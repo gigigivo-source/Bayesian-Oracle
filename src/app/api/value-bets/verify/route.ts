@@ -3,27 +3,44 @@
 
 import { db } from "@/db";
 import { valueBetLog } from "@/db/schema";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { fetchScoreboard } from "@/lib/espn";
-import { TOP_FEED_SLUGS } from "@/lib/leagues";
 import type { FixtureLite } from "@/lib/espn";
 
 export const dynamic = "force-dynamic";
 
-async function buildResultsMap() {
-  const now  = new Date();
-  const from = new Date(now); from.setDate(now.getDate() - 3);
-  const fmt  = (d: Date) => d.toISOString().slice(0, 10).replace(/-/g, "");
-  const range = `${fmt(from)}-${fmt(now)}`;
+type PendingValueBet = typeof valueBetLog.$inferSelect;
 
-  const slugs = [...new Set([...TOP_FEED_SLUGS.slice(0, 15), "bra.1","arg.1","mex.1","usa.1","ksa.1","jpn.1","col.1","chi.1"])];
-  const boards = await Promise.allSettled(slugs.map((s) => fetchScoreboard(s, range).catch(() => [] as FixtureLite[])));
+type MatchResult = {
+  hScore: number;
+  aScore: number;
+  total: number;
+  homeName: string;
+  awayName: string;
+};
 
-  const map = new Map<string, { hScore: number; aScore: number; total: number; homeName: string; awayName: string }>();
+async function buildResultsMap(pending: PendingValueBet[]) {
+  // Query the exact league/date for every pending bet. The previous global
+  // three-day scan omitted bets from leagues outside its hard-coded list and
+  // left older pending bets unresolved before their DB update could run.
+  const requests = new Map<string, { slug: string; date: string }>();
+  for (const bet of pending) {
+    const date = bet.matchDate.replace(/-/g, "").slice(0, 8);
+    if (!bet.leagueSlug || date.length !== 8) continue;
+    requests.set(`${bet.leagueSlug}|${date}`, { slug: bet.leagueSlug, date });
+  }
+
+  const boards = await Promise.allSettled(
+    [...requests.values()].map(({ slug, date }) =>
+      fetchScoreboard(slug, date).catch(() => [] as FixtureLite[]),
+    ),
+  );
+
+  const map = new Map<string, MatchResult>();
   for (const r of boards) {
     if (r.status !== "fulfilled") continue;
     for (const fx of r.value) {
-      if (fx.state !== "post" || fx.home.score === null) continue;
+      if (fx.state !== "post" || fx.home.score === null || fx.away.score === null) continue;
       const h = Number(fx.home.score) || 0;
       const a = Number(fx.away.score) || 0;
       const entry = { hScore: h, aScore: a, total: h + a, homeName: fx.home.name, awayName: fx.away.name };
@@ -91,7 +108,7 @@ export async function POST() {
     const pending = await db.select().from(valueBetLog).where(eq(valueBetLog.outcome, "pending")).limit(100);
     if (pending.length === 0) return Response.json({ message: "No pending value bets", settled: 0 });
 
-    const resultsMap = await buildResultsMap();
+    const resultsMap = await buildResultsMap(pending);
     let settled = 0; let won = 0; let lost = 0; let voidBets = 0;
     const results: Array<{ id: number; match: string; market: string; outcome: string; pnl: number }> = [];
 
@@ -112,9 +129,16 @@ export async function POST() {
       const pnl = outcome === "won" ? actualReturn - bet.stake :
                   outcome === "lost" ? -bet.stake : 0;
 
-      await db.update(valueBetLog)
+      const updated = await db
+        .update(valueBetLog)
         .set({ outcome, actualReturn, pnl })
-        .where(eq(valueBetLog.id, bet.id));
+        .where(and(eq(valueBetLog.id, bet.id), eq(valueBetLog.outcome, "pending")))
+        .returning({ id: valueBetLog.id });
+
+      // Only report a settlement after PostgreSQL confirms the row was updated.
+      // The pending guard also prevents concurrent cron/manual runs from settling
+      // and counting the same value bet twice.
+      if (!updated[0]) continue;
 
       settled++;
       if (outcome === "won")  { won++;  }
