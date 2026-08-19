@@ -1,0 +1,10 @@
+{
+  "crons": [
+    { "path": "/api/cron",                  "schedule": "0 */2 * * *" },
+    { "path": "/api/cron/settle",           "schedule": "0 */2 * * *" },
+    { "path": "/api/cron/warm-profiles",    "schedule": "0 */6 * * *" },
+    { "path": "/api/accumulator/verify",    "schedule": "0 */2 * * *" },
+    { "path": "/api/value-bets/verify",     "schedule": "0 */2 * * *" },
+    { "path": "/api/daily-picks",           "schedule": "0 6 * * *"   }
+  ]
+}

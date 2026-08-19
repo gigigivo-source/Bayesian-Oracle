@@ -1,0 +1,35 @@
+@import "tailwindcss";
+
+/* Hide scrollbar on league chips bar */
+.scrollbar-none {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}
+
+/* Mobile responsive */
+@media (max-width: 640px) {
+  nav { flex-wrap: wrap !important; gap: 2px !important; }
+  nav button { font-size: 10px !important; padding: 4px 8px !important; }
+  header h1 { font-size: 14px !important; }
+  header p { font-size: 8px !important; }
+  table { font-size: 11px; }
+  table th, table td { padding: 4px 6px !important; }
+  .grid { gap: 8px !important; }
+}
+
+@media (max-width: 480px) {
+  header { padding: 6px 8px !important; }
+  main { padding-left: 8px !important; padding-right: 8px !important; }
+  nav button { font-size: 9px !important; padding: 3px 6px !important; }
+}
+
+/* Touch-friendly tap targets */
+@media (pointer: coarse) {
+  button, a { min-height: 36px; }
+}
+
+/* Smooth page transitions */
+main { transition: opacity 0.15s ease; }
