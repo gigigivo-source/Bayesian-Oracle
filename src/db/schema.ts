@@ -7,6 +7,7 @@ import {
   integer,
   real,
   boolean,
+  uniqueIndex,
 } from "drizzle-orm/pg-core";
 
 // Suppress unused-import warning
@@ -171,6 +172,65 @@ export const savedSlips = pgTable("saved_slips", {
   status:       text("status").notNull(),     // pending | won | lost
   createdAt:    timestamp("created_at").defaultNow().notNull(),
 });
+
+// ─── Settlement performance ──────────────────────────────────────────────────
+// Immutable, idempotent audit records written when each tracked product settles.
+export const accumulatorPerformance = pgTable("accumulator_performance", {
+  id:           serial("id").primaryKey(),
+  slipId:       integer("slip_id").notNull(),
+  name:         text("name").notNull(),
+  slipType:     text("slip_type").notNull(),
+  totalLegs:    integer("total_legs").notNull(),
+  wonLegs:      integer("won_legs").notNull(),
+  lostLegs:     integer("lost_legs").notNull(),
+  voidLegs:     integer("void_legs").notNull().default(0),
+  combinedOdds: real("combined_odds").notNull(),
+  stake:        real("stake").notNull().default(0),
+  status:       text("status").notNull(),
+  returnAmount: real("return_amount").notNull().default(0),
+  pnl:          real("pnl").notNull().default(0),
+  legResults:   jsonb("leg_results").notNull(),
+  settledAt:    timestamp("settled_at").defaultNow().notNull(),
+}, (table) => [uniqueIndex("accumulator_performance_slip_id_uidx").on(table.slipId)]);
+
+export const dailyPickPerformance = pgTable("daily_pick_performance", {
+  id:          serial("id").primaryKey(),
+  dailyPickId: integer("daily_pick_id").notNull(),
+  pickDate:    text("pick_date").notNull(),
+  eventId:     text("event_id"),
+  match:       text("match").notNull(),
+  league:      text("league").notNull(),
+  totalPicks:  integer("total_picks").notNull(),
+  hits:        integer("hits").notNull(),
+  misses:      integer("misses").notNull(),
+  voids:       integer("voids").notNull().default(0),
+  accuracy:    real("accuracy").notNull(),
+  homeScore:   integer("home_score").notNull(),
+  awayScore:   integer("away_score").notNull(),
+  pickResults: jsonb("pick_results").notNull(),
+  settledAt:   timestamp("settled_at").defaultNow().notNull(),
+}, (table) => [uniqueIndex("daily_pick_performance_daily_pick_id_uidx").on(table.dailyPickId)]);
+
+export const valueBetPerformance = pgTable("value_bet_performance", {
+  id:           serial("id").primaryKey(),
+  valueBetId:   integer("value_bet_id").notNull(),
+  eventId:      text("event_id").notNull(),
+  match:        text("match").notNull(),
+  marketName:   text("market_name").notNull(),
+  selection:    text("selection").notNull(),
+  oracleProb:   real("oracle_prob").notNull(),
+  bookOdds:     real("book_odds").notNull(),
+  valueEdge:    real("value_edge").notNull(),
+  stake:        real("stake").notNull(),
+  outcome:      text("outcome").notNull(),
+  actualReturn: real("actual_return").notNull(),
+  pnl:          real("pnl").notNull(),
+  settledAt:    timestamp("settled_at").defaultNow().notNull(),
+}, (table) => [uniqueIndex("value_bet_performance_value_bet_id_uidx").on(table.valueBetId)]);
+
+export type AccumulatorPerformanceRow = typeof accumulatorPerformance.$inferSelect;
+export type DailyPickPerformanceRow = typeof dailyPickPerformance.$inferSelect;
+export type ValueBetPerformanceRow = typeof valueBetPerformance.$inferSelect;
 
 // ─── Legacy aliases (kept for backward compat with older routes) ───────────────
 /** @deprecated use `bankroll` */
