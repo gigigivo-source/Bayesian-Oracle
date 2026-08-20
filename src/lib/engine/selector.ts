@@ -14,19 +14,20 @@
 //      This makes it structurally impossible for pick #4 to MISS while #5 HITS.
 //
 //   3. Volatile families (Shots/SOT/Saves/Corners/Cards) are capped at 1 market
-//      across the entire Top-10.
+//      in the primary assembly. If that leaves the list short, the Top-10 is
+//      COMPLETED from the remaining eligible verifiable markets in safety
+//      order, so the Top-10 output always carries up to 10 picks.
 //
-//   4. TOP-1 WEAK-TEAM FILTER — the final Top-1 is chosen by walking the ranked
-//      markets from #1 to #10:
-//        • If the current market is a team-specific "Under 3.5 Goals" line for a
-//          WEAK team (xG < 0.8 OR bottom half of the league table), skip it and
-//          check the next ranked market.
-//        • Any other market — including the whole-match total "Under 3.5" —
-//          qualifies and is selected as Top-1.
-//        • Only if NONE of the top 10 ranked markets qualify is the match skipped.
+//   4. WEAK-TEAM FILTER (ALL Top-N outputs) — team-specific "Under 3.5 Goals"
+//      lines for a WEAK team (xG < 0.8 OR bottom half of the league table) are
+//      excluded from the ranked pool BEFORE the Top 1/3/5/10 lists are
+//      assembled, so they can never appear in ANY Top-N output — not just the
+//      first position. The whole-match total "Under 3.5" is not team-specific
+//      and always stays eligible. The lists then refill from the remaining
+//      ranked markets so Top-10 still carries up to 10 picks.
 //
-//   5. Top-1 is PINNED across Top 1/3/5/10 so a skipped weak-team line can
-//      never outrank the headline pick after the final safety sort.
+//   5. Only if NO eligible market remains after the weak-team filter is the
+//      match skipped (empty selection).
 
 import { poissonPmf } from "./stats";
 import { calibratedWinProb } from "./calibration";
@@ -160,7 +161,7 @@ function sigmaCushion(lambda: number, line: number): number {
   return Math.abs(lambda - line) / Math.sqrt(Math.max(0.5, lambda));
 }
 
-// ─── Weak-team detection (Top-1 "Under 3.5" filter) ───────────────────────────
+// ─── Weak-team detection ("Under 3.5" filter for all Top-N outputs) ──────────
 
 /** League-table context for one team. Optional — when absent, only the xG rule applies. */
 export interface TeamTableInfo {
@@ -197,9 +198,9 @@ function isTeamUnder35GoalLine(m: Market): boolean {
 }
 
 /**
- * Top-1 weak-team filter:
- * skip a market ONLY when it is a team-specific "Under 3.5 Goals" line whose
- * team is WEAK — xG below 0.8 OR bottom half of the league table.
+ * Weak-team filter (applies to ALL Top-N outputs):
+ * exclude a market ONLY when it is a team-specific "Under 3.5 Goals" line
+ * whose team is WEAK — xG below 0.8 OR bottom half of the league table.
  */
 function isWeakTeamUnder35(
   m:        Market,
@@ -361,8 +362,16 @@ export function selectTopPicks(
   // Top-10 assembly draws from VERIFIABLE markets only (ESPN can confirm
   // them post-match). Unverifiable markets stay in the full ranking above —
   // nothing is dropped from evaluation — they just never occupy Top-N slots.
-  const stablePool   = scored.filter((s) => s.verifiable && !isVolatile(s.market));
-  const volatilePool = scored.filter((s) => s.verifiable &&  isVolatile(s.market));
+  //
+  // WEAK-TEAM FILTER — team-specific "Under 3.5 Goals" lines for WEAK teams
+  // (xG < 0.8 OR bottom half of the league table) are excluded from BOTH
+  // pools up front, so they can never surface in Top 1/3/5/10 — the exclusion
+  // applies to every Top-N output, not just the Top-1 walk. The whole-match
+  // "Total Goals Under 3.5" is not team-specific and remains eligible.
+  const eligible = (s: SafetyScore): boolean =>
+    !isWeakTeamUnder35(s.market, lam, homeName, awayName, opts);
+  const stablePool   = scored.filter((s) => s.verifiable && !isVolatile(s.market) && eligible(s));
+  const volatilePool = scored.filter((s) => s.verifiable &&  isVolatile(s.market) && eligible(s));
 
   // ── Step 4: Build the ranked Top-10 (stable first, volatile last) ─────────
   // Positions 1-9 are filled entirely from stable picks, THEN at most 1
@@ -394,6 +403,21 @@ export function selectTopPicks(
     fillStable(10, true);
   }
 
+  // ── Step 4b: COMPLETE the Top-10 (Bug fix: full Top-10 output) ────────────
+  // The primary assembly above can leave the list short (family caps + the
+  // single volatile slot) when a fixture has few safe stable markets — the
+  // output then collapsed to a Top-4/5 instead of a Top-10. Back-fill from
+  // the remaining eligible verifiable markets in safety order so the Top-10
+  // output always carries up to 10 picks.
+  if (picked.length < 10) {
+    for (const s of scored) {
+      if (picked.length >= 10) break;
+      if (!s.verifiable || !eligible(s)) continue;
+      if (picked.includes(s.market)) continue;
+      picked.push(s.market);
+    }
+  }
+
   // ── Step 5: FINAL RE-SORT by wrongProb ascending ───────────────────────────
   // Absolute guarantee of monotonic safety ordering.
   // After family diversity selection, the order may be disturbed.
@@ -416,31 +440,23 @@ export function selectTopPicks(
 
   const rankedTop10 = finalSorted.slice(0, 10);
 
-  // ── Step 6: TOP-1 — walk the ranked markets #1 → #10 ──────────────────────
-  // Take the first ranked market that is NOT a weak-team "Under 3.5" goal
-  // line. A team is weak when its xG < 0.8 OR it sits in the bottom half of
-  // the league table. The whole-match "Total Goals Under 3.5" always
-  // qualifies. Only if none of the 10 qualify is the match skipped.
-  let top1Pick: Market | null = null;
-  for (const m of rankedTop10) {
-    if (isWeakTeamUnder35(m, lam, homeName, awayName, opts)) continue;
-    top1Pick = m;
-    break;
-  }
+  // ── Step 6: TOP-1 — first ranked market that survived the weak-team filter ─
+  // Weak-team "Under 3.5" goal lines were already excluded from the pools in
+  // Step 3, so every market in `rankedTop10` is eligible. The safest remaining
+  // market is the headline pick; Top 3/5/10 are the same monotonic list, so no
+  // excluded line can ever appear in any Top-N output.
+  const top1Pick: Market | null = rankedTop10[0] ?? null;
 
   if (!top1Pick) {
     return EMPTY_SELECTION(
-      "All top-10 ranked markets are weak-team Under 3.5 goal lines — match skipped.",
+      "No eligible markets after the weak-team Under 3.5 filter — match skipped.",
     );
   }
 
-  // Pin the chosen Top-1 so Top 3/5/10 never promote a skipped weak-team line.
-  const top1: Market[] = [top1Pick];
-  const remainder = rankedTop10.filter((m) => m !== top1Pick);
-  const pinned    = [top1Pick, ...remainder];
+  const pinned = rankedTop10;
 
   return {
-    top1,
+    top1:  [top1Pick],
     top3:  pinned.slice(0, 3),
     top5:  pinned.slice(0, 5),
     top10: pinned.slice(0, 10),
