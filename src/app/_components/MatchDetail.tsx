@@ -1,7 +1,5 @@
 "use client";
 
-import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import type { EngineResult, Market, DeepStatsVector } from "@/lib/engine/types";
 import type { FixtureLite, MatchSummary, TeamForm } from "@/lib/espn";
@@ -71,22 +69,12 @@ interface MatchResponse {
   valueBets?: ValueBetData[];
 }
 
-export function MatchDetail({
-  fixture,
-  familyFilter = "ALL",
-  showJson = false,
-  liveTab = "events",
-}: {
-  fixture: FixtureLite;
-  onClose?: () => void;
-  familyFilter?: string;
-  showJson?: boolean;
-  liveTab?: "events" | "stats" | "commentary";
-}) {
-  const router = useRouter();
+export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClose: () => void }) {
   // Response is keyed by the fixture it was fetched for, so loading/error states
   // are derived and never need to be reset synchronously inside the effect.
   const [response, setResponse] = useState<{ fixture: FixtureLite; data: MatchResponse | null; error: string | null } | null>(null);
+  const [familyFilter, setFamilyFilter] = useState("ALL");
+  const [showJson, setShowJson] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -120,27 +108,9 @@ export function MatchDetail({
     return [...list].sort((a, b) => b.hitRate - a.hitRate);
   }, [result, familyFilter]);
 
-  const detailHref = ({
-    family = familyFilter,
-    json = showJson,
-    live = liveTab,
-    hash,
-  }: {
-    family?: string;
-    json?: boolean;
-    live?: "events" | "stats" | "commentary";
-    hash?: string;
-  } = {}) => {
-    const query = new URLSearchParams({ league: fixture.leagueSlug });
-    if (family !== "ALL") query.set("family", family);
-    if (json) query.set("json", "1");
-    if (live !== "events") query.set("live", live);
-    return `/fixtures/${encodeURIComponent(fixture.id)}?${query.toString()}${hash ? `#${hash}` : ""}`;
-  };
-
-  const teamHref = (name: string) => {
-    const slug = name.toLowerCase().normalize("NFKD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-    return `/teams/${encodeURIComponent(slug)}?name=${encodeURIComponent(name)}&league=${encodeURIComponent(fixture.leagueSlug)}`;
+  const scrollToSection = (id: string) => {
+    const el = document.getElementById(id);
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
   };
 
   return (
@@ -153,7 +123,7 @@ export function MatchDetail({
             <h2 className="font-mono text-sm font-bold text-amber-300">ĞIGI GIVØ · DEEP STATISTICAL ORACLE</h2>
           </div>
           <button
-            onClick={() => router.back()}
+            onClick={onClose}
             className="rounded-md border border-white/15 bg-white/10 px-4 py-1.5 text-sm font-medium text-slate-100 hover:bg-white/20"
           >
             ✕ Close
@@ -166,20 +136,20 @@ export function MatchDetail({
             {fixture.leagueName} · {new Date(fixture.date).toLocaleString()}
           </div>
           <div className="flex items-center justify-center gap-6">
-            <Link href={teamHref(fixture.home.name)} className="flex flex-1 items-center justify-end gap-3">
+            <div className="flex flex-1 items-center justify-end gap-3">
               <span className="text-right text-lg font-bold text-slate-100">{fixture.home.name}</span>
               <TeamBadge logo={fixture.home.logo} name={fixture.home.name} size={48} />
-            </Link>
+            </div>
             <div className="text-center min-w-[100px]">
               <div className="font-mono text-3xl font-extrabold text-amber-300">
                 {fixture.state === "pre" ? "VS" : `${fixture.home.score ?? 0} - ${fixture.away.score ?? 0}`}
               </div>
               <div className="text-[11px] font-mono text-emerald-400 mt-1">{fixture.statusDetail}</div>
             </div>
-            <Link href={teamHref(fixture.away.name)} className="flex flex-1 items-center gap-3">
+            <div className="flex flex-1 items-center gap-3">
               <TeamBadge logo={fixture.away.logo} name={fixture.away.name} size={48} />
               <span className="text-lg font-bold text-slate-100">{fixture.away.name}</span>
-            </Link>
+            </div>
           </div>
           {fixture.venue ? (
             <div className="mt-3 text-center text-xs text-slate-400">{fixture.venue}</div>
@@ -197,37 +167,37 @@ export function MatchDetail({
                 { id: "sec-lineups", label: "Lineups & H2H" },
                 { id: "sec-registry", label: `Full Registry (${result.totalMarkets})` },
               ].map((s) => (
-                <Link
+                <button
                   key={s.id}
-                  href={detailHref({ hash: s.id })}
+                  onClick={() => scrollToSection(s.id)}
                   className="rounded-full bg-white/5 border border-white/15 px-3 py-1 text-slate-300 hover:bg-amber-400 hover:text-slate-950 font-medium transition"
                 >
                   {s.label}
-                </Link>
+                </button>
               ))}
               {fixture.state === "pre" && (
-                <Link
-                  href={detailHref({ hash: "sec-value" })}
+                <button
+                  onClick={() => scrollToSection("sec-value")}
                   className="rounded-full bg-emerald-500/20 border border-emerald-500/40 px-3 py-1 text-emerald-300 hover:bg-emerald-400 hover:text-slate-950 font-medium transition"
                 >
                   Value Bets
-                </Link>
+                </button>
               )}
               {fixture.state === "in" && (
-                <Link
-                  href={detailHref({ hash: "sec-live-centre" })}
+                <button
+                  onClick={() => scrollToSection("sec-live-centre")}
                   className="rounded-full bg-rose-500/30 border-2 border-rose-400/60 px-3 py-1 text-rose-300 hover:bg-rose-400 hover:text-slate-950 font-bold transition animate-pulse"
                 >
                   Live Match Centre
-                </Link>
+                </button>
               )}
               {(fixture.state === "post" || (fixture.home.score !== null && fixture.away.score !== null && fixture.state !== "pre")) && (
-                <Link
-                  href={detailHref({ hash: "sec-verified" })}
+                <button
+                  onClick={() => scrollToSection("sec-verified")}
                   className="rounded-full bg-emerald-500/30 border-2 border-emerald-400/60 px-3 py-1 text-emerald-300 hover:bg-emerald-400 hover:text-slate-950 font-bold transition animate-pulse"
                 >
                   Post-Match Verification
-                </Link>
+                </button>
               )}
             </div>
           ) : null}
@@ -307,7 +277,7 @@ export function MatchDetail({
 
             {/* LIVE MATCH CENTRE */}
             {(fixture.state === "in" || fixture.state === "post") && (
-              <LiveMatchCentre leagueSlug={fixture.leagueSlug} eventId={fixture.id} isLive={fixture.state === "in"} initialTab={liveTab} />
+              <LiveMatchCentre leagueSlug={fixture.leagueSlug} eventId={fixture.id} isLive={fixture.state === "in"} />
             )}
 
             {/* Odds and form panels */}
@@ -560,19 +530,19 @@ export function MatchDetail({
               title="FULL MARKET REGISTRY"
               subtitle={`Scanned across 18 market families (${registry.length} lines shown)`}
               right={
-                <Link
-                  href={detailHref({ json: !showJson, hash: "sec-registry" })}
+                <button
+                  onClick={() => setShowJson((s) => !s)}
                   className="rounded-md border border-white/15 bg-white/10 px-2.5 py-1 text-xs text-slate-200 hover:bg-white/20 font-mono"
                 >
                   {showJson ? "Hide JSON" : "JSON Export"}
-                </Link>
+                </button>
               }
             >
               {/* Family filter chips */}
               <div className="mb-4 flex flex-wrap items-center gap-1.5 font-mono text-xs border-b border-white/10 pb-3">
                 <span className="text-amber-300 font-bold mr-1">FAMILIES:</span>
-                <Link
-                  href={detailHref({ family: "ALL", hash: "sec-registry" })}
+                <button
+                  onClick={() => setFamilyFilter("ALL")}
                   className={`rounded-full px-3 py-1 font-medium transition border ${
                     familyFilter === "ALL"
                       ? "bg-amber-400 text-slate-950 border-amber-400 font-bold"
@@ -580,11 +550,11 @@ export function MatchDetail({
                   }`}
                 >
                   All ({result.totalMarkets})
-                </Link>
+                </button>
                 {families.map((f) => (
-                  <Link
+                  <button
                     key={f}
-                    href={detailHref({ family: f, hash: "sec-registry" })}
+                    onClick={() => setFamilyFilter(f)}
                     className={`rounded-full px-3 py-1 font-medium transition border ${
                       familyFilter === f
                         ? "bg-amber-400 text-slate-950 border-amber-400 font-bold"
@@ -592,7 +562,7 @@ export function MatchDetail({
                     }`}
                   >
                     {f} ({result.familyCounts[f]})
-                  </Link>
+                  </button>
                 ))}
               </div>
 
@@ -830,17 +800,7 @@ function BoxscorePanel({ leagueSlug, eventId, homeName, awayName }: {
   );
 }
 
-function LiveMatchCentre({
-  leagueSlug,
-  eventId,
-  isLive,
-  initialTab,
-}: {
-  leagueSlug: string;
-  eventId: string;
-  isLive: boolean;
-  initialTab: "events" | "stats" | "commentary";
-}) {
+function LiveMatchCentre({ leagueSlug, eventId, isLive }: { leagueSlug: string; eventId: string; isLive: boolean }) {
   const [data, setData] = useState<{
     keyEvents: Array<{ minute: string; type: string; text: string; team?: string }>;
     commentary: Array<{ minute: string; text: string }>;
@@ -848,7 +808,7 @@ function LiveMatchCentre({
     homeTeam: string;
     awayTeam: string;
   } | null>(null);
-  const tab = initialTab;
+  const [tab, setTab] = useState<"events" | "stats" | "commentary">("events");
 
   useEffect(() => {
     function load() {
@@ -874,15 +834,15 @@ function LiveMatchCentre({
     >
       <div className="flex gap-1.5 mb-4 font-mono text-xs">
         {(["events", "stats", "commentary"] as const).map((t) => (
-          <Link
+          <button
             key={t}
-            href={`/fixtures/${encodeURIComponent(eventId)}?league=${encodeURIComponent(leagueSlug)}${t === "events" ? "" : `&live=${t}`}#sec-live-centre`}
+            onClick={() => setTab(t)}
             className={`rounded-full px-3 py-1 font-semibold border transition capitalize ${
               tab === t ? "bg-amber-400 text-slate-950 border-amber-400" : "border-white/15 bg-black/40 text-slate-300 hover:bg-black/60"
             }`}
           >
             {t === "events" ? "Key Events" : t === "stats" ? "Match Stats" : "Commentary"}
-          </Link>
+          </button>
         ))}
         {isLive && (
           <span className="flex items-center gap-1.5 ml-auto text-rose-400 font-bold font-mono text-xs">
