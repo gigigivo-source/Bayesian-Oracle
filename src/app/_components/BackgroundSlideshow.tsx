@@ -35,12 +35,19 @@ const SLIDES = [
 
 export function BackgroundSlideshow() {
   const [current, setCurrent] = useState(0);
-  const [loaded, setLoaded] = useState<Set<number>>(new Set([0]));
+  // Pre-load the first two slides; further slides are marked as the rotation advances.
+  const [loaded, setLoaded] = useState<Set<number>>(() => new Set([0, 1]));
+  // Slides whose image failed to load (e.g. missing file) are skipped in the rotation.
+  const [failed, setFailed] = useState<Set<number>>(() => new Set());
 
   useEffect(() => {
     const timer = setInterval(() => {
       setCurrent((prev) => {
-        const next = (prev + 1) % SLIDES.length;
+        // Advance to the next slide that hasn't failed to load
+        let next = (prev + 1) % SLIDES.length;
+        for (let hops = 0; hops < SLIDES.length && failed.has(next); hops++) {
+          next = (next + 1) % SLIDES.length;
+        }
         setLoaded((s) => {
           const ns = new Set(s);
           ns.add(next);
@@ -50,9 +57,8 @@ export function BackgroundSlideshow() {
         return next;
       });
     }, 5000);
-    setLoaded(new Set([0, 1]));
     return () => clearInterval(timer);
-  }, []);
+  }, [failed]);
 
   return (
     <div className="fixed inset-0 z-0 overflow-hidden" aria-hidden>
@@ -62,13 +68,20 @@ export function BackgroundSlideshow() {
           className="absolute inset-0 transition-opacity duration-[2000ms] ease-in-out"
           style={{ opacity: current === i ? 1 : 0 }}
         >
-          {loaded.has(i) && (
+          {loaded.has(i) && !failed.has(i) && (
             // eslint-disable-next-line @next/next/no-img-element
             <img
               src={s.url}
               alt="Football"
               className="h-full w-full object-cover brightness-[0.35]"
               loading={i < 2 ? "eager" : "lazy"}
+              onError={() => {
+                setFailed((f) => {
+                  const nf = new Set(f);
+                  nf.add(i);
+                  return nf;
+                });
+              }}
             />
           )}
         </div>

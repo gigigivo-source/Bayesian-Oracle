@@ -4,10 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { EngineResult, Market, DeepStatsVector } from "@/lib/engine/types";
 import type { FixtureLite, MatchSummary, TeamForm } from "@/lib/espn";
 import { ConfidenceBar, GradeBadge, MarketTable, Section, TeamBadge } from "./ui";
-import { EventIcon, OutcomeBadge, IconBolt } from "./Icons";
-
-// Suppress unused icon imports that are used contextually
-void IconBolt;
+import { EventIcon, OutcomeBadge } from "./Icons";
 
 function getActualStat(
   marketName: string,
@@ -73,16 +70,14 @@ interface MatchResponse {
 }
 
 export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClose: () => void }) {
-  const [data, setData] = useState<MatchResponse | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  // Response is keyed by the fixture it was fetched for, so loading/error states
+  // are derived and never need to be reset synchronously inside the effect.
+  const [response, setResponse] = useState<{ fixture: FixtureLite; data: MatchResponse | null; error: string | null } | null>(null);
   const [familyFilter, setFamilyFilter] = useState("ALL");
   const [showJson, setShowJson] = useState(false);
 
   useEffect(() => {
     let active = true;
-    setLoading(true);
-    setError(null);
     fetch("/api/match", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -91,13 +86,17 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
       .then((r) => r.json())
       .then((d: MatchResponse & { error?: string }) => {
         if (!active) return;
-        if (d.error) setError(d.error);
-        else setData(d);
+        if (d.error) setResponse({ fixture, data: null, error: d.error });
+        else setResponse({ fixture, data: d, error: null });
       })
-      .catch(() => active && setError("Failed to reach oracle."))
-      .finally(() => active && setLoading(false));
+      .catch(() => { if (active) setResponse({ fixture, data: null, error: "Failed to reach oracle." }); });
     return () => { active = false; };
   }, [fixture]);
+
+  const current = response && response.fixture === fixture ? response : null;
+  const loading = !current;
+  const data = current?.data ?? null;
+  const error = current?.error ?? null;
 
   const result = data?.prediction ?? null;
   const summary = data?.summary ?? null;

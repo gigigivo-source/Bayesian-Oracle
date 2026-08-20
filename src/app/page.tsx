@@ -5,9 +5,10 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type { FixtureLite } from "@/lib/espn";
 import type { LeagueDef } from "@/lib/leagues";
 
-import { FixtureCard, MarketTable, Section, ConfidenceBar, GradeBadge } from "./_components/ui";
+import { FixtureCard } from "./_components/ui";
 import { MatchDetail } from "./_components/MatchDetail";
 import { BackgroundSlideshow } from "./_components/BackgroundSlideshow";
+import { ErrorBoundary } from "./_components/ErrorBoundary";
 
 type Tab = "top" | "live" | "accumulators" | "performance" | "leagues" | "standings" | "oracle" | "chat" | "bankroll" | "slipbuilder" | "dailypicks" | "oddscalc" | "verified" | "results" | "backtest" | "valuebets";
 
@@ -42,11 +43,7 @@ const TOP_LEAGUE_PILLS = [
   { slug: "arg.1", name: "Liga Pro", logo: "https://a.espncdn.com/i/leaguelogos/soccer/500/1.png" },
 ];
 
-// Suppress TS "unused" warnings for imported but used-in-JSX components
-void Section;
-void MarketTable;
-void ConfidenceBar;
-void GradeBadge;
+const ALL_TABS: readonly Tab[] = ["top", "live", "accumulators", "performance", "leagues", "standings", "oracle", "chat", "bankroll", "slipbuilder", "dailypicks", "oddscalc", "verified", "results", "backtest", "valuebets"];
 
 export default function Home() {
   const [tab, setTab] = useState<Tab>("top");
@@ -60,24 +57,43 @@ export default function Home() {
   const [pinError, setPinError] = useState("");
 
   useEffect(() => {
-    fetch("/api/auth").then(r => r.json()).then((d: { hasPin: boolean }) => {
+    fetch("/api/auth").then(r => {
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.json();
+    }).then((d: { hasPin: boolean }) => {
       setHasPin(d.hasPin);
       if (!d.hasPin) setAuthed(true); // No PIN set = open access
-    }).catch(() => setAuthed(true));
+    }).catch(() => { setHasPin(false); setAuthed(true); });
+  }, []);
+
+  // Support in-app navigation events (e.g. Standings "View Fixtures →" button)
+  useEffect(() => {
+    const onTabEvent = (e: Event) => {
+      const detail = (e as CustomEvent<string>).detail;
+      // "fixtures" is a legacy alias for the league fixture browser
+      const target: Tab | null = detail === "fixtures" ? "leagues" : (ALL_TABS as readonly string[]).includes(detail) ? (detail as Tab) : null;
+      if (target) setTab(target);
+    };
+    window.addEventListener("gigi-tab", onTabEvent);
+    return () => window.removeEventListener("gigi-tab", onTabEvent);
   }, []);
 
   async function handlePin() {
-    if (!hasPin) {
-      // Setup new PIN
-      if (pinInput.length < 4) { setPinError("PIN must be at least 4 digits"); return; }
-      await fetch("/api/auth", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "setup", pin: pinInput, name: pinName || "User" }) });
-      setAuthed(true);
-    } else {
-      // Verify PIN
-      const r = await fetch("/api/auth", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "verify", pin: pinInput }) });
-      const d = await r.json() as { valid: boolean };
-      if (d.valid) { setAuthed(true); setPinError(""); }
-      else setPinError("Incorrect PIN");
+    try {
+      if (!hasPin) {
+        // Setup new PIN
+        if (pinInput.length < 4) { setPinError("PIN must be at least 4 digits"); return; }
+        await fetch("/api/auth", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "setup", pin: pinInput, name: pinName || "User" }) });
+        setAuthed(true);
+      } else {
+        // Verify PIN
+        const r = await fetch("/api/auth", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "verify", pin: pinInput }) });
+        const d = await r.json() as { valid: boolean };
+        if (d.valid) { setAuthed(true); setPinError(""); }
+        else setPinError("Incorrect PIN");
+      }
+    } catch {
+      setPinError("Something went wrong. Please try again.");
     }
   }
 
@@ -166,31 +182,38 @@ export default function Home() {
         )}
 
         <main className="mx-auto max-w-7xl px-4 py-8">
-          {tab === "top" && (
-            <TopFeed
-              onSelect={setSelected}
-              filterSlug={selectedLeagueSlug}
-              onClearFilter={() => { setSelectedLeagueSlug(null); setShowTodayOnly(false); }}
-              showTodayOnly={showTodayOnly}
-              onClearToday={() => setShowTodayOnly(false)}
-            />
-          )}
-          {tab === "live" && <LivePage onSelect={setSelected} />}
-          {tab === "accumulators" && <AccumulatorPage />}
-          {tab === "performance" && <PerformanceDashboard />}
-          {tab === "leagues" && <LeagueBrowser onSelect={setSelected} />}
-          {tab === "standings" && <StandingsView />}
-          {tab === "oracle" && <ManualOracle />}
-          {tab === "chat" && <ChatAssistant />}
-          {tab === "dailypicks" && <DailyPicksPage />}
-          {tab === "oddscalc" && <OddsCalculator />}
-          {tab === "verified" && <VerifiedPage />}
-          {tab === "results" && <ResultsPage onSelect={setSelected} />}
-          {tab === "backtest" && <BacktestDashboard />}
-          {tab === "valuebets" && <ValueBetsPage />}
+          <ErrorBoundary key={tab}>
+            {tab === "top" && (
+              <TopFeed
+                onSelect={setSelected}
+                filterSlug={selectedLeagueSlug}
+                onClearFilter={() => { setSelectedLeagueSlug(null); setShowTodayOnly(false); }}
+                showTodayOnly={showTodayOnly}
+                onClearToday={() => setShowTodayOnly(false)}
+              />
+            )}
+            {tab === "live" && <LivePage onSelect={setSelected} />}
+            {tab === "accumulators" && <AccumulatorPage />}
+            {tab === "performance" && <PerformanceDashboard />}
+            {tab === "leagues" && <LeagueBrowser onSelect={setSelected} />}
+            {tab === "standings" && <StandingsView />}
+            {tab === "oracle" && <ManualOracle />}
+            {tab === "chat" && <ChatAssistant />}
+            {tab === "bankroll" && <BankrollTracker />}
+            {tab === "dailypicks" && <DailyPicksPage />}
+            {tab === "oddscalc" && <OddsCalculator />}
+            {tab === "verified" && <VerifiedPage />}
+            {tab === "results" && <ResultsPage onSelect={setSelected} />}
+            {tab === "backtest" && <BacktestDashboard />}
+            {tab === "valuebets" && <ValueBetsPage />}
+          </ErrorBoundary>
         </main>
 
-        {selected ? <MatchDetail fixture={selected} onClose={() => setSelected(null)} /> : null}
+        {selected ? (
+          <ErrorBoundary>
+            <MatchDetail fixture={selected} onClose={() => setSelected(null)} />
+          </ErrorBoundary>
+        ) : null}
 
         <footer className="bg-black/50 py-4 text-center text-xs text-slate-300 font-mono">
           ĞIGI GIVØ Proprietary Sportsbook Engine · Real Data Mesh · Zero Simulation
@@ -413,9 +436,9 @@ function TopFeed({
   onClearToday?:  () => void;
 }) {
   const [data, setData] = useState<TopData | null>(null);
-  // Fixtures loaded from /api/fixtures when a chip points to a league with no today matches
-  const [chipFixtures, setChipFixtures] = useState<{ upcoming: FixtureLite[]; results: FixtureLite[]; label: string } | null>(null);
-  const [chipLoading, setChipLoading]   = useState(false);
+  // Fixtures loaded from /api/fixtures when a chip points to a league with no today matches.
+  // Keyed by league slug so stale data is never shown for a different chip.
+  const [chipData, setChipData] = useState<{ slug: string; upcoming: FixtureLite[]; results: FixtureLite[]; label: string } | null>(null);
 
   useEffect(() => {
     fetch("/api/top")
@@ -426,34 +449,41 @@ function TopFeed({
 
   // When a chip is selected, check if that league has data in top feed.
   // If not (off-season / no today's match), load full fixture schedule instead.
-  useEffect(() => {
-    if (!filterSlug || !data) { setChipFixtures(null); return; }
-
+  const needsChipFixtures = useMemo(() => {
+    if (!filterSlug || !data) return false;
     const block = data.featured.find((b) => b.slug === filterSlug);
-    const hasMatches = block && (block.upcoming.length > 0 || block.results.length > 0);
+    const hasMatches = block && ((block.upcoming?.length ?? 0) > 0 || (block.results?.length ?? 0) > 0);
+    return !hasMatches;
+  }, [filterSlug, data]);
 
-    if (hasMatches) {
-      setChipFixtures(null); // use existing top-feed data
-      return;
-    }
+  useEffect(() => {
+    if (!filterSlug || !needsChipFixtures) return;
 
     // No today matches — load full fixture schedule (60-day window)
     const pill = TOP_LEAGUE_PILLS.find((p) => p.slug === filterSlug);
-    setChipLoading(true);
+    let cancelled = false;
     fetch(`/api/fixtures?league=${filterSlug}`)
       .then((r) => r.json())
       .then((d: { upcoming: FixtureLite[]; results: FixtureLite[]; league?: { name: string } }) => {
-        setChipFixtures({
+        if (cancelled) return;
+        setChipData({
+          slug:     filterSlug,
           upcoming: d.upcoming ?? [],
           results:  d.results  ?? [],
           label:    d.league?.name ?? pill?.name ?? filterSlug,
         });
       })
-      .catch(() => setChipFixtures({ upcoming: [], results: [], label: pill?.name ?? filterSlug }))
-      .finally(() => setChipLoading(false));
-  }, [filterSlug, data]);
+      .catch(() => {
+        if (cancelled) return;
+        setChipData({ slug: filterSlug, upcoming: [], results: [], label: pill?.name ?? filterSlug });
+      });
+    return () => { cancelled = true; };
+  }, [filterSlug, needsChipFixtures]);
 
   if (!data) return <LoadingGrid label="Connecting to Football Data Mesh…" />;
+
+  const chipFixtures = needsChipFixtures && chipData && chipData.slug === filterSlug ? chipData : null;
+  const chipLoading  = needsChipFixtures && !chipFixtures;
 
   // Today's date string for filtering
   const todayStr = new Date().toISOString().slice(0, 10);
@@ -813,72 +843,9 @@ interface StandingsEntry {
   form: string;
 }
 
-function StandingsView() {
-  const [activeSlug, setActiveSlug]   = useState("eng.1");
-  const [activeName, setActiveName]   = useState("Premier League");
-  const [entries, setEntries]         = useState<StandingsEntry[]>([]);
-  const [standingsMeta, setMeta]      = useState<{ knockoutFormat?: boolean; message?: string } | null>(null);
-  const [loading, setLoading]         = useState(false);
-  const [search, setSearch]           = useState("");
-  const [allLeagues, setAllLeagues]   = useState<Record<string, LeagueDef[]>>({});
-
-  useEffect(() => {
-    fetch("/api/leagues")
-      .then((r) => r.json())
-      .then((d: { byRegion: Record<string, LeagueDef[]> }) => setAllLeagues(d.byRegion ?? {}))
-      .catch(() => {});
-  }, []);
-
-  const loadStandings = useCallback((slug: string, name: string) => {
-    setActiveSlug(slug);
-    setActiveName(name);
-    setLoading(true);
-    setMeta(null);
-    fetch(`/api/standings?league=${slug}`)
-      .then((r) => r.json())
-      .then((d: { entries: StandingsEntry[]; knockoutFormat?: boolean; message?: string }) => {
-        setEntries(d.entries ?? []);
-        if (d.knockoutFormat || d.message) setMeta({ knockoutFormat: d.knockoutFormat, message: d.message });
-      })
-      .catch(() => { setEntries([]); })
-      .finally(() => setLoading(false));
-  }, []);
-
-  useEffect(() => { loadStandings("eng.1", "Premier League"); }, [loadStandings]);
-
-  // Filter leagues by search
-  const filteredLeagues = useMemo(() => {
-    if (!search.trim()) return allLeagues;
-    const q = search.toLowerCase();
-    const out: Record<string, LeagueDef[]> = {};
-    for (const [region, lgs] of Object.entries(allLeagues)) {
-      const m = lgs.filter((l) => l.name.toLowerCase().includes(q) || region.toLowerCase().includes(q));
-      if (m.length) out[region] = m;
-    }
-    return out;
-  }, [allLeagues, search]);
-
-  // Quick-access popular leagues
-  const QUICK = [
-    { slug: "eng.1", name: "PL" }, { slug: "esp.1", name: "LaLiga" },
-    { slug: "ger.1", name: "Bundesliga" }, { slug: "ita.1", name: "Serie A" },
-    { slug: "fra.1", name: "Ligue 1" }, { slug: "ned.1", name: "Eredivisie" },
-    { slug: "por.1", name: "Primeira Liga" }, { slug: "bra.1", name: "Brasileirão" },
-    { slug: "arg.1", name: "Liga Pro" }, { slug: "mex.1", name: "Liga MX" },
-    { slug: "usa.1", name: "MLS" }, { slug: "ksa.1", name: "Saudi PL" },
-    { slug: "jpn.1", name: "J1 League" }, { slug: "sco.1", name: "SPL" },
-    { slug: "bel.1", name: "Pro League" }, { slug: "tur.1", name: "Süper Lig" },
-    { slug: "chn.1", name: "CSL" }, { slug: "kor.1", name: "K League" },
-    { slug: "aus.1", name: "A-League" }, { slug: "rsa.1", name: "PSL" },
-    { slug: "egy.1", name: "Egypt PL" }, { slug: "col.1", name: "Colombia" },
-    { slug: "chi.1", name: "Chile" }, { slug: "per.1", name: "Peru" },
-    { slug: "uae.1", name: "UAE" }, { slug: "qat.1", name: "Qatar" },
-    { slug: "uefa.champions", name: "UCL" }, { slug: "uefa.europa", name: "UEL" },
-    { slug: "conmebol.libertadores", name: "Libertadores" },
-    { slug: "eng.2", name: "Championship" },
-  ];
-
-  const StandingsTable = () => (
+// Hoisted out of StandingsView so it isn't re-created on every render
+function StandingsTable({ entries, activeName }: { entries: StandingsEntry[]; activeName: string }) {
+  return (
     <div className="overflow-x-auto rounded-lg bg-black/50">
       <div className="px-3 py-2 bg-black/40 border-b border-white/5 flex items-center gap-2">
         <span className="text-xs font-bold text-amber-300 font-mono">{activeName}</span>
@@ -938,6 +905,78 @@ function StandingsView() {
       </div>
     </div>
   );
+}
+
+function StandingsView() {
+  const [activeSlug, setActiveSlug]   = useState("eng.1");
+  const [activeName, setActiveName]   = useState("Premier League");
+  const [entries, setEntries]         = useState<StandingsEntry[]>([]);
+  const [standingsMeta, setMeta]      = useState<{ knockoutFormat?: boolean; message?: string } | null>(null);
+  const [loading, setLoading]         = useState(true);
+  const [search, setSearch]           = useState("");
+  const [allLeagues, setAllLeagues]   = useState<Record<string, LeagueDef[]>>({});
+
+  useEffect(() => {
+    fetch("/api/leagues")
+      .then((r) => r.json())
+      .then((d: { byRegion: Record<string, LeagueDef[]> }) => setAllLeagues(d.byRegion ?? {}))
+      .catch(() => {});
+  }, []);
+
+  // Fetch-only helper: all state updates happen asynchronously in the promise chain.
+  const fetchStandings = useCallback((slug: string) => {
+    fetch(`/api/standings?league=${slug}`)
+      .then((r) => r.json())
+      .then((d: { entries: StandingsEntry[]; knockoutFormat?: boolean; message?: string }) => {
+        setEntries(d.entries ?? []);
+        if (d.knockoutFormat || d.message) setMeta({ knockoutFormat: d.knockoutFormat, message: d.message });
+      })
+      .catch(() => { setEntries([]); })
+      .finally(() => setLoading(false));
+  }, []);
+
+  const loadStandings = useCallback((slug: string, name: string) => {
+    setActiveSlug(slug);
+    setActiveName(name);
+    setLoading(true);
+    setMeta(null);
+    fetchStandings(slug);
+  }, [fetchStandings]);
+
+  // Initial load — defaults (eng.1 / loading=true) are already set in state.
+  useEffect(() => { fetchStandings("eng.1"); }, [fetchStandings]);
+
+  // Filter leagues by search
+  const filteredLeagues = useMemo(() => {
+    if (!search.trim()) return allLeagues;
+    const q = search.toLowerCase();
+    const out: Record<string, LeagueDef[]> = {};
+    for (const [region, lgs] of Object.entries(allLeagues)) {
+      const m = lgs.filter((l) => l.name.toLowerCase().includes(q) || region.toLowerCase().includes(q));
+      if (m.length) out[region] = m;
+    }
+    return out;
+  }, [allLeagues, search]);
+
+  // Quick-access popular leagues
+  const QUICK = [
+    { slug: "eng.1", name: "PL" }, { slug: "esp.1", name: "LaLiga" },
+    { slug: "ger.1", name: "Bundesliga" }, { slug: "ita.1", name: "Serie A" },
+    { slug: "fra.1", name: "Ligue 1" }, { slug: "ned.1", name: "Eredivisie" },
+    { slug: "por.1", name: "Primeira Liga" }, { slug: "bra.1", name: "Brasileirão" },
+    { slug: "arg.1", name: "Liga Pro" }, { slug: "mex.1", name: "Liga MX" },
+    { slug: "usa.1", name: "MLS" }, { slug: "ksa.1", name: "Saudi PL" },
+    { slug: "jpn.1", name: "J1 League" }, { slug: "sco.1", name: "SPL" },
+    { slug: "bel.1", name: "Pro League" }, { slug: "tur.1", name: "Süper Lig" },
+    { slug: "chn.1", name: "CSL" }, { slug: "kor.1", name: "K League" },
+    { slug: "aus.1", name: "A-League" }, { slug: "rsa.1", name: "PSL" },
+    { slug: "egy.1", name: "Egypt PL" }, { slug: "col.1", name: "Colombia" },
+    { slug: "chi.1", name: "Chile" }, { slug: "per.1", name: "Peru" },
+    { slug: "uae.1", name: "UAE" }, { slug: "qat.1", name: "Qatar" },
+    { slug: "uefa.champions", name: "UCL" }, { slug: "uefa.europa", name: "UEL" },
+    { slug: "conmebol.libertadores", name: "Libertadores" },
+    { slug: "eng.2", name: "Championship" },
+  ];
 
   return (
     <div className="space-y-4">
@@ -1033,7 +1072,7 @@ function StandingsView() {
               </div>
             </div>
           ) : (
-            <StandingsTable />
+            <StandingsTable entries={entries} activeName={activeName} />
           )}
         </div>
       </div>
@@ -1049,15 +1088,17 @@ function ManualOracle() {
   const [selectedFx, setSelectedFx] = useState<FixtureLite | null>(null);
 
   useEffect(() => {
-    if (query.length < 2) { setSearchResults([]); return; }
+    // All state updates happen inside the debounce callback / promise chain,
+    // never synchronously in the effect body.
     const timer = setTimeout(() => {
+      if (query.length < 2) { setSearchResults([]); return; }
       setSearching(true);
       fetch(`/api/search?q=${encodeURIComponent(query)}`)
         .then((r) => r.json())
         .then((d: { results: FixtureLite[] }) => setSearchResults(d.results ?? []))
         .catch(() => setSearchResults([]))
         .finally(() => setSearching(false));
-    }, 400);
+    }, query.length < 2 ? 0 : 400);
     return () => clearTimeout(timer);
   }, [query]);
 
@@ -1239,9 +1280,8 @@ function ResultsPage({ onSelect }: { onSelect: (fx: FixtureLite) => void }) {
   const [loading, setLoading] = useState(true);
   const [activeSlug, setActiveSlug] = useState<string | null>(null);
 
-  const loadResults = useCallback((slug: string | null) => {
-    setActiveSlug(slug);
-    setLoading(true);
+  // Fetch-only helper: all state updates happen asynchronously in the promise chain.
+  const fetchResults = useCallback((slug: string | null) => {
     const url = slug ? `/api/results?league=${slug}` : "/api/results";
     fetch(url)
       .then((r) => r.json())
@@ -1250,7 +1290,14 @@ function ResultsPage({ onSelect }: { onSelect: (fx: FixtureLite) => void }) {
       .finally(() => setLoading(false));
   }, []);
 
-  useEffect(() => { loadResults(null); }, [loadResults]);
+  const loadResults = useCallback((slug: string | null) => {
+    setActiveSlug(slug);
+    setLoading(true);
+    fetchResults(slug);
+  }, [fetchResults]);
+
+  // Initial load — defaults (slug=null / loading=true) are already set in state.
+  useEffect(() => { fetchResults(null); }, [fetchResults]);
 
   return (
     <div className="space-y-6">
@@ -1322,8 +1369,9 @@ function ValueBetsPage() {
   const [verifying, setVerifying] = useState(false);
   const [verifyResult, setVerifyResult] = useState<{ settled: number; won: number; lost: number; totalPnl: number } | null>(null);
 
+  // Fetch-only: all state updates happen asynchronously in the promise chain
+  // (initial `loading` already defaults to true).
   const load = useCallback(() => {
-    setLoading(true);
     fetch("/api/value-bets").then(r => r.json()).then((d: { bets: ValueBet[]; stats: ValueBetStats }) => {
       setBets(d.bets ?? []); setStats(d.stats ?? null);
     }).catch(() => {}).finally(() => setLoading(false));
@@ -1333,11 +1381,18 @@ function ValueBetsPage() {
 
   async function verify() {
     setVerifying(true);
-    const res = await fetch("/api/value-bets/verify", { method: "POST" });
-    const d = await res.json() as { settled: number; won: number; lost: number; totalPnl: number };
-    setVerifyResult(d);
-    setVerifying(false);
-    load();
+    try {
+      const res = await fetch("/api/value-bets/verify", { method: "POST" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const d = await res.json() as { settled: number; won: number; lost: number; totalPnl: number };
+      setVerifyResult(d);
+      setLoading(true);
+      load();
+    } catch {
+      setVerifyResult(null);
+    } finally {
+      setVerifying(false);
+    }
   }
 
   if (loading) return <LoadingGrid label="Loading value bet tracker…" />;
@@ -1360,8 +1415,8 @@ function ValueBetsPage() {
           <span className="text-emerald-300">Settled: <strong>{verifyResult.settled}</strong></span>
           <span className="text-emerald-300">Won: <strong>{verifyResult.won}</strong></span>
           <span className="text-rose-300">Lost: <strong>{verifyResult.lost}</strong></span>
-          <span className={verifyResult.totalPnl >= 0 ? "text-emerald-300" : "text-rose-300"}>
-            P&L: <strong>{verifyResult.totalPnl >= 0 ? "+" : ""}{verifyResult.totalPnl?.toFixed(2)}</strong>
+          <span className={(verifyResult.totalPnl ?? 0) >= 0 ? "text-emerald-300" : "text-rose-300"}>
+            P&L: <strong>{(verifyResult.totalPnl ?? 0) >= 0 ? "+" : ""}{(verifyResult.totalPnl ?? 0).toFixed(2)}</strong>
           </span>
         </div>
       )}
@@ -1399,9 +1454,9 @@ function ValueBetsPage() {
           <div className="flex justify-between items-center">
             <h3 className="text-sm font-bold text-white">{bets.length} tracked bets</h3>
             <div className="flex gap-3 text-xs font-mono">
-              <span className="text-slate-400">Staked: <strong className="text-white">${stats?.totalStaked.toFixed(0)}</strong></span>
-              <span className="text-slate-400">Returns: <strong className="text-emerald-300">${stats?.totalReturns.toFixed(0)}</strong></span>
-              <span className="text-slate-400">P&L: <strong className={stats?.totalPnl ?? 0 >= 0 ? "text-emerald-300" : "text-rose-300"}>{stats?.totalPnl ?? 0 >= 0 ? "+" : ""}${stats?.totalPnl?.toFixed(2)}</strong></span>
+              <span className="text-slate-400">Staked: <strong className="text-white">${(stats?.totalStaked ?? 0).toFixed(0)}</strong></span>
+              <span className="text-slate-400">Returns: <strong className="text-emerald-300">${(stats?.totalReturns ?? 0).toFixed(0)}</strong></span>
+              <span className="text-slate-400">P&L: <strong className={(stats?.totalPnl ?? 0) >= 0 ? "text-emerald-300" : "text-rose-300"}>{(stats?.totalPnl ?? 0) >= 0 ? "+" : ""}${(stats?.totalPnl ?? 0).toFixed(2)}</strong></span>
             </div>
           </div>
           <div className="bg-black/50 rounded-lg overflow-hidden">
@@ -1480,6 +1535,26 @@ interface BacktestAggregate {
   top10: { settled: number; perfectMatches: number; perfectRate: number; avgHits: number; totalHits: number; totalPicks: number; overallAccuracy: number };
 }
 
+// Hoisted out of BacktestDashboard so they aren't re-created on every render
+function AccuracyBadge({ pct, label }: { pct: number; label: string }) {
+  const color = pct >= 0.90 ? "text-emerald-300 border-emerald-500/40 bg-emerald-500/10"
+              : pct >= 0.75 ? "text-amber-300 border-amber-500/40 bg-amber-500/10"
+              : "text-rose-300 border-rose-500/40 bg-rose-500/10";
+  return (
+    <div className={`rounded-lg border px-4 py-3 text-center ${color}`}>
+      <div className="text-3xl font-extrabold font-mono">{(pct * 100).toFixed(1)}%</div>
+      <div className="text-[10px] font-bold uppercase mt-0.5">{label}</div>
+    </div>
+  );
+}
+
+function OutcomePill({ outcome }: { outcome: string }) {
+  if (outcome === "HIT")     return <span className="rounded bg-emerald-500/20 border border-emerald-500/40 px-2 py-0.5 text-[10px] font-bold text-emerald-300 font-mono">HIT</span>;
+  if (outcome === "MISS")    return <span className="rounded bg-rose-500/20 border border-rose-500/40 px-2 py-0.5 text-[10px] font-bold text-rose-300 font-mono">MISS</span>;
+  if (outcome === "EMPTY")   return <span className="rounded bg-slate-700/50 border border-slate-600/40 px-2 py-0.5 text-[10px] font-bold text-slate-400 font-mono">EMPTY</span>;
+  return <span className="rounded bg-slate-700/50 border border-slate-600/40 px-2 py-0.5 text-[10px] font-bold text-slate-500 font-mono">—</span>;
+}
+
 function BacktestDashboard() {
   const [loading, setLoading]     = useState(false);
   const [ran, setRan]             = useState(false);
@@ -1519,25 +1594,6 @@ function BacktestDashboard() {
       setLoading(false);
     }
   }
-
-  const AccuracyBadge = ({ pct, label }: { pct: number; label: string }) => {
-    const color = pct >= 0.90 ? "text-emerald-300 border-emerald-500/40 bg-emerald-500/10"
-                : pct >= 0.75 ? "text-amber-300 border-amber-500/40 bg-amber-500/10"
-                : "text-rose-300 border-rose-500/40 bg-rose-500/10";
-    return (
-      <div className={`rounded-lg border px-4 py-3 text-center ${color}`}>
-        <div className="text-3xl font-extrabold font-mono">{(pct * 100).toFixed(1)}%</div>
-        <div className="text-[10px] font-bold uppercase mt-0.5">{label}</div>
-      </div>
-    );
-  };
-
-  const OutcomePill = ({ outcome }: { outcome: string }) => {
-    if (outcome === "HIT")     return <span className="rounded bg-emerald-500/20 border border-emerald-500/40 px-2 py-0.5 text-[10px] font-bold text-emerald-300 font-mono">HIT</span>;
-    if (outcome === "MISS")    return <span className="rounded bg-rose-500/20 border border-rose-500/40 px-2 py-0.5 text-[10px] font-bold text-rose-300 font-mono">MISS</span>;
-    if (outcome === "EMPTY")   return <span className="rounded bg-slate-700/50 border border-slate-600/40 px-2 py-0.5 text-[10px] font-bold text-slate-400 font-mono">EMPTY</span>;
-    return <span className="rounded bg-slate-700/50 border border-slate-600/40 px-2 py-0.5 text-[10px] font-bold text-slate-500 font-mono">—</span>;
-  };
 
   return (
     <div className="space-y-6">
@@ -1816,11 +1872,8 @@ interface PerfData {
   tierSweep?: { top1: number; top3: number; top5: number; top10: number; counts: { top1: number; top3: number; top5: number; top10: number } };
   bestMatch: { matchLabel: string; score: string; accuracy: number; hits: number; total: number } | null;
   leagueBreakdown: Array<{ league: string; hits: number; misses: number; matches: number; accuracy: number }>;
-  accumulatorPerformance: {
-    total: number; won: number; lost: number; pending: number; settled: number;
-    winRate: number; roi: number; totalStaked: number; totalReturns: number;
-    slips: Array<{ id: number; name: string; legs: number; odds: number; prob: number; stake: number; status: string; potentialReturn: number }>;
-  };
+  // /api/performance returns per-type accumulator stats: { all, highHit, value }
+  accumulatorPerformance: { all: AccaStats; highHit: AccaStats; value: AccaStats } | null;
   recentMatches: Array<{
     id: number;
     matchLabel: string;
@@ -1843,6 +1896,14 @@ function PerformanceDashboard() {
   const [accuracy, setAccuracy]   = useState<{ cumulative?: { accuracy: number; accuracyPct: string; matches: number; trend: string }; rolling7d?: { accuracyPct: string }; daily?: Array<{ date: string; accuracy: number; matches: number }> } | null>(null);
   const [calibData, setCalibData] = useState<{ families?: Array<{ family: string; observedPct: string; currentCoeff: number; suggestedCoeff: number; action: string; total: number }> } | null>(null);
   const [activeSubTab, setActiveSubTab] = useState<"overview" | "accuracy" | "calibration">("overview");
+  const [resolvingId, setResolvingId]   = useState<number | null>(null);
+
+  const refreshPerformance = useCallback(() => {
+    return fetch("/api/performance")
+      .then((r) => r.json())
+      .then((d: PerfData) => setData(d))
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     fetch("/api/performance").then((r) => r.json()).then((d: PerfData) => setData(d)).catch(() => setData(null)).finally(() => setLoading(false));
@@ -1868,6 +1929,9 @@ function PerformanceDashboard() {
       </div>
     );
   }
+
+  // Combined stats across all slip types (the API returns { all, highHit, value })
+  const accaPerf = data.accumulatorPerformance?.all ?? null;
 
   return (
     <div className="space-y-6">
@@ -2100,39 +2164,39 @@ function PerformanceDashboard() {
         </div>
       )}
 
-      {data.accumulatorPerformance && data.accumulatorPerformance.total > 0 && (
+      {accaPerf && accaPerf.total > 0 && (
         <div>
           <div className="mb-2 inline-block bg-black/60 rounded-lg px-3 py-1.5">
             <h3 className="text-sm font-bold text-white">Accumulator Performance</h3>
           </div>
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-5 mb-3">
             <div className="bg-black/50 rounded-lg p-3 text-center">
-              <div className="text-xl font-extrabold font-mono text-amber-300">{data.accumulatorPerformance.total}</div>
+              <div className="text-xl font-extrabold font-mono text-amber-300">{accaPerf.total}</div>
               <div className="text-[10px] text-slate-400">Total Slips</div>
             </div>
             <div className="bg-black/50 rounded-lg p-3 text-center">
-              <div className="text-xl font-extrabold font-mono text-emerald-300">{data.accumulatorPerformance.won}</div>
+              <div className="text-xl font-extrabold font-mono text-emerald-300">{accaPerf.won}</div>
               <div className="text-[10px] text-slate-400">Won</div>
             </div>
             <div className="bg-black/50 rounded-lg p-3 text-center">
-              <div className="text-xl font-extrabold font-mono text-rose-300">{data.accumulatorPerformance.lost}</div>
+              <div className="text-xl font-extrabold font-mono text-rose-300">{accaPerf.lost}</div>
               <div className="text-[10px] text-slate-400">Lost</div>
             </div>
             <div className="bg-black/50 rounded-lg p-3 text-center">
-              <div className={`text-xl font-extrabold font-mono ${data.accumulatorPerformance.winRate >= 50 ? "text-emerald-300" : "text-rose-300"}`}>
-                {data.accumulatorPerformance.winRate.toFixed(0)}%
+              <div className={`text-xl font-extrabold font-mono ${accaPerf.winRate >= 50 ? "text-emerald-300" : "text-rose-300"}`}>
+                {accaPerf.winRate.toFixed(0)}%
               </div>
               <div className="text-[10px] text-slate-400">Win Rate</div>
             </div>
             <div className="bg-black/50 rounded-lg p-3 text-center">
-              <div className={`text-xl font-extrabold font-mono ${data.accumulatorPerformance.roi >= 0 ? "text-emerald-300" : "text-rose-300"}`}>
-                {data.accumulatorPerformance.roi >= 0 ? "+" : ""}{data.accumulatorPerformance.roi.toFixed(1)}%
+              <div className={`text-xl font-extrabold font-mono ${accaPerf.roi >= 0 ? "text-emerald-300" : "text-rose-300"}`}>
+                {accaPerf.roi >= 0 ? "+" : ""}{accaPerf.roi.toFixed(1)}%
               </div>
               <div className="text-[10px] text-slate-400">ROI</div>
             </div>
           </div>
           <div className="bg-black/50 rounded-lg divide-y divide-white/5">
-            {data.accumulatorPerformance.slips.map(s => (
+            {accaPerf.slips.map(s => (
               <div key={s.id} className="flex items-center justify-between px-4 py-2 text-xs">
                 <div>
                   <span className="text-white font-medium">{s.name}</span>
@@ -2172,21 +2236,25 @@ function PerformanceDashboard() {
                           {m.pending} to resolve
                         </span>
                         <button
-                          onClick={async (e) => {
-                            const btn = e.currentTarget;
-                            btn.textContent = "Searching...";
-                            btn.disabled = true;
-                            await fetch("/api/verify-pending", {
-                              method: "POST",
-                              headers: { "Content-Type": "application/json" },
-                              body: JSON.stringify({ performanceId: m.id }),
-                            });
-                            fetch("/api/performance").then(r => r.json()).then((d: PerfData) => setData(d));
-                            btn.textContent = "Done";
+                          onClick={async () => {
+                            setResolvingId(m.id);
+                            try {
+                              await fetch("/api/verify-pending", {
+                                method: "POST",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({ performanceId: m.id }),
+                              });
+                              await refreshPerformance();
+                            } catch {
+                              // keep the button usable if the request fails
+                            } finally {
+                              setResolvingId(null);
+                            }
                           }}
+                          disabled={resolvingId === m.id}
                           className="rounded px-2 py-1 text-[10px] font-mono bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 hover:bg-cyan-500/40"
                         >
-                          Web Search
+                          {resolvingId === m.id ? "Searching..." : "Web Search"}
                         </button>
                       </div>
                     )}
@@ -2213,12 +2281,14 @@ function PerformanceDashboard() {
                         <span className="flex gap-1 shrink-0 ml-1">
                           <button
                             onClick={async () => {
-                              await fetch("/api/performance/resolve", {
-                                method: "POST",
-                                headers: { "Content-Type": "application/json" },
-                                body: JSON.stringify({ performanceId: m.id, pickIndex: i, outcome: "HIT" }),
-                              });
-                              fetch("/api/performance").then(r => r.json()).then((d: PerfData) => setData(d));
+                              try {
+                                await fetch("/api/performance/resolve", {
+                                  method: "POST",
+                                  headers: { "Content-Type": "application/json" },
+                                  body: JSON.stringify({ performanceId: m.id, pickIndex: i, outcome: "HIT" }),
+                                });
+                                await refreshPerformance();
+                              } catch { /* ignore network failures */ }
                             }}
                             className="rounded bg-emerald-500/30 border border-emerald-500/50 px-2 py-0.5 text-[10px] font-bold text-emerald-300 hover:bg-emerald-500/50"
                           >
@@ -2226,12 +2296,14 @@ function PerformanceDashboard() {
                           </button>
                           <button
                             onClick={async () => {
-                              await fetch("/api/performance/resolve", {
-                                method: "POST",
-                                headers: { "Content-Type": "application/json" },
-                                body: JSON.stringify({ performanceId: m.id, pickIndex: i, outcome: "MISS" }),
-                              });
-                              fetch("/api/performance").then(r => r.json()).then((d: PerfData) => setData(d));
+                              try {
+                                await fetch("/api/performance/resolve", {
+                                  method: "POST",
+                                  headers: { "Content-Type": "application/json" },
+                                  body: JSON.stringify({ performanceId: m.id, pickIndex: i, outcome: "MISS" }),
+                                });
+                                await refreshPerformance();
+                              } catch { /* ignore network failures */ }
                             }}
                             className="rounded bg-rose-500/30 border border-rose-500/50 px-2 py-0.5 text-[10px] font-bold text-rose-300 hover:bg-rose-500/50"
                           >
@@ -2384,8 +2456,9 @@ interface SavedSlip {
 }
 
 type AccaStats = {
-  total: number; won: number; lost: number; pending: number; winRate: number; roi: number;
-  slips: Array<{ id: number; name: string; type: string; legs: number; odds: number; status: string; potentialReturn: number }>;
+  total: number; won: number; lost: number; pending: number; settled: number;
+  winRate: number; roi: number; totalStaked: number; totalReturns: number;
+  slips: Array<{ id: number; name: string; type: string; legs: number; odds: number; prob: number; stake: number | null; status: string; potentialReturn: number }>;
 };
 
 function AccumulatorPage() {
@@ -2425,20 +2498,31 @@ function AccumulatorPage() {
 
   async function manualVerify() {
     setVerifying(true); setVerifyMsg(null);
-    const r = await fetch("/api/accumulator/verify", { method: "POST" });
-    const d = await r.json() as { settled?: number; won?: number; lost?: number; stillPending?: number };
-    setVerifyMsg(`✓ ${d.settled ?? 0} settled (${d.won ?? 0} won, ${d.lost ?? 0} lost) · ${d.stillPending ?? 0} still pending`);
-    setVerifying(false); loadAll();
+    try {
+      const r = await fetch("/api/accumulator/verify", { method: "POST" });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const d = await r.json() as { settled?: number; won?: number; lost?: number; stillPending?: number };
+      setVerifyMsg(`✓ ${d.settled ?? 0} settled (${d.won ?? 0} won, ${d.lost ?? 0} lost) · ${d.stillPending ?? 0} still pending`);
+      loadAll();
+    } catch {
+      setVerifyMsg("Verification failed — please try again.");
+    } finally {
+      setVerifying(false);
+    }
   }
 
   async function deleteSlip(id: number) {
-    await fetch("/api/slips", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id, status: "void" }) });
+    try {
+      await fetch("/api/slips", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id, status: "void" }) });
+    } catch { /* ignore network failures */ }
     loadAll();
   }
 
   async function updateStake(slipId: number, stake: number) {
     // Update stake via slips endpoint
-    await fetch("/api/slips", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: slipId, stake }) });
+    try {
+      await fetch("/api/slips", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: slipId, stake }) });
+    } catch { /* ignore network failures */ }
     loadAll();
   }
 
@@ -2705,7 +2789,7 @@ function AccaCardRender({ acca, onSave }: { acca: Acca; onSave?: () => void }) {
   async function trackSlip() {
     setSaving(true);
     try {
-      await fetch("/api/slips", {
+      const r = await fetch("/api/slips", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -2717,8 +2801,11 @@ function AccaCardRender({ acca, onSave }: { acca: Acca; onSave?: () => void }) {
           stake,
         }),
       });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
       setSaved(true);
       onSave?.();
+    } catch {
+      // leave the button usable so the user can retry
     } finally {
       setSaving(false);
     }
@@ -2938,8 +3025,9 @@ function BankrollTracker() {
   const [accountBalance, setAccountBalance] = useState("");
   const [loading, setLoading] = useState(true);
 
+  // Fetch-only: all state updates happen asynchronously in the promise chain
+  // (initial `loading` already defaults to true).
   const load = useCallback(() => {
-    setLoading(true);
     fetch("/api/bankroll").then(r => r.json()).then((d: typeof data) => setData(d)).catch(() => {}).finally(() => setLoading(false));
   }, []);
 
@@ -2952,24 +3040,28 @@ function BankrollTracker() {
     const num = parseFloat(amount);
     if (isNaN(num)) return;
     const finalAmount = type === "bet" ? -Math.abs(num) : Math.abs(num);
-    await fetch("/api/bankroll", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type, amount: finalAmount, description: desc }),
-    });
-    setAmount(""); setDesc("");
+    try {
+      await fetch("/api/bankroll", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type, amount: finalAmount, description: desc }),
+      });
+      setAmount(""); setDesc("");
+    } catch { /* keep the form values so the user can retry */ }
     load();
   }
 
   async function setInitialBalance() {
     const num = parseFloat(accountBalance);
     if (isNaN(num) || num <= 0) return;
-    await fetch("/api/bankroll", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type: "deposit", amount: num, description: "My account balance" }),
-    });
-    setAccountBalance("");
+    try {
+      await fetch("/api/bankroll", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: "deposit", amount: num, description: "My account balance" }),
+      });
+      setAccountBalance("");
+    } catch { /* keep the form value so the user can retry */ }
     load();
   }
 
@@ -3174,21 +3266,32 @@ function OddsCalculator() {
   const [dutchResult, setDutchResult] = useState<OddsResult["dutching"] | null>(null);
 
   async function convert() {
+    if (!input.trim()) return;
     const params = new URLSearchParams();
     if (format === "decimal") params.set("decimal", input);
     else if (format === "american") params.set("american", input);
     else if (format === "fractional") params.set("fractional", input);
     else params.set("probability", input);
-    const r = await fetch(`/api/odds-calc?${params}`);
-    const d = await r.json() as OddsResult;
-    setResult(d);
+    try {
+      const r = await fetch(`/api/odds-calc?${params}`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const d = await r.json() as OddsResult;
+      setResult(d);
+    } catch {
+      setResult(null);
+    }
   }
 
   async function calcDutch() {
     if (!dutchOdds.trim()) return;
-    const r = await fetch(`/api/odds-calc?decimal=1&dutch=${encodeURIComponent(dutchOdds)}`);
-    const d = await r.json() as OddsResult;
-    setDutchResult(d.dutching ?? null);
+    try {
+      const r = await fetch(`/api/odds-calc?decimal=1&dutch=${encodeURIComponent(dutchOdds)}`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const d = await r.json() as OddsResult;
+      setDutchResult(d.dutching ?? null);
+    } catch {
+      setDutchResult(null);
+    }
   }
 
   return (
