@@ -18,15 +18,16 @@
 //      COMPLETED from the remaining eligible verifiable markets in safety
 //      order, so the Top-10 output always carries up to 10 picks.
 //
-//   4. WEAK-TEAM FILTER (ALL Top-N outputs) — team-specific "Under 3.5 Goals"
-//      lines for a WEAK team (xG < 0.8 OR bottom half of the league table) are
-//      excluded from the ranked pool BEFORE the Top 1/3/5/10 lists are
-//      assembled, so they can never appear in ANY Top-N output — not just the
-//      first position. The whole-match total "Under 3.5" is not team-specific
-//      and always stays eligible. The lists then refill from the remaining
-//      ranked markets so Top-10 still carries up to 10 picks.
+//   4. BIG-GIANT FILTER (ALL Top-N outputs) — a team-specific "Under 3.5 Goals"
+//      line is eligible ONLY when its team is a big-giant club (hardcoded list).
+//      Any other team's "Under 3.5 Team Goals" line is excluded from the ranked
+//      pool BEFORE the Top 1/3/5/10 lists are assembled, so it can never appear
+//      in ANY Top-N output — not just the first position. The whole-match total
+//      "Under 3.5" is not team-specific and always stays eligible. The lists
+//      then refill from the remaining ranked markets so Top-10 still carries up
+//      to 10 picks.
 //
-//   5. Only if NO eligible market remains after the weak-team filter is the
+//   5. Only if NO eligible market remains after the big-giant filter is the
 //      match skipped (empty selection).
 
 import { poissonPmf } from "./stats";
@@ -161,9 +162,9 @@ function sigmaCushion(lambda: number, line: number): number {
   return Math.abs(lambda - line) / Math.sqrt(Math.max(0.5, lambda));
 }
 
-// ─── Weak-team detection ("Under 3.5" filter for all Top-N outputs) ──────────
+// ─── Big-giant detection ("Under 3.5 Team Goals" filter for all Top-N) ───────
 
-/** League-table context for one team. Optional — when absent, only the xG rule applies. */
+/** League-table context for one team. Kept for API compatibility with oracle.ts. */
 export interface TeamTableInfo {
   /** 1-based position in the league table. */
   position?:   number;
@@ -171,13 +172,75 @@ export interface TeamTableInfo {
   leagueSize?: number;
 }
 
-/** A team is WEAK when its expected goals (xG) is below this threshold… */
-const WEAK_XG_THRESHOLD = 0.8;
+/**
+ * BIG-GIANT clubs — the ONLY teams whose team-specific "Under 3.5 Team Goals"
+ * line stays eligible for Top 1/3/5/10. Every other team's line is excluded.
+ *
+ * Source: hardcoded list (approach 3 from the spec) — the codebase has no
+ * historical ELO / market-value ranking and no Champions League knockout
+ * history to derive this from, so the explicit list is the reliable option.
+ * Clubs are grouped by league for readability; the matcher below normalises
+ * both the list and any incoming ESPN name (full or short) before comparing.
+ */
+const BIG_GIANT_CLUBS: ReadonlyArray<string> = [
+  // LaLiga
+  "Real Madrid", "Barcelona", "Atletico Madrid",
+  // Bundesliga
+  "Bayern Munich", "Borussia Dortmund",
+  // Ligue 1
+  "PSG",
+  // Premier League
+  "Manchester City", "Liverpool", "Arsenal", "Chelsea",
+  "Manchester United", "Tottenham",
+  // Serie A
+  "Juventus", "Inter Milan", "AC Milan", "Napoli",
+];
 
-/** …OR when it sits in the bottom half of the league table. */
-function isBottomHalf(table?: TeamTableInfo): boolean {
-  if (!table?.position || !table?.leagueSize) return false;
-  return table.position > table.leagueSize / 2;
+/** Alternate names ESPN can return for the clubs above (full / short / localised). */
+const BIG_GIANT_ALIASES: ReadonlyArray<string> = [
+  // Real Madrid
+  "Real Madrid CF",
+  // Barcelona
+  "FC Barcelona", "Barca",
+  // Atletico Madrid
+  "Atlético Madrid", "Atlético de Madrid", "Atletico de Madrid",
+  // Bayern Munich
+  "Bayern München", "Bayern Munchen", "FC Bayern", "FC Bayern Munchen", "FC Bayern München",
+  // Borussia Dortmund
+  "Dortmund", "BVB", "BVB 09",
+  // PSG
+  "Paris Saint-Germain", "Paris Saint Germain", "Paris SG",
+  // Manchester City
+  "Man City",
+  // Manchester United
+  "Man United", "Man Utd", "Man U",
+  // Tottenham
+  "Tottenham Hotspur", "Spurs",
+  // Inter Milan
+  "Inter", "Internazionale", "FC Internazionale", "Internazionale Milano",
+  // AC Milan
+  "Milan",
+  // Napoli
+  "SSC Napoli",
+];
+
+/** Lower-case, accent-stripped, punctuation-stripped name key. */
+function normalizeTeamName(name: string): string {
+  return name
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")   // strip diacritics (é → e, ü → u…)
+    .replace(/[^a-z0-9]/g, "");        // strip punctuation + whitespace
+}
+
+const BIG_GIANT_KEYS: ReadonlySet<string> = new Set(
+  [...BIG_GIANT_CLUBS, ...BIG_GIANT_ALIASES].map(normalizeTeamName),
+);
+
+/** True when the team name resolves to a big-giant club. */
+function isBigGiant(teamName: string): boolean {
+  if (!teamName) return false;
+  return BIG_GIANT_KEYS.has(normalizeTeamName(teamName));
 }
 
 /**
@@ -198,28 +261,55 @@ function isTeamUnder35GoalLine(m: Market): boolean {
 }
 
 /**
- * Weak-team filter (applies to ALL Top-N outputs):
- * exclude a market ONLY when it is a team-specific "Under 3.5 Goals" line
- * whose team is WEAK — xG below 0.8 OR bottom half of the league table.
+ * Attribute a team-specific "Under 3.5 Goals" line to home or away.
+ * The market name embeds the same team-name string the selector receives, so
+ * an exact full-name match is authoritative; a token-overlap fallback covers
+ * name variants (full vs short) and only resolves when one side is a clear
+ * winner — otherwise null (cannot attribute).
  */
-function isWeakTeamUnder35(
+function teamForUnder35Line(
   m:        Market,
-  lam:      LambdaSet,
   homeName: string,
   awayName: string,
-  opts?:    SelectOptions,
+): "home" | "away" | null {
+  const n     = m.name;
+  const hExact = !!homeName && n.includes(homeName);
+  const aExact = !!awayName && n.includes(awayName);
+
+  if (hExact && aExact) return homeName.length >= awayName.length ? "home" : "away";
+  if (hExact) return "home";
+  if (aExact) return "away";
+
+  // Fallback: significant-word overlap, strict winner only.
+  const words = (s: string) =>
+    s.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length >= 4);
+  const hW = words(homeName);
+  const aW = words(awayName);
+  const hScore = hW.filter((w) => n.toLowerCase().includes(w)).length;
+  const aScore = aW.filter((w) => n.toLowerCase().includes(w)).length;
+  if (hScore === 0 && aScore === 0) return null;
+  if (hScore === aScore) return null;
+  return hScore > aScore ? "home" : "away";
+}
+
+/**
+ * Big-giant filter (applies to ALL Top-N outputs):
+ * exclude a market when it is a team-specific "Under 3.5 Goals" line whose team
+ * is NOT a big-giant club. Big-giant lines stay eligible; every other team's
+ * "Under 3.5 Team Goals" line is removed from Top 1/3/5/10 entirely.
+ */
+function isNonGiantUnder35(
+  m:        Market,
+  homeName: string,
+  awayName: string,
 ): boolean {
   if (!isTeamUnder35GoalLine(m)) return false;
 
-  // Resolve which team the line belongs to (home wins ties on ambiguous names).
-  const isHome = teamMentions(m.name, homeName);
-  const isAway = !isHome && teamMentions(m.name, awayName);
-  if (!isHome && !isAway) return false; // cannot attribute the line — don't skip
+  const side = teamForUnder35Line(m, homeName, awayName);
+  if (!side) return true; // cannot confirm the team is a giant → exclude
 
-  const xg    = isHome ? lam.homeGoals : lam.awayGoals;
-  const table = isHome ? opts?.homeTable : opts?.awayTable;
-
-  return xg < WEAK_XG_THRESHOLD || isBottomHalf(table);
+  const team = side === "home" ? homeName : awayName;
+  return !isBigGiant(team);
 }
 
 // ─── Safety scoring ───────────────────────────────────────────────────────────
@@ -296,7 +386,7 @@ export interface SelectionResult {
   top3:     Market[];
   top5:     Market[];
   top10:    Market[];
-  /** Set only when NONE of the top 10 ranked markets pass the weak-team filter. */
+  /** Set only when NONE of the top 10 ranked markets pass the big-giant filter. */
   skipped?: string;
 }
 
@@ -305,9 +395,15 @@ const EMPTY_SELECTION = (reason: string): SelectionResult => ({
 });
 
 export interface SelectOptions {
-  /** League-table context for the home team (weak-team bottom-half check). */
+  /**
+   * League-table context for the home team. Retained for API compatibility
+   * with oracle.ts — the current big-giant filter does not consult it.
+   */
   homeTable?: TeamTableInfo;
-  /** League-table context for the away team (weak-team bottom-half check). */
+  /**
+   * League-table context for the away team. Retained for API compatibility
+   * with oracle.ts — the current big-giant filter does not consult it.
+   */
   awayTable?: TeamTableInfo;
 }
 
@@ -363,13 +459,13 @@ export function selectTopPicks(
   // them post-match). Unverifiable markets stay in the full ranking above —
   // nothing is dropped from evaluation — they just never occupy Top-N slots.
   //
-  // WEAK-TEAM FILTER — team-specific "Under 3.5 Goals" lines for WEAK teams
-  // (xG < 0.8 OR bottom half of the league table) are excluded from BOTH
-  // pools up front, so they can never surface in Top 1/3/5/10 — the exclusion
-  // applies to every Top-N output, not just the Top-1 walk. The whole-match
-  // "Total Goals Under 3.5" is not team-specific and remains eligible.
+  // BIG-GIANT FILTER — team-specific "Under 3.5 Goals" lines are excluded from
+  // BOTH pools up front UNLESS their team is a big-giant club, so a non-giant
+  // team's line can never surface in Top 1/3/5/10 — the exclusion applies to
+  // every Top-N output, not just the Top-1 walk. The whole-match "Total Goals
+  // Under 3.5" is not team-specific and remains eligible.
   const eligible = (s: SafetyScore): boolean =>
-    !isWeakTeamUnder35(s.market, lam, homeName, awayName, opts);
+    !isNonGiantUnder35(s.market, homeName, awayName);
   const stablePool   = scored.filter((s) => s.verifiable && !isVolatile(s.market) && eligible(s));
   const volatilePool = scored.filter((s) => s.verifiable &&  isVolatile(s.market) && eligible(s));
 
@@ -440,8 +536,8 @@ export function selectTopPicks(
 
   const rankedTop10 = finalSorted.slice(0, 10);
 
-  // ── Step 6: TOP-1 — first ranked market that survived the weak-team filter ─
-  // Weak-team "Under 3.5" goal lines were already excluded from the pools in
+  // ── Step 6: TOP-1 — first ranked market that survived the big-giant filter ─
+  // Non-giant "Under 3.5" goal lines were already excluded from the pools in
   // Step 3, so every market in `rankedTop10` is eligible. The safest remaining
   // market is the headline pick; Top 3/5/10 are the same monotonic list, so no
   // excluded line can ever appear in any Top-N output.
@@ -449,7 +545,7 @@ export function selectTopPicks(
 
   if (!top1Pick) {
     return EMPTY_SELECTION(
-      "No eligible markets after the weak-team Under 3.5 filter — match skipped.",
+      "No eligible markets after the big-giant Under 3.5 filter — match skipped.",
     );
   }
 
