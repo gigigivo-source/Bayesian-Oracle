@@ -3,7 +3,14 @@ import type { FixtureLite } from "@/lib/espn";
 import type { EngineResult, Market, DeepStatsVector, MarketExplanation } from "./types";
 import type { LambdaSet } from "./lambdas";
 import { calibratedWinProb, type MatchVolatility } from "./calibration";
-import { selectTopPicks, load1xBetBook, type OneXBetBook } from "./selector";
+import { selectTopPicks, type TeamTableInfo } from "./selector";
+import { getStandings } from "../footballData";
+
+/** Optional league-table context passed through to the Top-1 weak-team filter. */
+export interface TableContext {
+  home?: TeamTableInfo;
+  away?: TeamTableInfo;
+}
 
 // ─── League statistical priors ────────────────────────────────────────────────
 const LEAGUE_PRIORS: Record<string, {
@@ -174,7 +181,7 @@ function toLambdaSet(exp: {
 }
 
 // ─── Main oracle ─────────────────────────────────────────────────────────────────
-export function runOracle(fixture: FixtureLite, oneXBet?: OneXBetBook | null): EngineResult {
+export function runOracle(fixture: FixtureLite, tables?: TableContext): EngineResult {
   _mktIdx = 0;
   const prior = getPrior(fixture.leagueSlug);
   const isPost = fixture.state === "post";
@@ -551,8 +558,8 @@ export function runOracle(fixture: FixtureLite, oneXBet?: OneXBetBook | null): E
   const qualified = markets.filter((m) => !m.rejected);
   const rejected  = markets.filter((m) => m.rejected);
 
-  // Rank + gate via the shared selector (Top-1 family filter, Poisson λ
-  // matchup gate, 1xBet availability walk, pinned Top-1 across Top 3/5/10).
+  // Rank + gate via the shared selector (all 217 registry markets are ranked;
+  // Top-1 walks ranked picks #1→#10, skipping weak-team "Under 3.5" goal lines).
   const lam = toLambdaSet({
     homeGoals: expHG, awayGoals: expAG, totalGoals: expTotal,
     homeCorners: expHCorners, awayCorners: expACorners,
@@ -564,10 +571,8 @@ export function runOracle(fixture: FixtureLite, oneXBet?: OneXBetBook | null): E
     goalKicks: expGoalKicks, throwIns: expThrowIns,
   });
   const selection = selectTopPicks(qualified, lam, hn, an, undefined, {
-    date:           fixture.date.slice(0, 10),
-    homeSearchName: fixture.home.name,
-    awaySearchName: fixture.away.name,
-    oneXBet,
+    homeTable: tables?.home,
+    awayTable: tables?.away,
   });
   const top1  = selection.top1;
   const top3  = selection.top3;
@@ -646,7 +651,7 @@ export function runOracle(fixture: FixtureLite, oneXBet?: OneXBetBook | null): E
     `Confidence intervals: ±${(0.07*100).toFixed(0)}% at 95% level`,
     `Data source: ESPN public API — real fixtures, real scores`,
     `De-vigged implied probs: H${Math.round(homeWin*100)}% D${Math.round(draw*100)}% A${Math.round(awayWin*100)}%`,
-    `Top-1 gated by broadly-offered families + Poisson 2σ matchup check + 1xBet availability`,
+    `Top-1: ranked walk #1→#10 skipping weak-team Under 3.5 goal lines (xG < 0.8 or bottom-half table)`,
     top1[0]
       ? `Pinned Top-1: ${top1[0].name} · ${top1[0].selection}`
       : (selection.skipped ?? "No Top-1 — match skipped or no eligible market"),
@@ -723,21 +728,53 @@ export function runOracle(fixture: FixtureLite, oneXBet?: OneXBetBook | null): E
 }
 
 /**
- * Async oracle entry: resolve 1xBet markets first, then run the same
- * statistical engine with a confirmed availability book.
+ * Match a team name against a football-data.org standings row.
+ * Fuzzy: exact normalized match, substring containment, or significant-word overlap.
  */
-export async function runOracleWithAvailability(fixture: FixtureLite): Promise<EngineResult> {
-  const resolved = await load1xBetBook(
-    fixture.home.name,
-    fixture.away.name,
-    fixture.date.slice(0, 10),
-  );
-  // Present → use the real book. Absent → empty book so the selector skips
-  // the match. Unknown (no key / lookup failed) → null so we fail-open.
-  const book = resolved.status === "present"
-    ? resolved.book
-    : resolved.status === "absent"
-      ? { fixtureId: 0, bets: [] }
-      : null;
-  return runOracle(fixture, book);
+function tableInfoFor(
+  teamName: string,
+  rows: Array<{ position: number; team: string }>,
+): TeamTableInfo | undefined {
+  if (!rows.length) return undefined;
+  const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const target = norm(teamName);
+  const stop = new Set(["fc", "cf", "afc", "sc", "club", "de", "the", "and"]);
+  const words = (s: string) =>
+    s.toLowerCase().replace(/[^a-z0-9\s]/g, "").split(/\s+/).filter((w) => w.length > 3 && !stop.has(w));
+
+  const hit =
+    rows.find((r) => {
+      const t = norm(r.team);
+      return t === target || t.includes(target) || target.includes(t);
+    })
+    ?? rows.find((r) => {
+      const a = words(teamName);
+      const b = words(r.team);
+      return a.some((w) => b.includes(w));
+    });
+
+  return hit ? { position: hit.position, leagueSize: rows.length } : undefined;
 }
+
+/**
+ * Async oracle entry: resolve league standings first (for the Top-1 weak-team
+ * "Under 3.5" filter — bottom-half-of-table check), then run the same
+ * statistical engine. No market is ever filtered on bookmaker odds
+ * availability. If standings are unavailable, the xG < 0.8 rule still applies.
+ */
+export async function runOracleWithStandings(fixture: FixtureLite): Promise<EngineResult> {
+  let tables: TableContext | undefined;
+  try {
+    const rows = await getStandings(fixture.leagueSlug);
+    if (rows.length) {
+      tables = {
+        home: tableInfoFor(fixture.home.name, rows),
+        away: tableInfoFor(fixture.away.name, rows),
+      };
+    }
+  } catch {
+    // Standings unavailable — weak-team detection falls back to xG only.
+  }
+  return runOracle(fixture, tables);
+}
+
