@@ -36,12 +36,12 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
           {this.state.message && (
             <p className="text-xs text-slate-500 font-mono mb-4 max-w-md mx-auto truncate">{this.state.message}</p>
           )}
-          <button
-            onClick={() => this.setState({ hasError: false, message: null })}
+          <a
+            href=""
             className="rounded-lg bg-amber-400/20 border border-amber-400/30 px-4 py-2 text-xs font-bold text-amber-300 hover:bg-amber-400/30 transition"
           >
             Try Again
-          </button>
+          </a>
         </div>
       );
     }
