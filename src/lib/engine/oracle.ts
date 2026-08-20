@@ -3,10 +3,16 @@ import type { FixtureLite } from "@/lib/espn";
 import type { EngineResult, Market, DeepStatsVector, MarketExplanation } from "./types";
 import type { LambdaSet } from "./lambdas";
 import { calibratedWinProb, type MatchVolatility } from "./calibration";
-import { selectTopPicks, type TeamTableInfo } from "./selector";
+import {
+  selectTopPicks,
+  type TeamTableInfo,
+  type RankingContext,
+  type ImportanceContext,
+  type TeamFormSignal,
+} from "./selector";
 import { getStandings } from "../footballData";
 
-/** Optional league-table context passed through to the weak-team filter. */
+/** Optional league-table context used for match-importance (title race / relegation) detection. */
 export interface TableContext {
   home?: TeamTableInfo;
   away?: TeamTableInfo;
@@ -36,6 +42,68 @@ const LEAGUE_PRIORS: Record<string, {
 
 function getPrior(slug: string) {
   return LEAGUE_PRIORS[slug] ?? LEAGUE_PRIORS["default"];
+}
+
+// ─── Multi-factor ranking context (fed into the shared selector) ─────────────
+// Builds the optional enrichment the selector uses for its 8-factor composite.
+// Anything unavailable here simply falls back to a neutral value in the
+// selector and is logged as a data gap.
+
+/** Parse an ESPN W/D/L form string (e.g. "WWDLW") into a lightweight form signal. */
+function formSignalFromString(name: string, formStr: string | null | undefined): TeamFormSignal | null {
+  if (!formStr) return null;
+  let wins = 0, draws = 0, losses = 0, games = 0;
+  for (const ch of formStr.toUpperCase()) {
+    if (ch === "W") wins++;
+    else if (ch === "D") draws++;
+    else if (ch === "L") losses++;
+    else continue;
+    games++;
+  }
+  if (games === 0) return null;
+  const points = wins * 3 + draws;
+  // Goals for/against are not carried by the form string, so leave the GD
+  // component neutral — momentum is captured via points-per-game only.
+  return {
+    teamName: name,
+    games,
+    gfAvg: 1.0,
+    gaAvg: 1.0,
+    points,
+  };
+}
+
+/** Derive match-importance flags from the fixture's league name + status detail. */
+function deriveImportance(fx: FixtureLite): ImportanceContext | null {
+  const text = `${fx.leagueName} ${fx.statusDetail ?? ""}`.toLowerCase();
+  const importance: ImportanceContext = {
+    derby:      /derby|classico|cl[aá]sico|rivalry/i.test(text),
+    knockout:   /final|semi.?final|quarter.?final|round of 16|knockout|elimination|play.?off/i.test(text),
+    friendly:   /friendl|pre-season|preseason|exhibition|testimonial/i.test(text),
+    titleRace:  false,
+    relegation: false,
+  };
+  return importance.derby || importance.knockout || importance.friendly ? importance : null;
+}
+
+/** Build the ranking context for a fixture (everything the selector can use). */
+function buildRankingContext(fx: FixtureLite): RankingContext {
+  const homeForm = formSignalFromString(fx.home.name, fx.home.form);
+  const awayForm = formSignalFromString(fx.away.name, fx.away.form);
+  return {
+    homeForm,
+    awayForm,
+    tactical: {
+      neutralSite:   fx.neutralSite,
+      homeFormation: null,   // oracle path has no roster feed
+      awayFormation: null,
+      h2hGames:      0,
+      h2hGoalsAvg:   null,
+    },
+    importance: deriveImportance(fx),
+    leagueSlug: fx.leagueSlug,
+    odds:       fx.odds ?? null,
+  };
 }
 
 // ─── Poisson math ──────────────────────────────────────────────────────────────
@@ -558,8 +626,9 @@ export function runOracle(fixture: FixtureLite, tables?: TableContext): EngineRe
   const qualified = markets.filter((m) => !m.rejected);
   const rejected  = markets.filter((m) => m.rejected);
 
-  // Rank + gate via the shared selector (all 217 registry markets are ranked;
-  // weak-team "Under 3.5" goal lines are excluded from Top 1/3/5/10 output).
+  // Rank via the shared multi-factor selector (every qualified market is scored
+  // across all eight factors — λ, calibration, form, tactical, importance,
+  // league depth, liquidity, zero-bias — and ranked by composite score).
   const lam = toLambdaSet({
     homeGoals: expHG, awayGoals: expAG, totalGoals: expTotal,
     homeCorners: expHCorners, awayCorners: expACorners,
@@ -573,6 +642,7 @@ export function runOracle(fixture: FixtureLite, tables?: TableContext): EngineRe
   const selection = selectTopPicks(qualified, lam, hn, an, undefined, {
     homeTable: tables?.home,
     awayTable: tables?.away,
+    context:   buildRankingContext(fixture),
   });
   const top1  = selection.top1;
   const top3  = selection.top3;
@@ -651,11 +721,20 @@ export function runOracle(fixture: FixtureLite, tables?: TableContext): EngineRe
     `Confidence intervals: ±${(0.07*100).toFixed(0)}% at 95% level`,
     `Data source: ESPN public API — real fixtures, real scores`,
     `De-vigged implied probs: H${Math.round(homeWin*100)}% D${Math.round(draw*100)}% A${Math.round(awayWin*100)}%`,
-    `Weak-team Under 3.5 team-goal lines excluded from Top 1/3/5/10 (xG < 0.8 or bottom-half table)`,
+    `Ranked by 8-factor composite: λ 25% / calibration 20% / form 15% / tactical 10% / importance 10% / league depth 10% / liquidity 5% / zero-bias 5%`,
     top1[0]
       ? `Pinned Top-1: ${top1[0].name} · ${top1[0].selection}`
       : (selection.skipped ?? "No Top-1 — match skipped or no eligible market"),
   ];
+
+  // Surface the multi-factor ranking breakdown + any logged data gaps.
+  if (selection.rankingNotes?.length) {
+    calibrationNotes.push("Multi-factor ranking (λ/cal/form/tac/imp/league/liq/bias):");
+    for (const note of selection.rankingNotes) calibrationNotes.push(`  ${note}`);
+  }
+  if (selection.gaps?.length) {
+    calibrationNotes.push(`Ranking data gaps: ${selection.gaps.join(" · ")}`);
+  }
 
   // Verification for post-match
   let hitCount = 0, evaluatedCount = 0;
@@ -757,11 +836,11 @@ function tableInfoFor(
 }
 
 /**
- * Async oracle entry: resolve league standings first (for the weak-team
- * "Under 3.5" filter — bottom-half-of-table check across all Top-N outputs),
- * then run the same statistical engine. No market is ever filtered on
- * bookmaker odds availability. If standings are unavailable, the xG < 0.8 rule
- * still applies.
+ * Async oracle entry: resolve league standings first (used to detect
+ * title-race / relegation stakes for the match-importance factor), then run
+ * the same statistical engine. No market is ever filtered on bookmaker odds
+ * availability. If standings are unavailable, importance falls back to a
+ * neutral value inside the selector.
  */
 export async function runOracleWithStandings(fixture: FixtureLite): Promise<EngineResult> {
   let tables: TableContext | undefined;
@@ -774,7 +853,7 @@ export async function runOracleWithStandings(fixture: FixtureLite): Promise<Engi
       };
     }
   } catch {
-    // Standings unavailable — weak-team detection falls back to xG only.
+    // Standings unavailable — match importance falls back to a neutral value.
   }
   return runOracle(fixture, tables);
 }
