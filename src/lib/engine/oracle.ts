@@ -6,7 +6,7 @@ import { calibratedWinProb, type MatchVolatility } from "./calibration";
 import { selectTopPicks, type TeamTableInfo } from "./selector";
 import { getStandings } from "../footballData";
 
-/** Optional league-table context passed through to the Top-1 weak-team filter. */
+/** Optional league-table context passed through to the weak-team filter. */
 export interface TableContext {
   home?: TeamTableInfo;
   away?: TeamTableInfo;
@@ -559,7 +559,7 @@ export function runOracle(fixture: FixtureLite, tables?: TableContext): EngineRe
   const rejected  = markets.filter((m) => m.rejected);
 
   // Rank + gate via the shared selector (all 217 registry markets are ranked;
-  // Top-1 walks ranked picks #1→#10, skipping weak-team "Under 3.5" goal lines).
+  // weak-team "Under 3.5" goal lines are excluded from Top 1/3/5/10 output).
   const lam = toLambdaSet({
     homeGoals: expHG, awayGoals: expAG, totalGoals: expTotal,
     homeCorners: expHCorners, awayCorners: expACorners,
@@ -651,7 +651,7 @@ export function runOracle(fixture: FixtureLite, tables?: TableContext): EngineRe
     `Confidence intervals: ±${(0.07*100).toFixed(0)}% at 95% level`,
     `Data source: ESPN public API — real fixtures, real scores`,
     `De-vigged implied probs: H${Math.round(homeWin*100)}% D${Math.round(draw*100)}% A${Math.round(awayWin*100)}%`,
-    `Top-1: ranked walk #1→#10 skipping weak-team Under 3.5 goal lines (xG < 0.8 or bottom-half table)`,
+    `Weak-team Under 3.5 team-goal lines excluded from Top 1/3/5/10 (xG < 0.8 or bottom-half table)`,
     top1[0]
       ? `Pinned Top-1: ${top1[0].name} · ${top1[0].selection}`
       : (selection.skipped ?? "No Top-1 — match skipped or no eligible market"),
@@ -757,10 +757,11 @@ function tableInfoFor(
 }
 
 /**
- * Async oracle entry: resolve league standings first (for the Top-1 weak-team
- * "Under 3.5" filter — bottom-half-of-table check), then run the same
- * statistical engine. No market is ever filtered on bookmaker odds
- * availability. If standings are unavailable, the xG < 0.8 rule still applies.
+ * Async oracle entry: resolve league standings first (for the weak-team
+ * "Under 3.5" filter — bottom-half-of-table check across all Top-N outputs),
+ * then run the same statistical engine. No market is ever filtered on
+ * bookmaker odds availability. If standings are unavailable, the xG < 0.8 rule
+ * still applies.
  */
 export async function runOracleWithStandings(fixture: FixtureLite): Promise<EngineResult> {
   let tables: TableContext | undefined;
