@@ -1,7 +1,6 @@
 "use client";
 
 import Image from "next/image";
-import Link from "next/link";
 import type { Market } from "@/lib/engine/types";
 import type { FixtureLite } from "@/lib/espn";
 import { OutcomeBadge, IconLive } from "./Icons";
@@ -293,7 +292,7 @@ export function FixtureCard({
   live,
 }: {
   fx: FixtureLite;
-  onSelect?: (fx: FixtureLite) => void;
+  onSelect: (fx: FixtureLite) => void;
   live?: boolean;
 }) {
   const isLive = fx.state === "in" || live === true;
@@ -314,9 +313,9 @@ export function FixtureCard({
     fx.away.score !== null;
 
   return (
-    <Link
-      href={`/fixtures/${encodeURIComponent(fx.id)}?league=${encodeURIComponent(fx.leagueSlug)}`}
-      className={`group block w-full rounded-lg border text-left transition ${
+    <button
+      onClick={() => onSelect(fx)}
+      className={`group w-full rounded-lg border text-left transition ${
         isLive
           ? "border-rose-500/30 bg-black/50 hover:bg-black/60"
           : "border-white/10 bg-black/50 hover:bg-black/60"
@@ -392,6 +391,6 @@ export function FixtureCard({
           </span>
         )}
       </div>
-    </Link>
+    </button>
   );
 }
