@@ -11,6 +11,7 @@ export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
   const league = searchParams.get("league");
   const dates  = searchParams.get("dates") ?? undefined;
+  const event  = searchParams.get("event");
 
   if (!league || !LEAGUE_MAP[league]) {
     return Response.json({ error: "Unknown or missing league slug." }, { status: 400 });
@@ -47,6 +48,7 @@ export async function GET(req: Request) {
 
   return Response.json({
     league:        LEAGUE_MAP[league],
+    fixture:       event ? all.find((fixture) => fixture.id === event) ?? null : undefined,
     fixtures:      [...allUpcoming, ...finished],
     upcoming:      allUpcoming,
     results:       finished,
