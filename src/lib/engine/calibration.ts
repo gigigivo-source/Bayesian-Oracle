@@ -86,7 +86,10 @@ function baseReliability(m: Market): number {
   // These families have high shot-to-shot variance. Their raw Poisson
   // confidence is over-stated. The demotions below were tuned to maximise
   // the perfect-10/10 rate (drove it from 44% → 68% in backtest).
-  // They are hard-excluded from Top-1 and Top-3 in the selector regardless.
+  // In the multi-factor selector this reliability value is the 20%
+  // "calibration / historical hit rate" factor, so these families are
+  // naturally pushed out of the top of the ranking (they never need to be
+  // hard-excluded).
   // ────────────────────────────────────────────────────────────────────────
 
   // Cards — referee variance, reds, late tactical fouls (~57% raw hit rate)
