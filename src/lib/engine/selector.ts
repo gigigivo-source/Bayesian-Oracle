@@ -101,6 +101,57 @@ const VERIFIABLE = new Set([
   "Match Result", "Double Chance", "Draw No Bet / Asian Handicap",
 ]);
 
+const GIANT_CLUBS = new Set([
+  "Real Madrid",
+  "Barcelona",
+  "Atletico Madrid",
+  "Bayern Munich",
+  "Borussia Dortmund",
+  "PSG",
+  "Manchester City",
+  "Liverpool",
+  "Arsenal",
+  "Chelsea",
+  "Manchester United",
+  "Tottenham",
+  "Juventus",
+  "Inter Milan",
+  "AC Milan",
+  "Napoli",
+]);
+
+const GIANT_CLUB_ALIASES: Record<string, string> = {
+  "real madrid cf": "Real Madrid",
+  "fc barcelona": "Barcelona",
+  "barca": "Barcelona",
+  "atletico madrid": "Atletico Madrid",
+  "club atletico de madrid": "Atletico Madrid",
+  "atletico": "Atletico Madrid",
+  "atleti": "Atletico Madrid",
+  "fc bayern munchen": "Bayern Munich",
+  "bayern": "Bayern Munich",
+  "bvb": "Borussia Dortmund",
+  "dortmund": "Borussia Dortmund",
+  "paris saint germain": "PSG",
+  "paris sg": "PSG",
+  "manchester city": "Manchester City",
+  "man city": "Manchester City",
+  "mancity": "Manchester City",
+  "manchester united": "Manchester United",
+  "man united": "Manchester United",
+  "man utd": "Manchester United",
+  "tottenham hotspur": "Tottenham",
+  "spurs": "Tottenham",
+  "juve": "Juventus",
+  "juventus fc": "Juventus",
+  "inter": "Inter Milan",
+  "inter milano": "Inter Milan",
+  "internazionale": "Inter Milan",
+  "fc internazionale milano": "Inter Milan",
+  "milan": "AC Milan",
+  "ssc napoli": "Napoli",
+};
+
 function isVerifiable(m: Market): boolean {
   if (UNVERIFIABLE_PATTERNS.some((p) => m.name.includes(p) || m.family === p)) return false;
   if (m.name === "Both Teams To Score") return true;
@@ -131,6 +182,43 @@ function marketSide(m: Market, homeName: string, awayName: string): "home" | "aw
   if (hn && !an) return "home";
   if (an && !hn) return "away";
   return "total";
+}
+
+function normalizeClubName(name: string): string {
+  return name
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function isGiantClub(name: string): boolean {
+  if (!name) return false;
+  if (GIANT_CLUBS.has(name)) return true;
+  const normalized = normalizeClubName(name);
+  const canonical = GIANT_CLUB_ALIASES[normalized];
+  if (canonical) return GIANT_CLUBS.has(canonical);
+  for (const giant of GIANT_CLUBS) {
+    if (normalizeClubName(giant) === normalized) return true;
+  }
+  return false;
+}
+
+function isBlockedTeamSpecificUnder35Goals(
+  m: Market,
+  homeName: string,
+  awayName: string,
+): boolean {
+  if (!isUnderSelection(m)) return false;
+  const lineMatch = m.name.match(/Goals O\/U\s+([\d.]+)/);
+  if (!lineMatch || Math.abs(Number(lineMatch[1]) - 3.5) > 1e-9) return false;
+
+  const side = marketSide(m, homeName, awayName);
+  if (side === "total") return false;
+
+  const teamName = side === "home" ? homeName : awayName;
+  return !isGiantClub(teamName);
 }
 
 // Note: only true Over/Under selections carry a directional form/tactical
@@ -646,7 +734,20 @@ export function selectTopPicks(
     );
   }
 
-  const top10 = verifiable.slice(0, 10).map((s) => s.market);
+  // ── Step 5: Safety net — block non-giant team-specific Under 3.5 Goals lines ─
+  // This is applied only after the full 8-factor ranking has already been
+  // computed and sorted, so the ranking logic itself remains unchanged.
+  const topNEligible = verifiable.filter(
+    (s) => !isBlockedTeamSpecificUnder35Goals(s.market, homeName, awayName),
+  );
+  if (topNEligible.length === 0) {
+    return EMPTY_SELECTION(
+      "No Top-N-eligible market remains after applying the team-goals safety net.",
+      [...gapLog],
+    );
+  }
+
+  const top10 = topNEligible.slice(0, 10).map((s) => s.market);
 
   return {
     top1:  top10.slice(0, 1),
