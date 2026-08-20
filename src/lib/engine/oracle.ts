@@ -1,7 +1,9 @@
 // Bayesian / Statistical Oracle Engine — Full 18-Family Market Generator
 import type { FixtureLite } from "@/lib/espn";
 import type { EngineResult, Market, DeepStatsVector, MarketExplanation } from "./types";
+import type { LambdaSet } from "./lambdas";
 import { calibratedWinProb, type MatchVolatility } from "./calibration";
+import { selectTopPicks, load1xBetBook, type OneXBetBook } from "./selector";
 
 // ─── League statistical priors ────────────────────────────────────────────────
 const LEAGUE_PRIORS: Record<string, {
@@ -128,8 +130,51 @@ function verifyDc(sel: string, hScore: number, aScore: number, hName: string): "
   return (homeWin || awayWin) ? "HIT" : "MISS";
 }
 
+// ─── λ adapter (oracle expected-rates → selector LambdaSet) ───────────────────
+function toLambdaSet(exp: {
+  homeGoals: number; awayGoals: number; totalGoals: number;
+  homeCorners: number; awayCorners: number;
+  homeCards: number; awayCards: number;
+  homeSot: number; awaySot: number;
+  homeShots: number; awayShots: number;
+  homeSaves: number; awaySaves: number;
+  fouls: number; offsides: number; goalKicks: number; throwIns: number;
+}): LambdaSet {
+  return {
+    homeGoals:         exp.homeGoals,
+    awayGoals:         exp.awayGoals,
+    homeCorners:       exp.homeCorners,
+    awayCorners:       exp.awayCorners,
+    homeCards:         exp.homeCards,
+    awayCards:         exp.awayCards,
+    homeSot:           exp.homeSot,
+    awaySot:           exp.awaySot,
+    homeShots:         exp.homeShots,
+    awayShots:         exp.awayShots,
+    homeOffsides:      exp.offsides / 2,
+    awayOffsides:      exp.offsides / 2,
+    homeGoalKicks:     exp.goalKicks / 2,
+    awayGoalKicks:     exp.goalKicks / 2,
+    homeSaves:         exp.homeSaves,
+    awaySaves:         exp.awaySaves,
+    homeThrowIns:      exp.throwIns / 2,
+    awayThrowIns:      exp.throwIns / 2,
+    homeFouls:         exp.fouls * 0.52,
+    awayFouls:         exp.fouls * 0.48,
+    aerialTotal:       22,
+    passesTotal:       450,
+    interceptionsHome: 8,
+    interceptionsAway: 8,
+    dribblingHome:     8,
+    dribblingAway:     8,
+    redCardProb:       0.10,
+    penaltyProb:       0.22,
+    calibrationNotes:  [],
+  };
+}
+
 // ─── Main oracle ─────────────────────────────────────────────────────────────────
-export function runOracle(fixture: FixtureLite): EngineResult {
+export function runOracle(fixture: FixtureLite, oneXBet?: OneXBetBook | null): EngineResult {
   _mktIdx = 0;
   const prior = getPrior(fixture.leagueSlug);
   const isPost = fixture.state === "post";
@@ -498,17 +543,38 @@ export function runOracle(fixture: FixtureLite): EngineResult {
     m.mqs           = parseFloat((clampedHr >= 0.80 ? 8 + clampedHr * 2 : clampedHr * 10).toFixed(1));
   }
 
-  // Sort by hitRate desc
+  // Sort by hitRate desc (full registry order — selection is independent)
   markets.sort((a, b) => b.hitRate - a.hitRate);
 
   // Partition markets — mark rejected flag
   markets.forEach((m) => { m.rejected = m.hitRate < 0.50; });
   const qualified = markets.filter((m) => !m.rejected);
-  const top1 = qualified.slice(0, 1);
-  const top10 = qualified.slice(0, 10);
+  const rejected  = markets.filter((m) => m.rejected);
+
+  // Rank + gate via the shared selector (Top-1 family filter, Poisson λ
+  // matchup gate, 1xBet availability walk, pinned Top-1 across Top 3/5/10).
+  const lam = toLambdaSet({
+    homeGoals: expHG, awayGoals: expAG, totalGoals: expTotal,
+    homeCorners: expHCorners, awayCorners: expACorners,
+    homeCards: expHCards, awayCards: expACards,
+    homeSot: expHSot, awaySot: expASot,
+    homeShots: expHShots, awayShots: expAShots,
+    homeSaves: expHSaves, awaySaves: expASaves,
+    fouls: expFouls, offsides: expOffsides,
+    goalKicks: expGoalKicks, throwIns: expThrowIns,
+  });
+  const selection = selectTopPicks(qualified, lam, hn, an, undefined, {
+    date:           fixture.date.slice(0, 10),
+    homeSearchName: fixture.home.name,
+    awaySearchName: fixture.away.name,
+    oneXBet,
+  });
+  const top1  = selection.top1;
+  const top3  = selection.top3;
+  const top5  = selection.top5;
+  const top10 = selection.top10;
   const safeMode = qualified.filter((m) => m.hitRate >= 0.80 && m.disagreementIndex < 0.08);
   const ultraSafe = qualified.filter((m) => m.hitRate >= 0.88 && m.ciLower >= 0.82);
-  const rejected = markets.filter((m) => m.rejected);
 
   // Family counts
   const familyCounts: Record<string, number> = {};
@@ -580,6 +646,10 @@ export function runOracle(fixture: FixtureLite): EngineResult {
     `Confidence intervals: ±${(0.07*100).toFixed(0)}% at 95% level`,
     `Data source: ESPN public API — real fixtures, real scores`,
     `De-vigged implied probs: H${Math.round(homeWin*100)}% D${Math.round(draw*100)}% A${Math.round(awayWin*100)}%`,
+    `Top-1 gated by broadly-offered families + Poisson 2σ matchup check + 1xBet availability`,
+    top1[0]
+      ? `Pinned Top-1: ${top1[0].name} · ${top1[0].selection}`
+      : (selection.skipped ?? "No Top-1 — match skipped or no eligible market"),
   ];
 
   // Verification for post-match
@@ -636,8 +706,8 @@ export function runOracle(fixture: FixtureLite): EngineResult {
     agents:   [],
     markets,
     top1,
-    top3:     top10.slice(0, 3),
-    top5:     top10.slice(0, 5),
+    top3,
+    top5,
     top10,
     safeMode,
     ultraSafe,
@@ -650,4 +720,24 @@ export function runOracle(fixture: FixtureLite): EngineResult {
     hitCount,
     evaluatedCount,
   };
+}
+
+/**
+ * Async oracle entry: resolve 1xBet markets first, then run the same
+ * statistical engine with a confirmed availability book.
+ */
+export async function runOracleWithAvailability(fixture: FixtureLite): Promise<EngineResult> {
+  const resolved = await load1xBetBook(
+    fixture.home.name,
+    fixture.away.name,
+    fixture.date.slice(0, 10),
+  );
+  // Present → use the real book. Absent → empty book so the selector skips
+  // the match. Unknown (no key / lookup failed) → null so we fail-open.
+  const book = resolved.status === "present"
+    ? resolved.book
+    : resolved.status === "absent"
+      ? { fixtureId: 0, bets: [] }
+      : null;
+  return runOracle(fixture, book);
 }
