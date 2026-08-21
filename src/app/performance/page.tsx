@@ -1,522 +1,384 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+// ĞIGI GIVØ — League Performance Dashboard.
+// Complete redesign: every league, cup and competition tracked by the oracle is
+// summarised in a card grid (search + sort), and clicking any card opens a full
+// league-specific breakdown — summary cards, factor accuracy, P&L trend and the
+// raw bet-by-bet table behind every number.
+
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { PerformanceShell } from "@/app/_components/perf/PerformanceShell";
-import { AccuracyBars } from "@/app/_components/perf/charts";
-import { AccuracyBreakdown, type FactorStat } from "@/app/_components/perf/AccuracyBreakdown";
+import { PnLTrendChart, type TrendPoint as ChartPoint } from "@/app/_components/perf/charts";
+import { ErrorState, LoadingState, Section, cn } from "@/app/_components/perf/ui";
 import {
-  cn,
-  EmptyState,
-  ErrorState,
-  LoadingState,
-  pct,
-  Pill,
-  ProgressBar,
-  ResultBadge,
-  Section,
-  signedCurrency,
-  SortHeader,
-  StatCard,
-  StreakBadge,
-  type SortDir,
-} from "@/app/_components/perf/ui";
+  FactorAccuracyTable,
+  LeagueBetsTable,
+  LeagueCard,
+  LeagueSkeletonGrid,
+  LeagueSummaryCards,
+  money,
+  pctNum,
+  TrendArrow,
+  usePnlWindow,
+  type LeagueDetail,
+  type LeagueMetrics,
+  type LeaguesResponse,
+} from "@/app/_components/perf/leagues";
 
-// ─── API response shapes ──────────────────────────────────────────────────────
+type SortKey = "totalBets" | "hitRate" | "roi" | "totalPnl";
+const SORT_OPTIONS: Array<{ key: SortKey; label: string }> = [
+  { key: "totalBets", label: "Total Bets" },
+  { key: "hitRate", label: "Hit Rate" },
+  { key: "roi", label: "ROI" },
+  { key: "totalPnl", label: "P&L" },
+];
 
-interface TopN {
-  hits: number;
-  total: number;
-  accuracy: number;
+const DAYS_OPTIONS = [7, 30, 90] as const;
+
+export default function LeaguePerformancePage() {
+  return (
+    <Suspense fallback={<PerformanceShell title="League Performance" subtitle="Loading…"><LoadingState label="Loading league performance…" /></PerformanceShell>}>
+      <LeaguePerformanceInner />
+    </Suspense>
+  );
 }
 
-interface AccaStats {
-  total: number;
-  won: number;
-  lost: number;
-  pending: number;
-  settled: number;
-  winRate: number;
-  roi: number;
-  totalStaked: number;
-  totalReturns: number;
-}
-
-interface RecentPick {
-  name: string;
-  selection: string;
-  hitRate?: number;
-  outcome: string;
-  family?: string;
-  reason?: string;
-}
-
-interface RecentMatch {
-  id: number;
-  matchLabel: string;
-  league: string;
-  matchDate: string;
-  homeScore: number;
-  awayScore: number;
-  hits: number;
-  misses: number;
-  pending: number;
-  accuracy: number;
-  totalPicks: number;
-  top10Detail: RecentPick[];
-  createdAt: string;
-}
-
-interface PerfData {
-  totalMatches: number;
-  totalPicks: number;
-  totalHits: number;
-  totalMisses: number;
-  totalPending: number;
-  totalVerified: number;
-  overallAccuracy: number;
-  perfectMatches: number;
-  currentStreak: number;
-  streakType: "W" | "L" | null;
-  top1: TopN;
-  top3: TopN;
-  top10: TopN;
-  recentMatches: RecentMatch[];
-  // shape varies between success {all,highHit,value} and error fallback
-  accumulatorPerformance?:
-    | { all: AccaStats; highHit: AccaStats; value: AccaStats }
-    | Partial<AccaStats>;
-}
-
-interface AccuracyData {
-  cumulative?: {
-    matches: number;
-    hits: number;
-    misses: number;
-    total: number;
-    accuracy: number;
-    accuracyPct: string;
-    perfectMatches: number;
-    trend: string;
-  };
-  rolling7d?: { accuracyPct: string };
-  daily?: Array<{ date: string; accuracy: number; matches: number }>;
-}
-
-interface CalibFamily {
-  family: string;
-  hits: number;
-  misses: number;
-  total: number;
-  observed: number;
-  currentCoeff: number;
-  observedPct: string;
-}
-
-interface CalibData {
-  overall?: { hits: number; misses: number; total: number; accuracy: number; accuracyPct: string };
-  families?: CalibFamily[];
-}
-
-// ─── Page ─────────────────────────────────────────────────────────────────────
-
-export default function OraclePerformancePage() {
-  const [perf, setPerf] = useState<PerfData | null>(null);
-  const [accuracy, setAccuracy] = useState<AccuracyData | null>(null);
-  const [calib, setCalib] = useState<CalibData | null>(null);
+function LeaguePerformanceInner() {
+  const [data, setData] = useState<LeaguesResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const load = useCallback(() => {
-    // Fetch-only: all state updates happen asynchronously in the promise chain
-    // (initial `loading` already defaults to true via useState).
-    const p = fetch("/api/performance").then((r) => {
-      if (!r.ok) throw new Error(`Performance API returned ${r.status}`);
-      return r.json() as Promise<PerfData>;
-    });
-    const a = fetch("/api/accuracy?days=30")
-      .then((r) => r.json() as Promise<AccuracyData>)
-      .catch(() => null);
-    const c = fetch("/api/calibrate")
-      .then((r) => r.json() as Promise<CalibData>)
-      .catch(() => null);
+  const [search, setSearch] = useState("");
+  const [days, setDays] = useState<number>(30);
+  const [sortBy, setSortBy] = useState<SortKey>("totalBets");
+  const searchParams = useSearchParams();
+  // Deep-link support (?league=eng.1) — read once during initial render.
+  const [selectedSlug, setSelectedSlug] = useState<string | null>(() => searchParams.get("league"));
+  const [detail, setDetail] = useState<LeagueDetail | null>(null);
+  const [detailLoading, setDetailLoading] = useState(true);
 
-    Promise.all([p, a, c])
-      .then(([pData, aData, cData]) => {
-        setPerf(pData);
-        setAccuracy(aData);
-        setCalib(cData);
+  // Async-only loader (no synchronous setState — safe to call from effects).
+  const load = useCallback((d: number, sort: SortKey) => {
+    fetch(`/api/performance/leagues?days=${d}&sortBy=${sort}&limit=100`)
+      .then((r) => {
+        if (!r.ok) throw new Error(`League performance API returned ${r.status}`);
+        return r.json() as Promise<LeaguesResponse>;
       })
-      .catch((e) => {
-        setError(e instanceof Error ? e.message : "Failed to load performance data");
+      .then((res) => {
+        setData(res);
+        // Keep selection if still present, otherwise pick the top league.
+        setSelectedSlug((prev) => {
+          if (prev && res.leagues.some((l) => l.leagueSlug === prev)) return prev;
+          return res.leagues[0]?.leagueSlug ?? null;
+        });
       })
+      .catch((e) => setError(e instanceof Error ? e.message : "Failed to load league performance"))
       .finally(() => setLoading(false));
   }, []);
 
+  const loadDetail = useCallback((slug: string | null, d: number) => {
+    if (!slug) return; // no selection yet — detail section stays hidden
+    fetch(`/api/performance/leagues?leagueSlug=${encodeURIComponent(slug)}&days=${d}`)
+      .then((r) => {
+        if (!r.ok) throw new Error(`League detail API returned ${r.status}`);
+        return r.json() as Promise<LeaguesResponse>;
+      })
+      .then((res) => setDetail(res.league))
+      .catch(() => setDetail(null))
+      .finally(() => setDetailLoading(false));
+  }, []);
+
+  // Initial load.
   useEffect(() => {
-    load();
-  }, [load]);
+    load(days, sortBy);
+  }, [load]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    loadDetail(selectedSlug, days);
+  }, [selectedSlug, days, loadDetail]);
+
+  // User picks a league card — show the loading state immediately (event handler).
+  const selectLeague = useCallback((slug: string) => {
+    setSelectedSlug(slug);
+    setDetail(null);
+    setDetailLoading(true);
+  }, []);
 
   const retry = useCallback(() => {
     setLoading(true);
     setError(null);
-    load();
-  }, [load]);
+    load(days, sortBy);
+  }, [days, load, sortBy]);
+
+  const filtered = useMemo(() => {
+    const list = data?.leagues ?? [];
+    const q = search.trim().toLowerCase();
+    if (!q) return list;
+    return list.filter(
+      (l) =>
+        l.competitionName.toLowerCase().includes(q) ||
+        l.leagueSlug.toLowerCase().includes(q) ||
+        (l.region ?? "").toLowerCase().includes(q),
+    );
+  }, [data, search]);
+
+  const totals = useMemo(() => {
+    const list = data?.leagues ?? [];
+    return list.reduce(
+      (acc, l) => ({
+        bets: acc.bets + l.totalBets,
+        wins: acc.wins + l.totalWins,
+        losses: acc.losses + l.totalLosses,
+        pnl: acc.pnl + l.totalPnl,
+        stake: acc.stake + l.totalStake,
+      }),
+      { bets: 0, wins: 0, losses: 0, pnl: 0, stake: 0 },
+    );
+  }, [data]);
+
+  const selected = useMemo(
+    () => filtered.find((l) => l.leagueSlug === selectedSlug) ?? null,
+    [filtered, selectedSlug],
+  );
 
   return (
     <PerformanceShell
-      title="Oracle Performance"
-      subtitle="Full transparency on every post-match verification — accuracy, streaks, per-factor reliability and daily trends. No hidden calculations."
+      title="League Performance"
+      subtitle="Every league, cup and competition — hit rate, ROI, P&L, streaks, factor accuracy and the raw bets behind every number. Filter by name, sort, and drill into any competition."
     >
-      {loading ? (
-        <LoadingState label="Loading verified performance records…" />
-      ) : error ? (
+      {loading && !data ? (
+        <>
+          <LoadingState label="Aggregating league performance from the database…" />
+          <LeagueSkeletonGrid count={8} />
+        </>
+      ) : error && !data ? (
         <ErrorState message={error} onRetry={retry} />
-      ) : !perf || perf.totalMatches === 0 ? (
-        <EmptyState
-          icon="📊"
-          title="No verified matches yet"
-          message="Run the oracle on a finished match — post-match verification results will appear here automatically."
-        />
+      ) : !data || data.leagues.length === 0 ? (
+        <div className="rounded-xl border border-white/10 bg-black/50 p-10 text-center">
+          <div className="mb-3 text-3xl">🌍</div>
+          <div className="mb-2 text-base font-bold text-slate-300">No league data yet</div>
+          <p className="mx-auto max-w-sm font-mono text-xs text-slate-400">
+            The daily all-league cron (/api/cron/daily-picks) records verified picks per competition.
+            Run it once — or POST /api/backfill/performance — and every league with data appears here.
+          </p>
+        </div>
       ) : (
-        <OracleContent perf={perf} accuracy={accuracy} calib={calib} />
+        <>
+          {/* ── Global strip ─────────────────────────────────────────────── */}
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <GlobalStat label="Leagues Tracked" value={String(data!.totalLeagues)} sub={`last ${data!.days} days`} />
+            <GlobalStat label="Total Bets" value={String(totals.bets)} sub="picks + value bets + slips" />
+            <GlobalStat
+              label="Overall Hit Rate"
+              value={totals.wins + totals.losses > 0 ? pctNum((totals.wins / (totals.wins + totals.losses)) * 100) : "—"}
+              sub={`${totals.wins}W · ${totals.losses}L settled`}
+            />
+            <GlobalStat
+              label="Total P&L"
+              value={money(totals.pnl)}
+              sub={totals.stake > 0 ? `ROI ${((totals.pnl / totals.stake) * 100).toFixed(1)}%` : "no stake data"}
+              tone={totals.pnl >= 0 ? "positive" : "negative"}
+            />
+          </div>
+
+          {/* ── Controls: search / days / sort ───────────────────────────── */}
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="relative min-w-[220px] flex-1">
+              <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-500">⌕</span>
+              <input
+                type="text"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search competitions (e.g. Premier League, Champions, LaLiga)…"
+                className="w-full rounded-lg border border-white/10 bg-black/50 py-2 pl-9 pr-3 text-sm text-slate-200 placeholder:text-slate-500 focus:border-amber-400/50 focus:outline-none"
+              />
+            </div>
+            <div className="flex gap-1 rounded-lg border border-white/10 bg-white/[0.03] p-1">
+              {DAYS_OPTIONS.map((d) => (
+                <button
+                  key={d}
+                  onClick={() => setDays(d)}
+                  className={cn(
+                    "rounded-md px-2.5 py-1.5 font-mono text-[11px] font-medium transition",
+                    days === d ? "bg-amber-400 font-bold text-slate-950" : "text-slate-300 hover:bg-white/5",
+                  )}
+                >
+                  {d}d
+                </button>
+              ))}
+            </div>
+            <div className="flex gap-1 rounded-lg border border-white/10 bg-white/[0.03] p-1">
+              {SORT_OPTIONS.map((o) => (
+                <button
+                  key={o.key}
+                  onClick={() => setSortBy(o.key)}
+                  className={cn(
+                    "rounded-md px-2.5 py-1.5 text-[11px] font-medium transition",
+                    sortBy === o.key ? "bg-amber-400 font-bold text-slate-950" : "text-slate-300 hover:bg-white/5",
+                  )}
+                >
+                  {o.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* ── League overview grid ─────────────────────────────────────── */}
+          <Section
+            title="League Overview"
+            subtitle={`${filtered.length} of ${data!.totalLeagues} competitions · sorted by ${SORT_OPTIONS.find((o) => o.key === sortBy)?.label ?? sortBy} · last ${days} days`}
+          >
+            {filtered.length === 0 ? (
+              <div className="rounded-xl border border-white/10 bg-black/50 p-8 text-center font-mono text-xs text-slate-400">
+                No competitions match “{search}”.
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                {filtered.map((m) => (
+                  <LeagueCard
+                    key={m.leagueSlug}
+                    m={m}
+                    selected={m.leagueSlug === selectedSlug}
+                    onClick={() => selectLeague(m.leagueSlug)}
+                  />
+                ))}
+              </div>
+            )}
+          </Section>
+
+          {/* ── Selected league detail ───────────────────────────────────── */}
+          {selectedSlug ? (
+            <LeagueDetailSection
+              league={selected}
+              detail={detail}
+              loading={detailLoading}
+              days={days}
+            />
+          ) : null}
+        </>
       )}
     </PerformanceShell>
   );
 }
 
-function OracleContent({
-  perf,
-  accuracy,
-  calib,
+function GlobalStat({
+  label,
+  value,
+  sub,
+  tone = "neutral",
 }: {
-  perf: PerfData;
-  accuracy: AccuracyData | null;
-  calib: CalibData | null;
+  label: string;
+  value: string;
+  sub: string;
+  tone?: "positive" | "negative" | "neutral";
 }) {
-  // ── Flatten matches into a pick-level list for the sortable table ──────────
-  const picks = useMemo(() => {
-    return perf.recentMatches.flatMap((m) =>
-      m.top10Detail.map((p, idx) => ({
-        key: `${m.id}-${idx}`,
-        date: m.matchDate,
-        match: m.matchLabel,
-        league: m.league,
-        score: `${m.homeScore}-${m.awayScore}`,
-        market: p.name,
-        selection: p.selection,
-        hitRate: p.hitRate ?? null,
-        family: p.family ?? null,
-        outcome: p.outcome,
-        reason: p.reason ?? null,
-      })),
-    );
-  }, [perf]);
-
-  const [sortKey, setSortKey] = useState<"date" | "hitRate">("date");
-  const [sortDir, setSortDir] = useState<SortDir>("desc");
-
-  const sortedPicks = useMemo(() => {
-    const arr = [...picks];
-    arr.sort((a, b) => {
-      let cmp = 0;
-      if (sortKey === "date") cmp = (a.date ?? "").localeCompare(b.date ?? "");
-      else cmp = (a.hitRate ?? -1) - (b.hitRate ?? -1);
-      return sortDir === "asc" ? cmp : -cmp;
-    });
-    return arr;
-  }, [picks, sortKey, sortDir]);
-
-  const toggleSort = (key: "date" | "hitRate") => {
-    if (sortKey === key) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
-    else {
-      setSortKey(key);
-      setSortDir("desc");
-    }
-  };
-
-  // ── Bankroll summary from the staked products (accumulator slips) ──────────
-  const accaAll =
-    perf.accumulatorPerformance && "all" in (perf.accumulatorPerformance as object)
-      ? (perf.accumulatorPerformance as { all: AccaStats }).all
-      : (perf.accumulatorPerformance as Partial<AccaStats> | undefined);
-  const bankStaked = accaAll?.totalStaked ?? 0;
-  const bankReturns = accaAll?.totalReturns ?? 0;
-  const bankPnl = bankReturns - bankStaked;
-  const bankRoi = accaAll?.roi ?? (bankStaked > 0 ? (bankPnl / bankStaked) * 100 : 0);
-  const hasBank = bankStaked > 0 || bankReturns > 0;
-
-  // ── Accuracy breakdown factors from calibration data ───────────────────────
-  const factors: FactorStat[] = useMemo(() => {
-    return (calib?.families ?? []).map((f) => ({
-      label: f.family,
-      hits: f.hits,
-      total: f.total,
-      expected: f.currentCoeff,
-      description: "Empirical hit rate — settled picks only",
-    }));
-  }, [calib]);
-
-  const trendUp = (accuracy?.cumulative?.trend ?? "").includes("↑");
-  const trendDown = (accuracy?.cumulative?.trend ?? "").includes("↓");
-
-  return (
-    <>
-      {/* ── Summary Cards ─────────────────────────────────────────────────── */}
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
-        <StatCard
-          label="Overall Hit Rate"
-          value={pct(perf.overallAccuracy)}
-          sub={`${perf.totalHits} hits / ${perf.totalVerified} verified`}
-          tone={perf.overallAccuracy >= 0.8 ? "positive" : perf.overallAccuracy >= 0.65 ? "info" : "negative"}
-        />
-        <StatCard
-          label="Verified Picks"
-          value={perf.totalVerified}
-          sub={`of ${perf.totalPicks} logged`}
-          tone="neutral"
-        />
-        <StatCard
-          label="Top-1 Hit Rate"
-          value={perf.top1.total > 0 ? pct(perf.top1.accuracy) : "—"}
-          sub={perf.top1.total > 0 ? `${perf.top1.hits}/${perf.top1.total} matches` : "no data"}
-          tone={perf.top1.accuracy >= 0.8 ? "positive" : perf.top1.accuracy >= 0.6 ? "info" : "negative"}
-        />
-        <StatCard
-          label="Perfect Matches"
-          value={perf.perfectMatches}
-          sub={`of ${perf.totalMatches} matches`}
-          tone="accent"
-        />
-        <StatCard
-          label="Matches Tracked"
-          value={perf.totalMatches}
-          sub={`${perf.totalPending} picks pending`}
-          tone="neutral"
-        />
-        <div className="flex flex-col justify-between rounded-xl border border-white/10 bg-black/50 p-4">
-          <span className="text-[11px] font-medium uppercase tracking-wider text-slate-400">Current Streak</span>
-          <div className="mt-2">
-            <StreakBadge count={perf.currentStreak} type={perf.streakType} />
-          </div>
-          <div className="mt-1 text-[11px] text-slate-400">
-            {perf.streakType === "W" ? "perfect matches" : perf.streakType === "L" ? "matches with misses" : "no streak data"}
-          </div>
-        </div>
-      </div>
-
-      {/* W/L/P/V strip */}
-      <div className="rounded-xl border border-white/10 bg-black/40 p-4">
-        <div className="mb-2 flex items-center justify-between">
-          <span className="font-mono text-[11px] font-bold uppercase tracking-wider text-slate-400">
-            Win / Loss / Pending Breakdown
-          </span>
-          <span className="font-mono text-[11px] text-slate-500">settled picks</span>
-        </div>
-        <div className="flex flex-wrap items-stretch gap-2">
-          <div className="flex flex-1 flex-col items-center justify-center rounded-lg border border-emerald-500/40 bg-emerald-500/15 px-3 py-2 min-w-[80px]">
-            <span className="font-mono text-lg font-extrabold tabular-nums text-emerald-300">{perf.totalHits}</span>
-            <span className="text-[10px] font-bold uppercase tracking-wide text-emerald-300">Wins</span>
-          </div>
-          <div className="flex flex-1 flex-col items-center justify-center rounded-lg border border-rose-500/40 bg-rose-500/15 px-3 py-2 min-w-[80px]">
-            <span className="font-mono text-lg font-extrabold tabular-nums text-rose-300">{perf.totalMisses}</span>
-            <span className="text-[10px] font-bold uppercase tracking-wide text-rose-300">Losses</span>
-          </div>
-          <div className="flex flex-1 flex-col items-center justify-center rounded-lg border border-amber-500/40 bg-amber-500/15 px-3 py-2 min-w-[80px]">
-            <span className="font-mono text-lg font-extrabold tabular-nums text-amber-300">{perf.totalPending}</span>
-            <span className="text-[10px] font-bold uppercase tracking-wide text-amber-300">Pending</span>
-          </div>
-        </div>
-      </div>
-
-      {/* Tier accuracy + bankroll */}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-        <Section title="Tier Hit Rate" subtitle="per-position accuracy" className="lg:col-span-2">
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-            <TierCard label="Top 1" data={perf.top1} />
-            <TierCard label="Top 3" data={perf.top3} />
-            <TierCard label="Top 10" data={perf.top10} />
-          </div>
-        </Section>
-
-        <Section title="Bankroll Summary" subtitle="from staked accumulators">
-          {hasBank ? (
-            <div className="space-y-2 rounded-xl border border-white/10 bg-black/40 p-4">
-              <div className="flex items-center justify-between text-xs">
-                <span className="text-slate-400">Staked</span>
-                <span className="font-mono text-slate-200">{signedCurrency(bankStaked)}</span>
-              </div>
-              <div className="flex items-center justify-between text-xs">
-                <span className="text-slate-400">Returns</span>
-                <span className="font-mono text-emerald-300">{signedCurrency(bankReturns)}</span>
-              </div>
-              <div className="flex items-center justify-between border-t border-white/10 pt-2 text-sm">
-                <span className="font-semibold text-white">Net P&amp;L</span>
-                <span className={cn("font-mono font-extrabold", bankPnl >= 0 ? "text-emerald-300" : "text-rose-300")}>
-                  {signedCurrency(bankPnl)}
-                </span>
-              </div>
-              <div className="flex items-center justify-between text-sm">
-                <span className="font-semibold text-white">ROI</span>
-                <span className={cn("font-mono font-extrabold", bankRoi >= 0 ? "text-emerald-300" : "text-rose-300")}>
-                  {bankRoi >= 0 ? "+" : ""}
-                  {bankRoi.toFixed(1)}%
-                </span>
-              </div>
-            </div>
-          ) : (
-            <div className="rounded-xl border border-white/10 bg-black/40 p-6 text-center font-mono text-xs text-slate-500">
-              No staked slips settled yet — P&amp;L appears once accumulators resolve.
-            </div>
-          )}
-        </Section>
-      </div>
-
-      {/* ── Accuracy Breakdown by factor ─────────────────────────────────── */}
-      <Section
-        title="Accuracy Breakdown by Factor"
-        subtitle="Empirical hit rate per market family — see which signals are most reliable"
-      >
-        <AccuracyBreakdown factors={factors} />
-      </Section>
-
-      {/* ── Detailed sortable table ──────────────────────────────────────── */}
-      <Section
-        title="Detailed Performance Table"
-        subtitle={`${sortedPicks.length} verified picks · sorted by ${sortKey === "date" ? "date" : "hit rate"}`}
-      >
-        {sortedPicks.length === 0 ? (
-          <EmptyState icon="📋" title="No verified picks yet" message="Picks appear here once matches are verified." />
-        ) : (
-          <div className="overflow-x-auto rounded-xl border border-white/10 bg-black/50">
-            <table className="w-full text-left text-sm">
-              <thead className="border-b border-white/10 bg-black/40">
-                <tr>
-                  <SortHeader label="Date" active={sortKey === "date"} dir={sortDir} onClick={() => toggleSort("date")} />
-                  <th className="px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-400">Match</th>
-                  <th className="px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-400">Market</th>
-                  <th className="px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-400">Selection</th>
-                  <SortHeader label="Hit Rate" active={sortKey === "hitRate"} dir={sortDir} onClick={() => toggleSort("hitRate")} align="right" />
-                  <th className="px-3 py-2.5 text-center text-[11px] font-semibold uppercase tracking-wider text-slate-400">Result</th>
-                  <th className="hidden px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-400 sm:table-cell">Notes</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-white/5">
-                {sortedPicks.map((p) => {
-                  const { result, label } = classify(p.outcome);
-                  const rowTint =
-                    result === "win"
-                      ? "border-l-emerald-500"
-                      : result === "loss"
-                        ? "border-l-rose-500"
-                        : result === "pending"
-                          ? "border-l-amber-500"
-                          : "border-l-slate-600";
-                  return (
-                    <tr key={p.key} className={cn("border-l-2 transition hover:bg-white/[0.02]", rowTint)}>
-                      <td className="whitespace-nowrap px-3 py-2 font-mono text-[11px] text-slate-400">{p.date}</td>
-                      <td className="px-3 py-2">
-                        <div className="max-w-[180px] truncate font-medium text-slate-100">{p.match}</div>
-                        <div className="font-mono text-[10px] text-slate-500">
-                          {p.league} · {p.score}
-                        </div>
-                      </td>
-                      <td className="px-3 py-2">
-                        <div className="max-w-[160px] truncate text-slate-200">{p.market}</div>
-                        {p.family ? (
-                          <span className="font-mono text-[10px] text-amber-300/70">{p.family}</span>
-                        ) : null}
-                      </td>
-                      <td className="px-3 py-2">
-                        <span className="rounded border border-emerald-500/20 bg-emerald-500/10 px-1.5 py-0.5 font-mono text-[11px] font-bold text-emerald-300">
-                          {p.selection}
-                        </span>
-                      </td>
-                      <td className="px-3 py-2 text-right">
-                        {p.hitRate !== null ? (
-                          <span className="font-mono text-xs font-bold text-emerald-300">{pct(p.hitRate, 0)}</span>
-                        ) : (
-                          <span className="text-slate-500">—</span>
-                        )}
-                      </td>
-                      <td className="px-3 py-2 text-center">
-                        <ResultBadge result={result} label={label} />
-                      </td>
-                      <td className="hidden max-w-[200px] px-3 py-2 sm:table-cell">
-                        <span className="line-clamp-2 text-[11px] text-slate-400">{p.reason ?? "—"}</span>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </Section>
-
-      {/* ── Trends ───────────────────────────────────────────────────────── */}
-      <Section
-        title="Accuracy Trends"
-        subtitle="daily hit rate over the last 30 days"
-        right={
-          accuracy?.cumulative ? (
-            <div className="flex flex-wrap gap-2">
-              <span className="rounded-md border border-white/10 bg-black/50 px-2.5 py-1 font-mono text-[11px] text-slate-300">
-                30d: <span className="font-bold text-white">{accuracy.cumulative.accuracyPct}</span>
-              </span>
-              {accuracy.rolling7d ? (
-                <span className="rounded-md border border-white/10 bg-black/50 px-2.5 py-1 font-mono text-[11px] text-slate-300">
-                  7d: <span className="font-bold text-cyan-300">{accuracy.rolling7d.accuracyPct}</span>
-                </span>
-              ) : null}
-              <span
-                className={cn(
-                  "rounded-md border px-2.5 py-1 font-mono text-[11px] font-bold",
-                  trendUp
-                    ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
-                    : trendDown
-                      ? "border-rose-500/40 bg-rose-500/10 text-rose-300"
-                      : "border-amber-500/40 bg-amber-500/10 text-amber-300",
-                )}
-              >
-                {accuracy.cumulative.trend}
-              </span>
-            </div>
-          ) : null
-        }
-      >
-        <AccuracyBars daily={accuracy?.daily ?? []} />
-      </Section>
-    </>
-  );
-}
-
-function TierCard({ label, data }: { label: string; data: TopN }) {
-  const rate = data.total > 0 ? data.accuracy : 0;
-  const tone = rate >= 0.8 ? "positive" : rate >= 0.65 ? "info" : rate >= 0.5 ? "warning" : "negative";
   const text =
-    tone === "positive" ? "text-emerald-300" : tone === "info" ? "text-cyan-300" : tone === "warning" ? "text-amber-300" : "text-rose-300";
+    tone === "positive" ? "text-emerald-300" : tone === "negative" ? "text-rose-300" : "text-white";
   return (
     <div className="rounded-xl border border-white/10 bg-black/50 p-4">
-      <div className="flex items-baseline justify-between">
-        <span className="font-mono text-xs font-bold text-white">{label}</span>
-        <span className={cn("font-mono text-2xl font-extrabold tabular-nums", data.total > 0 ? text : "text-slate-600")}>
-          {data.total > 0 ? pct(rate, 0) : "—"}
-        </span>
-      </div>
-      <div className="mt-1 text-[11px] text-slate-400">
-        {data.total > 0 ? `${data.hits} hit · ${data.total - data.hits} miss · ${data.total} picks` : "no settled picks"}
-      </div>
-      <ProgressBar value={rate} tone={tone} className="mt-2" />
+      <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">{label}</div>
+      <div className={cn("mt-1.5 font-mono text-2xl font-extrabold tabular-nums", text)}>{value}</div>
+      <div className="mt-1 text-[11px] text-slate-400">{sub}</div>
     </div>
   );
 }
 
-/** local outcome classifier (keeps this page self-contained) */
-function classify(raw: string) {
-  const v = (raw ?? "").toString().toUpperCase();
-  if (v === "HIT") return { result: "win" as const, label: "WIN" };
-  if (v === "MISS") return { result: "loss" as const, label: "LOSS" };
-  if (v === "PUSH") return { result: "push" as const, label: "PUSH" };
-  if (v === "VOID") return { result: "void" as const, label: "VOID" };
-  return { result: "pending" as const, label: "PENDING" };
+function LeagueDetailSection({
+  league,
+  detail,
+  loading,
+  days,
+}: {
+  league: LeagueMetrics | null;
+  detail: LeagueDetail | null;
+  loading: boolean;
+  days: number;
+}) {
+  const { visible: trendPoints, WindowSwitcher } = usePnlWindow(detail?.pnlTrend ?? []);
+  const chartPoints: ChartPoint[] = trendPoints.map((p) => ({ label: p.label, value: p.value, delta: p.delta }));
+
+  return (
+    <section id="league-detail" className="scroll-mt-28 space-y-6 rounded-2xl border border-amber-400/20 bg-black/30 p-4 sm:p-6">
+      {/* Header */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="inline-block rounded-lg bg-black/60 px-4 py-2">
+          <h2 className="text-base font-bold text-white">
+            {league?.competitionName ?? detail?.competitionName ?? "League detail"}
+          </h2>
+          <p className="text-[11px] text-slate-300/80">
+            {league?.region ?? ""}
+            {league?.region ? " · " : ""}
+            window: last {days} days · select a card above to switch league
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          {WindowSwitcher}
+          {league ? (
+            <Link
+              href={`/performance/league/${encodeURIComponent(league.leagueSlug)}?days=${days}`}
+              className="rounded-lg border border-amber-400/40 bg-amber-400/10 px-3 py-1.5 text-xs font-bold text-amber-300 transition hover:bg-amber-400/20"
+            >
+              Open dedicated page ↗
+            </Link>
+          ) : null}
+        </div>
+      </div>
+
+      {loading && !detail ? (
+        <LeagueSkeletonGrid count={4} />
+      ) : !detail ? (
+        <div className="rounded-xl border border-white/10 bg-black/50 p-8 text-center font-mono text-xs text-slate-400">
+          No data recorded for this competition in the selected window.
+        </div>
+      ) : (
+        <>
+          {/* Summary cards */}
+          <LeagueSummaryCards m={detail} />
+
+          {/* Factor accuracy + P&L trend */}
+          <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+            <Section title="Accuracy Breakdown by Factor" subtitle="empirical hit rate per ranking factor — derived from settled picks">
+              <FactorAccuracyTable factors={detail.factorAccuracy} />
+            </Section>
+            <Section
+              title="P&L Trend"
+              subtitle="cumulative profit/loss from staked products (value bets + slips)"
+              right={<TrendArrow dir={detail.trendDirection} />}
+            >
+              {chartPoints.length > 0 ? (
+                <div className="rounded-xl border border-white/10 bg-black/50 p-4">
+                  <PnLTrendChart points={chartPoints} />
+                  <div className="mt-2 flex flex-wrap gap-2 font-mono text-[11px] text-slate-400">
+                    <span>
+                      7d: <span className={detail.last7DaysPnl >= 0 ? "text-emerald-300" : "text-rose-300"}>{money(detail.last7DaysPnl)}</span>
+                    </span>
+                    <span>
+                      30d: <span className={detail.last30DaysPnl >= 0 ? "text-emerald-300" : "text-rose-300"}>{money(detail.last30DaysPnl)}</span>
+                    </span>
+                    <span>
+                      All: <span className={detail.totalPnl >= 0 ? "text-emerald-300" : "text-rose-300"}>{money(detail.totalPnl)}</span>
+                    </span>
+                  </div>
+                </div>
+              ) : (
+                <div className="rounded-xl border border-white/10 bg-black/50 p-8 text-center font-mono text-xs text-slate-500">
+                  No staked P&L yet for this league — trend appears once value bets or slips settle.
+                </div>
+              )}
+            </Section>
+          </div>
+
+          {/* Bet-by-bet table */}
+          <Section
+            title="All Bets — Full Transparency"
+            subtitle={`${detail.bets.length} individual bets (verification picks, value bets, slips) · every aggregate above is computed from these rows`}
+          >
+            <LeagueBetsTable bets={detail.bets} />
+          </Section>
+        </>
+      )}
+    </section>
+  );
 }

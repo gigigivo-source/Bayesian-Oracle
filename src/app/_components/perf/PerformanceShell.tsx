@@ -6,7 +6,7 @@ import type { ReactNode } from "react";
 import { cn } from "./ui";
 
 const NAV = [
-  { href: "/performance", label: "Oracle", short: "Oracle Picks" },
+  { href: "/performance", label: "Leagues", short: "Leagues" },
   { href: "/performance/value-bets", label: "Value Bets", short: "Value Bets" },
   { href: "/performance/accumulators", label: "Accumulators", short: "Accas" },
 ] as const;
