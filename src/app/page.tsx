@@ -315,72 +315,77 @@ function Header({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
   const activeInMenu = menuTabs.some((t) => t.id === tab);
 
   return (
-    <header className="sticky top-0 z-40 bg-black/60 shadow-lg backdrop-blur-sm">
-      <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3 px-4 py-2">
-        <div className="flex items-center gap-3">
-          <div className="h-[38px] w-[38px] rounded-lg bg-amber-400/20 border border-amber-400/30 flex items-center justify-center">
-            <span className="text-xl">⚽</span>
+    <>
+      <header className="sticky top-0 z-40 bg-black/60 shadow-lg backdrop-blur-sm">
+        <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3 px-4 py-2 sm:pr-28">
+          <div className="flex items-center gap-3">
+            <div className="h-[38px] w-[38px] rounded-lg bg-amber-400/20 border border-amber-400/30 flex items-center justify-center">
+              <span className="text-xl">⚽</span>
+            </div>
+            <div>
+              <h1 className="bg-gradient-to-r from-amber-300 via-yellow-200 to-emerald-300 bg-clip-text font-mono text-lg font-extrabold tracking-tight text-transparent">
+                ĞIGI GIVØ
+              </h1>
+              <p className="text-[10px] text-slate-400 font-mono">Bayesian Oracle · Deep Statistical Engine</p>
+            </div>
           </div>
-          <div>
-            <h1 className="bg-gradient-to-r from-amber-300 via-yellow-200 to-emerald-300 bg-clip-text font-mono text-lg font-extrabold tracking-tight text-transparent">
-              ĞIGI GIVØ
-            </h1>
-            <p className="text-[10px] text-slate-400 font-mono">Bayesian Oracle · Deep Statistical Engine</p>
-          </div>
+          <nav className="flex gap-1 rounded-lg border border-white/10 bg-white/[0.03] p-1 items-center">
+            {mainTabs.map((t) => (
+              <button
+                key={t.id}
+                onClick={() => { setTab(t.id); setMenuOpen(false); }}
+                className={`rounded-md px-3.5 py-1.5 text-xs font-medium transition ${
+                  tab === t.id
+                    ? "bg-amber-400 text-slate-950 font-bold"
+                    : "text-slate-300 hover:bg-white/5"
+                }`}
+              >
+                {t.label}
+              </button>
+            ))}
+          </nav>
         </div>
-        <nav className="flex gap-1 rounded-lg border border-white/10 bg-white/[0.03] p-1 items-center">
-          {mainTabs.map((t) => (
-            <button
-              key={t.id}
-              onClick={() => { setTab(t.id); setMenuOpen(false); }}
-              className={`rounded-md px-3.5 py-1.5 text-xs font-medium transition ${
-                tab === t.id
-                  ? "bg-amber-400 text-slate-950 font-bold"
-                  : "text-slate-300 hover:bg-white/5"
-              }`}
-            >
-              {t.label}
-            </button>
-          ))}
+      </header>
 
-          {/* Menu dropdown */}
-          <div className="relative">
-            <button
-              onClick={() => setMenuOpen((o) => !o)}
-              className={`rounded-md px-3.5 py-1.5 text-xs font-medium transition flex items-center gap-1.5 ${
-                activeInMenu
-                  ? "bg-amber-400 text-slate-950 font-bold"
-                  : "text-slate-300 hover:bg-white/5"
-              }`}
-            >
-              Menu
-              <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="2">
-                <polyline points={menuOpen ? "2,7 5,3 8,7" : "2,3 5,7 8,3"} />
-              </svg>
-            </button>
+      {/* Menu button — fixed to the top-right corner of the viewport */}
+      <div className="fixed top-4 right-4 z-50">
+        <button
+          onClick={() => setMenuOpen((o) => !o)}
+          aria-expanded={menuOpen}
+          aria-haspopup="menu"
+          aria-label="Menu"
+          className={`flex cursor-pointer select-none items-center gap-2 rounded-xl border px-3.5 py-2 text-sm font-semibold shadow-lg shadow-black/40 backdrop-blur-sm transition duration-150 hover:scale-[1.03] active:scale-95 ${
+            activeInMenu
+              ? "border-amber-300 bg-amber-400 text-slate-950 hover:bg-amber-300"
+              : "border-white/25 bg-white text-slate-900 hover:bg-slate-100"
+          }`}
+        >
+          <span aria-hidden="true" className="text-base leading-none">
+            {menuOpen ? "✕" : "☰"}
+          </span>
+          <span className="hidden sm:inline">Menu</span>
+        </button>
 
-            {menuOpen && (
-              <div className="absolute right-0 top-full mt-1 w-56 rounded-lg bg-black/90 border border-white/15 shadow-xl z-50 overflow-hidden">
-                {menuTabs.map((t) => (
-                  <button
-                    key={t.id}
-                    onClick={() => { setTab(t.id); setMenuOpen(false); }}
-                    className={`w-full text-left px-4 py-3 transition border-b border-white/5 last:border-0 ${
-                      tab === t.id
-                        ? "bg-amber-400/10 text-amber-300"
-                        : "text-slate-200 hover:bg-white/5"
-                    }`}
-                  >
-                    <div className="text-sm font-medium">{t.label}</div>
-                    <div className="text-[10px] text-slate-400">{t.desc}</div>
-                  </button>
-                ))}
-              </div>
-            )}
+        {menuOpen && (
+          <div className="absolute right-0 top-full mt-2 w-56 max-h-[calc(100vh-5rem)] overflow-y-auto rounded-lg bg-black/90 border border-white/15 shadow-xl">
+            {menuTabs.map((t) => (
+              <button
+                key={t.id}
+                onClick={() => { setTab(t.id); setMenuOpen(false); }}
+                className={`w-full text-left px-4 py-3 transition border-b border-white/5 last:border-0 ${
+                  tab === t.id
+                    ? "bg-amber-400/10 text-amber-300"
+                    : "text-slate-200 hover:bg-white/5"
+                }`}
+              >
+                <div className="text-sm font-medium">{t.label}</div>
+                <div className="text-[10px] text-slate-400">{t.desc}</div>
+              </button>
+            ))}
           </div>
-        </nav>
+        )}
       </div>
-    </header>
+    </>
   );
 }
 
