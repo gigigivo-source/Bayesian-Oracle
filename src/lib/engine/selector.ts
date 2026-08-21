@@ -109,6 +109,39 @@ const MIN_CALIBRATION_HIT_RATE = 0.85;
 const MIN_BACKFILL_CALIBRATION_HIT_RATE = 0.55;
 const SIGNIFICANT_ODDS_MOVE_PCT = 20;
 
+// ─── Match-level confidence gate ─────────────────────────────────────────────
+// After the full market registry has been scored and ranked, the selector
+// computes ONE match-level confidence score from three signals:
+//
+//   1. Top-10 calibration quality ........ 50% — average empirical hit-rate
+//      reliability (factor 1) of the selected picks. A Top-10 built from
+//      historically reliable market families is inherently more trustworthy;
+//      reliance on the sub-85% backfill tier pulls this down.
+//
+//   2. Factor availability ............. 30% — how many of the eleven ranking
+//      factors had REAL data for this match (averaged across the picks).
+//      Every missing factor is uncertainty the model could not price in.
+//
+//   3. Source trust .................... 20% — which priority source provided
+//      the match's enrichment data (mapped by the caller): tier-1 live
+//      sources (ESPN / SportScore) score high, backfill-tier sources low.
+//
+// When the caller enables the gate and the score falls below the threshold,
+// the match is flagged LOW CONFIDENCE and only the Top-3 picks are returned —
+// the engine bets fewer markets on matches it cannot back with strong data.
+export const CONFIDENCE_WEIGHTS = {
+  top10Calibration:   0.50,  // average calibration/hit rate of the Top-10 picks
+  factorAvailability: 0.30,  // share of the 11 factors backed by real data
+  sourceTrust:        0.20,  // priority of the data source actually used
+} as const;
+
+/** Default match-level confidence threshold — scores below it are flagged. */
+export const CONFIDENCE_GATE_THRESHOLD = 0.75;
+/** Picks kept when the gate reduces a low-confidence match. */
+export const LOW_CONFIDENCE_PICKS = 3;
+/** Neutral trust applied when the caller supplies no source information. */
+const DEFAULT_SOURCE_TRUST = 0.5;
+
 /** Factor keys — mirror the fields of RANKING_WEIGHTS. */
 export type FactorKey = keyof typeof RANKING_WEIGHTS;
 
@@ -385,6 +418,22 @@ export interface WeatherContext {
   score?:         number | null;
 }
 
+/**
+ * Source-trust signal for the match-level confidence gate — which priority
+ * source actually provided this match's enrichment data. The caller (oracle)
+ * maps its own source registry onto a 0..1 trust value: tier-1 live sources
+ * (ESPN / SportScore) score high, backfill-tier sources score low, and no
+ * enrichment at all scores lower still.
+ */
+export interface SourceTrustSignal {
+  /** Highest-priority source that contributed data (e.g. "ESPN"). */
+  primarySource?: string | null;
+  /** Pre-mapped 0..1 trust in that source (higher = more reliable). */
+  trust:          number;
+  /** Short human-readable provenance note for logging. */
+  detail?:        string;
+}
+
 /** Optional enrichment passed into the selector (all fields optional). */
 export interface RankingContext {
   homeForm?:          TeamFormSignal | null;
@@ -396,6 +445,7 @@ export interface RankingContext {
   injury?:            InjuryContext | null;
   marketVolatility?:  MarketVolatilityContext | null;
   weather?:           WeatherContext | null;
+  sourceTrust?:       SourceTrustSignal | null;
 }
 
 /** League-table context for one team. Kept for API compatibility with oracle.ts. */
@@ -404,11 +454,28 @@ export interface TeamTableInfo {
   leagueSize?: number;
 }
 
+/**
+ * Confidence-gate configuration (opt-in via SelectOptions). The confidence
+ * score itself is always computed, logged and returned on the SelectionResult;
+ * `enabled` only controls whether a low-confidence match's output is reduced.
+ */
+export interface ConfidenceGateConfig {
+  /** Enable the pick-reduction gate. Default false (score-only mode). */
+  enabled?:   boolean;
+  /** Match-level threshold 0..1. Default CONFIDENCE_GATE_THRESHOLD (0.75). */
+  threshold?: number;
+  /** Picks to keep for low-confidence matches. Default LOW_CONFIDENCE_PICKS (3). */
+  reduceTo?:  number;
+}
+
 /** Options passed to the selector. */
 export interface SelectOptions {
   homeTable?: TeamTableInfo;
   awayTable?: TeamTableInfo;
   context?:   RankingContext;
+  /** Match-level confidence gate — when enabled, matches scoring below the
+   *  threshold return only their Top `reduceTo` picks instead of 10. */
+  confidenceGate?: ConfidenceGateConfig;
 }
 
 // ─── Factor scorers (each returns a 0..1 score + optional gap log) ────────────
@@ -1009,11 +1076,155 @@ export interface SelectionResult {
   weightLog?:      string[];
   /** Union of factors excluded across the Top-10 (missing data signals). */
   missingFactors?: FactorKey[];
+  /**
+   * Match-level confidence verdict — always computed after ranking, even when
+   * the gate is disabled or the match was skipped. When the gate is enabled
+   * and the score falls below the threshold, the Top-10 list above contains
+   * only the reduced Top-3 and `confidence.gateAction` is "reduced-to-top3".
+   */
+  confidence: MatchConfidence;
 }
 
-const EMPTY_SELECTION = (reason: string, gaps: string[] = []): SelectionResult => ({
-  top1: [], top3: [], top5: [], top10: [], skipped: reason, gaps,
+// ─── Match-level confidence ───────────────────────────────────────────────────
+
+/** What the confidence gate did with a match. */
+export type ConfidenceGateAction =
+  | "full-top10"       // high confidence (or already ≤ reduceTo picks) — full list returned
+  | "reduced-to-top3"  // low confidence — output trimmed to the Top `reduceTo` picks
+  | "gate-disabled"    // caller did not enable the gate — score only, full list returned
+  | "skipped";         // no picks survived the safety filters at all
+
+/** Match-level confidence verdict, computed after the full registry is ranked. */
+export interface MatchConfidence {
+  /** Overall 0..1 confidence (weighted mix of the three components below). */
+  score:              number;
+  /** Component 1 — average calibration / hit-rate reliability of the picks (0..1). */
+  top10Calibration:   number;
+  /** Component 2 — average share of ranking factors backed by real data (0..1). */
+  factorAvailability: number;
+  /** Component 3 — trust in the primary enrichment source (0..1). */
+  sourceTrust:        number;
+  /** true when score < threshold. */
+  lowConfidence:      boolean;
+  /** Threshold the score was compared against (0..1). */
+  threshold:          number;
+  /** What the gate did with this match. */
+  gateAction:         ConfidenceGateAction;
+  /** Picks actually returned after gating (0 when skipped). */
+  picksReturned:      number;
+  /** Union of factors excluded across the ranked picks (missing data signals). */
+  missingFactors:     FactorKey[];
+  /** Top-10 slots filled from the sub-85% calibration backfill tier. */
+  backfilledPicks:    number;
+  /** Primary enrichment source id, when the caller supplied one. */
+  primarySource:      string | null;
+  /** Human-readable explanation of the score (for logs / UI warnings). */
+  reasons:            string[];
+}
+
+const EMPTY_SELECTION = (reason: string, gaps: string[], confidence: MatchConfidence): SelectionResult => ({
+  top1: [], top3: [], top5: [], top10: [], skipped: reason, gaps, confidence,
 });
+
+/**
+ * Compute the match-level confidence score + gate verdict from the ranked
+ * picks. The three components follow CONFIDENCE_WEIGHTS: average calibration
+ * of the picks (50%), factor availability (30%), source trust (20%).
+ */
+function buildMatchConfidence(args: {
+  top10Scores:     MarketScore[];
+  backfilledPicks: number;
+  context:         RankingContext | null;
+  threshold:       number;
+  gateEnabled:     boolean;
+  reduceTo:        number;
+  /** Set when the safety filters produced no picks at all. */
+  skipped?:        string;
+}): MatchConfidence {
+  const { top10Scores, backfilledPicks, context, threshold, gateEnabled, reduceTo, skipped } = args;
+  const n = top10Scores.length;
+
+  // Component 1 — average calibration / historical hit rate of the picks.
+  // Backfill-tier slots (sub-85% calibration) automatically drag this down.
+  const top10Calibration = n
+    ? top10Scores.reduce((sum, s) => sum + s.breakdown.calibration, 0) / n
+    : 0;
+
+  // Component 2 — number of factors backed by real data, averaged across the
+  // picks (each pick's excludedFactors marks the missing ones).
+  const factorAvailability = n
+    ? top10Scores.reduce(
+        (sum, s) => sum + (ALL_FACTOR_KEYS.length - s.excludedFactors.length) / ALL_FACTOR_KEYS.length,
+        0,
+      ) / n
+    : 0;
+
+  // Component 3 — trust in the primary source that fed this match's data.
+  const signal = context?.sourceTrust ?? null;
+  const sourceTrust = clamp(signal?.trust ?? DEFAULT_SOURCE_TRUST, 0, 1);
+
+  const score = clamp(
+    CONFIDENCE_WEIGHTS.top10Calibration   * top10Calibration +
+    CONFIDENCE_WEIGHTS.factorAvailability * factorAvailability +
+    CONFIDENCE_WEIGHTS.sourceTrust        * sourceTrust,
+    0, 1,
+  );
+  const lowConfidence = score < threshold;
+
+  const missing = new Set<FactorKey>();
+  for (const s of top10Scores) s.excludedFactors.forEach((f) => missing.add(f));
+  const missingFactors = [...missing];
+
+  const picksReturned = skipped
+    ? 0
+    : gateEnabled && lowConfidence
+      ? Math.min(n, reduceTo)
+      : n;
+  const gateAction: ConfidenceGateAction = skipped
+    ? "skipped"
+    : !gateEnabled
+      ? "gate-disabled"
+      : picksReturned < n ? "reduced-to-top3" : "full-top10";
+
+  const pct = (v: number) => `${(v * 100).toFixed(1)}%`;
+  const reasons: string[] = [
+    `top-10 avg calibration ${pct(top10Calibration)} (×${CONFIDENCE_WEIGHTS.top10Calibration})`,
+    `factor availability ${pct(factorAvailability)} (×${CONFIDENCE_WEIGHTS.factorAvailability})`,
+    `source trust ${pct(sourceTrust)}${signal?.primarySource ? ` — ${signal.primarySource}` : " — no source info, neutral default"} (×${CONFIDENCE_WEIGHTS.sourceTrust})`,
+  ];
+  if (backfilledPicks > 0) {
+    reasons.push(`${backfilledPicks}/10 slots came from the sub-85% calibration backfill tier`);
+  }
+  if (missingFactors.length) {
+    reasons.push(`factors excluded for missing data: ${missingFactors.join(", ")}`);
+  }
+  if (skipped) {
+    reasons.push(`no picks generated — ${skipped}`);
+  } else if (lowConfidence) {
+    reasons.push(
+      gateEnabled && picksReturned < n
+        ? `score ${pct(score)} < threshold ${pct(threshold)} → LOW CONFIDENCE, output reduced to Top ${picksReturned}`
+        : `score ${pct(score)} < threshold ${pct(threshold)} → LOW CONFIDENCE`,
+    );
+  } else {
+    reasons.push(`score ${pct(score)} ≥ threshold ${pct(threshold)} → high confidence`);
+  }
+
+  return {
+    score,
+    top10Calibration,
+    factorAvailability,
+    sourceTrust,
+    lowConfidence,
+    threshold,
+    gateAction,
+    picksReturned,
+    missingFactors,
+    backfilledPicks,
+    primarySource: signal?.primarySource ?? null,
+    reasons,
+  };
+}
 
 function hasSevereInjury(team: TeamInjuryContext | null | undefined): boolean {
   if (!hasAnyInjuryData(team)) return false;
@@ -1060,6 +1271,27 @@ export function selectTopPicks(
 ): SelectionResult {
 
   const gapLog = new Set<string>();
+  const context = opts?.context ?? null;
+
+  // Confidence-gate configuration (opt-in). The score itself is always
+  // computed, logged and returned — `enabled` only controls whether a
+  // low-confidence match's output is trimmed to the Top `reduceTo` picks.
+  const gateEnabled   = opts?.confidenceGate?.enabled === true;
+  const confThreshold = opts?.confidenceGate?.threshold ?? CONFIDENCE_GATE_THRESHOLD;
+  const reduceTo      = Math.max(1, Math.min(10, Math.floor(opts?.confidenceGate?.reduceTo ?? LOW_CONFIDENCE_PICKS)));
+
+  /** Empty result for the hard-stop paths — still carries a confidence verdict
+   *  (empty pick list ⇒ near-zero confidence) so every match is logged. */
+  const emptySelection = (reason: string): SelectionResult => {
+    const confidence = buildMatchConfidence({
+      top10Scores: [], backfilledPicks: 0, context,
+      threshold: confThreshold, gateEnabled, reduceTo, skipped: reason,
+    });
+    console.log(
+      `[selector] ${homeName} vs ${awayName} — confidence ${(confidence.score * 100).toFixed(1)}% → SKIPPED (${reason})`,
+    );
+    return EMPTY_SELECTION(reason, [...gapLog], confidence);
+  };
 
   // ── Step 1: Score every non-rejected market across all eleven factors ───────
   const scored = markets
@@ -1071,7 +1303,7 @@ export function selectTopPicks(
     });
 
   if (scored.length === 0) {
-    return EMPTY_SELECTION("No qualified markets to rank.", [...gapLog]);
+    return emptySelection("No qualified markets to rank.");
   }
 
   // ── Step 2: Deterministic ranking (composite desc → loss prob asc → σ desc) ─
@@ -1096,7 +1328,6 @@ export function selectTopPicks(
   // (calibration ≥ 0.55 backfill tier) admitted — every pick, in either tier,
   // is still qualified, injury-severity-checked, safety-net-checked and
   // verifiable. Injury severity remains an absolute block in both tiers.
-  const context = opts?.context ?? null;
   const hardQualified = ranked.filter((s) => {
     const reason = hardSafetyRejectReason(s, context, homeName, awayName);
     if (reason) {
@@ -1106,9 +1337,8 @@ export function selectTopPicks(
     return true;
   });
   if (hardQualified.length === 0) {
-    return EMPTY_SELECTION(
+    return emptySelection(
       "No market remains after hard safety filters (injury severity).",
-      [...gapLog],
     );
   }
 
@@ -1121,18 +1351,16 @@ export function selectTopPicks(
     return !blocked;
   });
   if (topNQualified.length === 0) {
-    return EMPTY_SELECTION(
+    return emptySelection(
       "No Top-N-eligible market remains after applying the team-goals safety net.",
-      [...gapLog],
     );
   }
 
   // ── Step 5: Top-N slots require verifiable markets (settleable picks) ──────
   const verifiableRanked = topNQualified.filter((s) => s.verifiable);
   if (verifiableRanked.length === 0) {
-    return EMPTY_SELECTION(
+    return emptySelection(
       "No verifiable market remains after scoring and hard safety filters — match skipped.",
-      [...gapLog],
     );
   }
 
@@ -1172,7 +1400,6 @@ export function selectTopPicks(
   }
   const extras = extrasPool.sort(comparator);
   const top10Scores = [...deduped, ...extras].slice(0, 10);
-  const top10 = top10Scores.map((s) => s.market);
 
   const backfilledCount = top10Scores.filter(
     (s) => s.breakdown.calibration < MIN_CALIBRATION_HIT_RATE,
@@ -1180,6 +1407,25 @@ export function selectTopPicks(
   if (backfilledCount > 0) {
     gapLog.add(
       `Top-10 backfill tier used for ${backfilledCount}/10 slots (trusted ≥85% calibration pool exhausted; backfill picks still qualified, safety-net-checked and verifiable)`,
+    );
+  }
+
+  // ── Step 6b: Match-level confidence gate ──────────────────────────────────
+  // The full registry has now been ranked. Score the MATCH itself from the
+  // three confidence signals (Top-10 calibration, factor availability, source
+  // trust). Below the threshold the match is LOW CONFIDENCE and — when the
+  // caller enabled the gate — only the Top `reduceTo` picks are returned.
+  const confidence = buildMatchConfidence({
+    top10Scores, backfilledPicks: backfilledCount, context,
+    threshold: confThreshold, gateEnabled, reduceTo,
+  });
+  const deliveredScores = confidence.gateAction === "reduced-to-top3"
+    ? top10Scores.slice(0, confidence.picksReturned)
+    : top10Scores;
+  const top10 = deliveredScores.map((s) => s.market);
+  if (confidence.gateAction === "reduced-to-top3") {
+    gapLog.add(
+      `confidence gate: match scored ${(confidence.score * 100).toFixed(1)}% < ${(confThreshold * 100).toFixed(0)}% — low confidence, output reduced to Top ${confidence.picksReturned} picks`,
     );
   }
 
@@ -1202,9 +1448,25 @@ export function selectTopPicks(
   if (backfilledCount > 0) {
     weightLog.push(`top-10 fill: ${10 - backfilledCount}/10 from the trusted tier (calibration ≥ 85%), ${backfilledCount}/10 backfilled from the 0.55–0.85 tier — all fully filtered`);
   }
+  // Confidence-gate summary (flows into the caller's calibration notes).
+  weightLog.push(
+    `match confidence: ${(confidence.score * 100).toFixed(1)}% ` +
+    `[top10-cal ${(confidence.top10Calibration * 100).toFixed(1)}% ×${CONFIDENCE_WEIGHTS.top10Calibration} + ` +
+    `factors ${(confidence.factorAvailability * 100).toFixed(1)}% ×${CONFIDENCE_WEIGHTS.factorAvailability} + ` +
+    `source ${(confidence.sourceTrust * 100).toFixed(1)}%${confidence.primarySource ? ` (${confidence.primarySource})` : ""} ×${CONFIDENCE_WEIGHTS.sourceTrust}] ` +
+    (confidence.lowConfidence
+      ? `< ${(confThreshold * 100).toFixed(0)}% → LOW CONFIDENCE` +
+        (confidence.gateAction === "reduced-to-top3"
+          ? ` — gate returned Top ${confidence.picksReturned} picks only`
+          : " — flagged (gate not enabled by caller)")
+      : `≥ ${(confThreshold * 100).toFixed(0)}% — high confidence`),
+  );
   console.log(
     `[selector] ${homeName} vs ${awayName} — top10: ${top10.length}/10` +
     (backfilledCount ? ` (backfill: ${backfilledCount})` : "") +
+    ` | confidence: ${(confidence.score * 100).toFixed(1)}%` +
+    (confidence.lowConfidence ? ` LOW (< ${(confThreshold * 100).toFixed(0)}%)` : "") +
+    (confidence.gateAction === "reduced-to-top3" ? ` → top ${confidence.picksReturned} only` : "") +
     (excludedUnion.size ? ` | missing: ${[...excludedUnion].join(",")}` : " | all factors available") +
     (lead ? ` | ${weightLog[0]}` : ""),
   );
@@ -1214,6 +1476,7 @@ export function selectTopPicks(
     top3:  top10.slice(0, 3),
     top5:  top10.slice(0, 5),
     top10,
+    confidence,
     gaps:         [...gapLog],
     rankingNotes: top10.map((m) => {
       const s = scored.find((x) => x.market === m);
