@@ -77,6 +77,19 @@
 //   The final sort is deterministic (composite desc → loss-probability asc →
 //   σ-cushion desc → market id), so the same fixture + data always yields the
 //   same order, and a genuinely better market always ranks above a weaker one.
+//
+// CONFIDENCE GATE (match-level, applied AFTER ranking — see Step 8)
+//   Ranking picks the best markets FOR a match; the gate decides whether the
+//   match itself is worth betting. A 0..1 confidence score blends:
+//     · 50% mean calibration / historical hit rate of the returned picks
+//     · 30% factor coverage (share of ranking weight backed by real data)
+//     · 20% source priority (ESPN/SportScore = high, official league APIs =
+//           medium, free aggregators = low) discounted by backfill-tier usage
+//   plus a depth discount when fewer than 10 qualified verifiable picks exist.
+//   Below the threshold (default 75%) the match is marked low confidence and,
+//   depending on the caller's policy, either flagged (full Top-10 + a
+//   `confidence` block for the UI warning), trimmed to the Top-3, or skipped.
+//   Every match logs one `[selector][confidence]` line for monitoring.
 
 import { poissonPmf, clamp } from "./stats";
 import { marketReliability, type MatchVolatility } from "./calibration";
@@ -404,11 +417,57 @@ export interface TeamTableInfo {
   leagueSize?: number;
 }
 
+/**
+ * Provenance of the real data used for this match — feeds the source-priority
+ * component of the match-level confidence gate.
+ *
+ * High-priority feeds (ESPN / SportScore / StatsBomb) are treated as high
+ * confidence; official league APIs as medium; free/backfill aggregators
+ * (TheSportsDB, API-Football free tier, …) as lower confidence.
+ */
+export interface SourceQualityContext {
+  /** Highest-priority source that contributed at least one real field. */
+  primarySource?:       string | null;
+  /** Every source that contributed at least one real field. */
+  contributingSources?: string[] | null;
+  /** 0..1 share of the enrichment fields that real sources actually filled. */
+  fieldCoverage?:       number | null;
+  /** Explicit 0..1 override of the source component (skips tier lookup). */
+  score?:               number | null;
+}
+
+/** What the gate should do when a match scores below the confidence threshold. */
+export type ConfidencePolicy =
+  /** Keep the full Top-10 and only attach the confidence block (UI warning). */
+  | "flag"
+  /** Reduce the response to the Top-N safest picks (default N = 3). */
+  | "trim"
+  /** Return no picks at all for this match. */
+  | "skip";
+
+/** Tuning knobs for the match-level confidence gate. */
+export interface ConfidenceOptions {
+  /** Below this score the match is "low confidence" (default 0.75). */
+  threshold?:              number;
+  /** Below this score the match is skipped entirely (default 0.50). */
+  skipThreshold?:          number;
+  /** Action for low-confidence matches (default "flag" — non-breaking). */
+  policy?:                 ConfidencePolicy;
+  /** How many picks a trimmed low-confidence match returns (default 3). */
+  lowConfidencePickCount?: number;
+  /** Set false to disable the gate entirely (still reports the score). */
+  enabled?:                boolean;
+}
+
 /** Options passed to the selector. */
 export interface SelectOptions {
-  homeTable?: TeamTableInfo;
-  awayTable?: TeamTableInfo;
-  context?:   RankingContext;
+  homeTable?:     TeamTableInfo;
+  awayTable?:     TeamTableInfo;
+  context?:       RankingContext;
+  /** Which feeds supplied the real data (source-priority confidence input). */
+  sourceQuality?: SourceQualityContext;
+  /** Confidence-gate configuration (threshold / policy). */
+  confidence?:    ConfidenceOptions;
 }
 
 // ─── Factor scorers (each returns a 0..1 score + optional gap log) ────────────
@@ -988,6 +1047,344 @@ function statKey(m: Market): string {
   return m.name.replace(/\s*O\/U\s*[\d.]+\s*/, "").trim();
 }
 
+// ─── Match-level confidence gate ──────────────────────────────────────────────
+//
+// Ranking answers "which markets are best for THIS match?". The confidence gate
+// answers the separate question "should we bet this match at all?" — the driver
+// of hit-rate consistency, since a Top-10 built from thin data on a weak feed is
+// structurally less reliable than the same Top-10 built from a complete ESPN
+// payload, even when both look similar after ranking.
+//
+// The score is a weighted blend of three REAL, already-computed signals:
+//
+//   1. Calibration / hit rate of the Top-10 ......... 50%
+//      Mean empirical reliability (calibration factor) of the picks that are
+//      actually being returned. Higher = the pick set leans on market types
+//      that historically settle as predicted.
+//
+//   2. Factor coverage ............................... 30%
+//      Share of the ranking weight mass that had REAL data behind it. Every
+//      excluded factor (missing form, injuries, odds movement, weather …)
+//      means the composite was decided by fewer independent signals, so the
+//      ranking itself is less trustworthy.
+//
+//   3. Source priority / provenance .................. 20%
+//      Which feeds supplied the data: ESPN / SportScore / StatsBomb = high,
+//      official league APIs = medium, free aggregators = low. Additionally
+//      discounted by the share of Top-10 slots that had to be filled from the
+//      calibration BACKFILL tier (0.55–0.85) instead of the trusted ≥85% tier.
+//
+// Same data-gap contract as the ranking: if no source provenance is supplied at
+// all, the source component is EXCLUDED and its 20% is redistributed across the
+// remaining two — never replaced with a neutral stand-in.
+//
+// A final depth factor discounts matches that could not even produce a full
+// Top-10 of qualified, verifiable picks.
+
+/** Component weights of the match confidence score (Σ = 1). */
+export const CONFIDENCE_WEIGHTS = {
+  calibration:    0.50,
+  factorCoverage: 0.30,
+  sourceQuality:  0.20,
+} as const;
+
+export type ConfidenceComponentKey = keyof typeof CONFIDENCE_WEIGHTS;
+
+/** Below this score a match is flagged "low confidence". */
+export const DEFAULT_CONFIDENCE_THRESHOLD = 0.75;
+/** Below this score a match is not worth betting at all. */
+export const DEFAULT_CONFIDENCE_SKIP_THRESHOLD = 0.50;
+/** Picks returned by a trimmed low-confidence match. */
+export const DEFAULT_LOW_CONFIDENCE_PICK_COUNT = 3;
+/** Full-strength pick count (a short Top-N is itself a confidence signal). */
+const TARGET_PICK_COUNT = 10;
+/** Max discount applied to the source component by backfill-tier usage. */
+const BACKFILL_SOURCE_PENALTY = 0.35;
+
+/** Source provenance tiers → confidence contribution. */
+export type SourceTier = "high" | "medium" | "low" | "unknown";
+
+const SOURCE_TIER_SCORE: Record<SourceTier, number> = {
+  high:    1.00,
+  medium:  0.80,
+  low:     0.55,
+  unknown: 0.50,
+};
+
+/** Priority feeds — real, first-party or high-trust providers. */
+const HIGH_TIER_SOURCES = new Set([
+  "espn", "sportscore", "statsbomb", "opta",
+]);
+/** Official league APIs and reference data providers. */
+const MEDIUM_TIER_SOURCES = new Set([
+  "openligadb", "premierleagueofficial", "laligaofficial", "serieaofficial",
+  "footballdata", "fbref", "whoscored",
+]);
+/** Free-tier / community aggregators used to backfill missing fields. */
+const LOW_TIER_SOURCES = new Set([
+  "thesportsdb", "apifootball", "footystats", "backfill", "fallback", "cache",
+]);
+
+const normalizeSourceName = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+
+/** Tier of a single named source (unknown when the name is not registered). */
+export function sourceTierOf(source: string | null | undefined): SourceTier {
+  if (!source) return "unknown";
+  const key = normalizeSourceName(source);
+  if (!key) return "unknown";
+  if (HIGH_TIER_SOURCES.has(key)) return "high";
+  if (MEDIUM_TIER_SOURCES.has(key)) return "medium";
+  if (LOW_TIER_SOURCES.has(key)) return "low";
+  return "unknown";
+}
+
+/** One scored component of the confidence blend. */
+export interface ConfidenceComponent {
+  /** 0..1 raw component score. */
+  score:     number;
+  /** Nominal weight from CONFIDENCE_WEIGHTS. */
+  weight:    number;
+  /** Weight actually applied after redistribution (0 when unavailable). */
+  applied:   number;
+  /** false → data unavailable, component excluded and weight redistributed. */
+  available: boolean;
+  /** Human-readable explanation for the monitoring log / UI. */
+  detail:    string;
+}
+
+/** Match-level confidence verdict attached to every selection. */
+export interface MatchConfidence {
+  /** 0..1 blended confidence score. */
+  score:          number;
+  /** Same score as a rounded 0..100 percentage (UI-friendly). */
+  scorePct:       number;
+  /** HIGH ≥ threshold · LOW ≥ skip floor · VERY_LOW below the skip floor. */
+  level:          "HIGH" | "LOW" | "VERY_LOW";
+  /** True when the score is below the configured threshold. */
+  lowConfidence:  boolean;
+  /** What the gate did: full Top-10, reduced pick set, or skipped match. */
+  action:         "full" | "reduced" | "skipped";
+  /** Number of picks actually returned after the gate. */
+  picksReturned:  number;
+  threshold:      number;
+  skipThreshold:  number;
+  policy:         ConfidencePolicy;
+  components:     Record<ConfidenceComponentKey, ConfidenceComponent>;
+  /** Mean calibration / historical hit rate of the returned picks (0..1). */
+  avgCalibration: number;
+  /** Mean number of ranking factors that had real data (of 11). */
+  avgFactorsAvailable: number;
+  totalFactors:   number;
+  /** Factors missing across the pick set (weight was redistributed). */
+  missingFactors: FactorKey[];
+  /** Provenance summary. */
+  sourceTier:     SourceTier;
+  sources:        string[];
+  /** Top-N slots filled from the 0.55–0.85 calibration backfill tier. */
+  backfillPicks:  number;
+  /** Bullet reasons behind the score (logged + surfaced to the UI). */
+  reasons:        string[];
+  /** One-line summary for logs and UI badges. */
+  summary:        string;
+}
+
+const TOTAL_RANKING_WEIGHT = ALL_FACTOR_KEYS.reduce((sum, k) => sum + RANKING_WEIGHTS[k], 0);
+
+/** Resolve the gate configuration, applying defaults. */
+function resolveConfidenceOptions(opts?: ConfidenceOptions): Required<ConfidenceOptions> {
+  const threshold = clamp(opts?.threshold ?? DEFAULT_CONFIDENCE_THRESHOLD, 0, 1);
+  const skipThreshold = clamp(opts?.skipThreshold ?? DEFAULT_CONFIDENCE_SKIP_THRESHOLD, 0, threshold);
+  return {
+    threshold,
+    skipThreshold,
+    // Default "flag" keeps every existing caller's pick count unchanged; the
+    // oracle pipeline opts into "trim"/"skip" explicitly.
+    policy:                 opts?.policy ?? "flag",
+    lowConfidencePickCount: Math.max(1, Math.round(opts?.lowConfidencePickCount ?? DEFAULT_LOW_CONFIDENCE_PICK_COUNT)),
+    enabled:                opts?.enabled ?? true,
+  };
+}
+
+/** Source-priority component (20%) — provenance tier + field + backfill share. */
+function scoreSourceQuality(
+  source: SourceQualityContext | null | undefined,
+  backfillPicks: number,
+  pickCount: number,
+): { result: FactorResult; tier: SourceTier; sources: string[] } {
+  const named = [
+    ...(source?.primarySource ? [source.primarySource] : []),
+    ...(source?.contributingSources ?? []),
+  ].filter((s): s is string => !!s && !!s.trim());
+  const unique = [...new Set(named)];
+
+  const backfillShare = pickCount > 0 ? clamp(backfillPicks / pickCount, 0, 1) : 0;
+  const backfillFactor = 1 - BACKFILL_SOURCE_PENALTY * backfillShare;
+
+  // Explicit override wins (callers that compute provenance themselves).
+  if (typeof source?.score === "number" && Number.isFinite(source.score)) {
+    const base = clamp(source.score, 0, 1);
+    return {
+      result: {
+        score: clamp(base * backfillFactor, 0, 1),
+        gap: backfillShare > 0 ? `source score ${base.toFixed(2)} discounted by backfill share ${(backfillShare * 100).toFixed(0)}%` : undefined,
+      },
+      tier: base >= 0.95 ? "high" : base >= 0.75 ? "medium" : "low",
+      sources: unique,
+    };
+  }
+
+  if (!unique.length) {
+    return {
+      result: {
+        score: SOURCE_TIER_SCORE.unknown,
+        available: false,
+        gap: "no source provenance supplied — source component excluded, weight redistributed",
+      },
+      tier: "unknown",
+      sources: [],
+    };
+  }
+
+  const tiers = unique.map(sourceTierOf);
+  const tierMean = tiers.reduce((sum, t) => sum + SOURCE_TIER_SCORE[t], 0) / tiers.length;
+  const primaryTier = sourceTierOf(source?.primarySource) !== "unknown"
+    ? sourceTierOf(source?.primarySource)
+    : tiers[0];
+
+  // Field coverage (how much of the enrichment contract the feeds actually
+  // filled) refines the tier score when the caller provides it.
+  const coverage = typeof source?.fieldCoverage === "number" && Number.isFinite(source.fieldCoverage)
+    ? clamp(source.fieldCoverage, 0, 1)
+    : null;
+  const base = coverage === null ? tierMean : tierMean * 0.75 + coverage * 0.25;
+
+  return {
+    result: { score: clamp(base * backfillFactor, 0, 1) },
+    tier: primaryTier,
+    sources: unique,
+  };
+}
+
+/**
+ * Compute the match-level confidence verdict for a ranked pick set.
+ *
+ * Exported so the oracle (and tests / monitoring jobs) can score a selection
+ * without re-running the selector.
+ */
+export function computeMatchConfidence(
+  picks: MarketScore[],
+  opts?: SelectOptions,
+  meta?: { backfillPicks?: number },
+): MatchConfidence {
+  const cfg = resolveConfidenceOptions(opts?.confidence);
+  const pickCount = picks.length;
+  const backfillPicks = meta?.backfillPicks
+    ?? picks.filter((s) => s.breakdown.calibration < MIN_CALIBRATION_HIT_RATE).length;
+
+  // ── Component 1: calibration / historical hit rate of the Top-10 ──────────
+  const avgCalibration = pickCount
+    ? picks.reduce((sum, s) => sum + s.breakdown.calibration, 0) / pickCount
+    : 0;
+
+  // ── Component 2: factor coverage (share of real ranking weight mass) ──────
+  const coveragePerPick = picks.map((s) => {
+    const excludedMass = s.excludedFactors.reduce((sum, k) => sum + RANKING_WEIGHTS[k], 0);
+    return (TOTAL_RANKING_WEIGHT - excludedMass) / TOTAL_RANKING_WEIGHT;
+  });
+  const factorCoverage = coveragePerPick.length
+    ? coveragePerPick.reduce((a, b) => a + b, 0) / coveragePerPick.length
+    : 0;
+  const avgFactorsAvailable = pickCount
+    ? picks.reduce((sum, s) => sum + (ALL_FACTOR_KEYS.length - s.excludedFactors.length), 0) / pickCount
+    : 0;
+  const missingUnion = new Set<FactorKey>();
+  for (const s of picks) s.excludedFactors.forEach((k) => missingUnion.add(k));
+  const missingFactors = ALL_FACTOR_KEYS.filter((k) => missingUnion.has(k));
+
+  // ── Component 3: source priority / provenance ─────────────────────────────
+  const src = scoreSourceQuality(opts?.sourceQuality, backfillPicks, pickCount);
+
+  const raw: Record<ConfidenceComponentKey, FactorResult> = {
+    calibration:    { score: clamp(avgCalibration, 0, 1) },
+    factorCoverage: { score: clamp(factorCoverage, 0, 1) },
+    sourceQuality:  src.result,
+  };
+
+  // Dynamic weight redistribution — identical contract to the ranking factors.
+  const componentKeys = Object.keys(CONFIDENCE_WEIGHTS) as ConfidenceComponentKey[];
+  const activeKeys = componentKeys.filter((k) => raw[k].available !== false);
+  const activeWeight = activeKeys.reduce((sum, k) => sum + CONFIDENCE_WEIGHTS[k], 0)
+    || CONFIDENCE_WEIGHTS.calibration;
+
+  const blended = activeKeys.reduce(
+    (sum, k) => sum + (CONFIDENCE_WEIGHTS[k] / activeWeight) * raw[k].score,
+    0,
+  );
+
+  // Depth discount — a match that cannot fill a full Top-10 of qualified,
+  // verifiable picks is inherently thinner evidence.
+  const depthFactor = pickCount >= TARGET_PICK_COUNT
+    ? 1
+    : 0.85 + 0.15 * (pickCount / TARGET_PICK_COUNT);
+  const score = clamp(blended * depthFactor, 0, 1);
+
+  const components = componentKeys.reduce((acc, k) => {
+    acc[k] = {
+      score:     clamp(raw[k].score, 0, 1),
+      weight:    CONFIDENCE_WEIGHTS[k],
+      applied:   raw[k].available === false ? 0 : CONFIDENCE_WEIGHTS[k] / activeWeight,
+      available: raw[k].available !== false,
+      detail:    "",
+    };
+    return acc;
+  }, {} as Record<ConfidenceComponentKey, ConfidenceComponent>);
+
+  components.calibration.detail =
+    `mean calibration of ${pickCount} pick(s) = ${(avgCalibration * 100).toFixed(1)}%`;
+  components.factorCoverage.detail =
+    `${(factorCoverage * 100).toFixed(1)}% of ranking weight backed by real data ` +
+    `(${avgFactorsAvailable.toFixed(1)}/${ALL_FACTOR_KEYS.length} factors` +
+    `${missingFactors.length ? `, missing: ${missingFactors.join(", ")}` : ""})`;
+  components.sourceQuality.detail = src.result.available === false
+    ? (src.result.gap ?? "source provenance unavailable — component excluded")
+    : `${src.tier} tier (${src.sources.join(" + ") || "unknown"})` +
+      (backfillPicks ? ` · ${backfillPicks}/${pickCount} picks from the calibration backfill tier` : "");
+
+  const lowConfidence = cfg.enabled && score < cfg.threshold;
+  const level: MatchConfidence["level"] =
+    score < cfg.skipThreshold ? "VERY_LOW" : score < cfg.threshold ? "LOW" : "HIGH";
+
+  const reasons: string[] = componentKeys.map(
+    (k) => `${k}: ${(components[k].score * 100).toFixed(1)}% × ${(components[k].applied * 100).toFixed(0)}% — ${components[k].detail}`,
+  );
+  if (depthFactor < 1) {
+    reasons.push(`pick depth: only ${pickCount}/${TARGET_PICK_COUNT} qualified verifiable picks — score × ${depthFactor.toFixed(3)}`);
+  }
+  if (!cfg.enabled) reasons.push("confidence gate disabled — score reported only, no action taken");
+
+  return {
+    score,
+    scorePct: Math.round(score * 1000) / 10,
+    level,
+    lowConfidence,
+    action: "full",           // finalised by the gate in selectTopPicks()
+    picksReturned: pickCount, // finalised by the gate in selectTopPicks()
+    threshold:     cfg.threshold,
+    skipThreshold: cfg.skipThreshold,
+    policy:        cfg.policy,
+    components,
+    avgCalibration,
+    avgFactorsAvailable,
+    totalFactors: ALL_FACTOR_KEYS.length,
+    missingFactors,
+    sourceTier: src.tier,
+    sources:    src.sources,
+    backfillPicks,
+    reasons,
+    summary: "",              // finalised by the gate in selectTopPicks()
+  };
+}
+
 // ─── Selection result ─────────────────────────────────────────────────────────
 
 export interface SelectionResult {
@@ -1009,6 +1406,14 @@ export interface SelectionResult {
   weightLog?:      string[];
   /** Union of factors excluded across the Top-10 (missing data signals). */
   missingFactors?: FactorKey[];
+  /**
+   * Match-level confidence verdict (see computeMatchConfidence). Always set
+   * once markets were ranked, so the UI can show a warning — or the caller can
+   * skip the match — when `confidence.lowConfidence` is true.
+   */
+  confidence?:     MatchConfidence;
+  /** Human-readable confidence lines for the per-match monitoring log. */
+  confidenceLog?:  string[];
 }
 
 const EMPTY_SELECTION = (reason: string, gaps: string[] = []): SelectionResult => ({
@@ -1209,17 +1614,89 @@ export function selectTopPicks(
     (lead ? ` | ${weightLog[0]}` : ""),
   );
 
+  // ── Step 8: Match-level confidence gate ───────────────────────────────────
+  // The ranking is done; now decide whether this match is worth betting at all.
+  // Low-confidence matches are either flagged (UI warning), trimmed to the
+  // safest few picks, or skipped outright — configurable per caller.
+  const cfg = resolveConfidenceOptions(opts?.confidence);
+  const confidence = computeMatchConfidence(top10Scores, opts, { backfillPicks: backfilledCount });
+
+  const shouldSkip = cfg.enabled && cfg.policy === "skip" && confidence.score < cfg.threshold;
+  const belowSkipFloor = cfg.enabled && cfg.policy !== "flag" && confidence.score < cfg.skipThreshold;
+  const shouldTrim = cfg.enabled && cfg.policy === "trim" && confidence.lowConfidence;
+
+  let finalPicks = top10;
+  if (shouldSkip || belowSkipFloor) {
+    confidence.action = "skipped";
+    confidence.picksReturned = 0;
+    finalPicks = [];
+  } else if (shouldTrim) {
+    confidence.action = "reduced";
+    finalPicks = top10.slice(0, cfg.lowConfidencePickCount);
+    confidence.picksReturned = finalPicks.length;
+  } else {
+    confidence.action = "full";
+    confidence.picksReturned = finalPicks.length;
+  }
+
+  confidence.summary =
+    `confidence ${confidence.scorePct.toFixed(1)}% (${confidence.level}) ` +
+    `vs threshold ${(confidence.threshold * 100).toFixed(0)}% → ` +
+    (confidence.action === "skipped"
+      ? "match SKIPPED (no picks returned)"
+      : confidence.action === "reduced"
+        ? `reduced to Top-${confidence.picksReturned}`
+        : `full Top-${confidence.picksReturned}`);
+
+  const confidenceLog = [
+    confidence.summary,
+    ...confidence.reasons.map((r) => `· ${r}`),
+  ];
+
+  // Monitoring: one confidence line per match.
+  console.log(
+    `[selector][confidence] ${homeName} vs ${awayName} — score ${confidence.scorePct.toFixed(1)}% ` +
+    `(${confidence.level}) | cal ${(confidence.components.calibration.score * 100).toFixed(1)}% ` +
+    `| factors ${(confidence.components.factorCoverage.score * 100).toFixed(1)}% ` +
+    `(${confidence.avgFactorsAvailable.toFixed(1)}/${confidence.totalFactors}) ` +
+    `| source ${confidence.components.sourceQuality.available
+      ? `${(confidence.components.sourceQuality.score * 100).toFixed(1)}% [${confidence.sourceTier}: ${confidence.sources.join("+") || "n/a"}]`
+      : "unavailable (weight redistributed)"} ` +
+    `| backfill ${confidence.backfillPicks}/${top10.length} ` +
+    `| threshold ${(confidence.threshold * 100).toFixed(0)}% | policy ${confidence.policy} ` +
+    `→ ${confidence.action.toUpperCase()} (${confidence.picksReturned} picks)`,
+  );
+
+  if (confidence.action === "skipped") {
+    return {
+      ...EMPTY_SELECTION(
+        `Low confidence (${confidence.scorePct.toFixed(1)}% < ${(confidence.threshold * 100).toFixed(0)}%) — match skipped by the confidence gate.`,
+        [...gapLog],
+      ),
+      rankingNotes: top10.map((m) => {
+        const s = scored.find((x) => x.market === m);
+        return s ? s.notes : `${m.name} · ${m.selection}`;
+      }),
+      weightLog,
+      missingFactors: [...excludedUnion],
+      confidence,
+      confidenceLog,
+    };
+  }
+
   return {
-    top1:  top10.slice(0, 1),
-    top3:  top10.slice(0, 3),
-    top5:  top10.slice(0, 5),
-    top10,
+    top1:  finalPicks.slice(0, 1),
+    top3:  finalPicks.slice(0, 3),
+    top5:  finalPicks.slice(0, 5),
+    top10: finalPicks,
     gaps:         [...gapLog],
-    rankingNotes: top10.map((m) => {
+    rankingNotes: finalPicks.map((m) => {
       const s = scored.find((x) => x.market === m);
       return s ? s.notes : `${m.name} · ${m.selection}`;
     }),
     weightLog,
     missingFactors: [...excludedUnion],
+    confidence,
+    confidenceLog,
   };
 }
