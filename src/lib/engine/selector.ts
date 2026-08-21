@@ -98,6 +98,7 @@ import type { LambdaSet } from "./lambdas";
 import { LEAGUE_ANCHORS, getAnchors } from "./statisticalAnchors";
 import { analyseFormationMismatch } from "./players";
 import type { OddsInfo } from "../espn";
+import type { CanonicalMatchStats, StatKey } from "../data/types";
 
 // ─── Factor weights ───────────────────────────────────────────────────────────
 
@@ -279,6 +280,125 @@ function isOverSelection(m: Market): boolean {
 }
 function isUnderSelection(m: Market): boolean {
   return m.selection.startsWith("Under");
+}
+
+// ─── Canonical stats integration (Part 3) ────────────────────────────────────
+//
+// The selector is the consumption point for CanonicalMatchStats. When the
+// caller supplies `opts.stats`, every λ value is grounded in REAL match stats
+// (xG / goals for the goal λ, corners / cards / shots / SOT / fouls / offsides
+// / saves / throw-ins from their respective fields) — the xG- and form-model
+// estimates are only kept where no source provided a value. Each stat-backed
+// market then gets a `statConfidence` multiplier on the λ factor's weight:
+//   1.0  → the market's stat is present for both teams (full weight), or
+//   0.5  → the stat is missing, so the market falls back to the historical
+//          league average (avgCornersPerGame / avgCardsPerGame, or the caller's
+//          league-prior model) and the λ factor's weight is halved.
+
+/** Which TeamStats field settles a given market (for stat-confidence). */
+export function statFieldFor(m: Market): StatKey | null {
+  const fam = m.family.toLowerCase().replace(/_/g, " ");
+  const name = m.name.toLowerCase();
+  if (fam.includes("corner") || name.includes("corner")) return "corners";
+  if (fam.includes("card") || name.includes("cards")) return "yellowCards";
+  if (name.includes("gk saves") || name.includes("total saves") || fam.includes("save")) return "saves";
+  if (name.includes("shots on target") || name.includes("total sot") || name.includes(" sot ")) return "shotsOnTarget";
+  if (name.includes("shots") || fam.includes("shot")) return "shots";
+  if (name.includes("foul")) return "fouls";
+  if (name.includes("offside")) return "offsides";
+  if (name.includes("throw-in")) return "throwIns";
+  if (name.includes("goal kick")) return "goalKicks";
+  if (name.includes("possession")) return "possession";
+  if (name.includes("passes") || fam.includes("pass")) return "passes";
+  if (name.includes("goal") && fam.includes("goal")) return "goals";
+  return null;
+}
+
+/** 1.0 when the market's stat is real for both teams; 0.5 when it fell back. */
+export function statConfidenceFor(
+  m: Market,
+  stats: CanonicalMatchStats | null | undefined,
+): number {
+  if (!stats) return 1; // no canonical stats supplied → legacy full-weight behaviour
+  const field = statFieldFor(m);
+  if (!field) return 1; // market not settled by a specific stat → no modulation
+  const hv = stats.home[field];
+  const av = stats.away[field];
+  return hv !== null && av !== null ? 1 : 0.5;
+}
+
+/** True when the market's backing stat is missing and the fallback is in play. */
+export function statFellBack(m: Market, stats: CanonicalMatchStats | null | undefined): boolean {
+  return statConfidenceFor(m, stats) === 0.5;
+}
+
+/** Override a LambdaSet with real canonical stats where available. */
+export function effectiveLambdas(
+  lam: LambdaSet,
+  stats: CanonicalMatchStats | null | undefined,
+): LambdaSet {
+  if (!stats) return lam;
+  const h = stats.home;
+  const a = stats.away;
+
+  const resolvePair = (
+    realH: number | null,
+    realA: number | null,
+    modelH: number,
+    modelA: number,
+    avgH: number | null = null,
+    avgA: number | null = null,
+  ): [number, number] => {
+    const hh = realH ?? avgH ?? null;
+    const aa = realA ?? avgA ?? null;
+    if (hh !== null && aa !== null) return [hh, aa];
+    if (hh !== null) return [hh, modelA];
+    if (aa !== null) return [modelH, aa];
+    return [modelH, modelA];
+  };
+
+  const [homeGoals, awayGoals] = resolvePair(h.xg ?? h.goals, a.xg ?? a.goals, lam.homeGoals, lam.awayGoals);
+  const [homeCorners, awayCorners] = resolvePair(
+    h.corners, a.corners, lam.homeCorners, lam.awayCorners,
+    h.avgCornersPerGame, a.avgCornersPerGame,
+  );
+  const [homeCards, awayCards] = resolvePair(
+    h.yellowCards, a.yellowCards, lam.homeCards, lam.awayCards,
+    h.avgCardsPerGame, a.avgCardsPerGame,
+  );
+  const [homeSot, awaySot] = resolvePair(h.shotsOnTarget, a.shotsOnTarget, lam.homeSot, lam.awaySot);
+  const [homeShots, awayShots] = resolvePair(h.shots, a.shots, lam.homeShots, lam.awayShots);
+  const [homeOffsides, awayOffsides] = resolvePair(h.offsides, a.offsides, lam.homeOffsides, lam.awayOffsides);
+  const [homeSaves, awaySaves] = resolvePair(h.saves, a.saves, lam.homeSaves, lam.awaySaves);
+  const [homeThrowIns, awayThrowIns] = resolvePair(h.throwIns, a.throwIns, lam.homeThrowIns, lam.awayThrowIns);
+  const [homeFouls, awayFouls] = resolvePair(h.fouls, a.fouls, lam.homeFouls, lam.awayFouls);
+  const [homeGoalKicks, awayGoalKicks] = resolvePair(h.goalKicks, a.goalKicks, lam.homeGoalKicks, lam.awayGoalKicks);
+  const [interceptionsHome, interceptionsAway] = resolvePair(
+    h.interceptions, a.interceptions, lam.interceptionsHome, lam.interceptionsAway,
+  );
+  const [dribblingHome, dribblingAway] = resolvePair(
+    h.dribbling, a.dribbling, lam.dribblingHome, lam.dribblingAway,
+  );
+  const passesTotal = h.passes !== null && a.passes !== null
+    ? h.passes + a.passes
+    : lam.passesTotal;
+
+  return {
+    ...lam,
+    homeGoals, awayGoals,
+    homeCorners, awayCorners,
+    homeCards, awayCards,
+    homeSot, awaySot,
+    homeShots, awayShots,
+    homeOffsides, awayOffsides,
+    homeSaves, awaySaves,
+    homeThrowIns, awayThrowIns,
+    homeFouls, awayFouls,
+    homeGoalKicks, awayGoalKicks,
+    interceptionsHome, interceptionsAway,
+    dribblingHome, dribblingAway,
+    passesTotal,
+  };
 }
 
 // ─── λ resolver ───────────────────────────────────────────────────────────────
@@ -464,6 +584,12 @@ export interface SelectOptions {
   homeTable?:     TeamTableInfo;
   awayTable?:     TeamTableInfo;
   context?:       RankingContext;
+  /**
+   * Canonical match stats from the multi-source aggregator (Part 3). When
+   * present, the λ for every stat-backed market is grounded in real values and
+   * each market's λ-factor weight is multiplied by its stat-confidence.
+   */
+  stats?:         CanonicalMatchStats | null;
   /** Which feeds supplied the real data (source-priority confidence input). */
   sourceQuality?: SourceQualityContext;
   /** Confidence-gate configuration (threshold / policy). */
@@ -919,6 +1045,16 @@ export interface MarketScore {
    * calibration = 0.30/0.90 = 0.333.
    */
   appliedWeights: Partial<Record<FactorKey, number>>;
+  /**
+   * Stat-confidence multiplier applied to the λ factor's weight (Part 3):
+   * 1.0 when the market's stat is real for both teams, 0.5 when it fell back
+   * to the historical league average.
+   */
+  statConfidence: number;
+  /** The TeamStats field that backs this market (null for non-stat markets). */
+  statField:      StatKey | null;
+  /** True when the λ used the historical-average fallback (stat was null). */
+  statFallback:   boolean;
 }
 
 /**
@@ -934,19 +1070,27 @@ export function scoreMarket(
   opts?:         SelectOptions,
 ): MarketScore {
   const context = opts?.context ?? null;
+  const stats   = opts?.stats ?? null;
 
-  const totalGoals = lam.homeGoals + lam.awayGoals;
-  const evenness = 1 - Math.min(1, Math.abs(lam.homeGoals - lam.awayGoals) / Math.max(0.5, totalGoals));
+  // Part 3 — ground λ in real canonical stats, and compute the market's
+  // stat-confidence multiplier (1.0 = real stat for both teams, 0.5 = fallback).
+  const effLam = effectiveLambdas(lam, stats);
+  const statConfidence = statConfidenceFor(m, stats);
+  const statField = statFieldFor(m);
+  const statFallback = statFellBack(m, stats);
+
+  const totalGoals = effLam.homeGoals + effLam.awayGoals;
+  const evenness = 1 - Math.min(1, Math.abs(effLam.homeGoals - effLam.awayGoals) / Math.max(0.5, totalGoals));
   const ctx: MatchVolatility = { totalGoals, evenness };
 
-  const lambda           = scoreLambda(m, lam, homeName, awayName);
+  const lambda           = scoreLambda(m, effLam, homeName, awayName);
   const calibration      = scoreCalibration(m, ctx);
   const form             = scoreForm(m, homeName, awayName, context);
-  const tactical         = scoreTactical(m, lam, homeName, awayName, context);
+  const tactical         = scoreTactical(m, effLam, homeName, awayName, context);
   const importance       = scoreImportance(context, opts);
   const leagueDepth      = scoreLeagueDepth(context);
   const liquidity        = scoreLiquidity(m, confidenceMap, context);
-  const bias             = scoreBias(m, lam, homeName, awayName, context);
+  const bias             = scoreBias(m, effLam, homeName, awayName, context);
   const injuryImpact     = scoreInjuryImpact(m, homeName, awayName, context);
   const marketVolatility = scoreMarketVolatility(m, context);
   const weather          = scoreWeather(context);
@@ -975,20 +1119,29 @@ export function scoreMarket(
   };
   const excludedFactors = ALL_FACTOR_KEYS.filter((k) => factorResults[k].available === false);
   const activeKeys = ALL_FACTOR_KEYS.filter((k) => factorResults[k].available !== false);
+
+  // ── Stat-confidence weighting (Part 3) ──────────────────────────────────────
+  // The λ factor's weight is multiplied by the market's stat-confidence: a real
+  // stat (both teams) keeps the full 0.20 weight; a missing stat (fallback to
+  // the historical league average) halves it, and the freed mass flows to the
+  // remaining active factors through the Σ=100% renormalisation below.
+  const effectiveWeight = (k: FactorKey): number =>
+    k === "lambda" ? RANKING_WEIGHTS.lambda * statConfidence : RANKING_WEIGHTS[k];
+
   // Calibration is always data-backed, so this can never be zero.
-  const activeWeightTotal = activeKeys.reduce((sum, k) => sum + RANKING_WEIGHTS[k], 0)
+  const activeWeightTotal = activeKeys.reduce((sum, k) => sum + effectiveWeight(k), 0)
     || RANKING_WEIGHTS.calibration
     || 1;
 
   const weightedTotal = activeKeys.reduce(
-    (sum, k) => sum + RANKING_WEIGHTS[k] * breakdown[k],
+    (sum, k) => sum + effectiveWeight(k) * breakdown[k],
     0,
   );
   const composite = weightedTotal / activeWeightTotal;
 
   const appliedWeights: Partial<Record<FactorKey, number>> = {};
   for (const k of activeKeys) {
-    appliedWeights[k] = RANKING_WEIGHTS[k] / activeWeightTotal;
+    appliedWeights[k] = effectiveWeight(k) / activeWeightTotal;
   }
 
   // Consensus loss probability for tiebreaks (1 - hitRate, already calibrated
@@ -996,7 +1149,7 @@ export function scoreMarket(
   const wrongProb = clamp(1 - m.hitRate, 0, 1);
 
   // σ-cushion for λ markets (third tiebreak).
-  const lamVal = lambdaFor(m, lam, homeName, awayName);
+  const lamVal = lambdaFor(m, effLam, homeName, awayName);
   const lineMatch = m.name.match(/O\/U\s+([\d.]+)/);
   const marginUnits = lamVal !== null && lineMatch
     ? sigmaCushion(lamVal, Number(lineMatch[1]))
@@ -1024,6 +1177,7 @@ export function scoreMarket(
     `loss=${(wrongProb * 100).toFixed(1)}% ` +
     `w[${activeKeys.map((k) => `${k}=${((appliedWeights[k] ?? 0) * 100).toFixed(1)}%`).join(" ")}]` +
     (excludedFactors.length ? ` excluded[${excludedFactors.join(",")}]` : "") +
+    (statField ? ` stat=${statField}@${(statConfidence * 100).toFixed(0)}%${statFallback ? "(fallback)" : ""}` : "") +
     (gaps.length ? ` [gaps: ${gaps.join("; ")}]` : "");
 
   return {
@@ -1037,6 +1191,9 @@ export function scoreMarket(
     notes,
     excludedFactors,
     appliedWeights,
+    statConfidence,
+    statField,
+    statFallback,
   };
 }
 
