@@ -90,6 +90,23 @@
 //   depending on the caller's policy, either flagged (full Top-10 + a
 //   `confidence` block for the UI warning), trimmed to the Top-3, or skipped.
 //   Every match logs one `[selector][confidence]` line for monitoring.
+//
+// CONTEXTUAL TOP-1 BAN FOR HIGH-LINE UNDERS (Part 1, applied AFTER the gate —
+// see Step 9)
+//   Total Goals / Team Goals "Under X.5" (X ≥ 4) markets are demoted out of
+//   the Top-1 slot when the match carries an explosion risk: effective
+//   combined xG × leagueFactor > 3.5 OR effective recent-avg goals ×
+//   leagueFactor > 3.0. The league factor is 1.0 for top-5 leagues, 1.1 for
+//   Bundesliga / MLS / Eredivisie and 0.9 for defensive leagues. The inputs
+//   come from the caller (`SelectOptions.explosionRisk` — real stats-aggregator
+//   xG + real last-5 scoring averages); without them the ban is inert. Blocked
+//   markets stay in the Top-N and the next best ranked market takes Top-1.
+//
+// UNDER 4.5 PROBABILITY CALIBRATION (Part 2, inside scoreMarket)
+//   Under 4.5 (Total or Team) markets with a raw hit rate above 0.93 are
+//   ranked with adjusted = raw − (raw − 0.93) × 0.4 (e.g. 0.99 → 0.966) in the
+//   calibration factor and the loss-probability tiebreak, so the engine stops
+//   overvaluing their extreme probabilities.
 
 import { poissonPmf, clamp } from "./stats";
 import { marketReliability, type MatchVolatility } from "./calibration";
@@ -122,6 +139,28 @@ const MIN_CALIBRATION_HIT_RATE = 0.85;
  *  injury-severity-checked, safety-net-checked and verifiable. */
 const MIN_BACKFILL_CALIBRATION_HIT_RATE = 0.55;
 const SIGNIFICANT_ODDS_MOVE_PCT = 20;
+
+// ─── Contextual Top-1 ban for high-line Unders (Part 1) ─────────────────────
+// Total Goals / Team Goals "Under X.5" lines at or above this value
+// (Under 4.5, Under 5.5, …) are demoted out of the Top-1 slot when the match
+// carries an explosion risk. The filter is DATA-DRIVEN and contextual — the
+// caller (oracle.ts) supplies the real risk inputs via `SelectOptions`, and
+// when they are absent the ban is inert. There is no permanent hard ban.
+const EXPLOSION_MIN_UNDER_LINE = 4.5;
+/** Effective combined xG (× league factor) above which a high-line Under is
+ *  blocked from the Top-1 slot. */
+const EXPLOSION_XG_THRESHOLD = 3.5;
+/** Effective recent-average goals (× league factor) above which a high-line
+ *  Under is blocked from the Top-1 slot. */
+const EXPLOSION_RECENT_GOALS_THRESHOLD = 3.0;
+
+// ─── Under 4.5 probability calibration (Part 2) ──────────────────────────────
+// Raw hit rates above this floor are penalised for Under 4.5 (Total or Team)
+// markets so the ranking stops overvaluing their extreme probabilities.
+const UNDER45_CALIBRATION_FLOOR = 0.93;
+/** Share of the excess above the floor that is removed from the hit rate
+ *  (adjusted = raw − (raw − floor) × penalty). */
+const UNDER45_CALIBRATION_PENALTY = 0.4;
 
 /** Factor keys — mirror the fields of RANKING_WEIGHTS. */
 export type FactorKey = keyof typeof RANKING_WEIGHTS;
@@ -280,6 +319,116 @@ function isOverSelection(m: Market): boolean {
 }
 function isUnderSelection(m: Market): boolean {
   return m.selection.startsWith("Under");
+}
+
+// ─── Contextual ban + calibration helpers (Part 1 & 2) ───────────────────────
+
+function isHalfLine(line: number): boolean {
+  return Number.isInteger(line * 2) && (line * 2) % 2 === 1;
+}
+
+/** Total Goals or Team Goals "Under X.5" with X >= 4 (Under 4.5, 5.5, …). */
+function isHighLineUnderGoals(m: Market): boolean {
+  if (!isUnderSelection(m)) return false;
+  const lineMatch = m.name.match(/Goals O\/U\s+([\d.]+)/);
+  if (!lineMatch) return false;
+  const line = Number(lineMatch[1]);
+  return Number.isFinite(line) && isHalfLine(line) && line >= EXPLOSION_MIN_UNDER_LINE;
+}
+
+/** Total Goals or Team Goals "Under 4.5" (calibration-penalty target, Part 2). */
+function isUnder45Goals(m: Market): boolean {
+  if (!isUnderSelection(m)) return false;
+  const lineMatch = m.name.match(/Goals O\/U\s+([\d.]+)/);
+  if (!lineMatch) return false;
+  const line = Number(lineMatch[1]);
+  return Number.isFinite(line) && Math.abs(line - 4.5) < 1e-9;
+}
+
+interface HitRateCalibration {
+  /** Hit rate used for ranking (calibration factor + loss-probability tiebreak). */
+  effective: number;
+  /** True when the Under 4.5 overconfidence penalty was applied. */
+  adjusted: boolean;
+}
+
+/**
+ * Part 2 — Under 4.5 (Total or Team) probability calibration.
+ *
+ * Extremely high raw hit rates (> 0.93) are pulled down toward the empirical
+ * floor before ranking:
+ *
+ *     adjusted = raw − (raw − 0.93) × 0.4
+ *
+ * e.g. 0.99 → 0.966 and 0.98 → 0.96, so the engine stops overvaluing these
+ * markets in the calibration factor and the loss-probability tiebreak.
+ */
+function calibratedUnder45HitRate(m: Market): HitRateCalibration {
+  if (!isUnder45Goals(m) || m.hitRate <= UNDER45_CALIBRATION_FLOOR) {
+    return { effective: m.hitRate, adjusted: false };
+  }
+  const effective = m.hitRate - (m.hitRate - UNDER45_CALIBRATION_FLOOR) * UNDER45_CALIBRATION_PENALTY;
+  return { effective, adjusted: true };
+}
+
+/** True when a high-line Under is blocked from Top-1 by the contextual
+ *  explosion-risk ban (Part 1). Inert without real risk inputs. */
+function explosionRiskBlocked(
+  m: Market,
+  opts?: SelectOptions,
+): boolean {
+  const risk = opts?.explosionRisk;
+  if (!risk) return false;
+  // Scope: Total Goals / Team Goals "Under X.5" with X >= 4 (isHighLineUnderGoals
+  // already guarantees the name is a goals O/U line at or above 4.5).
+  if (!isHighLineUnderGoals(m)) return false;
+
+  const factor = risk.leagueFactor;
+  const effXG = risk.combinedXG != null ? risk.combinedXG * factor : null;
+  const effRecent = risk.recentAvgGoals != null ? risk.recentAvgGoals * factor : null;
+  if (effXG != null && effXG > EXPLOSION_XG_THRESHOLD) return true;
+  if (effRecent != null && effRecent > EXPLOSION_RECENT_GOALS_THRESHOLD) return true;
+  return false;
+}
+
+/**
+ * Part 1 — contextual Top-1 ban (applied AFTER ranking, before the Top-1 slot
+ * is finalised). When the highest-ranked pick is a high-line Under on an
+ * explosive match, the next best ranked market takes the Top-1 slot instead;
+ * the blocked market stays in the Top-N (it is still a valuable pick) and when
+ * no alternative exists the first pick is kept — never a permanent hard ban.
+ */
+function applyTop1ExplosionBan(
+  picks: Market[],
+  homeName: string,
+  awayName: string,
+  opts?: SelectOptions,
+): Market[] {
+  const risk = opts?.explosionRisk;
+  if (!risk || picks.length < 2) return picks;
+
+  const ordered = [...picks];
+  const firstBlockedIdx = ordered.findIndex((m) => explosionRiskBlocked(m, opts));
+  const firstCleanIdx = ordered.findIndex((m) => !explosionRiskBlocked(m, opts));
+  if (firstBlockedIdx !== 0 || firstCleanIdx <= 0) return ordered;
+
+  const blocked = ordered[0];
+  const [lead] = ordered.splice(firstCleanIdx, 1);
+  ordered.unshift(lead);
+
+  const lineMatch = blocked.name.match(/O\/U\s+([\d.]+)/);
+  const line = lineMatch ? lineMatch[1] : "?";
+  const factor = risk.leagueFactor;
+  const effXG = risk.combinedXG != null ? risk.combinedXG * factor : null;
+  const effRecent = risk.recentAvgGoals != null ? risk.recentAvgGoals * factor : null;
+  console.log(
+    `[Selector] Blocked Under ${line} for ${homeName} vs ${awayName} ` +
+    `(combinedXG=${effXG != null ? effXG.toFixed(2) : "n/a"}, ` +
+    `threshold=${EXPLOSION_XG_THRESHOLD.toFixed(1)}` +
+    `${effRecent != null ? ` | recentAvgGoals=${effRecent.toFixed(2)} (threshold=${EXPLOSION_RECENT_GOALS_THRESHOLD.toFixed(1)})` : ""}` +
+    ` | leagueFactor=${factor.toFixed(2)})`,
+  );
+  return ordered;
 }
 
 // ─── Canonical stats integration (Part 3) ────────────────────────────────────
@@ -579,6 +728,26 @@ export interface ConfidenceOptions {
   enabled?:                boolean;
 }
 
+/**
+ * Match-explosion risk inputs for the contextual Top-1 ban (Part 1).
+ * Computed by the caller (oracle.ts) from the stats aggregator + multi-source
+ * enrichment. All fields are REAL data or null — a null leg simply cannot
+ * vote. When the whole object is omitted, the ban is inert (data-driven,
+ * never a permanent hardcode).
+ */
+export interface ExplosionRiskInput {
+  /** homeXG + awayXG from the stats aggregator. The oracle falls back to the
+   *  xG-grounded model λ (stats xG → enrichment xG → league prior) when a
+   *  real value is unavailable, so this is effectively always present. */
+  combinedXG: number | null;
+  /** (homeAvgGoalsLast5 + awayAvgGoalsLast5) / 2 — real last-5 scoring
+   *  averages from the enrichment fetchers; null when no source had scores. */
+  recentAvgGoals: number | null;
+  /** 1.0 for top-5 leagues · 1.1 for Bundesliga / MLS / Eredivisie · 0.9 for
+   *  defensive leagues (data-driven via the league priors table). */
+  leagueFactor: number;
+}
+
 /** Options passed to the selector. */
 export interface SelectOptions {
   homeTable?:     TeamTableInfo;
@@ -590,6 +759,13 @@ export interface SelectOptions {
    * each market's λ-factor weight is multiplied by its stat-confidence.
    */
   stats?:         CanonicalMatchStats | null;
+  /**
+   * Match-explosion risk inputs for the contextual Top-1 ban (Part 1). When
+   * provided, Total/Team Goals "Under X.5" (X ≥ 4) markets are demoted out of
+   * the Top-1 slot if combined xG or the recent-goals average (× league
+   * factor) exceeds the explosion thresholds.
+   */
+  explosionRisk?: ExplosionRiskInput | null;
   /** Which feeds supplied the real data (source-priority confidence input). */
   sourceQuality?: SourceQualityContext;
   /** Confidence-gate configuration (threshold / policy). */
@@ -628,7 +804,18 @@ function scoreLambda(
 }
 
 /** Factor 2 — Calibration / historical hit rate (market-type reliability). */
-function scoreCalibration(m: Market, ctx: MatchVolatility): FactorResult {
+function scoreCalibration(
+  m: Market,
+  ctx: MatchVolatility,
+  effectiveHitRate?: number,
+): FactorResult {
+  // Part 2 — Under 4.5 (Total or Team) with an extreme raw hit rate (> 0.93)
+  // is scored with the CALIBRATED (penalised) hit rate instead of the raw one,
+  // so the ranking stops overvaluing its extreme probability. All other
+  // markets keep the empirical market-type reliability factor.
+  if (effectiveHitRate !== undefined && effectiveHitRate !== m.hitRate) {
+    return { score: clamp(effectiveHitRate, 0, 1) };
+  }
   // marketReliability is already the empirical hit-rate-derived factor (0.4..1.0).
   const rel = marketReliability(m, ctx);
   return { score: clamp(rel, 0, 1) };
@@ -1083,8 +1270,18 @@ export function scoreMarket(
   const evenness = 1 - Math.min(1, Math.abs(effLam.homeGoals - effLam.awayGoals) / Math.max(0.5, totalGoals));
   const ctx: MatchVolatility = { totalGoals, evenness };
 
+  // Part 2 — Under 4.5 probability calibration. Markets with a raw hit rate
+  // above 0.93 are ranked with the penalised hit rate (adjusted = raw −
+  // (raw − 0.93) × 0.4) in the calibration factor and the loss-probability
+  // tiebreak, so the engine cannot overvalue them.
+  const hitRateCal = calibratedUnder45HitRate(m);
+  if (hitRateCal.adjusted) {
+    console.log(
+      `[Selector] Calibrated Under 4.5 from ${m.hitRate.toFixed(2)} to ${hitRateCal.effective.toFixed(2)} for ${homeName} vs ${awayName}.`,
+    );
+  }
   const lambda           = scoreLambda(m, effLam, homeName, awayName);
-  const calibration      = scoreCalibration(m, ctx);
+  const calibration      = scoreCalibration(m, ctx, hitRateCal.effective);
   const form             = scoreForm(m, homeName, awayName, context);
   const tactical         = scoreTactical(m, effLam, homeName, awayName, context);
   const importance       = scoreImportance(context, opts);
@@ -1144,9 +1341,10 @@ export function scoreMarket(
     appliedWeights[k] = effectiveWeight(k) / activeWeightTotal;
   }
 
-  // Consensus loss probability for tiebreaks (1 - hitRate, already calibrated
-  // in the oracle path, raw ensemble in the engine path).
-  const wrongProb = clamp(1 - m.hitRate, 0, 1);
+  // Consensus loss probability for tiebreaks (1 − hit rate). Part 2: for
+  // Under 4.5 markets the CALIBRATED hit rate is used, so the re-rank is
+  // driven by the adjusted probability rather than the raw one.
+  const wrongProb = clamp(1 - hitRateCal.effective, 0, 1);
 
   // σ-cushion for λ markets (third tiebreak).
   const lamVal = lambdaFor(m, effLam, homeName, awayName);
@@ -1841,13 +2039,20 @@ export function selectTopPicks(
     };
   }
 
+  // ── Step 9: Contextual Top-1 ban (Part 1) ─────────────────────────────────
+  // Before the Top-1 slot is finalised, high-line Unders (Under 4.5 / 5.5+)
+  // on explosive matches are demoted and the next best ranked market leads.
+  // The blocked market stays in the Top-N; with no alternative the first pick
+  // is kept (data-driven filter, never a permanent hard ban).
+  const orderedPicks = applyTop1ExplosionBan(finalPicks, homeName, awayName, opts);
+
   return {
-    top1:  finalPicks.slice(0, 1),
-    top3:  finalPicks.slice(0, 3),
-    top5:  finalPicks.slice(0, 5),
-    top10: finalPicks,
+    top1:  orderedPicks.slice(0, 1),
+    top3:  orderedPicks.slice(0, 3),
+    top5:  orderedPicks.slice(0, 5),
+    top10: orderedPicks,
     gaps:         [...gapLog],
-    rankingNotes: finalPicks.map((m) => {
+    rankingNotes: orderedPicks.map((m) => {
       const s = scored.find((x) => x.market === m);
       return s ? s.notes : `${m.name} · ${m.selection}`;
     }),

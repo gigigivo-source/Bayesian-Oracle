@@ -72,6 +72,19 @@ function getPrior(slug: string) {
   return LEAGUE_PRIORS[slug] ?? LEAGUE_PRIORS["default"];
 }
 
+/**
+ * League factor for the match-explosion risk score (selector Part 1):
+ *   1.1 — Bundesliga / MLS / Eredivisie (high-scoring, explosive leagues)
+ *   0.9 — defensive leagues (prior avgGoals ≤ 2.45 — data-driven via LEAGUE_PRIORS)
+ *   1.0 — everything else, including the remaining top-5 leagues
+ * (Bundesliga is a top-5 league but is explicitly in the 1.1 bucket per spec.)
+ */
+function leagueExplosionFactor(slug: string): number {
+  if (slug === "ger.1" || slug === "usa.1" || slug === "ned.1") return 1.1;
+  if (getPrior(slug).avgGoals <= 2.45) return 0.9;
+  return 1.0;
+}
+
 // ─── Multi-factor ranking context (fed into the shared selector) ─────────────
 // Builds the optional enrichment the selector uses for its 8-factor composite.
 // Anything unavailable here simply falls back to a neutral value in the
@@ -207,6 +220,11 @@ export interface ExternalMatchData {
   homeXG:                  number | null;
   /** Real expected-goals for the away team. */
   awayXG:                  number | null;
+  /** Average goals scored by the home team across its last 5 finished matches
+   *  (computed from real scores — null when no source carried them). */
+  homeAvgGoalsLast5:       number | null;
+  /** Average goals scored by the away team across its last 5 finished matches. */
+  awayAvgGoalsLast5:       number | null;
   /** Current league-table position of the home team (1..leagueSize). */
   leagueTablePositionHome: number | null;
   /** Current league-table position of the away team. */
@@ -488,6 +506,47 @@ function formLettersFromString(s: string | null | undefined): string[] | null {
   return letters.length ? letters : null;
 }
 
+/** Average goals scored by a team across its last 5 finished matches — computed
+ *  from REAL scores collected by the enrichment fetchers (null when no source
+ *  carried scores for this team). Feeds the selector's match-explosion risk
+ *  score (Part 1). Matches must be chronological (oldest → newest). */
+function avgGoalsLast5(
+  team: string,
+  matches: Array<{ home: string; away: string; hs: number; as: number }>,
+): number | null {
+  const own = matches
+    .filter((m) => namesLooselyMatch(m.home, team) || namesLooselyMatch(m.away, team))
+    .slice(-5);
+  if (!own.length) return null;
+  const sum = own.reduce((acc, m) => {
+    const isHome = namesLooselyMatch(m.home, team);
+    return acc + (isHome ? m.hs : m.as);
+  }, 0);
+  return Number((sum / own.length).toFixed(2));
+}
+
+/** Average goals scored by a team across the last-5 entry of the ESPN summary
+ *  payload (scores keyed by ESPN team id — real scores, null when absent). */
+function espnAvgGoalsLast5(entry: unknown): number | null {
+  const rec = asRecord(entry);
+  const teamId = asString(getPath(rec, "team.id"));
+  if (!teamId) return null;
+  const scores: number[] = [];
+  for (const e of asArray(rec?.events)) {
+    const ev = asRecord(e);
+    if (!ev) continue;
+    const homeId = asString(ev.homeTeamId);
+    const awayId = asString(ev.awayTeamId);
+    if (homeId !== teamId && awayId !== teamId) continue; // event not involving this team
+    const hs = asNumber(ev.homeTeamScore);
+    const as = asNumber(ev.awayTeamScore);
+    if (hs === null || as === null) continue;
+    scores.push(homeId === teamId ? hs : as);
+  }
+  if (!scores.length) return null;
+  return Number((scores.reduce((a, b) => a + b, 0) / scores.length).toFixed(2));
+}
+
 function kebabCaseName(name: string): string {
   return name.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
     .replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
@@ -660,6 +719,11 @@ async function fetchEspn(fx: FixtureLite, deadline: number): Promise<SourceFetch
   partial.formHome = formEntry(0, fx.home.form);
   partial.formAway = formEntry(1, fx.away.form);
 
+  // Last-5 scoring averages (real scores from the summary payload) — feeds the
+  // match-explosion risk score (Part 1).
+  partial.homeAvgGoalsLast5 = espnAvgGoalsLast5(lastFive[0]);
+  partial.awayAvgGoalsLast5 = espnAvgGoalsLast5(lastFive[1]);
+
   // H2H — from the perspective of the current fixture's home team.
   const h2h: Array<"HomeWin" | "Draw" | "AwayWin"> = [];
   for (const block of asArray(root.headToHeadGames)) {
@@ -783,6 +847,7 @@ async function fetchSportScore(fx: FixtureLite, deadline: number): Promise<Sourc
   }
   if (homeFormMatches.length) {
     partial.formHome = formOf(fx.home.name, homeFormMatches);
+    partial.homeAvgGoalsLast5 = avgGoalsLast5(fx.home.name, homeFormMatches);
     const meetings = homeFormMatches.filter(
       (m) => (namesLooselyMatch(m.home, fx.home.name) && namesLooselyMatch(m.away, fx.away.name)) ||
               (namesLooselyMatch(m.home, fx.away.name) && namesLooselyMatch(m.away, fx.home.name)),
@@ -793,6 +858,7 @@ async function fetchSportScore(fx: FixtureLite, deadline: number): Promise<Sourc
   }
   if (awayFormMatches.length) {
     partial.formAway = formOf(fx.away.name, awayFormMatches);
+    partial.awayAvgGoalsLast5 = avgGoalsLast5(fx.away.name, awayFormMatches);
   }
 
   const filled = Object.entries(partial).filter(([, v]) => v !== null);
@@ -887,6 +953,8 @@ async function fetchOpenLigaDb(fx: FixtureLite, deadline: number): Promise<Sourc
   }
   partial.formHome = formOf(fx.home.name);
   partial.formAway = formOf(fx.away.name);
+  partial.homeAvgGoalsLast5 = avgGoalsLast5(fx.home.name, finished);
+  partial.awayAvgGoalsLast5 = avgGoalsLast5(fx.away.name, finished);
   const meetings = finished.filter(
     (m) => (namesLooselyMatch(m.home, fx.home.name) && namesLooselyMatch(m.away, fx.away.name)) ||
             (namesLooselyMatch(m.home, fx.away.name) && namesLooselyMatch(m.away, fx.home.name)),
@@ -1016,6 +1084,8 @@ async function fetchTheSportsDb(fx: FixtureLite, deadline: number): Promise<Sour
   };
   partial.formHome = formOf(fx.home.name, homeEvents);
   partial.formAway = formOf(fx.away.name, awayEvents);
+  partial.homeAvgGoalsLast5 = avgGoalsLast5(fx.home.name, homeEvents ?? []);
+  partial.awayAvgGoalsLast5 = avgGoalsLast5(fx.away.name, awayEvents ?? []);
 
   if (homeEvents?.length) {
     const meetings = homeEvents.filter(
@@ -1138,6 +1208,7 @@ const notIntegratedLogged = new Set<SourceId>();
 /** Fields of ExternalMatchData that a source can contribute. */
 const DATA_FIELDS = [
   "formHome", "formAway", "h2h", "homeXG", "awayXG",
+  "homeAvgGoalsLast5", "awayAvgGoalsLast5",
   "leagueTablePositionHome", "leagueTablePositionAway",
   "injuriesHome", "injuriesAway", "oddsMovement",
   "homeFormation", "awayFormation",
@@ -1171,6 +1242,7 @@ function emptyExternalData(): ExternalMatchData {
   return {
     formHome: null, formAway: null, h2h: null,
     homeXG: null, awayXG: null,
+    homeAvgGoalsLast5: null, awayAvgGoalsLast5: null,
     leagueTablePositionHome: null, leagueTablePositionAway: null,
     injuriesHome: null, injuriesAway: null,
     oddsMovement: null,
@@ -1578,6 +1650,17 @@ export function runOracle(
     : prior.avgGoals * 0.46 * (0.82 + s2 * 0.36);
   const expTotal = expHG + expAG;
 
+  // Part 1 — Match Explosion Risk Score (inputs for the selector's contextual
+  // Top-1 ban). combinedXG uses the xG-grounded λ pair (stats-aggregator xG →
+  // enrichment xG → league-prior model, so real aggregator xG wins whenever a
+  // source provides it); recentAvgGoals uses REAL last-5 scoring averages from
+  // the enrichment fetchers — null means that leg of the OR condition is
+  // inert, never fabricated.
+  const recentAvgGoals =
+    enrichment?.data.homeAvgGoalsLast5 != null && enrichment?.data.awayAvgGoalsLast5 != null
+      ? (enrichment.data.homeAvgGoalsLast5 + enrichment.data.awayAvgGoalsLast5) / 2
+      : null;
+
   // 1X2 via bivariate Poisson
   let homeWin = 0, draw = 0, awayWin = 0;
   for (let h = 0; h <= 8; h++) {
@@ -1956,6 +2039,15 @@ export function runOracle(
     // ── Canonical stats (Part 3) — grounds every stat-backed λ in real data
     //    and applies the per-market stat-confidence weight multiplier.
     stats:     stats ?? null,
+    // ── Contextual Top-1 ban (Part 1) — match-explosion risk inputs for
+    //    high-line Unders (Under 4.5 / 5.5+). Real xG + real last-5 scoring
+    //    averages × league factor; the selector demotes the market out of the
+    //    Top-1 slot when the risk exceeds the thresholds.
+    explosionRisk: {
+      combinedXG: expTotal,
+      recentAvgGoals,
+      leagueFactor: leagueExplosionFactor(fixture.leagueSlug),
+    },
     // ── Confidence gate inputs (selector.ts, Step 8) ────────────────────────
     // Which feeds supplied the real data drives the source-priority component;
     // the policy decides what happens to a low-confidence match.
