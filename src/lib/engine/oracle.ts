@@ -3,6 +3,14 @@
 // positions / injuries / odds movement) feeding the shared selector, whose
 // factor weights redistribute dynamically around unavailable data — real data
 // only, never simulated values.
+//
+// After ranking, a match-level CONFIDENCE GATE (selector.ts) scores each
+// match 0–100 from the average marketReliability of its Top-10 picks (60%),
+// the number of ranking factors backed by real data (25%), and the priority
+// of the data source actually used (15%). ≥75 → high (full Top-10); 50–74 →
+// medium (full Top-10 + confidence flag); <50 → low (trimmed to the Top 3,
+// picksTrimmed). The verdict is exposed on the response (`confidence`) and
+// logged for every match ([ConfidenceGate]).
 import type { FixtureLite } from "@/lib/espn";
 import type { EngineResult, Market, DeepStatsVector, MarketExplanation } from "./types";
 import type { LambdaSet } from "./lambdas";
@@ -15,6 +23,8 @@ import {
   type TeamFormSignal,
   type TeamInjuryContext,
   type MarketVolatilityContext,
+  type SourceTrustSignal,
+  type MatchConfidence,
 } from "./selector";
 import { getStandings } from "../footballData";
 
@@ -151,6 +161,7 @@ function buildRankingContext(fx: FixtureLite, enrichment?: EnrichmentOutcome | n
     injury:     homeInjuries || awayInjuries ? { home: homeInjuries, away: awayInjuries } : null,
     marketVolatility: volatility,
     weather:    null,   // no real weather source integrated — stays null (weight redistributed)
+    sourceTrust: sourceTrustSignal(enrichment),   // feeds the match-level confidence gate
   };
 }
 // ─────────────────────────────────────────────────────────────────────────────
@@ -249,6 +260,56 @@ const NOT_INTEGRATED: Partial<Record<SourceId, string>> = {
   FootyStats:     "FootyStats via sportsdata-mcp not available in this repo yet",
   WhoScored:      "WhoScored via sportsdata-mcp not available in this repo yet",
 };
+
+/**
+ * Match-confidence gate — source-priority tiers for the selector's match-level
+ * confidence score:
+ *
+ *   1.0  PRIMARY   — ESPN / SportScore, the tier-1 live integrations.
+ *   0.7  FALLBACK  — every other real source deeper down SOURCE_PRIORITY
+ *                    (OpenLigaDB, Premier League Official, Serie A Official,
+ *                    TheSportsDB, API-Football, …).
+ *   0.3  BACKFILL  — no real source contributed; the league-prior model is
+ *                    the only evidence base.
+ */
+const SOURCE_TRUST: Record<SourceId, number> = {
+  ESPN:                  1.0,
+  SportScore:            1.0,
+  OpenLigaDB:            0.7,
+  PremierLeagueOfficial: 0.7,
+  SerieAOfficial:        0.7,
+  TheSportsDB:           0.7,
+  ApiFootball:           0.7,
+  // Registered-but-not-integrated ids — fallback tier once wired up.
+  StatsBomb:             0.7,
+  LaLigaOfficial:        0.7,
+  FBref:                 0.7,
+  FootyStats:            0.7,
+  WhoScored:             0.7,
+};
+
+/** Source-priority score applied when NO real source contributed (backfill). */
+const BACKFILL_SOURCE_SCORE = 0.3;
+
+/**
+ * Build the selector's source-priority signal from the aggregation outcome.
+ */
+function sourceTrustSignal(enrichment?: EnrichmentOutcome | null): SourceTrustSignal {
+  if (!enrichment) {
+    return {
+      primarySource: null,
+      trust: BACKFILL_SOURCE_SCORE,
+      detail: "backfill — no real source contributed, league-prior model only",
+    };
+  }
+  const primary = enrichment.primarySource;
+  const tier1 = primary === "ESPN" || primary === "SportScore";
+  return {
+    primarySource: primary,
+    trust: SOURCE_TRUST[primary] ?? 0.7,
+    detail: tier1 ? `${primary} — primary source` : `${primary} — fallback source`,
+  };
+}
 
 /** League → covering sources (unordered; always re-sorted by SOURCE_PRIORITY).
  *  Sources that do not cover a league are skipped for it. Leagues absent from
@@ -1452,11 +1513,23 @@ function enrichmentCompleteness(enrichment?: EnrichmentOutcome | null): number {
 }
 
 // ─── Main oracle ─────────────────────────────────────────────────────────────────
+
+/**
+ * Oracle result — the shared EngineResult plus the match-level confidence-gate
+ * verdict. Declared here (not in types.ts) so the gate stays scoped to the
+ * oracle pipeline; the field flows straight through to API JSON responses so
+ * the UI can warn on low-confidence matches.
+ */
+export interface OracleEngineResult extends EngineResult {
+  /** Match-level confidence verdict (score, components, gate action). */
+  confidence: MatchConfidence;
+}
+
 export function runOracle(
   fixture: FixtureLite,
   tables?: TableContext,
   enrichment?: EnrichmentOutcome | null,
-): EngineResult {
+): OracleEngineResult {
   _mktIdx = 0;
   const prior = getPrior(fixture.leagueSlug);
   const isPost = fixture.state === "post";
@@ -1862,11 +1935,30 @@ export function runOracle(
       (enrichment?.data.leagueTablePositionAway != null
         ? { position: enrichment.data.leagueTablePositionAway } : undefined),
     context:   buildRankingContext(fixture, enrichment),
+    // Match-level confidence gate: ≥75 → full Top-10; 50–74 → full Top-10
+    // flagged confidenceLevel "medium" in the response; <50 → low confidence,
+    // only the Top 3 picks returned (picksTrimmed) — stake exposure only
+    // where the data genuinely backs the ranking.
+    confidenceGate: { enabled: true },
   });
   const top1  = selection.top1;
   const top3  = selection.top3;
   const top5  = selection.top5;
   const top10 = selection.top10;
+
+  // Per-match monitoring — the confidence score, its band and what the gate
+  // decided. Low-confidence matches stand out in the logs so the gate's
+  // impact on hit-rate consistency can be tracked over time. (The selector
+  // already emitted the canonical [ConfidenceGate] score line for this match;
+  // this one records the response actually returned by the oracle.)
+  {
+    const c = selection.confidence;
+    console.log(
+      `[ConfidenceGate] ${fixture.home.name} vs ${fixture.away.name} → response: ${c.confidenceScore}% ${c.confidenceLevel}` +
+      ` | picks: ${c.picksReturned}${c.picksTrimmed ? " (trimmed from 10)" : ""}` +
+      ` | source: ${c.source ?? "backfill"}${c.gateAction === "skipped" ? " | match skipped" : ""}`,
+    );
+  }
   const safeMode = qualified.filter((m) => m.hitRate >= 0.80 && m.disagreementIndex < 0.08);
   const ultraSafe = qualified.filter((m) => m.hitRate >= 0.88 && m.ciLower >= 0.82);
 
@@ -1927,6 +2019,15 @@ export function runOracle(
     },
   };
 
+  // Confidence-gate verdict for the calibration notes (all three bands).
+  const gate = selection.confidence;
+  const confidenceNote =
+    gate.confidenceLevel === "high"
+      ? `Confidence gate: ${gate.confidenceScore}% — HIGH (≥75) — full Top ${gate.picksReturned} returned · factors ${gate.factorsAvailable}/10 · calibration avg ${(gate.calibrationAvg * 100).toFixed(1)}% · source ${gate.source ?? "backfill"}`
+      : gate.confidenceLevel === "medium"
+        ? `Confidence gate: ${gate.confidenceScore}% — MEDIUM (50–74) — full Top ${gate.picksReturned} returned with confidence warning · factors ${gate.factorsAvailable}/10 · calibration avg ${(gate.calibrationAvg * 100).toFixed(1)}% · source ${gate.source ?? "backfill"} (${gate.reasons.join(" · ")})`
+        : `CONFIDENCE GATE: ${gate.confidenceScore}% — LOW (<50) — low-confidence match${gate.picksTrimmed ? `, returning Top ${gate.picksReturned} picks only (picksTrimmed)` : ""} (${gate.reasons.join(" · ")})`;
+
   const calibrationNotes: string[] = [
     `xG model: Poisson with league prior μ=${prior.avgGoals.toFixed(2)}, home boost +${(homeBoost*100).toFixed(0)}%`,
     `${markets.length} markets generated across 18 families`,
@@ -1946,6 +2047,7 @@ export function runOracle(
       : []),
     `De-vigged implied probs: H${Math.round(homeWin*100)}% D${Math.round(draw*100)}% A${Math.round(awayWin*100)}%`,
     `Ranked by 11-factor composite with dynamic weight redistribution — unavailable factors are excluded and remaining weights rescaled to Σ=100% (no neutral stand-ins)`,
+    confidenceNote,
     top1[0]
       ? `Pinned Top-1: ${top1[0].name} · ${top1[0].selection}`
       : (selection.skipped ?? "No Top-1 — match skipped or no eligible market"),
@@ -2028,6 +2130,7 @@ export function runOracle(
     qualifiedMarkets: qualified.length,
     familyCounts,
     calibrationNotes,
+    confidence: selection.confidence,
     generatedAt: new Date().toISOString(),
     hitCount,
     evaluatedCount,
@@ -2075,9 +2178,12 @@ function tableInfoFor(
  *   3. League standings (football-data.org) are resolved for title-race /
  *      relegation stakes on top of the aggregator's table positions.
  *   4. runOracle() ranks every generated market with dynamically
- *      redistributed factor weights (see selector.ts) and fills the Top 10.
+ *      redistributed factor weights (see selector.ts), fills the Top 10,
+ *      and applies the match-level confidence gate — <50% confidence
+ *      matches return only their Top 3 picks, 50–74% return the full
+ *      Top 10 with a "medium" confidence flag.
  */
-export async function runOracleWithStandings(fixture: FixtureLite): Promise<EngineResult | null> {
+export async function runOracleWithStandings(fixture: FixtureLite): Promise<OracleEngineResult | null> {
   // ── Step 1+2: multi-source enrichment with the unplayable guard ──────────
   const enrichment = await fetchExternalMatchData(fixture);
   if (!enrichment) {
