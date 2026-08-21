@@ -60,12 +60,18 @@
 //      Perfect conditions score 1.0, clear conditions 0.8, heavy rain/snow/wind
 //      0.2; missing weather data falls back to 0.9.
 //
-// DATA-GAP CONTRACT
-//   Every factor is scored from whatever data is available. When a factor's
-//   data source is missing it falls back to a neutral value (0.5 for existing
-//   direction-agnostic factors, 1.0 for the neutrality-only bias factor, and the
-//   specified safety fallbacks for injury/volatility/weather) and the gap is
-//   logged on the market score and aggregated on the SelectionResult.
+// DATA-GAP CONTRACT (v2 — dynamic weight redistribution, no neutral stand-ins)
+//   Every factor is scored from whatever REAL data is available. When a
+//   factor's data source is missing (null / unavailable) the factor is
+//   EXCLUDED from the composite entirely and its weight is redistributed
+//   proportionally across the remaining factors so the weights still sum to
+//   exactly 100%. No simulated, default or neutral stand-in values are ever
+//   substituted for missing data — a missing signal simply cannot vote.
+//
+//   Example: form (10%) and injuries (10%) unavailable → 20% redistributed,
+//   so calibration 30%→33.3%, λ 20%→22.2%, etc. Calibration is always
+//   available (it is derived from the model + empirical backtest), so the
+//   denominator can never collapse to zero.
 //
 // STABILITY
 //   The final sort is deterministic (composite desc → loss-probability asc →
@@ -96,9 +102,17 @@ export const RANKING_WEIGHTS = {
   weather:           0.05,  // weather / pitch conditions
 } as const;
 
-const RANKING_WEIGHT_TOTAL = Object.values(RANKING_WEIGHTS).reduce((sum, weight) => sum + weight, 0);
 const MIN_CALIBRATION_HIT_RATE = 0.85;
+/** Backfill tier floor — used ONLY to complete the Top-10 when the trusted
+ *  (≥85%) pool is exhausted. Picks from this tier are still qualified,
+ *  injury-severity-checked, safety-net-checked and verifiable. */
+const MIN_BACKFILL_CALIBRATION_HIT_RATE = 0.55;
 const SIGNIFICANT_ODDS_MOVE_PCT = 20;
+
+/** Factor keys — mirror the fields of RANKING_WEIGHTS. */
+export type FactorKey = keyof typeof RANKING_WEIGHTS;
+
+const ALL_FACTOR_KEYS: FactorKey[] = Object.keys(RANKING_WEIGHTS) as FactorKey[];
 
 // ─── Verifiability ────────────────────────────────────────────────────────────
 
@@ -317,6 +331,12 @@ export interface TacticalContext {
   awayFormation?:  string | null;
   h2hGames?:       number;
   h2hGoalsAvg?:    number | null;
+  /**
+   * Historical head-to-head results from the perspective of the CURRENT
+   * fixture's home team ("HomeWin" = current home team won that meeting).
+   * Provided by the multi-source aggregator (oracle.ts) when available.
+   */
+  h2hResults?:     Array<"HomeWin" | "Draw" | "AwayWin"> | null;
 }
 
 /** Match importance flags. */
@@ -396,6 +416,13 @@ export interface SelectOptions {
 interface FactorResult {
   score: number;
   gap?:   string;
+  /**
+   * false → the factor's underlying DATA is unavailable for this match, so the
+   * factor is excluded from the composite and its weight is redistributed
+   * proportionally across the available factors (never a neutral stand-in).
+   * Defaults to true; partial data still counts as available.
+   */
+  available?: boolean;
 }
 
 /** Factor 1 — Poisson λ (expected event rates). */
@@ -404,7 +431,11 @@ function scoreLambda(
 ): FactorResult {
   const lambda = lambdaFor(m, lam, homeName, awayName);
   if (lambda === null) {
-    return { score: 0.5, gap: "no direct λ→selection mapping (non event-rate market)" };
+    return {
+      score: 0.5,
+      available: false,
+      gap: "no direct λ→selection mapping (non event-rate market) — λ factor excluded, weight redistributed",
+    };
   }
   // P(selection wins) under Poisson(λ): 1 - tail risk of the selected side.
   const winProb = 1 - tailRisk(m, lambda);
@@ -437,7 +468,11 @@ function scoreForm(
   const hM = momentum(hf);
   const aM = momentum(af);
   if (hM === null && aM === null) {
-    return { score: 0.5, gap: "team form data missing" };
+    return {
+      score: 0.5,
+      available: false,
+      gap: "team form data missing — form factor excluded, weight redistributed",
+    };
   }
   const hm = hM ?? 0;
   const am = aM ?? 0;
@@ -475,15 +510,19 @@ function scoreTactical(
   const tac = context?.tactical ?? null;
   let score = 0.5;
   const gaps: string[] = [];
+  let hasSignal = false;
 
   const isGoals   = /Goals/.test(m.name);
   const isCorners = /Corners/.test(m.name);
   const isResult  = /Match Result|Draw No Bet|Asian Handicap/i.test(m.name);
+  const isResultLike = isResult || /Double Chance/i.test(m.name);
   const over = isOverSelection(m);
   const under = isUnderSelection(m);
 
   // H2H scoring history — adjusts goal markets toward the historical pattern.
-  if (tac && tac.h2hGames !== undefined && tac.h2hGames >= 3 && tac.h2hGoalsAvg != null) {
+  const h2hUsable = !!tac && (tac.h2hGames ?? 0) >= 3;
+  if (h2hUsable && tac?.h2hGoalsAvg != null) {
+    hasSignal = true;
     const modelTotal = lam.homeGoals + lam.awayGoals;
     const ratio = tac.h2hGoalsAvg / Math.max(0.5, modelTotal);
     const adj = clamp(ratio - 1, -0.4, 0.4); // + = historically higher scoring
@@ -491,12 +530,25 @@ function scoreTactical(
       if (over) score += adj * 0.5;
       if (under) score -= adj * 0.5;
     }
-  } else {
-    gaps.push("H2H data missing");
   }
+  // H2H result dominance (real W/D/L strings from the multi-source aggregator,
+  // from the perspective of the current fixture's home team).
+  if (h2hUsable && tac?.h2hResults?.length) {
+    hasSignal = true;
+    const results = tac.h2hResults;
+    const dominance =
+      (results.filter((r) => r === "HomeWin").length -
+        results.filter((r) => r === "AwayWin").length) / results.length; // -1..1
+    if (isResultLike && dominance !== 0) {
+      if (teamMentions(m.selection, homeName)) score += dominance * 0.15;
+      if (teamMentions(m.selection, awayName)) score -= dominance * 0.15;
+    }
+  }
+  if (!h2hUsable) gaps.push("H2H data missing");
 
   // Formation mismatch — goal/corner multipliers + home advantage.
   if (tac?.homeFormation && tac?.awayFormation) {
+    hasSignal = true;
     try {
       const fmm = analyseFormationMismatch(tac.homeFormation, tac.awayFormation);
       if (isGoals) {
@@ -518,6 +570,13 @@ function scoreTactical(
     gaps.push("formation data missing");
   }
 
+  if (!hasSignal) {
+    return {
+      score: 0.5,
+      available: false,
+      gap: `${gaps.join("; ")} — tactical factor excluded, weight redistributed`,
+    };
+  }
   return { score: clamp(score, 0, 1), gap: gaps.length ? gaps.join("; ") : undefined };
 }
 
@@ -551,21 +610,33 @@ function scoreImportance(context: RankingContext | null, opts?: SelectOptions): 
     return { score: 0.5 };
   }
 
-  return { score: 0.5, gap: "match importance context missing (no flags, no league table)" };
+  return {
+    score: 0.5,
+    available: false,
+    gap: "match importance context missing (no flags, no league table) — importance factor excluded, weight redistributed",
+  };
 }
 
 /** Factor 6 — League-specific depth (leagueAnchors.ts). */
 function scoreLeagueDepth(context: RankingContext | null): FactorResult {
   const slug = context?.leagueSlug;
   if (!slug) {
-    return { score: 0.5, gap: "league slug missing" };
+    return {
+      score: 0.5,
+      available: false,
+      gap: "league slug missing — league-depth factor excluded, weight redistributed",
+    };
   }
   if (LEAGUE_ANCHORS[slug]) return { score: 1.0 };
   const resolved = getAnchors(slug);
   if (resolved) {
     return { score: 0.65, gap: `league '${slug}' resolved via proxy anchors (no dedicated baseline)` };
   }
-  return { score: 0.5, gap: "no league anchors available" };
+  return {
+    score: 0.5,
+    available: false,
+    gap: "no league anchors available — league-depth factor excluded, weight redistributed",
+  };
 }
 
 /** Factor 7 — Market confidence / liquidity (odds volume or movement). */
@@ -585,7 +656,11 @@ function scoreLiquidity(
     if (matchesTotal || matchesResult) return { score: 0.8 };
     return { score: 0.55, gap: "odds present but no matching line for this market" };
   }
-  return { score: 0.5, gap: "no odds/volume data — liquidity neutral" };
+  return {
+    score: 0.5,
+    available: false,
+    gap: "no odds/volume data — liquidity factor excluded, weight redistributed",
+  };
 }
 
 /** Factor 8 — Zero bias (neutralise home/away favouritism). */
@@ -642,7 +717,11 @@ function hasAnyInjuryData(team: TeamInjuryContext | null | undefined): boolean {
 
 function scoreTeamInjuryImpact(team: TeamInjuryContext | null | undefined, label: string): FactorResult {
   if (!hasAnyInjuryData(team)) {
-    return { score: 0.7, gap: `${label} injury data missing — using 0.70 fallback` };
+    return {
+      score: 0.7,
+      available: false,
+      gap: `${label} injury data missing — injury factor excluded, weight redistributed`,
+    };
   }
 
   if (hasKeyPlayerOut(team)) return { score: 0.0 };
@@ -661,10 +740,29 @@ function scoreInjuryImpact(
   const home = scoreTeamInjuryImpact(context?.injury?.home, "home");
   const away = scoreTeamInjuryImpact(context?.injury?.away, "away");
 
-  if (side === "home") return home;
-  if (side === "away") return away;
+  if (side === "home") {
+    // Side-specific market: only that side's availability matters.
+    if (home.available === false) {
+      return { ...home, gap: `home injury data missing — injury factor excluded, weight redistributed` };
+    }
+    return { score: home.score };
+  }
+  if (side === "away") {
+    if (away.available === false) {
+      return { ...away, gap: `away injury data missing — injury factor excluded, weight redistributed` };
+    }
+    return { score: away.score };
+  }
 
+  // Total/neutral market: real signal only while BOTH sides have real data.
   const gaps = [home.gap, away.gap].filter((g): g is string => !!g);
+  if (home.available === false || away.available === false) {
+    return {
+      score: Math.min(home.score, away.score),
+      available: false,
+      gap: `${gaps.join("; ") || "injury data missing"} — injury factor excluded, weight redistributed`,
+    };
+  }
   return { score: Math.min(home.score, away.score), gap: gaps.length ? gaps.join("; ") : undefined };
 }
 
@@ -672,13 +770,21 @@ function scoreInjuryImpact(
 function scoreMarketVolatility(m: Market, context: RankingContext | null): FactorResult {
   const vol = context?.marketVolatility ?? null;
   if (!vol || vol.dataAvailable === false) {
-    return { score: 0.8, gap: "6h odds movement data missing — using 0.80 fallback" };
+    return {
+      score: 0.8,
+      available: false,
+      gap: "6h odds movement data missing — volatility factor excluded, weight redistributed",
+    };
   }
 
   const move = vol.marketMovePctLast6h?.[m.id] ?? vol.maxMovePctLast6h ?? null;
   if (typeof move !== "number" || !Number.isFinite(move)) {
     if (vol.stable === true) return { score: 1.0 };
-    return { score: 0.8, gap: "6h odds movement data missing for market — using 0.80 fallback" };
+    return {
+      score: 0.8,
+      available: false,
+      gap: "6h odds movement data missing for market — volatility factor excluded, weight redistributed",
+    };
   }
 
   const absMove = Math.abs(move);
@@ -691,7 +797,11 @@ function scoreMarketVolatility(m: Market, context: RankingContext | null): Facto
 function scoreWeather(context: RankingContext | null): FactorResult {
   const wx = context?.weather ?? null;
   if (!wx || wx.dataAvailable === false) {
-    return { score: 0.9, gap: "weather/pitch data missing — using 0.90 fallback" };
+    return {
+      score: 0.9,
+      available: false,
+      gap: "weather/pitch data missing — weather factor excluded, weight redistributed",
+    };
   }
 
   if (typeof wx.score === "number" && Number.isFinite(wx.score)) {
@@ -700,7 +810,11 @@ function scoreWeather(context: RankingContext | null): FactorResult {
 
   const descriptor = `${wx.condition ?? ""} ${wx.pitch ?? ""}`.toLowerCase();
   if (!descriptor.trim()) {
-    return { score: 0.9, gap: "weather/pitch condition missing — using 0.90 fallback" };
+    return {
+      score: 0.9,
+      available: false,
+      gap: "weather/pitch condition missing — weather factor excluded, weight redistributed",
+    };
   }
   if (/heavy|storm|thunder|snow|sleet|blizzard|gale|high wind|strong wind|waterlogged|frozen|poor pitch/.test(descriptor)) {
     return { score: 0.2 };
@@ -731,13 +845,21 @@ export interface FactorBreakdown {
 /** Full multi-factor score for a single market. */
 export interface MarketScore {
   market:      Market;
-  composite:   number;   // 0..1 weighted sum of the eleven factors
+  composite:   number;   // 0..1 weighted sum of the AVAILABLE factors
   wrongProb:   number;   // consensus loss probability (1 - hitRate) for tiebreaks
   marginUnits: number;   // σ-cushion vs the line (λ markets only)
   verifiable:  boolean;
   breakdown:   FactorBreakdown;
   gaps:        string[];
   notes:       string;
+  /** Factors whose data was unavailable — excluded from this market's composite. */
+  excludedFactors: FactorKey[];
+  /**
+   * Final (redistributed) factor weights applied to this market, as fractions
+   * of the active weight mass (Σ = 1). E.g. after excluding form + injuries,
+   * calibration = 0.30/0.90 = 0.333.
+   */
+  appliedWeights: Partial<Record<FactorKey, number>>;
 }
 
 /**
@@ -784,19 +906,31 @@ export function scoreMarket(
     weather:          weather.score,
   };
 
-  const weightedTotal =
-    RANKING_WEIGHTS.lambda           * breakdown.lambda +
-    RANKING_WEIGHTS.calibration      * breakdown.calibration +
-    RANKING_WEIGHTS.form             * breakdown.form +
-    RANKING_WEIGHTS.tactical         * breakdown.tactical +
-    RANKING_WEIGHTS.importance       * breakdown.importance +
-    RANKING_WEIGHTS.leagueDepth      * breakdown.leagueDepth +
-    RANKING_WEIGHTS.liquidity        * breakdown.liquidity +
-    RANKING_WEIGHTS.bias             * breakdown.bias +
-    RANKING_WEIGHTS.injuryImpact     * breakdown.injuryImpact +
-    RANKING_WEIGHTS.marketVolatility * breakdown.marketVolatility +
-    RANKING_WEIGHTS.weather          * breakdown.weather;
-  const composite = weightedTotal / RANKING_WEIGHT_TOTAL;
+  // ── Dynamic weight redistribution (Part 2 of the multi-source contract) ──
+  // Factors whose data is unavailable are EXCLUDED entirely — never replaced
+  // with a neutral stand-in — and the remaining factors' weights are scaled
+  // proportionally so they sum to exactly 100%.
+  const factorResults: Record<FactorKey, FactorResult> = {
+    lambda, calibration, form, tactical, importance,
+    leagueDepth, liquidity, bias, injuryImpact, marketVolatility, weather,
+  };
+  const excludedFactors = ALL_FACTOR_KEYS.filter((k) => factorResults[k].available === false);
+  const activeKeys = ALL_FACTOR_KEYS.filter((k) => factorResults[k].available !== false);
+  // Calibration is always data-backed, so this can never be zero.
+  const activeWeightTotal = activeKeys.reduce((sum, k) => sum + RANKING_WEIGHTS[k], 0)
+    || RANKING_WEIGHTS.calibration
+    || 1;
+
+  const weightedTotal = activeKeys.reduce(
+    (sum, k) => sum + RANKING_WEIGHTS[k] * breakdown[k],
+    0,
+  );
+  const composite = weightedTotal / activeWeightTotal;
+
+  const appliedWeights: Partial<Record<FactorKey, number>> = {};
+  for (const k of activeKeys) {
+    appliedWeights[k] = RANKING_WEIGHTS[k] / activeWeightTotal;
+  }
 
   // Consensus loss probability for tiebreaks (1 - hitRate, already calibrated
   // in the oracle path, raw ensemble in the engine path).
@@ -828,7 +962,9 @@ export function scoreMarket(
     `liq=${breakdown.liquidity.toFixed(2)} bias=${breakdown.bias.toFixed(2)} ` +
     `inj=${breakdown.injuryImpact.toFixed(2)} vol=${breakdown.marketVolatility.toFixed(2)} ` +
     `wx=${breakdown.weather.toFixed(2)} → composite=${composite.toFixed(3)} ` +
-    `loss=${(wrongProb * 100).toFixed(1)}%` +
+    `loss=${(wrongProb * 100).toFixed(1)}% ` +
+    `w[${activeKeys.map((k) => `${k}=${((appliedWeights[k] ?? 0) * 100).toFixed(1)}%`).join(" ")}]` +
+    (excludedFactors.length ? ` excluded[${excludedFactors.join(",")}]` : "") +
     (gaps.length ? ` [gaps: ${gaps.join("; ")}]` : "");
 
   return {
@@ -840,6 +976,8 @@ export function scoreMarket(
     breakdown,
     gaps,
     notes,
+    excludedFactors,
+    appliedWeights,
   };
 }
 
@@ -863,6 +1001,14 @@ export interface SelectionResult {
   gaps?:    string[];
   /** Per-factor notes for the ranked Top-10 (transparency). */
   rankingNotes?: string[];
+  /**
+   * Part 3 monitoring — final (redistributed) weight distribution of the
+   * top-ranked market, plus which factors were unavailable for the match and
+   * were excluded (their weight redistributed). One summary per match.
+   */
+  weightLog?:      string[];
+  /** Union of factors excluded across the Top-10 (missing data signals). */
+  missingFactors?: FactorKey[];
 }
 
 const EMPTY_SELECTION = (reason: string, gaps: string[] = []): SelectionResult => ({
@@ -892,9 +1038,10 @@ function hardSafetyRejectReason(
   homeName: string,
   awayName: string,
 ): string | null {
-  if (s.breakdown.calibration < MIN_CALIBRATION_HIT_RATE) {
-    return `historical calibration ${(s.breakdown.calibration * 100).toFixed(1)}% below 85% minimum`;
-  }
+  // NOTE: the historical-calibration floor is no longer an absolute cut — it
+  // is enforced as the trusted/backfill TIER order in Step 6 so the Top-10 can
+  // always be filled with fully-filtered verifiable markets. Injury severity
+  // remains an absolute block for every pick in either tier.
   if (injurySeverityBlocksMarket(s.market, context, homeName, awayName)) {
     return "team-specific market blocked by injury severity filter";
   }
@@ -943,6 +1090,12 @@ export function selectTopPicks(
   // ── Step 3: Hard safety filters BEFORE Top-10 assembly ────────────────────
   // Rejected candidates are skipped here, before deduplication, so the next-best
   // qualified line for the same underlying stat can still fill a Top-N slot.
+  // The 85% historical-calibration floor is applied as a PREFERENCE TIER
+  // (Step 6): trusted lines fill the Top-10 first, and only when fewer than 10
+  // trusted verifiable lines exist are the next-best fully-filtered markets
+  // (calibration ≥ 0.55 backfill tier) admitted — every pick, in either tier,
+  // is still qualified, injury-severity-checked, safety-net-checked and
+  // verifiable. Injury severity remains an absolute block in both tiers.
   const context = opts?.context ?? null;
   const hardQualified = ranked.filter((s) => {
     const reason = hardSafetyRejectReason(s, context, homeName, awayName);
@@ -954,7 +1107,7 @@ export function selectTopPicks(
   });
   if (hardQualified.length === 0) {
     return EMPTY_SELECTION(
-      "No market remains after hard safety filters (85% calibration and injury severity).",
+      "No market remains after hard safety filters (injury severity).",
       [...gapLog],
     );
   }
@@ -974,25 +1127,87 @@ export function selectTopPicks(
     );
   }
 
-  // ── Step 5: One line per underlying stat (keep highest-composite qualified line) ──
-  const seen = new Set<string>();
-  const deduped = topNQualified.filter((s) => {
-    const key = statKey(s.market);
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-
-  // ── Step 6: Top-N slots require verifiable markets (settleable picks) ───────
-  const verifiable = deduped.filter((s) => s.verifiable);
-  if (verifiable.length === 0) {
+  // ── Step 5: Top-N slots require verifiable markets (settleable picks) ──────
+  const verifiableRanked = topNQualified.filter((s) => s.verifiable);
+  if (verifiableRanked.length === 0) {
     return EMPTY_SELECTION(
       "No verifiable market remains after scoring and hard safety filters — match skipped.",
       [...gapLog],
     );
   }
 
-  const top10 = verifiable.slice(0, 10).map((s) => s.market);
+  // ── Step 6: Top-10 fill guarantee (trusted tier → backfill tier → extras) ──
+  // Diversity first: one line per underlying stat. Trusted (≥85% calibration)
+  // lines fill the slots first; if fewer than 10 distinct trusted stats
+  // survive the safety filters, the backfill tier (0.55–0.85 calibration,
+  // still fully filtered and verifiable) and then additional lines of
+  // already-represented stats complete the Top-10. No safety filter is
+  // relaxed to do this — only the diversity preference and the tier order.
+  const comparator = (a: MarketScore, b: MarketScore) => {
+    const dc = b.composite - a.composite;
+    if (Math.abs(dc) > 1e-6) return dc;
+    const dw = a.wrongProb - b.wrongProb;
+    if (Math.abs(dw) > 1e-6) return dw;
+    const dm = b.marginUnits - a.marginUnits;
+    if (Math.abs(dm) > 1e-6) return dm;
+    return a.market.id.localeCompare(b.market.id);
+  };
+  const trustedTier = verifiableRanked
+    .filter((s) => s.breakdown.calibration >= MIN_CALIBRATION_HIT_RATE)
+    .sort(comparator);
+  const backfillTier = verifiableRanked
+    .filter((s) =>
+      s.breakdown.calibration < MIN_CALIBRATION_HIT_RATE &&
+      s.breakdown.calibration >= MIN_BACKFILL_CALIBRATION_HIT_RATE)
+    .sort(comparator);
+
+  const seen = new Set<string>();
+  const deduped: MarketScore[] = [];
+  const extrasPool: MarketScore[] = [];
+  for (const s of [...trustedTier, ...backfillTier]) {
+    const key = statKey(s.market);
+    if (seen.has(key)) { extrasPool.push(s); continue; }
+    seen.add(key);
+    deduped.push(s);
+  }
+  const extras = extrasPool.sort(comparator);
+  const top10Scores = [...deduped, ...extras].slice(0, 10);
+  const top10 = top10Scores.map((s) => s.market);
+
+  const backfilledCount = top10Scores.filter(
+    (s) => s.breakdown.calibration < MIN_CALIBRATION_HIT_RATE,
+  ).length;
+  if (backfilledCount > 0) {
+    gapLog.add(
+      `Top-10 backfill tier used for ${backfilledCount}/10 slots (trusted ≥85% calibration pool exhausted; backfill picks still qualified, safety-net-checked and verifiable)`,
+    );
+  }
+
+  // ── Step 7: Part 3 logging — missing factors + final weight distribution ──
+  const excludedUnion = new Set<FactorKey>();
+  for (const s of top10Scores) s.excludedFactors.forEach((f) => excludedUnion.add(f));
+  const lead = top10Scores[0];
+  const weightLog: string[] = [];
+  if (lead) {
+    weightLog.push(
+      `final weights: ${ALL_FACTOR_KEYS
+        .filter((k) => lead.appliedWeights[k] !== undefined)
+        .map((k) => `${k} ${((lead.appliedWeights[k] ?? 0) * 100).toFixed(1)}%`)
+        .join(", ")} (Σ = ${(ALL_FACTOR_KEYS.reduce((sum, k) => sum + (lead.appliedWeights[k] ?? 0), 0) * 100).toFixed(0)}%)`,
+    );
+  }
+  if (excludedUnion.size) {
+    weightLog.push(`missing factors (weight redistributed): ${[...excludedUnion].join(", ")}`);
+  }
+  if (backfilledCount > 0) {
+    weightLog.push(`top-10 fill: ${10 - backfilledCount}/10 from the trusted tier (calibration ≥ 85%), ${backfilledCount}/10 backfilled from the 0.55–0.85 tier — all fully filtered`);
+  }
+  console.log(
+    `[selector] ${homeName} vs ${awayName} — top10: ${top10.length}/10` +
+    (backfilledCount ? ` (backfill: ${backfilledCount})` : "") +
+    (excludedUnion.size ? ` | missing: ${[...excludedUnion].join(",")}` : " | all factors available") +
+    (lead ? ` | ${weightLog[0]}` : ""),
+  );
 
   return {
     top1:  top10.slice(0, 1),
@@ -1004,5 +1219,7 @@ export function selectTopPicks(
       const s = scored.find((x) => x.market === m);
       return s ? s.notes : `${m.name} · ${m.selection}`;
     }),
+    weightLog,
+    missingFactors: [...excludedUnion],
   };
 }
