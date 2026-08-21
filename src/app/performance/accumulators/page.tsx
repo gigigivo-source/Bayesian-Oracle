@@ -22,6 +22,12 @@ import {
   type BetResult,
   type SortDir,
 } from "@/app/_components/perf/ui";
+import { LEAGUE_MAP } from "@/lib/leagues";
+
+function competitionNameFor(slug: string | undefined | null): string | null {
+  if (!slug) return null;
+  return LEAGUE_MAP[slug]?.name ?? slug;
+}
 
 interface AccaLeg {
   matchLabel?: string;
@@ -425,6 +431,11 @@ function AccaContent({ slips, onRefresh }: { slips: Slip[]; onRefresh: () => voi
                                     <span className={cn("h-2 w-2 shrink-0 rounded-full", dotCls)} />
                                     <span className="text-[10px] font-mono text-slate-500">{i + 1}.</span>
                                     <span className="min-w-0 flex-1 truncate text-slate-200">{leg.matchLabel ?? "—"}</span>
+                                    {competitionNameFor(leg.league) ? (
+                                      <span className="hidden shrink-0 max-w-[120px] truncate rounded bg-white/5 px-1.5 py-0.5 font-mono text-[10px] text-cyan-300/80 md:block">
+                                        {competitionNameFor(leg.league)}
+                                      </span>
+                                    ) : null}
                                     <span className="hidden shrink-0 truncate text-slate-400 sm:block max-w-[120px]">{leg.marketName}</span>
                                     <span className="shrink-0 rounded bg-emerald-500/10 px-1.5 py-0.5 font-mono text-[10px] text-emerald-300">
                                       {leg.selection}

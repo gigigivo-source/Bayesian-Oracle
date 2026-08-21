@@ -93,23 +93,25 @@ export type NewPrediction  = typeof predictions.$inferInsert;
 // ─── Performance Log ──────────────────────────────────────────────────────────
 // Records every post-match Top-10 verification result.
 export const performanceLog = pgTable("performance_log", {
-  id:          serial("id").primaryKey(),
-  eventId:     text("event_id").notNull(),
-  matchLabel:  text("match_label").notNull(),
-  homeTeam:    text("home_team").notNull(),
-  awayTeam:    text("away_team").notNull(),
-  league:      text("league").notNull(),
-  leagueSlug:  text("league_slug"),
-  matchDate:   text("match_date").notNull(),
-  homeScore:   integer("home_score").notNull(),
-  awayScore:   integer("away_score").notNull(),
-  totalPicks:  integer("total_picks").notNull(),
-  hits:        integer("hits").notNull(),
-  misses:      integer("misses").notNull(),
-  pending:     integer("pending").notNull(),
-  accuracy:    real("accuracy").notNull(),           // hits / (hits+misses)
-  top10Detail: jsonb("top10_detail").notNull(),      // full top10 with outcomes
-  createdAt:   timestamp("created_at").defaultNow().notNull(),
+  id:              serial("id").primaryKey(),
+  eventId:         text("event_id").notNull(),
+  matchLabel:      text("match_label").notNull(),
+  homeTeam:        text("home_team").notNull(),
+  awayTeam:        text("away_team").notNull(),
+  league:          text("league").notNull(),
+  leagueSlug:      text("league_slug"),
+  competitionName: text("competition_name"),         // human-readable, e.g. "Premier League"
+  matchDate:       text("match_date").notNull(),
+  homeScore:       integer("home_score").notNull(),
+  awayScore:       integer("away_score").notNull(),
+  totalPicks:      integer("total_picks").notNull(),
+  hits:            integer("hits").notNull(),
+  misses:          integer("misses").notNull(),
+  pending:         integer("pending").notNull(),
+  accuracy:        real("accuracy").notNull(),       // hits / (hits+misses)
+  top10Detail:     jsonb("top10_detail").notNull(),  // full top10 with outcomes
+  lowConfidence:   boolean("low_confidence").notNull().default(false), // confidence gate flag
+  createdAt:       timestamp("created_at").defaultNow().notNull(),
 });
 
 export type PerformanceRow = typeof performanceLog.$inferSelect;
@@ -145,6 +147,7 @@ export const valueBetLog = pgTable("value_bet_log", {
   id:              serial("id").primaryKey(),
   eventId:         text("event_id").notNull(),
   leagueSlug:      text("league_slug").notNull(),
+  competitionName: text("competition_name"),     // human-readable, e.g. "La Liga"
   match:           text("match").notNull(),
   matchDate:       text("match_date").notNull(),
   marketName:      text("market_name").notNull(),
@@ -158,19 +161,22 @@ export const valueBetLog = pgTable("value_bet_log", {
   outcome:         text("outcome").notNull().default("pending"), // pending | won | lost | void
   actualReturn:    real("actual_return"),
   pnl:             real("pnl"),
+  lowConfidence:   boolean("low_confidence").notNull().default(false), // confidence gate flag
   createdAt:       timestamp("created_at").defaultNow().notNull(),
 });
 
 export const savedSlips = pgTable("saved_slips", {
-  id:           serial("id").primaryKey(),
-  name:         text("name").notNull(),
-  slipType:     text("slip_type").notNull(),  // highhit | value
-  picks:        jsonb("picks").notNull(),
-  combinedOdds: real("combined_odds").notNull(),
-  combinedProb: real("combined_prob").notNull(),
-  stake:        real("stake"),
-  status:       text("status").notNull(),     // pending | won | lost
-  createdAt:    timestamp("created_at").defaultNow().notNull(),
+  id:              serial("id").primaryKey(),
+  name:            text("name").notNull(),
+  slipType:        text("slip_type").notNull(),  // highhit | value
+  leagueSlug:      text("league_slug"),
+  competitionName: text("competition_name"),     // human-readable, e.g. "Champions League"
+  picks:           jsonb("picks").notNull(),
+  combinedOdds:    real("combined_odds").notNull(),
+  combinedProb:    real("combined_prob").notNull(),
+  stake:           real("stake"),
+  status:          text("status").notNull(),     // pending | won | lost
+  createdAt:       timestamp("created_at").defaultNow().notNull(),
 });
 
 // ─── Settlement performance ──────────────────────────────────────────────────

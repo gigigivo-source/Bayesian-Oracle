@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { PerformanceShell } from "@/app/_components/perf/PerformanceShell";
 import { PnLTrendChart, Sparkline, type TrendPoint } from "@/app/_components/perf/charts";
 import { AccuracyBreakdown, type FactorStat } from "@/app/_components/perf/AccuracyBreakdown";
+import { LEAGUE_MAP } from "@/lib/leagues";
 import {
   classifyOutcome,
   cn,
@@ -85,6 +86,12 @@ function dateKey(b: ValueBet): string {
   return (b.matchDate || b.createdAt || "").slice(0, 10);
 }
 
+/** Human-readable competition name for a stored league slug. */
+function competitionNameFor(slug: string | undefined | null): string {
+  if (!slug) return "Unknown";
+  return LEAGUE_MAP[slug]?.name ?? slug;
+}
+
 export default function ValueBetsPerformancePage() {
   const [data, setData] = useState<ValueBetsResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -138,12 +145,28 @@ export default function ValueBetsPerformancePage() {
 function ValueBetsContent({ bets, stats }: { bets: ValueBet[]; stats: VbStats }) {
   const [sortKey, setSortKey] = useState<"date" | "odds" | "pnl" | "ev">("date");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
+  const [leagueFilter, setLeagueFilter] = useState<string>("all");
 
-  const settled = useMemo(() => bets.filter((b) => b.outcome === "won" || b.outcome === "lost"), [bets]);
-  const won = bets.filter((b) => b.outcome === "won");
-  const lost = bets.filter((b) => b.outcome === "lost");
-  const voids = bets.filter((b) => b.outcome === "void");
-  const pending = bets.filter((b) => b.outcome === "pending");
+  // Competitions present in the data (slug → name), sorted alphabetically.
+  const leagueOptions = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const b of bets) {
+      const slug = b.league ?? "unknown";
+      if (!map.has(slug)) map.set(slug, competitionNameFor(slug));
+    }
+    return [...map.entries()].sort((a, b) => a[1].localeCompare(b[1]));
+  }, [bets]);
+
+  const visibleBets = useMemo(
+    () => (leagueFilter === "all" ? bets : bets.filter((b) => (b.league ?? "unknown") === leagueFilter)),
+    [bets, leagueFilter],
+  );
+
+  const settled = useMemo(() => visibleBets.filter((b) => b.outcome === "won" || b.outcome === "lost"), [visibleBets]);
+  const won = visibleBets.filter((b) => b.outcome === "won");
+  const lost = visibleBets.filter((b) => b.outcome === "lost");
+  const voids = visibleBets.filter((b) => b.outcome === "void");
+  const pending = visibleBets.filter((b) => b.outcome === "pending");
   const voidCount = voids.length;
 
   const hitRate = settled.length > 0 ? (won.length / settled.length) : 0;
@@ -155,11 +178,11 @@ function ValueBetsContent({ bets, stats }: { bets: ValueBet[]; stats: VbStats })
     return totalStake > 0 ? weighted / totalStake : 0;
   }, [settled]);
 
-  // Average EV (per $1) across all bets
+  // Average EV (per $1) across all visible bets
   const avgEv = useMemo(() => {
-    if (bets.length === 0) return 0;
-    return bets.reduce((s, b) => s + evPerUnit(b), 0) / bets.length;
-  }, [bets]);
+    if (visibleBets.length === 0) return 0;
+    return visibleBets.reduce((s, b) => s + evPerUnit(b), 0) / visibleBets.length;
+  }, [visibleBets]);
 
   // Current streak over settled bets ordered by date (newest first)
   const streak = useMemo(() => {
@@ -209,7 +232,7 @@ function ValueBetsContent({ bets, stats }: { bets: ValueBet[]; stats: VbStats })
   }, [settled]);
 
   const sortedBets = useMemo(() => {
-    const arr = [...bets];
+    const arr = [...visibleBets];
     arr.sort((a, b) => {
       let cmp = 0;
       if (sortKey === "date") cmp = dateKey(a).localeCompare(dateKey(b));
@@ -219,7 +242,7 @@ function ValueBetsContent({ bets, stats }: { bets: ValueBet[]; stats: VbStats })
       return sortDir === "asc" ? cmp : -cmp;
     });
     return arr;
-  }, [bets, sortKey, sortDir]);
+  }, [visibleBets, sortKey, sortDir]);
 
   const toggleSort = (key: "date" | "odds" | "pnl" | "ev") => {
     if (sortKey === key) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
@@ -322,12 +345,27 @@ function ValueBetsContent({ bets, stats }: { bets: ValueBet[]; stats: VbStats })
       <Section
         title="Detailed Performance Table"
         subtitle={`${sortedBets.length} bets · sorted by ${sortKey} (${sortDir})`}
+        right={
+          <select
+            value={leagueFilter}
+            onChange={(e) => setLeagueFilter(e.target.value)}
+            className="rounded-lg border border-white/10 bg-black/50 px-3 py-1.5 text-xs text-slate-200 focus:border-amber-400/50 focus:outline-none"
+          >
+            <option value="all">All competitions ({bets.length})</option>
+            {leagueOptions.map(([slug, name]) => (
+              <option key={slug} value={slug}>
+                {name} ({bets.filter((b) => (b.league ?? "unknown") === slug).length})
+              </option>
+            ))}
+          </select>
+        }
       >
         <div className="overflow-x-auto rounded-xl border border-white/10 bg-black/50">
           <table className="w-full text-left text-sm">
             <thead className="border-b border-white/10 bg-black/40">
               <tr>
                 <SortHeader label="Date" active={sortKey === "date"} dir={sortDir} onClick={() => toggleSort("date")} />
+                <th className="px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-400">Competition</th>
                 <th className="px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-400">Match / Market</th>
                 <th className="px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-400">Selection</th>
                 <SortHeader label="Odds" active={sortKey === "odds"} dir={sortDir} onClick={() => toggleSort("odds")} align="right" />
@@ -351,6 +389,10 @@ function ValueBetsContent({ bets, stats }: { bets: ValueBet[]; stats: VbStats })
                 return (
                   <tr key={b.id} className={cn("border-l-2 transition hover:bg-white/[0.02]", rowTint)}>
                     <td className="whitespace-nowrap px-3 py-2 font-mono text-[11px] text-slate-400">{dateKey(b)}</td>
+                    <td className="max-w-[140px] truncate px-3 py-2">
+                      <div className="truncate text-[11px] font-semibold text-slate-200">{competitionNameFor(b.league)}</div>
+                      <div className="truncate font-mono text-[10px] text-slate-500">{b.league}</div>
+                    </td>
                     <td className="px-3 py-2">
                       <div className="max-w-[180px] truncate font-medium text-slate-100">{b.match}</div>
                       <div className="max-w-[180px] truncate text-[11px] text-slate-400">
