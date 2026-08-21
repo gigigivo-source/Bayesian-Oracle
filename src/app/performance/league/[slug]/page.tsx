@@ -10,6 +10,7 @@ import { useParams, useSearchParams } from "next/navigation";
 import { PerformanceShell } from "@/app/_components/perf/PerformanceShell";
 import { PnLTrendChart, type TrendPoint as ChartPoint } from "@/app/_components/perf/charts";
 import { ErrorState, LoadingState, Section, cn } from "@/app/_components/perf/ui";
+import { OUTLINE_CYAN } from "@/app/_components/design";
 import {
   FactorAccuracyTable,
   LeagueBetsTable,
@@ -74,7 +75,7 @@ function LeaguePageInner() {
       <div className="flex flex-wrap items-center gap-2">
         <Link
           href="/performance"
-          className="rounded-lg border border-white/15 bg-white/[0.03] px-3 py-1.5 text-xs font-semibold text-slate-300 transition hover:bg-white/10"
+          className={cn(OUTLINE_CYAN, "px-3 py-1.5 text-xs")}
         >
           ← All leagues
         </Link>

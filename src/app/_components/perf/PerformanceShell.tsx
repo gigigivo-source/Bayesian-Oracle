@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type { ReactNode } from "react";
 import { cn } from "./ui";
+import { NAV_PILL, NAV_PILL_OFF, NAV_PILL_ON_VIOLET, OUTLINE_CYAN } from "../design";
 
 const NAV = [
   { href: "/performance", label: "Leagues", short: "Leagues" },
@@ -27,7 +28,7 @@ export function PerformanceShell({
       <header className="sticky top-0 z-40 border-b border-white/5 bg-black/60 shadow-lg backdrop-blur-sm">
         <div className="mx-auto max-w-7xl px-4 py-3">
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <Link href="/" className="flex items-center gap-3 transition hover:opacity-90">
+            <Link href="/" className="flex cursor-pointer select-none items-center gap-3 transition-all duration-200 hover:scale-[1.02] hover:opacity-90 active:scale-95">
               <div className="flex h-9 w-9 items-center justify-center rounded-lg border border-amber-400/30 bg-amber-400/20">
                 <span className="text-xl">⚽</span>
               </div>
@@ -39,8 +40,8 @@ export function PerformanceShell({
               </div>
             </Link>
             <div className="flex items-center gap-2">
-              {/* Sub-page nav */}
-              <nav className="flex gap-1 rounded-lg border border-white/10 bg-white/[0.03] p-1">
+              {/* Sub-page nav — TYPE 1 glass-tech pills (violet/fuchsia section accent) */}
+              <nav className="flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.03] p-1.5 shadow-inner shadow-black/20 backdrop-blur-md">
                 {NAV.map((n) => {
                   const active =
                     n.href === "/performance"
@@ -51,10 +52,9 @@ export function PerformanceShell({
                       key={n.href}
                       href={n.href}
                       className={cn(
-                        "rounded-md px-3 py-1.5 text-xs font-medium transition",
-                        active
-                          ? "bg-amber-400 font-bold text-slate-950"
-                          : "text-slate-300 hover:bg-white/5",
+                        NAV_PILL,
+                        "px-3 py-1.5 text-xs font-medium",
+                        active ? NAV_PILL_ON_VIOLET : NAV_PILL_OFF,
                       )}
                     >
                       <span className="hidden sm:inline">{n.label}</span>
@@ -63,10 +63,7 @@ export function PerformanceShell({
                   );
                 })}
               </nav>
-              <Link
-                href="/"
-                className="rounded-lg border border-white/15 bg-white/[0.03] px-3 py-1.5 text-xs font-semibold text-slate-300 transition hover:bg-white/10"
-              >
+              <Link href="/" className={cn(OUTLINE_CYAN, "px-3 py-1.5 text-xs")}>
                 ← App
               </Link>
             </div>

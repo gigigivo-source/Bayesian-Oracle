@@ -5,6 +5,7 @@ import type { EngineResult, Market, DeepStatsVector } from "@/lib/engine/types";
 import type { FixtureLite, MatchSummary, TeamForm } from "@/lib/espn";
 import { ConfidenceBar, GradeBadge, MarketTable, Section, TeamBadge } from "./ui";
 import { EventIcon, OutcomeBadge } from "./Icons";
+import { CHIP, CHIP_OFF, CHIP_ON_AMBER, CHIP_ON_EMERALD, CHIP_ON_ROSE, OUTLINE_NEUTRAL } from "./design";
 
 function getActualStat(
   marketName: string,
@@ -124,7 +125,7 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
           </div>
           <button
             onClick={onClose}
-            className="rounded-md border border-white/15 bg-white/10 px-4 py-1.5 text-sm font-medium text-slate-100 hover:bg-white/20"
+            className={`${OUTLINE_NEUTRAL} px-4 py-1.5 text-sm`}
           >
             ✕ Close
           </button>
@@ -170,7 +171,7 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
                 <button
                   key={s.id}
                   onClick={() => scrollToSection(s.id)}
-                  className="rounded-full bg-white/5 border border-white/15 px-3 py-1 text-slate-300 hover:bg-amber-400 hover:text-slate-950 font-medium transition"
+                  className={`${CHIP} ${CHIP_OFF} px-3 py-1 text-xs font-medium hover:text-amber-200`}
                 >
                   {s.label}
                 </button>
@@ -178,7 +179,7 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
               {fixture.state === "pre" && (
                 <button
                   onClick={() => scrollToSection("sec-value")}
-                  className="rounded-full bg-emerald-500/20 border border-emerald-500/40 px-3 py-1 text-emerald-300 hover:bg-emerald-400 hover:text-slate-950 font-medium transition"
+                  className={`${CHIP} ${CHIP_ON_EMERALD} px-3 py-1 text-xs`}
                 >
                   Value Bets
                 </button>
@@ -186,7 +187,7 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
               {fixture.state === "in" && (
                 <button
                   onClick={() => scrollToSection("sec-live-centre")}
-                  className="rounded-full bg-rose-500/30 border-2 border-rose-400/60 px-3 py-1 text-rose-300 hover:bg-rose-400 hover:text-slate-950 font-bold transition animate-pulse"
+                  className={`${CHIP} ${CHIP_ON_ROSE} animate-pulse px-3 py-1 text-xs`}
                 >
                   Live Match Centre
                 </button>
@@ -194,7 +195,7 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
               {(fixture.state === "post" || (fixture.home.score !== null && fixture.away.score !== null && fixture.state !== "pre")) && (
                 <button
                   onClick={() => scrollToSection("sec-verified")}
-                  className="rounded-full bg-emerald-500/30 border-2 border-emerald-400/60 px-3 py-1 text-emerald-300 hover:bg-emerald-400 hover:text-slate-950 font-bold transition animate-pulse"
+                  className={`${CHIP} ${CHIP_ON_EMERALD} animate-pulse px-3 py-1 text-xs`}
                 >
                   Post-Match Verification
                 </button>
@@ -532,7 +533,7 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
               right={
                 <button
                   onClick={() => setShowJson((s) => !s)}
-                  className="rounded-md border border-white/15 bg-white/10 px-2.5 py-1 text-xs text-slate-200 hover:bg-white/20 font-mono"
+                  className={`${OUTLINE_NEUTRAL} px-2.5 py-1 text-xs font-mono`}
                 >
                   {showJson ? "Hide JSON" : "JSON Export"}
                 </button>
@@ -543,10 +544,8 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
                 <span className="text-amber-300 font-bold mr-1">FAMILIES:</span>
                 <button
                   onClick={() => setFamilyFilter("ALL")}
-                  className={`rounded-full px-3 py-1 font-medium transition border ${
-                    familyFilter === "ALL"
-                      ? "bg-amber-400 text-slate-950 border-amber-400 font-bold"
-                      : "border-white/15 bg-white/5 text-slate-300 hover:bg-white/10"
+                  className={`${CHIP} px-3 py-1 text-xs font-medium ${
+                    familyFilter === "ALL" ? CHIP_ON_AMBER : CHIP_OFF
                   }`}
                 >
                   All ({result.totalMarkets})
@@ -555,10 +554,8 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
                   <button
                     key={f}
                     onClick={() => setFamilyFilter(f)}
-                    className={`rounded-full px-3 py-1 font-medium transition border ${
-                      familyFilter === f
-                        ? "bg-amber-400 text-slate-950 border-amber-400 font-bold"
-                        : "border-white/15 bg-white/5 text-slate-300 hover:bg-white/10"
+                    className={`${CHIP} px-3 py-1 text-xs font-medium ${
+                      familyFilter === f ? CHIP_ON_AMBER : CHIP_OFF
                     }`}
                   >
                     {f} ({result.familyCounts[f]})
@@ -837,8 +834,8 @@ function LiveMatchCentre({ leagueSlug, eventId, isLive }: { leagueSlug: string; 
           <button
             key={t}
             onClick={() => setTab(t)}
-            className={`rounded-full px-3 py-1 font-semibold border transition capitalize ${
-              tab === t ? "bg-amber-400 text-slate-950 border-amber-400" : "border-white/15 bg-black/40 text-slate-300 hover:bg-black/60"
+            className={`${CHIP} px-3 py-1 text-xs font-semibold capitalize ${
+              tab === t ? CHIP_ON_AMBER : CHIP_OFF
             }`}
           >
             {t === "events" ? "Key Events" : t === "stats" ? "Match Stats" : "Commentary"}
