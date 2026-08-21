@@ -34,6 +34,8 @@ import { findValueBets, type BookmakerOdds } from "@/lib/engine/value";
 import { evaluateLeg, type MatchResult } from "@/lib/settlement/evaluate";
 import { LEAGUES, LEAGUE_MAP } from "@/lib/leagues";
 import { resilientJson } from "@/lib/httpClient";
+import { statsAggregator } from "@/lib/data/aggregator";
+import type { CanonicalMatchStats, TeamStats } from "@/lib/data/types";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -816,6 +818,56 @@ export async function saveAutoSlip(
   return true;
 }
 
+// ─── Canonical stats pre-fetch (Part 5) ───────────────────────────────────────
+//
+// Before a match's picks are persisted, its canonical stats are pulled into the
+// aggregator's shared cache so the settlement engine finds them instantly when
+// the match finishes. Fail-soft: a null result (no source has stats yet, e.g.
+// pre-kickoff) simply means settlement will re-fetch later.
+
+/** Build a MatchStatsQuery for a fixture (any source / namespace). */
+function statsQueryForFixture(fx: FixtureLite) {
+  return {
+    leagueSlug: fx.leagueSlug,
+    eventId: fx.id,
+    homeTeam: fx.home.name,
+    awayTeam: fx.away.name,
+    date: fx.date,
+  };
+}
+
+async function prefetchStats(fx: FixtureLite): Promise<CanonicalMatchStats | null> {
+  return statsAggregator.fetch(statsQueryForFixture(fx)).catch(() => null);
+}
+
+/**
+ * Map canonical stats onto the ESPN-boxscore key space consumed by
+ * evaluateFinishedMatch. Only PRESENT fields are emitted — a null stat is
+ * omitted (never coerced to 0), so the evaluator keeps the market PENDING
+ * rather than fabricating a value.
+ */
+export function statsToBoxscore(stats: CanonicalMatchStats | null): Record<string, number> | null {
+  if (!stats) return null;
+  const out: Record<string, number> = {};
+  const add = (key: string, value: number | null) => {
+    if (value !== null) out[key] = value;
+  };
+  const team = (s: TeamStats, prefix: "home" | "away") => {
+    add(`${prefix}Shots`, s.shots);
+    add(`${prefix}Sot`, s.shotsOnTarget);
+    add(`${prefix}Corners`, s.corners);
+    add(`${prefix}Cards`, s.yellowCards);
+    add(`${prefix}Fouls`, s.fouls);
+    add(`${prefix}Offsides`, s.offsides);
+    add(`${prefix}Saves`, s.saves);
+    add(`${prefix}Interceptions`, s.interceptions);
+    add(`${prefix}RedCards`, s.redCards);
+  };
+  team(stats.home, "home");
+  team(stats.away, "away");
+  return Object.keys(out).length > 0 ? out : null;
+}
+
 // ─── Per-competition processing ───────────────────────────────────────────────
 
 interface ProcessOutcome {
@@ -857,10 +909,17 @@ export async function processCompetition(
 
       const finished = fx.state === "post" && fx.home.score !== null && fx.away.score !== null;
 
+      // Part 5 — warm the shared stats cache before persisting anything, so the
+      // settlement engine can resolve stat markets instantly once the match ends.
+      const canonicalStats = await prefetchStats(fx);
+
       if (finished) {
         // Verify + write the settled result into performance_log.
         if (verifyFinished) {
-          const boxscore = await fetchEspnBoxscore(fx.leagueSlug, fx.id);
+          // ESPN boxscore first; fall back to the canonical aggregator's stats
+          // so non-ESPN matches can still settle corners/cards/shots honestly.
+          const boxscore = (await fetchEspnBoxscore(fx.leagueSlug, fx.id))
+            ?? statsToBoxscore(canonicalStats);
           if (await savePerformanceLog(fx, comp.competitionName, pred, boxscore)) out.verified++;
         }
       } else {

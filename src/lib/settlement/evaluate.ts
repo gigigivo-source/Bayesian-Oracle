@@ -1,3 +1,5 @@
+import type { CanonicalMatchStats } from "../data/types";
+
 export type LegOutcome = "won" | "lost" | "void" | "pending";
 
 export interface MatchResult {
@@ -31,9 +33,95 @@ function compareLine(actual: number, line: number, over: boolean): LegOutcome {
   return over ? (actual > line ? "won" : "lost") : actual < line ? "won" : "lost";
 }
 
-/** Evaluate a football betting leg from a final score. Unsupported/stat-based
- * markets remain pending; they must not be guessed from score data. */
-export function evaluateLeg(leg: SettlementLeg, result: MatchResult): LegOutcome {
+// ─── Stat-backed settlement (Part 4) ─────────────────────────────────────────
+//
+// When the settlement engine supplies the CanonicalMatchStats for the match,
+// market families like Corners O/U, Cards O/U and Shots on Target O/U are read
+// from the real stats instead of being left pending. If the stat is present the
+// line is evaluated exactly (e.g. totalCorners = home.corners + away.corners);
+// if the stat is null while the match is finished, the leg is VOID (stake
+// returned). When no stats object is supplied at all, the leg stays pending —
+// the caller retries when the stats cache has been filled.
+
+function sumOrNull(a: number | null, b: number | null): number | null {
+  if (a === null && b === null) return null;
+  return (a ?? 0) + (b ?? 0);
+}
+
+function cardsFor(t: { yellowCards: number | null; redCards: number | null }): number | null {
+  return sumOrNull(t.yellowCards, t.redCards);
+}
+
+/** Read the home/away stat values a market settles on. */
+function statValuesForMarket(
+  market: string,
+  stats: CanonicalMatchStats,
+): { home: number | null; away: number | null } {
+  const s = stats;
+  if (market.includes("corner")) return { home: s.home.corners, away: s.away.corners };
+  if (market.includes("card")) return { home: cardsFor(s.home), away: cardsFor(s.away) };
+  if (market.includes("sot") || market.includes("shots on target")) {
+    return { home: s.home.shotsOnTarget, away: s.away.shotsOnTarget };
+  }
+  if (market.includes("shots towards goal")) {
+    return { home: s.home.shots, away: s.away.shots };
+  }
+  if (market.includes("shot")) return { home: s.home.shots, away: s.away.shots };
+  if (market.includes("foul")) return { home: s.home.fouls, away: s.away.fouls };
+  if (market.includes("offside")) return { home: s.home.offsides, away: s.away.offsides };
+  if (market.includes("save")) return { home: s.home.saves, away: s.away.saves };
+  if (market.includes("throw")) return { home: s.home.throwIns, away: s.away.throwIns };
+  if (market.includes("goal kick")) return { home: s.home.goalKicks, away: s.away.goalKicks };
+  if (market.includes("possession")) return { home: s.home.possession, away: s.away.possession };
+  if (market.includes("penalt")) return { home: s.home.penalties, away: s.away.penalties };
+  return { home: null, away: null };
+}
+
+/**
+ * Evaluate a stat-backed O/U leg from canonical stats. Returns null when the
+ * market is not an O/U stat line (caller should fall through to other rules).
+ */
+function evaluateStatLeg(
+  rawMarket: string,
+  rawSelection: string,
+  result: MatchResult,
+  stats: CanonicalMatchStats | null | undefined,
+): LegOutcome | null {
+  if (!stats) return "pending"; // no stats yet → keep pending, retry later
+
+  const market = normalise(rawMarket);
+  const selection = normalise(rawSelection);
+  const home = normalise(result.homeName);
+  const away = normalise(result.awayName);
+
+  const line = lineFrom(rawMarket, rawSelection);
+  const over = selection.startsWith("over") || /\bover\b/.test(selection);
+  const under = selection.startsWith("under") || /\bunder\b/.test(selection);
+  if (line === null || (!over && !under)) return null; // not an O/U line we resolve here
+
+  const vals = statValuesForMarket(market, stats);
+  if (vals.home === null || vals.away === null) {
+    // Stat unavailable but the match is finished → stake returned.
+    return "void";
+  }
+
+  let actual: number;
+  if (/total/.test(market)) actual = vals.home + vals.away;
+  else if (market.includes(home) && !market.includes(away)) actual = vals.home;
+  else if (market.includes(away) && !market.includes(home)) actual = vals.away;
+  else actual = vals.home + vals.away;
+
+  return compareLine(actual, line, over);
+}
+
+/** Evaluate a football betting leg from a final score (and, when supplied, the
+ * match's canonical stats). Stat-based markets that cannot be resolved from
+ * real stats remain pending — they must never be guessed from score data. */
+export function evaluateLeg(
+  leg: SettlementLeg,
+  result: MatchResult,
+  stats?: CanonicalMatchStats | null,
+): LegOutcome {
   const rawMarket = leg.marketName?.trim() ?? "";
   const rawSelection = leg.selection?.trim() ?? "";
   if (!rawMarket || !rawSelection) return "pending";
@@ -46,8 +134,12 @@ export function evaluateLeg(leg: SettlementLeg, result: MatchResult): LegOutcome
   const awayScore = result.awayScore;
   const total = homeScore + awayScore;
 
-  // Score-only settlement cannot reliably resolve these markets.
-  if (/cards?|corners?|shots?|offsides?|fouls?|penalt/.test(market)) return "pending";
+  // Stat-backed markets — resolved from canonical stats when available.
+  if (/cards?|corners?|shots?|\bsot\b|offsides?|fouls?|saves?|throw|goal kick|penalt/.test(market)) {
+    const statOutcome = evaluateStatLeg(rawMarket, rawSelection, result, stats);
+    if (statOutcome !== null) return statOutcome;
+    return "pending";
+  }
 
   if (/both teams.*score|btts/.test(market)) {
     const happened = homeScore > 0 && awayScore > 0;

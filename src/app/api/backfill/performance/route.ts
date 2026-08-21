@@ -39,14 +39,47 @@ import {
   fetchEspnBoxscore,
   saveValueBets,
   oddsFromFixture,
+  statsToBoxscore,
   type AggregatedFixture,
   type CompetitionFixtures,
 } from "../../cron/daily-picks/route";
+import { statsAggregator } from "@/lib/data/aggregator";
+import type { FixtureLite } from "@/lib/espn";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
 const env = (name: string): string => (process.env[name] ?? "").trim();
+
+// ─── Historical stats priority (Part 5) ──────────────────────────────────────
+// Live APIs rarely serve matches older than a few days. For backfill, the
+// aggregator tries the GitHub-backed sources FIRST, then falls through to the
+// live sources for whatever they still serve.
+const GITHUB_FIRST_PRIORITY = [
+  "StatsBomb",
+  "GitHubDatasets",
+  "SportScore",
+  "API-Football",
+  "datafc",
+  "worldcup2026",
+  "FBref",
+  "TheSportsDB",
+  "OpenLigaDB",
+  "Highlightly",
+  "Understat",
+];
+
+/** Read the (already cached) canonical stats for a fixture — populated by the
+ *  oracle run above with the GitHub-first priority. */
+function peekStats(fx: FixtureLite) {
+  return statsAggregator.peek({
+    leagueSlug: fx.leagueSlug,
+    eventId: fx.id,
+    homeTeam: fx.home.name,
+    awayTeam: fx.away.name,
+    date: fx.date,
+  });
+}
 
 // ─── Date window helpers ──────────────────────────────────────────────────────
 
@@ -185,13 +218,14 @@ async function runBackfill(body: {
             // Existing rows may pre-date late provider/boxscore data. Re-evaluate
             // them during backfill instead of leaving their individual bets pending.
             if (existing[0].pending > 0) {
-              const pred = await runOracleWithStandings(fx);
+              const pred = await runOracleWithStandings(fx, { statsPriority: GITHUB_FIRST_PRIORITY });
               if (!pred) {
                 summary.totalFailed++;
                 summary.failures.push({ leagueSlug: slug, eventId: fx.id, error: "pending row could not be re-evaluated" });
                 continue;
               }
-              const boxscore = await fetchEspnBoxscore(fx.leagueSlug, fx.id);
+              const boxscore = (await fetchEspnBoxscore(fx.leagueSlug, fx.id))
+                ?? statsToBoxscore(peekStats(fx));
               evaluateFinishedMatch(fx, pred, boxscore);
               const detail = buildTop10Detail(pred);
               const hits = detail.filter((pick) => pick.outcome === "HIT").length;
@@ -210,7 +244,7 @@ async function runBackfill(body: {
             continue;
           }
 
-          const pred = await runOracleWithStandings(fx);
+          const pred = await runOracleWithStandings(fx, { statsPriority: GITHUB_FIRST_PRIORITY });
           if (!pred) {
             // Unplayable by the engine — integrity over volume.
             summary.totalFailed++;
@@ -218,7 +252,12 @@ async function runBackfill(body: {
             continue;
           }
 
-          const saved = await savePerformanceLog(fx, comp.competitionName, pred, null);
+          const saved = await savePerformanceLog(
+            fx,
+            comp.competitionName,
+            pred,
+            (await fetchEspnBoxscore(fx.leagueSlug, fx.id)) ?? statsToBoxscore(peekStats(fx)),
+          );
           if (saved) {
             summary.totalSucceeded++;
             const vbs = await saveValueBets(fx, comp.competitionName, pred, oddsFromFixture(fx));

@@ -28,6 +28,7 @@ import {
   fetchEspnBoxscore,
   lookupMultiSourceResult,
 } from "../daily-picks/route";
+import { statsAggregator } from "@/lib/data/aggregator";
 import { evaluateFinishedMatch } from "@/lib/engine";
 import { runOracleWithStandings } from "@/lib/engine/oracle";
 import { LEAGUE_MAP } from "@/lib/leagues";
@@ -152,6 +153,23 @@ async function settlePendingAcrossAllSources(force = false): Promise<SettlePass>
     return cache.get(key) ?? null;
   };
 
+  // Canonical stats cache-first lookup so stat legs settle from real data.
+  const statsCache = new Map<string, Awaited<ReturnType<typeof statsAggregator.peek>>>();
+  const resolveStats = async (result: MatchResult | null) => {
+    if (!result) return null;
+    const key = `${result.leagueSlug}|${result.eventId}`;
+    if (!statsCache.has(key)) {
+      statsCache.set(key, await statsAggregator.fetch({
+        leagueSlug: result.leagueSlug,
+        eventId: result.eventId,
+        homeTeam: result.homeName,
+        awayTeam: result.awayName,
+        date: result.date,
+      }));
+    }
+    return statsCache.get(key) ?? null;
+  };
+
   const pass: SettlePass = {
     dailyPicks: 0, valueBets: 0, accumulators: 0, won: 0, lost: 0, void: 0, stillPending: 0,
     failed: 0, resolvedByLeague: {},
@@ -167,12 +185,14 @@ async function settlePendingAcrossAllSources(force = false): Promise<SettlePass>
       if (!row.eventId || !row.leagueSlug) { pass.stillPending++; continue; }
       const result = await resolve(row.eventId, row.leagueSlug, row.match, row.pickDate);
       if (!result || !Array.isArray(row.picks) || row.picks.length === 0) { pass.stillPending++; continue; }
+      const stats = await resolveStats(result);
 
       const picks = row.picks.map((raw) => {
         const pick = raw as { name?: string; marketName?: string; selection?: string; outcome?: string };
         const outcome = evaluateLeg(
           { marketName: pick.marketName ?? pick.name, selection: pick.selection },
           result,
+          stats,
         );
         const stored = outcome === "won" ? "HIT" : outcome === "lost" ? "MISS" : outcome.toUpperCase();
         return { pick: { ...pick, outcome: stored }, outcome };
@@ -205,7 +225,8 @@ async function settlePendingAcrossAllSources(force = false): Promise<SettlePass>
     try {
       const result = await resolve(row.eventId, row.leagueSlug, row.match, row.matchDate);
       if (!result) { pass.stillPending++; continue; }
-      const outcome = evaluateLeg({ marketName: row.marketName, selection: row.selection }, result);
+      const stats = await resolveStats(result);
+      const outcome = evaluateLeg({ marketName: row.marketName, selection: row.selection }, result, stats);
       if (outcome === "pending") { pass.stillPending++; continue; }
       const actualReturn = outcome === "won" ? row.stake * row.bookOdds : outcome === "void" ? row.stake : 0;
       const changed = await settleValueBet(row, { outcome, actualReturn, pnl: actualReturn - row.stake });
@@ -234,7 +255,8 @@ async function settlePendingAcrossAllSources(force = false): Promise<SettlePass>
         if (!leg?.fixtureId || !leg?.leagueSlug) { allSettled = false; continue; }
         const result = await resolve(leg.fixtureId, leg.leagueSlug, leg.matchLabel ?? "", leg.date ?? "");
         if (!result) { allSettled = false; continue; }
-        const outcome = evaluateLeg({ marketName: leg.marketName, selection: leg.selection }, result);
+        const stats = await resolveStats(result);
+        const outcome = evaluateLeg({ marketName: leg.marketName, selection: leg.selection }, result, stats);
         evaluated.push({ outcome });
         if (outcome === "pending") allSettled = false;
         if (outcome === "lost") allHit = false;

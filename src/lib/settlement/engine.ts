@@ -2,8 +2,10 @@ import {
   getPendingSettlementItems, settleAccumulator, settleDailyPick, settleValueBet,
   type PendingAccumulator, type PendingDailyPick, type PendingValueBet,
 } from "@/db/queries/settlement";
-import { evaluateLeg, type LegOutcome } from "./evaluate";
+import { evaluateLeg, type LegOutcome, type MatchResult } from "./evaluate";
 import { fetchSettlementResults, type ResultsProvider } from "./results";
+import { statsAggregator } from "@/lib/data/aggregator";
+import type { CanonicalMatchStats } from "@/lib/data/types";
 
 interface StoredLeg {
   fixtureId?: string; eventId?: string; matchLabel?: string; match?: string;
@@ -16,17 +18,39 @@ export interface SettlementSummary {
   won: number; lost: number; void: number; stillPending: number; ranAt: string;
 }
 
-function evaluateStoredLeg(leg: StoredLeg, results: ResultsProvider) {
+/**
+ * Resolve the canonical stats for a stored leg: cache-first (filled ahead of
+ * time by the daily-picks cron), then a fail-soft aggregator fetch. Null when
+ * no stats are obtainable — stat legs then stay pending (never guessed).
+ */
+async function statsForLeg(
+  leg: { fixtureId?: string | null; eventId?: string | null; leagueSlug?: string | null },
+  result: MatchResult | undefined,
+): Promise<CanonicalMatchStats | null> {
+  const eventId = leg.fixtureId ?? leg.eventId;
+  if (!result || !eventId) return null;
+  const query = {
+    leagueSlug: leg.leagueSlug ?? result.leagueSlug,
+    eventId,
+    homeTeam: result.homeName,
+    awayTeam: result.awayName,
+    date: result.date,
+  };
+  return statsAggregator.peek(query) ?? statsAggregator.fetch(query);
+}
+
+async function evaluateStoredLeg(leg: StoredLeg, results: ResultsProvider) {
   const result = results.find(leg.fixtureId ?? leg.eventId, leg.matchLabel ?? leg.match);
+  const stats = result ? await statsForLeg(leg, result) : null;
   const outcome = result
-    ? evaluateLeg({ marketName: leg.marketName ?? leg.name, selection: leg.selection }, result)
+    ? evaluateLeg({ marketName: leg.marketName ?? leg.name, selection: leg.selection }, result, stats)
     : "pending";
   return { ...leg, outcome, result };
 }
 
 async function processAccumulator(slip: PendingAccumulator, results: ResultsProvider): Promise<"won" | "lost" | null> {
   if (!Array.isArray(slip.picks) || slip.picks.length === 0) return null;
-  const legs = slip.picks.map((leg) => evaluateStoredLeg(leg as StoredLeg, results));
+  const legs = await Promise.all(slip.picks.map((leg) => evaluateStoredLeg(leg as StoredLeg, results)));
   const outcomes = legs.map((leg) => leg.outcome);
   const hasLoss = outcomes.includes("lost");
   const resolved = outcomes.every((outcome) => outcome !== "pending");
@@ -55,9 +79,10 @@ async function processAccumulator(slip: PendingAccumulator, results: ResultsProv
 async function processDailyPick(row: PendingDailyPick, results: ResultsProvider): Promise<boolean> {
   const result = results.find(row.eventId, row.match);
   if (!result || !Array.isArray(row.picks) || row.picks.length === 0) return false;
+  const stats = await statsForLeg({ eventId: row.eventId, leagueSlug: row.leagueSlug }, result);
   const evaluated = row.picks.map((raw) => {
     const pick = raw as StoredLeg;
-    const outcome = evaluateLeg({ marketName: pick.marketName ?? pick.name, selection: pick.selection }, result);
+    const outcome = evaluateLeg({ marketName: pick.marketName ?? pick.name, selection: pick.selection }, result, stats);
     const storedOutcome = outcome === "won" ? "HIT" : outcome === "lost" ? "MISS" : outcome.toUpperCase();
     return { pick: { ...pick, outcome: storedOutcome }, outcome };
   });
@@ -75,7 +100,8 @@ async function processDailyPick(row: PendingDailyPick, results: ResultsProvider)
 async function processValueBet(row: PendingValueBet, results: ResultsProvider): Promise<LegOutcome | null> {
   const result = results.find(row.eventId, row.match);
   if (!result) return null;
-  const outcome = evaluateLeg({ marketName: row.marketName, selection: row.selection }, result);
+  const stats = await statsForLeg({ eventId: row.eventId, leagueSlug: row.leagueSlug }, result);
+  const outcome = evaluateLeg({ marketName: row.marketName, selection: row.selection }, result, stats);
   if (outcome === "pending") return null;
   const actualReturn = outcome === "won" ? row.stake * row.bookOdds : outcome === "void" ? row.stake : 0;
   const changed = await settleValueBet(row, { outcome, actualReturn, pnl: actualReturn - row.stake });

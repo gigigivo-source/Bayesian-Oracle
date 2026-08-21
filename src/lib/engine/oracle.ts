@@ -24,6 +24,8 @@ import {
   type MatchConfidence,
 } from "./selector";
 import { getStandings } from "../footballData";
+import { statsAggregator } from "../data/aggregator";
+import type { CanonicalMatchStats } from "../data/types";
 
 /** Optional league-table context used for match-importance (title race / relegation) detection. */
 export interface TableContext {
@@ -1542,6 +1544,7 @@ export function runOracle(
   fixture: FixtureLite,
   tables?: TableContext,
   enrichment?: EnrichmentOutcome | null,
+  stats?: CanonicalMatchStats | null,
 ): OracleResult {
   _mktIdx = 0;
   const prior = getPrior(fixture.leagueSlug);
@@ -1564,8 +1567,10 @@ export function runOracle(
   // (API-Football expected_goals for in-play/finished fixtures); otherwise the
   // league-prior statistical model. No simulated stand-ins in either path.
   const homeBoost = 0.08;
-  const realHomeXG = enrichment?.data.homeXG ?? null;
-  const realAwayXG = enrichment?.data.awayXG ?? null;
+  // Part 3 — the xG grounding now prefers the canonical multi-source aggregator
+  // (home.xg), then the legacy enrichment xG, then the league-prior model.
+  const realHomeXG = stats?.home.xg ?? enrichment?.data.homeXG ?? null;
+  const realAwayXG = stats?.away.xg ?? enrichment?.data.awayXG ?? null;
   const clampNum = (v: number, lo: number, hi: number) => Math.min(Math.max(v, lo), hi);
   const expHG = realHomeXG != null ? clampNum(realHomeXG, 0.15, 4.5)
     : prior.avgGoals * (0.54 + homeBoost) * (0.82 + s1 * 0.36);
@@ -1948,6 +1953,9 @@ export function runOracle(
       (enrichment?.data.leagueTablePositionAway != null
         ? { position: enrichment.data.leagueTablePositionAway } : undefined),
     context:   buildRankingContext(fixture, enrichment),
+    // ── Canonical stats (Part 3) — grounds every stat-backed λ in real data
+    //    and applies the per-market stat-confidence weight multiplier.
+    stats:     stats ?? null,
     // ── Confidence gate inputs (selector.ts, Step 8) ────────────────────────
     // Which feeds supplied the real data drives the source-priority component;
     // the policy decides what happens to a low-confidence match.
@@ -2209,7 +2217,19 @@ function tableInfoFor(
  *      it lands below the threshold, reduces the pick count (or skips the
  *      match) so only high-confidence matches are bet at full size.
  */
-export async function runOracleWithStandings(fixture: FixtureLite): Promise<OracleResult | null> {
+export interface OracleStatsOptions {
+  /**
+   * Override the stats source priority for this run — used by the backfill job
+   * to try GitHub datasets (StatsBomb / football-catalogs /
+   * schochastics/football-data) FIRST, since live APIs rarely serve old matches.
+   */
+  statsPriority?: string[];
+}
+
+export async function runOracleWithStandings(
+  fixture: FixtureLite,
+  opts?: OracleStatsOptions,
+): Promise<OracleResult | null> {
   // ── Step 1+2: multi-source enrichment with the unplayable guard ──────────
   const enrichment = await fetchExternalMatchData(fixture);
   if (!enrichment) {
@@ -2234,7 +2254,24 @@ export async function runOracleWithStandings(fixture: FixtureLite): Promise<Orac
     // or is excluded with its weight redistributed by the selector.
   }
 
+  // ── Step 3.5: canonical match stats (multi-source aggregator, fail-soft) ─
+  // Grounds the ranking λ in real stats (Part 3). Null when no source has any
+  // stat for the match — the engine then falls back to league priors, and each
+  // stat-backed market's λ weight is halved (statConfidence = 0.5).
+  const stats = await statsAggregator
+    .fetch(
+      {
+        leagueSlug: fixture.leagueSlug,
+        eventId: fixture.id,
+        homeTeam: fixture.home.name,
+        awayTeam: fixture.away.name,
+        date: fixture.date,
+      },
+      opts?.statsPriority?.length ? { priority: opts.statsPriority } : undefined,
+    )
+    .catch(() => null);
+
   // ── Step 4: rank all markets and fill the Top 10 with real data only ─────
-  return runOracle(fixture, tables, enrichment);
+  return runOracle(fixture, tables, enrichment, stats);
 }
 
