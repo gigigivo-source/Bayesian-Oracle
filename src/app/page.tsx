@@ -131,13 +131,13 @@ export default function Home() {
         {/* LEAGUE CHIPS — only on Top Matches tab */}
         {tab === "top" && (
           <div className="sticky top-[99px] z-30 bg-black/55 py-2 px-4 overflow-x-auto scrollbar-none">
-            <div className="mx-auto flex max-w-7xl items-center gap-2">
+            <div className="mx-auto flex max-w-7xl items-center gap-3">
               <button
                 onClick={() => { setSelectedLeagueSlug(null); setShowTodayOnly(false); }}
-                className={`rounded-full px-3 py-1 text-xs font-semibold whitespace-nowrap transition border ${
+                className={`rounded-full px-4 py-2 text-sm font-medium tracking-wide whitespace-nowrap transition-all duration-200 cursor-pointer select-none active:scale-95 hover:scale-105 border ${
                   selectedLeagueSlug === null && !showTodayOnly
-                    ? "bg-amber-400 text-slate-950 border-amber-400"
-                    : "border-white/15 bg-white/5 text-slate-300 hover:bg-white/10"
+                    ? "bg-gradient-to-r from-amber-400 to-orange-500 text-slate-950 font-bold shadow-lg shadow-amber-500/25 border-amber-300/60 hover:shadow-amber-500/40"
+                    : "bg-white/5 text-slate-300 border-white/15 hover:bg-white/10 hover:text-white hover:border-white/25"
                 }`}
               >
                 All
@@ -145,10 +145,10 @@ export default function Home() {
               {/* TODAY chip */}
               <button
                 onClick={() => { setShowTodayOnly(true); setSelectedLeagueSlug(null); }}
-                className={`rounded-full px-3 py-1 text-xs font-semibold whitespace-nowrap transition border flex items-center gap-1.5 ${
+                className={`rounded-full px-4 py-2 text-sm font-medium tracking-wide whitespace-nowrap transition-all duration-200 cursor-pointer select-none active:scale-95 hover:scale-105 border flex items-center gap-1.5 ${
                   showTodayOnly
-                    ? "bg-emerald-400 text-slate-950 border-emerald-400"
-                    : "border-emerald-500/40 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20"
+                    ? "bg-gradient-to-r from-emerald-400 to-teal-500 text-slate-950 font-bold shadow-lg shadow-emerald-500/25 border-emerald-300/60 hover:shadow-emerald-500/40"
+                    : "bg-emerald-500/10 text-emerald-300 border-emerald-500/30 hover:bg-emerald-500/20 hover:border-emerald-500/50"
                 }`}
               >
                 <span className="relative flex h-2 w-2">
@@ -167,10 +167,10 @@ export default function Home() {
                     const el = document.getElementById(`league-sec-${lg.slug}`);
                     if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
                   }}
-                  className={`rounded-full px-2.5 py-1 text-xs font-semibold whitespace-nowrap transition flex items-center gap-1.5 border ${
+                  className={`rounded-full px-4 py-2 text-sm font-medium tracking-wide whitespace-nowrap transition-all duration-200 cursor-pointer select-none active:scale-95 hover:scale-105 flex items-center gap-1.5 border ${
                     selectedLeagueSlug === lg.slug
-                      ? "bg-amber-400 text-slate-950 border-amber-400"
-                      : "border-white/15 bg-white/5 text-slate-300 hover:bg-white/10"
+                      ? "bg-gradient-to-r from-amber-400 to-orange-500 text-slate-950 font-bold shadow-lg shadow-amber-500/25 border-amber-300/60 hover:shadow-amber-500/40"
+                      : "bg-white/5 text-slate-300 border-white/15 hover:bg-white/10 hover:text-white hover:border-white/25"
                   }`}
                 >
                   <Image src={lg.logo} alt={lg.name} width={16} height={16} className="object-contain" unoptimized />
@@ -329,15 +329,15 @@ function Header({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
               <p className="text-[10px] text-slate-400 font-mono">Bayesian Oracle · Deep Statistical Engine</p>
             </div>
           </div>
-          <nav className="flex gap-1 rounded-lg border border-white/10 bg-white/[0.03] p-1 items-center">
+          <nav className="flex gap-2 rounded-full border border-white/10 bg-white/[0.03] p-1.5 items-center backdrop-blur-md shadow-inner shadow-black/20">
             {mainTabs.map((t) => (
               <button
                 key={t.id}
                 onClick={() => { setTab(t.id); setMenuOpen(false); }}
-                className={`rounded-md px-3.5 py-1.5 text-xs font-medium transition ${
+                className={`rounded-full px-4 py-2 text-sm font-medium tracking-wide transition-all duration-200 cursor-pointer select-none active:scale-95 hover:scale-105 backdrop-blur-sm ${
                   tab === t.id
-                    ? "bg-amber-400 text-slate-950 font-bold"
-                    : "text-slate-300 hover:bg-white/5"
+                    ? "bg-gradient-to-r from-amber-400 to-orange-500 text-slate-950 font-bold shadow-lg shadow-amber-500/30 border border-amber-300/50 hover:shadow-amber-500/50"
+                    : "bg-white/5 text-slate-300 border border-white/15 hover:bg-white/10 hover:text-white hover:border-white/20"
                 }`}
               >
                 {t.label}
@@ -354,10 +354,10 @@ function Header({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
           aria-expanded={menuOpen}
           aria-haspopup="menu"
           aria-label="Menu"
-          className={`flex cursor-pointer select-none items-center gap-2 rounded-xl border px-3.5 py-2 text-sm font-semibold shadow-lg shadow-black/40 backdrop-blur-sm transition duration-150 hover:scale-[1.03] active:scale-95 ${
+          className={`flex cursor-pointer select-none items-center gap-2 rounded-full border px-4 py-2.5 text-sm font-semibold shadow-lg shadow-black/40 backdrop-blur-sm transition-all duration-200 hover:scale-[1.03] active:scale-95 ${
             activeInMenu
-              ? "border-amber-300 bg-amber-400 text-slate-950 hover:bg-amber-300"
-              : "border-white/25 bg-white text-slate-900 hover:bg-slate-100"
+              ? "border-amber-300 bg-gradient-to-r from-amber-400 to-orange-500 text-slate-950 hover:from-amber-300 hover:to-orange-400 shadow-amber-500/25"
+              : "border-white/25 bg-white/10 text-slate-100 hover:bg-white/15 hover:border-white/35 hover:text-white"
           }`}
         >
           <span aria-hidden="true" className="text-base leading-none">
@@ -372,10 +372,10 @@ function Header({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
               <button
                 key={t.id}
                 onClick={() => { setTab(t.id); setMenuOpen(false); }}
-                className={`w-full text-left px-4 py-3 transition border-b border-white/5 last:border-0 ${
+                className={`w-full text-left px-4 py-3 transition-all duration-200 rounded-xl border-b border-white/5 last:border-0 cursor-pointer select-none active:scale-[0.98] hover:scale-[1.01] hover:bg-white/5 ${
                   tab === t.id
-                    ? "bg-amber-400/10 text-amber-300"
-                    : "text-slate-200 hover:bg-white/5"
+                    ? "bg-gradient-to-r from-amber-400/10 to-orange-500/10 text-amber-300 border-l-2 border-amber-400 font-bold"
+                    : "text-slate-200 font-medium"
                 }`}
               >
                 <div className="text-sm font-medium">{t.label}</div>
