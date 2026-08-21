@@ -9,12 +9,19 @@ import type { LambdaSet } from "./lambdas";
 import { calibratedWinProb, type MatchVolatility } from "./calibration";
 import {
   selectTopPicks,
+  DEFAULT_CONFIDENCE_THRESHOLD,
+  DEFAULT_CONFIDENCE_SKIP_THRESHOLD,
+  DEFAULT_LOW_CONFIDENCE_PICK_COUNT,
   type TeamTableInfo,
   type RankingContext,
   type ImportanceContext,
   type TeamFormSignal,
   type TeamInjuryContext,
   type MarketVolatilityContext,
+  type SourceQualityContext,
+  type ConfidenceOptions,
+  type ConfidencePolicy,
+  type MatchConfidence,
 } from "./selector";
 import { getStandings } from "../footballData";
 
@@ -23,6 +30,19 @@ export interface TableContext {
   home?: TeamTableInfo;
   away?: TeamTableInfo;
 }
+
+/**
+ * Oracle output = the standard EngineResult plus the match-level confidence
+ * verdict produced by the selector's confidence gate (selector.ts, Step 8).
+ *
+ * `confidence` is always present for a ranked match, so API routes / the UI can
+ * show a warning badge, and `lowConfidence` is a convenience mirror of
+ * `confidence.lowConfidence` for consumers that only need the boolean.
+ */
+export type OracleResult = EngineResult & {
+  confidence?:    MatchConfidence;
+  lowConfidence?: boolean;
+};
 
 // ─── League statistical priors ────────────────────────────────────────────────
 const LEAGUE_PRIORS: Record<string, {
@@ -1451,12 +1471,78 @@ function enrichmentCompleteness(enrichment?: EnrichmentOutcome | null): number {
   return Math.round(45 + (filled / DATA_FIELDS.length) * 50);
 }
 
+// ─── Confidence gate wiring (source provenance + policy) ─────────────────────
+//
+// The selector computes the match-level confidence score; the oracle supplies
+// the provenance half of it (which feeds actually answered, and how much of the
+// enrichment contract they filled) and chooses the gate policy.
+//
+// Env overrides (all optional):
+//   ORACLE_CONFIDENCE_THRESHOLD       e.g. "75" or "0.75"  (default 75%)
+//   ORACLE_CONFIDENCE_SKIP_THRESHOLD  e.g. "50" or "0.50"  (default 50%)
+//   ORACLE_CONFIDENCE_POLICY          flag | trim | skip   (default trim)
+//   ORACLE_LOW_CONFIDENCE_PICKS       e.g. "3"             (default 3)
+//   ORACLE_CONFIDENCE_GATE            "off"/"false" disables the gate
+//                                     (score still computed + logged)
+
+/** Parse a 0..1 fraction or a 0..100 percentage from an env var. */
+function parseConfidenceLevel(raw: string, fallback: number): number {
+  if (!raw) return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) return fallback;
+  const frac = n > 1 ? n / 100 : n;
+  return Math.min(Math.max(frac, 0), 1);
+}
+
+/** Gate configuration for the oracle pipeline (env-overridable). */
+function confidenceOptionsFromEnv(): ConfidenceOptions {
+  const policyRaw = env("ORACLE_CONFIDENCE_POLICY").toLowerCase();
+  const policy: ConfidencePolicy =
+    policyRaw === "flag" || policyRaw === "skip" || policyRaw === "trim"
+      ? policyRaw
+      : "trim"; // production default: cut low-confidence matches down to Top-3
+  const gate = env("ORACLE_CONFIDENCE_GATE").toLowerCase();
+  const picksRaw = Number(env("ORACLE_LOW_CONFIDENCE_PICKS"));
+  return {
+    threshold:     parseConfidenceLevel(env("ORACLE_CONFIDENCE_THRESHOLD"), DEFAULT_CONFIDENCE_THRESHOLD),
+    skipThreshold: parseConfidenceLevel(env("ORACLE_CONFIDENCE_SKIP_THRESHOLD"), DEFAULT_CONFIDENCE_SKIP_THRESHOLD),
+    policy,
+    lowConfidencePickCount: Number.isFinite(picksRaw) && picksRaw >= 1
+      ? Math.round(picksRaw)
+      : DEFAULT_LOW_CONFIDENCE_PICK_COUNT,
+    enabled: !(gate === "off" || gate === "false" || gate === "0"),
+  };
+}
+
+/**
+ * Source-priority input for the confidence gate.
+ *
+ * `primarySource` is the highest-priority feed that answered (ESPN / SportScore
+ * rank as high confidence, official league APIs as medium, free aggregators as
+ * lower/backfill), `contributingSources` is every feed that filled at least one
+ * field, and `fieldCoverage` is the share of the enrichment contract that real
+ * data actually covered. Returns undefined when there is no enrichment at all,
+ * so the selector excludes the component and redistributes its weight instead
+ * of inventing a neutral stand-in.
+ */
+function buildSourceQuality(enrichment?: EnrichmentOutcome | null): SourceQualityContext | undefined {
+  if (!enrichment) return undefined;
+  const contributors = [...new Set(Object.values(enrichment.fieldSources))] as string[];
+  if (!contributors.length && !enrichment.primarySource) return undefined;
+  const filled = DATA_FIELDS.filter((f) => enrichment.data[f] !== null).length;
+  return {
+    primarySource:       enrichment.primarySource,
+    contributingSources: contributors,
+    fieldCoverage:       filled / DATA_FIELDS.length,
+  };
+}
+
 // ─── Main oracle ─────────────────────────────────────────────────────────────────
 export function runOracle(
   fixture: FixtureLite,
   tables?: TableContext,
   enrichment?: EnrichmentOutcome | null,
-): EngineResult {
+): OracleResult {
   _mktIdx = 0;
   const prior = getPrior(fixture.leagueSlug);
   const isPost = fixture.state === "post";
@@ -1862,7 +1948,13 @@ export function runOracle(
       (enrichment?.data.leagueTablePositionAway != null
         ? { position: enrichment.data.leagueTablePositionAway } : undefined),
     context:   buildRankingContext(fixture, enrichment),
+    // ── Confidence gate inputs (selector.ts, Step 8) ────────────────────────
+    // Which feeds supplied the real data drives the source-priority component;
+    // the policy decides what happens to a low-confidence match.
+    sourceQuality: buildSourceQuality(enrichment),
+    confidence:    confidenceOptionsFromEnv(),
   });
+  const confidence = selection.confidence;
   const top1  = selection.top1;
   const top3  = selection.top3;
   const top5  = selection.top5;
@@ -1964,6 +2056,39 @@ export function runOracle(
     calibrationNotes.push(`Ranking data gaps: ${selection.gaps.join(" · ")}`);
   }
 
+  // ── Confidence gate — notes + per-match monitoring log ────────────────────
+  if (confidence) {
+    calibrationNotes.push(
+      `Match confidence: ${confidence.scorePct.toFixed(1)}% (${confidence.level}) — ` +
+      `threshold ${(confidence.threshold * 100).toFixed(0)}%, policy '${confidence.policy}', ` +
+      `action '${confidence.action}' → ${confidence.picksReturned} pick(s) returned`,
+    );
+    calibrationNotes.push(
+      "Confidence components (calibration 50% / factor coverage 30% / source priority 20%):",
+    );
+    for (const reason of confidence.reasons) calibrationNotes.push(`  ${reason}`);
+    if (confidence.lowConfidence) {
+      calibrationNotes.push(
+        confidence.action === "skipped"
+          ? `LOW CONFIDENCE — match skipped by the gate: the engine is not confident enough to bet it.`
+          : confidence.action === "reduced"
+            ? `LOW CONFIDENCE — pick count reduced to the safest ${confidence.picksReturned} to protect the hit rate.`
+            : `LOW CONFIDENCE — full Top-${confidence.picksReturned} returned with a warning flag for the UI.`,
+      );
+    }
+
+    console.log(
+      `[oracle][confidence] ${fixture.home.name} vs ${fixture.away.name} ` +
+      `(${fixture.leagueSlug} ${fixture.date.slice(0, 10)}) → ${confidence.scorePct.toFixed(1)}% ` +
+      `${confidence.level} | picks ${confidence.picksReturned} | action ${confidence.action} | ` +
+      `cal ${(confidence.avgCalibration * 100).toFixed(1)}% | ` +
+      `factors ${confidence.avgFactorsAvailable.toFixed(1)}/${confidence.totalFactors}` +
+      `${confidence.missingFactors.length ? ` (missing: ${confidence.missingFactors.join(",")})` : ""} | ` +
+      `source ${confidence.sourceTier}:${confidence.sources.join("+") || "n/a"} | ` +
+      `backfill ${confidence.backfillPicks}`,
+    );
+  }
+
   // Verification for post-match
   let hitCount = 0, evaluatedCount = 0;
   if (isPost) {
@@ -2031,6 +2156,9 @@ export function runOracle(
     generatedAt: new Date().toISOString(),
     hitCount,
     evaluatedCount,
+    // Confidence gate output — lets the UI warn (or hide) low-confidence matches.
+    confidence,
+    lowConfidence: confidence?.lowConfidence ?? false,
   };
 }
 
@@ -2076,8 +2204,12 @@ function tableInfoFor(
  *      relegation stakes on top of the aggregator's table positions.
  *   4. runOracle() ranks every generated market with dynamically
  *      redistributed factor weights (see selector.ts) and fills the Top 10.
+ *   5. The match-level confidence gate scores the resulting pick set
+ *      (calibration 50% / factor coverage 30% / source priority 20%) and, when
+ *      it lands below the threshold, reduces the pick count (or skips the
+ *      match) so only high-confidence matches are bet at full size.
  */
-export async function runOracleWithStandings(fixture: FixtureLite): Promise<EngineResult | null> {
+export async function runOracleWithStandings(fixture: FixtureLite): Promise<OracleResult | null> {
   // ── Step 1+2: multi-source enrichment with the unplayable guard ──────────
   const enrichment = await fetchExternalMatchData(fixture);
   if (!enrichment) {
