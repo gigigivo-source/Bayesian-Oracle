@@ -4,6 +4,7 @@ import Image from "next/image";
 import type { Market } from "@/lib/engine/types";
 import type { FixtureLite } from "@/lib/espn";
 import { OutcomeBadge, IconLive } from "./Icons";
+import { CARD_CLICK, CARD_CLICK_LIVE } from "./design";
 
 export function pct(x: number): string {
   return `${(x * 100).toFixed(1)}%`;
@@ -315,11 +316,7 @@ export function FixtureCard({
   return (
     <button
       onClick={() => onSelect(fx)}
-      className={`group w-full rounded-lg border text-left transition ${
-        isLive
-          ? "border-rose-500/30 bg-black/50 hover:bg-black/60"
-          : "border-white/10 bg-black/50 hover:bg-black/60"
-      } p-3`}
+      className={`group p-3 text-left ${isLive ? CARD_CLICK_LIVE : CARD_CLICK}`}
     >
       <div className="mb-2 flex items-center justify-between text-[11px]">
         <span

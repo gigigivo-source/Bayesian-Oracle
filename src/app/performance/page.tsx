@@ -12,6 +12,7 @@ import { useSearchParams } from "next/navigation";
 import { PerformanceShell } from "@/app/_components/perf/PerformanceShell";
 import { PnLTrendChart, type TrendPoint as ChartPoint } from "@/app/_components/perf/charts";
 import { ErrorState, LoadingState, Section, cn } from "@/app/_components/perf/ui";
+import { CHIP, CHIP_OFF, CHIP_ON_AMBER, OUTLINE_AMBER } from "@/app/_components/design";
 import {
   FactorAccuracyTable,
   LeagueBetsTable,
@@ -195,28 +196,30 @@ function LeaguePerformanceInner() {
                 className="w-full rounded-lg border border-white/10 bg-black/50 py-2 pl-9 pr-3 text-sm text-slate-200 placeholder:text-slate-500 focus:border-amber-400/50 focus:outline-none"
               />
             </div>
-            <div className="flex gap-1 rounded-lg border border-white/10 bg-white/[0.03] p-1">
+            <div className="flex gap-1.5">
               {DAYS_OPTIONS.map((d) => (
                 <button
                   key={d}
                   onClick={() => setDays(d)}
                   className={cn(
-                    "rounded-md px-2.5 py-1.5 font-mono text-[11px] font-medium transition",
-                    days === d ? "bg-amber-400 font-bold text-slate-950" : "text-slate-300 hover:bg-white/5",
+                    CHIP,
+                    "px-2.5 py-1.5 font-mono text-[11px] font-medium",
+                    days === d ? CHIP_ON_AMBER : CHIP_OFF,
                   )}
                 >
                   {d}d
                 </button>
               ))}
             </div>
-            <div className="flex gap-1 rounded-lg border border-white/10 bg-white/[0.03] p-1">
+            <div className="flex gap-1.5">
               {SORT_OPTIONS.map((o) => (
                 <button
                   key={o.key}
                   onClick={() => setSortBy(o.key)}
                   className={cn(
-                    "rounded-md px-2.5 py-1.5 text-[11px] font-medium transition",
-                    sortBy === o.key ? "bg-amber-400 font-bold text-slate-950" : "text-slate-300 hover:bg-white/5",
+                    CHIP,
+                    "px-2.5 py-1.5 text-[11px] font-medium",
+                    sortBy === o.key ? CHIP_ON_AMBER : CHIP_OFF,
                   )}
                 >
                   {o.label}
@@ -318,7 +321,7 @@ function LeagueDetailSection({
           {league ? (
             <Link
               href={`/performance/league/${encodeURIComponent(league.leagueSlug)}?days=${days}`}
-              className="rounded-lg border border-amber-400/40 bg-amber-400/10 px-3 py-1.5 text-xs font-bold text-amber-300 transition hover:bg-amber-400/20"
+              className={cn(OUTLINE_AMBER, "px-3 py-1.5 text-xs")}
             >
               Open dedicated page ↗
             </Link>

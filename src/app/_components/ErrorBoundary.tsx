@@ -1,6 +1,7 @@
 "use client";
 
 import { Component, type ReactNode } from "react";
+import { ACTION_BLUE } from "./design";
 
 interface ErrorBoundaryProps {
   children: ReactNode;
@@ -38,7 +39,7 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
           )}
           <button
             onClick={() => this.setState({ hasError: false, message: null })}
-            className="rounded-lg bg-amber-400/20 border border-amber-400/30 px-4 py-2 text-xs font-bold text-amber-300 hover:bg-amber-400/30 transition"
+            className={`${ACTION_BLUE} px-4 py-2 text-xs`}
           >
             Try Again
           </button>

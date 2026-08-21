@@ -13,6 +13,7 @@ import {
   SortHeader,
   type SortDir,
 } from "./ui";
+import { CARD_CLICK, CHIP, CHIP_OFF, CHIP_ON_AMBER } from "../design";
 
 // ─── API shapes (mirror /api/performance/leagues) ─────────────────────────────
 
@@ -205,10 +206,10 @@ export function LeagueCard({
   );
 
   const cls = cn(
-    "group relative block rounded-xl border bg-black/50 p-4 text-left transition",
-    selected
-      ? "border-amber-400/60 bg-amber-400/[0.06] ring-1 ring-amber-400/40"
-      : "border-white/10 hover:border-white/25 hover:bg-black/70",
+    "group relative p-4 text-left",
+    CARD_CLICK,
+    // Selected league stays pinned with a lit ring + resting amber glow.
+    selected && "ring-2 ring-amber-400/60 shadow-lg shadow-amber-500/20",
   );
 
   if (href) {
@@ -479,14 +480,15 @@ export function usePnlWindow(points: TrendPoint[]) {
   }, [points, windowDays]);
 
   const WindowSwitcher = (
-    <div className="flex gap-1 rounded-lg border border-white/10 bg-white/[0.03] p-1">
+    <div className="flex gap-1.5">
       {([7, 30, 0] as const).map((d) => (
         <button
           key={d}
           onClick={() => setWindowDays(d)}
           className={cn(
-            "rounded-md px-2.5 py-1 font-mono text-[11px] font-medium transition",
-            windowDays === d ? "bg-amber-400 font-bold text-slate-950" : "text-slate-300 hover:bg-white/5",
+            CHIP,
+            "px-2.5 py-1 font-mono text-[11px] font-medium",
+            windowDays === d ? CHIP_ON_AMBER : CHIP_OFF,
           )}
         >
           {d === 0 ? "All" : `${d}d`}

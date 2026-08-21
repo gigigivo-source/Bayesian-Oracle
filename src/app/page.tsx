@@ -9,6 +9,27 @@ import { FixtureCard } from "./_components/ui";
 import { MatchDetail } from "./_components/MatchDetail";
 import { BackgroundSlideshow } from "./_components/BackgroundSlideshow";
 import { ErrorBoundary } from "./_components/ErrorBoundary";
+import {
+  ACTION_AMBER,
+  ACTION_BLUE,
+  ACTION_EMERALD,
+  ACTION_ROSE,
+  CARD_SURFACE,
+  CHIP,
+  CHIP_OFF,
+  CHIP_ON_AMBER,
+  CHIP_ON_CYAN,
+  CHIP_ON_EMERALD,
+  CHIP_ON_VIOLET,
+  MENU_ITEM,
+  MENU_ITEM_ON,
+  NAV_PILL,
+  NAV_PILL_OFF,
+  NAV_PILL_ON_AMBER,
+  OUTLINE_AMBER,
+  OUTLINE_NEUTRAL,
+  OUTLINE_ROSE,
+} from "./_components/design";
 
 type Tab = "top" | "live" | "accumulators" | "performance" | "leagues" | "standings" | "oracle" | "chat" | "bankroll" | "slipbuilder" | "dailypicks" | "oddscalc" | "verified" | "results" | "backtest" | "valuebets";
 
@@ -115,7 +136,7 @@ export default function Home() {
           type="password" onKeyDown={e => { if (e.key === "Enter") handlePin(); }}
           className="w-full rounded-lg border border-white/15 bg-black/40 px-4 py-3 text-center text-2xl tracking-[0.5em] text-white outline-none focus:border-amber-400 font-mono" />
         {pinError && <p className="text-rose-400 text-xs mt-2">{pinError}</p>}
-        <button onClick={handlePin} className="w-full mt-4 rounded-lg bg-amber-400 py-3 text-sm font-bold text-slate-950 hover:bg-amber-300">
+        <button onClick={handlePin} className={`w-full mt-4 px-4 py-3 text-sm ${ACTION_AMBER}`}>
           {hasPin ? "Unlock" : "Set PIN & Start"}
         </button>
       </div>
@@ -134,10 +155,8 @@ export default function Home() {
             <div className="mx-auto flex max-w-7xl items-center gap-3">
               <button
                 onClick={() => { setSelectedLeagueSlug(null); setShowTodayOnly(false); }}
-                className={`rounded-full px-4 py-2 text-sm font-medium tracking-wide whitespace-nowrap transition-all duration-200 cursor-pointer select-none active:scale-95 hover:scale-105 border ${
-                  selectedLeagueSlug === null && !showTodayOnly
-                    ? "bg-gradient-to-r from-amber-400 to-orange-500 text-slate-950 font-bold shadow-lg shadow-amber-500/25 border-amber-300/60 hover:shadow-amber-500/40"
-                    : "bg-white/5 text-slate-300 border-white/15 hover:bg-white/10 hover:text-white hover:border-white/25"
+                className={`${CHIP} px-4 py-2 text-sm font-medium tracking-wide ${
+                  selectedLeagueSlug === null && !showTodayOnly ? CHIP_ON_AMBER : CHIP_OFF
                 }`}
               >
                 All
@@ -145,10 +164,8 @@ export default function Home() {
               {/* TODAY chip */}
               <button
                 onClick={() => { setShowTodayOnly(true); setSelectedLeagueSlug(null); }}
-                className={`rounded-full px-4 py-2 text-sm font-medium tracking-wide whitespace-nowrap transition-all duration-200 cursor-pointer select-none active:scale-95 hover:scale-105 border flex items-center gap-1.5 ${
-                  showTodayOnly
-                    ? "bg-gradient-to-r from-emerald-400 to-teal-500 text-slate-950 font-bold shadow-lg shadow-emerald-500/25 border-emerald-300/60 hover:shadow-emerald-500/40"
-                    : "bg-emerald-500/10 text-emerald-300 border-emerald-500/30 hover:bg-emerald-500/20 hover:border-emerald-500/50"
+                className={`${CHIP} px-4 py-2 text-sm font-medium tracking-wide ${
+                  showTodayOnly ? CHIP_ON_EMERALD : "bg-gray-800/50 text-emerald-300/80 hover:bg-emerald-500/15 hover:text-emerald-200"
                 }`}
               >
                 <span className="relative flex h-2 w-2">
@@ -167,10 +184,8 @@ export default function Home() {
                     const el = document.getElementById(`league-sec-${lg.slug}`);
                     if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
                   }}
-                  className={`rounded-full px-4 py-2 text-sm font-medium tracking-wide whitespace-nowrap transition-all duration-200 cursor-pointer select-none active:scale-95 hover:scale-105 flex items-center gap-1.5 border ${
-                    selectedLeagueSlug === lg.slug
-                      ? "bg-gradient-to-r from-amber-400 to-orange-500 text-slate-950 font-bold shadow-lg shadow-amber-500/25 border-amber-300/60 hover:shadow-amber-500/40"
-                      : "bg-white/5 text-slate-300 border-white/15 hover:bg-white/10 hover:text-white hover:border-white/25"
+                  className={`${CHIP} px-4 py-2 text-sm font-medium tracking-wide ${
+                    selectedLeagueSlug === lg.slug ? CHIP_ON_AMBER : CHIP_OFF
                   }`}
                 >
                   <Image src={lg.logo} alt={lg.name} width={16} height={16} className="object-contain" unoptimized />
@@ -334,10 +349,8 @@ function Header({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
               <button
                 key={t.id}
                 onClick={() => { setTab(t.id); setMenuOpen(false); }}
-                className={`rounded-full px-4 py-2 text-sm font-medium tracking-wide transition-all duration-200 cursor-pointer select-none active:scale-95 hover:scale-105 backdrop-blur-sm ${
-                  tab === t.id
-                    ? "bg-gradient-to-r from-amber-400 to-orange-500 text-slate-950 font-bold shadow-lg shadow-amber-500/30 border border-amber-300/50 hover:shadow-amber-500/50"
-                    : "bg-white/5 text-slate-300 border border-white/15 hover:bg-white/10 hover:text-white hover:border-white/20"
+                className={`${NAV_PILL} px-4 py-2 text-sm font-medium tracking-wide ${
+                  tab === t.id ? NAV_PILL_ON_AMBER : NAV_PILL_OFF
                 }`}
               >
                 {t.label}
@@ -354,10 +367,8 @@ function Header({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
           aria-expanded={menuOpen}
           aria-haspopup="menu"
           aria-label="Menu"
-          className={`flex cursor-pointer select-none items-center gap-2 rounded-full border px-4 py-2.5 text-sm font-semibold shadow-lg shadow-black/40 backdrop-blur-sm transition-all duration-200 hover:scale-[1.03] active:scale-95 ${
-            activeInMenu
-              ? "border-amber-300 bg-gradient-to-r from-amber-400 to-orange-500 text-slate-950 hover:from-amber-300 hover:to-orange-400 shadow-amber-500/25"
-              : "border-white/25 bg-white/10 text-slate-100 hover:bg-white/15 hover:border-white/35 hover:text-white"
+          className={`${NAV_PILL} px-4 py-2.5 text-sm font-semibold ${
+            activeInMenu ? NAV_PILL_ON_AMBER : NAV_PILL_OFF
           }`}
         >
           <span aria-hidden="true" className="text-base leading-none">
@@ -367,19 +378,15 @@ function Header({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
         </button>
 
         {menuOpen && (
-          <div className="absolute right-0 top-full mt-2 w-56 max-h-[calc(100vh-5rem)] overflow-y-auto rounded-lg bg-black/90 border border-white/15 shadow-xl">
+          <div className="absolute right-0 top-full mt-2 w-56 max-h-[calc(100vh-5rem)] overflow-y-auto rounded-xl bg-black/90 border border-white/15 shadow-2xl shadow-black/60 p-1.5 space-y-0.5 backdrop-blur-md">
             {menuTabs.map((t) => (
               <button
                 key={t.id}
                 onClick={() => { setTab(t.id); setMenuOpen(false); }}
-                className={`w-full text-left px-4 py-3 transition-all duration-200 rounded-xl border-b border-white/5 last:border-0 cursor-pointer select-none active:scale-[0.98] hover:scale-[1.01] hover:bg-white/5 ${
-                  tab === t.id
-                    ? "bg-gradient-to-r from-amber-400/10 to-orange-500/10 text-amber-300 border-l-2 border-amber-400 font-bold"
-                    : "text-slate-200 font-medium"
-                }`}
+                className={`${MENU_ITEM} w-full px-4 py-3 text-left ${tab === t.id ? MENU_ITEM_ON : ""}`}
               >
                 <div className="text-sm font-medium">{t.label}</div>
-                <div className="text-[10px] text-slate-400">{t.desc}</div>
+                <div className={`text-[10px] ${tab === t.id ? "text-slate-300" : "text-slate-400"}`}>{t.desc}</div>
               </button>
             ))}
           </div>
@@ -531,7 +538,7 @@ function TopFeed({
             <strong>Today — {todayStr}</strong>
             <span className="text-emerald-300/70 text-xs">({todayMatchCount} matches)</span>
           </span>
-          <button onClick={onClearToday} className="text-xs text-emerald-300 hover:text-white underline font-mono">
+          <button onClick={onClearToday} className={`${OUTLINE_NEUTRAL} px-3 py-1 text-xs font-mono`}>
             Show All ✕
           </button>
         </div>
@@ -539,7 +546,7 @@ function TopFeed({
       {filterSlug && !showTodayOnly ? (
         <div className="flex items-center justify-between rounded-lg bg-black/50 px-4 py-2 text-sm text-amber-200">
           <span>Filtering: <strong>{TOP_LEAGUE_PILLS.find((p) => p.slug === filterSlug)?.name ?? filterSlug}</strong></span>
-          <button onClick={onClearFilter} className="text-xs text-slate-300 hover:text-white underline font-mono">
+          <button onClick={onClearFilter} className={`${OUTLINE_NEUTRAL} px-3 py-1 text-xs font-mono`}>
             Show All ✕
           </button>
         </div>
@@ -764,10 +771,8 @@ function LeagueBrowser({ onSelect }: { onSelect: (fx: FixtureLite) => void }) {
                   <button
                     key={lg.slug}
                     onClick={() => loadLeague(lg)}
-                    className={`w-full rounded-md px-3 py-1.5 text-left text-sm transition ${
-                      activeLeague?.slug === lg.slug
-                        ? "bg-amber-400/20 text-amber-200 font-bold"
-                        : "text-slate-300 hover:bg-white/5"
+                    className={`${MENU_ITEM} w-full px-3 py-1.5 text-left text-sm ${
+                      activeLeague?.slug === lg.slug ? MENU_ITEM_ON : ""
                     }`}
                   >
                     {lg.name}
@@ -997,10 +1002,8 @@ function StandingsView() {
           <button
             key={lg.slug}
             onClick={() => loadStandings(lg.slug, lg.name)}
-            className={`rounded-full px-2.5 py-1 text-[11px] font-semibold border transition whitespace-nowrap ${
-              activeSlug === lg.slug
-                ? "bg-amber-400 text-slate-950 border-amber-400"
-                : "border-white/15 bg-black/40 text-slate-300 hover:bg-black/60"
+            className={`${CHIP} px-2.5 py-1 text-[11px] font-semibold ${
+              activeSlug === lg.slug ? CHIP_ON_AMBER : CHIP_OFF
             }`}
           >
             {lg.name}
@@ -1027,10 +1030,8 @@ function StandingsView() {
                     <button
                       key={lg.slug}
                       onClick={() => loadStandings(lg.slug, lg.name)}
-                      className={`w-full rounded px-2.5 py-1.5 text-left text-xs transition flex items-center justify-between gap-2 ${
-                        activeSlug === lg.slug
-                          ? "bg-amber-400/20 text-amber-200 font-bold"
-                          : "text-slate-300 hover:bg-white/5"
+                      className={`${MENU_ITEM} flex w-full items-center justify-between gap-2 px-2.5 py-1.5 text-left text-xs ${
+                        activeSlug === lg.slug ? MENU_ITEM_ON : ""
                       }`}
                     >
                       <span className="truncate">{lg.name}</span>
@@ -1070,7 +1071,7 @@ function StandingsView() {
               <div className="mt-4 flex gap-2 justify-center">
                 <button
                   onClick={() => { window.dispatchEvent(new CustomEvent("gigi-tab", { detail: "fixtures" })); }}
-                  className="rounded-lg bg-amber-400/20 border border-amber-400/30 px-4 py-2 text-xs font-bold text-amber-300 hover:bg-amber-400/30 transition"
+                  className={`${OUTLINE_AMBER} px-4 py-2 text-xs`}
                 >
                   View Fixtures →
                 </button>
@@ -1127,12 +1128,12 @@ function ManualOracle() {
       </div>
 
       {searchResults.length > 0 && !selectedFx && (
-        <div className="bg-black/50 rounded-lg overflow-hidden divide-y divide-white/5">
+        <div className="bg-white/5 border border-white/5 rounded-2xl overflow-hidden p-1.5 space-y-0.5">
           {searchResults.map((fx) => (
             <button
               key={`${fx.leagueSlug}-${fx.id}`}
               onClick={() => setSelectedFx(fx)}
-              className="w-full text-left px-4 py-3 hover:bg-white/5 transition flex items-center gap-3"
+              className={`${MENU_ITEM} flex w-full items-center gap-3 px-4 py-3 text-left`}
             >
               {fx.home.logo && <Image src={fx.home.logo} alt="" width={20} height={20} className="object-contain" unoptimized />}
               <div className="flex-1 min-w-0">
@@ -1309,8 +1310,8 @@ function ResultsPage({ onSelect }: { onSelect: (fx: FixtureLite) => void }) {
       <div className="flex flex-wrap gap-1.5">
         <button
           onClick={() => loadResults(null)}
-          className={`rounded-full px-3 py-1 text-xs font-semibold border transition ${
-            activeSlug === null ? "bg-amber-400 text-slate-950 border-amber-400" : "border-white/15 bg-black/40 text-slate-300 hover:bg-black/60"
+          className={`${CHIP} px-3 py-1 text-xs font-semibold ${
+            activeSlug === null ? CHIP_ON_AMBER : CHIP_OFF
           }`}
         >
           All Leagues
@@ -1319,8 +1320,8 @@ function ResultsPage({ onSelect }: { onSelect: (fx: FixtureLite) => void }) {
           <button
             key={lg.slug}
             onClick={() => loadResults(lg.slug)}
-            className={`rounded-full px-2.5 py-1 text-xs font-semibold border transition flex items-center gap-1.5 ${
-              activeSlug === lg.slug ? "bg-amber-400 text-slate-950 border-amber-400" : "border-white/15 bg-black/40 text-slate-300 hover:bg-black/60"
+            className={`${CHIP} px-2.5 py-1 text-xs font-semibold ${
+              activeSlug === lg.slug ? CHIP_ON_AMBER : CHIP_OFF
             }`}
           >
             <Image src={lg.logo} alt={lg.name} width={14} height={14} className="object-contain" unoptimized />
@@ -1410,7 +1411,7 @@ function ValueBetsPage() {
           <p className="text-xs text-slate-400 mt-1">Post-match P&L verification — oracle edge vs real outcomes</p>
         </div>
         <button onClick={verify} disabled={verifying}
-          className="rounded-lg bg-emerald-500/20 border border-emerald-500/40 px-4 py-2 text-sm font-bold text-emerald-300 hover:bg-emerald-500/30 disabled:opacity-50 transition">
+          className={`${ACTION_EMERALD} px-4 py-2 text-sm`}>
           {verifying ? "Verifying…" : "▶ Verify Pending"}
         </button>
       </div>
@@ -1622,7 +1623,7 @@ function BacktestDashboard() {
             <div className="flex gap-1">
               {[3, 7, 14, 30].map((d) => (
                 <button key={d} onClick={() => setDays(d)}
-                  className={`rounded px-3 py-1.5 text-xs font-bold transition ${days === d ? "bg-amber-400 text-slate-950" : "bg-black/40 text-slate-300 border border-white/15"}`}>
+                  className={`${CHIP} px-3 py-1.5 text-xs font-bold ${days === d ? CHIP_ON_AMBER : CHIP_OFF}`}>
                   {d}d
                 </button>
               ))}
@@ -1634,7 +1635,7 @@ function BacktestDashboard() {
             <div className="flex gap-1">
               {[10, 20, 30, 50].map((l) => (
                 <button key={l} onClick={() => setLimit(l)}
-                  className={`rounded px-3 py-1.5 text-xs font-bold transition ${limit === l ? "bg-amber-400 text-slate-950" : "bg-black/40 text-slate-300 border border-white/15"}`}>
+                  className={`${CHIP} px-3 py-1.5 text-xs font-bold ${limit === l ? CHIP_ON_AMBER : CHIP_OFF}`}>
                   {l}
                 </button>
               ))}
@@ -1648,7 +1649,7 @@ function BacktestDashboard() {
           <div className="flex flex-wrap gap-1.5">
             {LEAGUES_QUICK.map((l) => (
               <button key={l.slug} onClick={() => setLeagueFilter(l.slug)}
-                className={`rounded-full px-2.5 py-1 text-[11px] font-semibold border transition ${leagueFilter === l.slug ? "bg-amber-400 text-slate-950 border-amber-400" : "border-white/15 bg-black/40 text-slate-300 hover:bg-black/60"}`}>
+                className={`${CHIP} px-2.5 py-1 text-[11px] font-semibold ${leagueFilter === l.slug ? CHIP_ON_AMBER : CHIP_OFF}`}>
                 {l.name}
               </button>
             ))}
@@ -1656,7 +1657,7 @@ function BacktestDashboard() {
         </div>
 
         <button onClick={runBacktest} disabled={loading}
-          className="rounded-lg bg-emerald-500 px-6 py-3 text-sm font-bold text-white hover:bg-emerald-400 disabled:opacity-50 transition flex items-center gap-2">
+          className={`${ACTION_EMERALD} inline-flex items-center gap-2 px-6 py-3 text-sm`}>
           {loading ? (
             <><span className="animate-spin">⚡</span> Running Backtest…</>
           ) : (
@@ -1743,10 +1744,10 @@ function BacktestDashboard() {
                              : "border-l-amber-500";
 
               return (
-                <div key={idx} className={`bg-black/50 rounded-lg border-l-2 ${top1Color} overflow-hidden`}>
+                <div key={idx} className={`overflow-hidden rounded-2xl border border-white/5 border-l-2 bg-white/5 transition-all duration-200 hover:-translate-y-1 hover:shadow-2xl hover:shadow-black/50 ${top1Color}`}>
                   <button
                     onClick={() => setExpandedMatch(isExpanded ? null : `${idx}`)}
-                    className="w-full text-left p-3 hover:bg-white/[0.02] transition"
+                    className="block w-full cursor-pointer select-none p-3 text-left transition-all duration-200 hover:bg-white/5 active:scale-[0.995]"
                   >
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div className="flex items-center gap-3">
@@ -1951,7 +1952,7 @@ function PerformanceDashboard() {
         <div className="flex gap-1.5">
           {(["overview","accuracy","calibration"] as const).map((t) => (
             <button key={t} onClick={() => setActiveSubTab(t)}
-              className={`rounded-lg px-3 py-1.5 text-xs font-bold capitalize transition ${activeSubTab===t ? "bg-amber-400 text-slate-950" : "bg-black/50 text-slate-300 border border-white/10 hover:bg-black/70"}`}>
+              className={`${CHIP} px-3 py-1.5 text-xs font-bold capitalize ${activeSubTab===t ? CHIP_ON_AMBER : CHIP_OFF}`}>
               {t === "overview" ? "Overview" : t === "accuracy" ? "📈 Accuracy Trend" : "🔧 Calibration"}
             </button>
           ))}
@@ -2257,7 +2258,7 @@ function PerformanceDashboard() {
                             }
                           }}
                           disabled={resolvingId === m.id}
-                          className="rounded px-2 py-1 text-[10px] font-mono bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 hover:bg-cyan-500/40"
+                          className={`${ACTION_BLUE} px-2.5 py-1 text-[10px] font-mono`}
                         >
                           {resolvingId === m.id ? "Searching..." : "Web Search"}
                         </button>
@@ -2295,7 +2296,7 @@ function PerformanceDashboard() {
                                 await refreshPerformance();
                               } catch { /* ignore network failures */ }
                             }}
-                            className="rounded bg-emerald-500/30 border border-emerald-500/50 px-2 py-0.5 text-[10px] font-bold text-emerald-300 hover:bg-emerald-500/50"
+                            className={`${ACTION_EMERALD} px-2 py-0.5 text-[10px]`}
                           >
                             HIT
                           </button>
@@ -2310,7 +2311,7 @@ function PerformanceDashboard() {
                                 await refreshPerformance();
                               } catch { /* ignore network failures */ }
                             }}
-                            className="rounded bg-rose-500/30 border border-rose-500/50 px-2 py-0.5 text-[10px] font-bold text-rose-300 hover:bg-rose-500/50"
+                            className={`${ACTION_ROSE} px-2 py-0.5 text-[10px]`}
                           >
                             MISS
                           </button>
@@ -2565,16 +2566,16 @@ function AccumulatorPage() {
 
       {/* Tabs */}
       <div className="flex gap-2 flex-wrap items-center">
-        <button onClick={() => setAccaTab("highhit")}    className={`rounded-lg px-3 py-2 text-xs font-bold transition ${accaTab === "highhit"     ? "bg-amber-400 text-slate-950"   : "bg-black/50 text-slate-300 hover:bg-black/70"}`}>🔒 High Hit</button>
-        <button onClick={() => setAccaTab("value")}      className={`rounded-lg px-3 py-2 text-xs font-bold transition ${accaTab === "value"       ? "bg-emerald-400 text-slate-950" : "bg-black/50 text-slate-300 hover:bg-black/70"}`}>💎 Value Bets</button>
-        <button onClick={() => setAccaTab("slips")}      className={`rounded-lg px-3 py-2 text-xs font-bold transition ${accaTab === "slips"       ? "bg-cyan-400 text-slate-950"    : "bg-black/50 text-slate-300 hover:bg-black/70"}`}>
+        <button onClick={() => setAccaTab("highhit")}    className={`${CHIP} px-3 py-2 text-xs font-bold ${accaTab === "highhit"     ? CHIP_ON_AMBER   : CHIP_OFF}`}>🔒 High Hit</button>
+        <button onClick={() => setAccaTab("value")}      className={`${CHIP} px-3 py-2 text-xs font-bold ${accaTab === "value"       ? CHIP_ON_EMERALD : CHIP_OFF}`}>💎 Value Bets</button>
+        <button onClick={() => setAccaTab("slips")}      className={`${CHIP} px-3 py-2 text-xs font-bold ${accaTab === "slips"       ? CHIP_ON_CYAN    : CHIP_OFF}`}>
           📋 My Slips {pendingSlips.length > 0 && <span className="ml-1 rounded-full bg-amber-400 text-slate-950 text-[9px] px-1.5 py-0.5 font-black">{pendingSlips.length}</span>}
         </button>
-        <button onClick={() => setAccaTab("performance")} className={`rounded-lg px-3 py-2 text-xs font-bold transition ${accaTab === "performance" ? "bg-purple-400 text-slate-950"  : "bg-black/50 text-slate-300 hover:bg-black/70"}`}>📊 Performance</button>
+        <button onClick={() => setAccaTab("performance")} className={`${CHIP} px-3 py-2 text-xs font-bold ${accaTab === "performance" ? CHIP_ON_VIOLET  : CHIP_OFF}`}>📊 Performance</button>
 
         {/* Auto-verify with manual trigger */}
         <button onClick={manualVerify} disabled={verifying}
-          className="ml-auto rounded-lg bg-emerald-500/20 border border-emerald-500/40 px-3 py-1.5 text-xs font-bold text-emerald-300 hover:bg-emerald-500/30 disabled:opacity-50 transition">
+          className={`${ACTION_EMERALD} ml-auto px-3 py-1.5 text-xs`}>
           {verifying ? "Verifying…" : "⚡ Verify Now"}
         </button>
       </div>
@@ -2685,14 +2686,14 @@ function SavedSlipCard({
   const pending = picks.filter(p => !p.outcome || p.outcome === "PENDING").length;
   const allSettled = pending === 0 && picks.length > 0;
 
-  const statusColor = slip.status === "won"  ? "border-l-emerald-500 bg-emerald-500/5" :
-                      slip.status === "lost" ? "border-l-rose-500 bg-rose-500/5" :
-                                               "border-l-amber-500 bg-black/50";
+  const statusColor = slip.status === "won"  ? "border-l-emerald-500" :
+                      slip.status === "lost" ? "border-l-rose-500" :
+                                               "border-l-amber-500";
 
   return (
-    <div className={`rounded-lg border border-white/10 border-l-2 ${statusColor} overflow-hidden`}>
+    <div className={`overflow-hidden rounded-2xl border border-white/5 border-l-2 bg-white/5 transition-all duration-200 hover:-translate-y-1 hover:shadow-2xl hover:shadow-black/50 ${statusColor}`}>
       {/* Header */}
-      <button onClick={() => setExpanded(e => !e)} className="w-full text-left p-3 hover:bg-white/[0.02] transition">
+      <button onClick={() => setExpanded(e => !e)} className="block w-full cursor-pointer select-none p-3 text-left transition-all duration-200 hover:bg-white/5 active:scale-[0.995]">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
             <div className="text-sm font-bold text-white">{slip.name}</div>
@@ -2742,11 +2743,11 @@ function SavedSlipCard({
               <input value={stakeVal} onChange={e => setStakeVal(e.target.value)} type="number" min="1"
                 className="w-16 rounded bg-black/50 border border-white/20 px-2 py-0.5 text-xs text-white outline-none font-mono" />
               <button onClick={() => { onUpdateStake(slip.id, parseFloat(stakeVal) || 10); setEditingStake(false); }}
-                className="rounded bg-amber-400 text-slate-950 px-2 py-0.5 text-[10px] font-bold">Save</button>
-              <button onClick={() => setEditingStake(false)} className="text-[10px] text-slate-400 hover:text-white">✕</button>
+                className={`${ACTION_AMBER} px-2 py-0.5 text-[10px]`}>Save</button>
+              <button onClick={() => setEditingStake(false)} className={`${OUTLINE_ROSE} px-1.5 py-0.5 text-[10px]`}>✕</button>
             </div>
           ) : (
-            <button onClick={() => setEditingStake(true)} className="text-[10px] text-amber-300 font-mono hover:text-amber-200">
+            <button onClick={() => setEditingStake(true)} className="cursor-pointer select-none text-[10px] text-amber-300 font-mono transition-all duration-200 hover:text-amber-200 active:scale-95">
               ${slip.stake ?? 10} → ${((slip.stake ?? 10) * slip.combinedOdds).toFixed(2)} · <span className="underline">edit</span>
             </button>
           )}
@@ -2777,8 +2778,8 @@ function SavedSlipCard({
             </div>
           ))}
           <div className="flex gap-2 px-3 py-2 bg-black/20">
-            <button onClick={onVerify} className="rounded bg-emerald-500/20 border border-emerald-500/40 px-3 py-1 text-[10px] font-bold text-emerald-300 hover:bg-emerald-500/30">⚡ Re-verify</button>
-            <button onClick={() => onDelete(slip.id)} className="rounded bg-rose-500/20 border border-rose-500/40 px-3 py-1 text-[10px] font-bold text-rose-300 hover:bg-rose-500/30">🗑 Delete</button>
+            <button onClick={onVerify} className={`${ACTION_EMERALD} px-3 py-1 text-[10px]`}>⚡ Re-verify</button>
+            <button onClick={() => onDelete(slip.id)} className={`${OUTLINE_ROSE} px-3 py-1 text-[10px]`}>🗑 Delete</button>
           </div>
         </div>
       )}
@@ -2817,7 +2818,7 @@ function AccaCardRender({ acca, onSave }: { acca: Acca; onSave?: () => void }) {
   }
 
   return (
-    <div className="bg-black/50 rounded-lg overflow-hidden border border-white/5">
+    <div className={`${CARD_SURFACE} overflow-hidden`}>
       {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-3 p-4 border-b border-white/10">
         <div>
@@ -2882,7 +2883,7 @@ function AccaCardRender({ acca, onSave }: { acca: Acca; onSave?: () => void }) {
               <span className="rounded bg-emerald-500/20 border border-emerald-500/40 px-3 py-1.5 text-xs font-bold text-emerald-300 font-mono">✓ Tracked</span>
             ) : (
               <button onClick={trackSlip} disabled={saving}
-                className="rounded bg-amber-400 text-slate-950 px-4 py-1.5 text-xs font-bold hover:bg-amber-300 disabled:opacity-50 transition">
+                className={`${ACTION_AMBER} px-4 py-1.5 text-xs`}>
                 {saving ? "Saving…" : "📋 Track Slip"}
               </button>
             )}
@@ -2950,7 +2951,7 @@ function ChatAssistant() {
                 <button
                   key={q}
                   onClick={() => { setInput(q); }}
-                  className="rounded-full bg-black/40 border border-white/15 px-3 py-1.5 text-xs text-slate-300 hover:bg-white/10 transition"
+                  className={`${CHIP} ${CHIP_OFF} px-3 py-1.5 text-xs`}
                 >
                   {q}
                 </button>
@@ -2976,7 +2977,7 @@ function ChatAssistant() {
                       href={s.url}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="block text-xs text-cyan-400 hover:text-cyan-300 truncate"
+                      className="block cursor-pointer select-none truncate text-xs text-cyan-400 transition-all duration-200 hover:translate-x-1 hover:text-cyan-200"
                     >
                       {s.title}
                     </a>
@@ -3008,7 +3009,7 @@ function ChatAssistant() {
         <button
           onClick={send}
           disabled={loading || !input.trim()}
-          className="rounded-lg bg-amber-400 px-5 py-3 text-sm font-bold text-slate-950 hover:bg-amber-300 disabled:opacity-50"
+          className={`${ACTION_AMBER} px-5 py-3 text-sm`}
         >
           Send
         </button>
@@ -3086,7 +3087,7 @@ function BankrollTracker() {
               placeholder="e.g. 500" type="number" step="0.01"
               className="flex-1 rounded-lg border border-white/15 bg-black/40 px-4 py-3 text-xl text-white outline-none focus:border-amber-400 font-mono" />
             <button onClick={setInitialBalance}
-              className="rounded-lg bg-amber-400 px-6 py-3 text-sm font-bold text-slate-950 hover:bg-amber-300">
+              className={`${ACTION_AMBER} px-6 py-3 text-sm`}>
               Start Tracking
             </button>
           </div>
@@ -3128,12 +3129,15 @@ function BankrollTracker() {
       <div className="bg-black/50 rounded-lg p-4">
         <div className="text-xs text-slate-400 font-mono mb-2">RECORD TRANSACTION</div>
         <div className="flex flex-wrap gap-2 mb-3">
-          {(["deposit", "bet", "win", "withdraw"] as const).map(t => (
-            <button key={t} onClick={() => setType(t)}
-              className={`rounded px-3 py-1.5 text-xs font-bold capitalize ${type === t ? "bg-amber-400 text-slate-950" : "bg-black/40 text-slate-300 border border-white/15"}`}>
-              {t === "deposit" ? "Deposit" : t === "bet" ? "Place Bet" : t === "win" ? "Bet Won" : "Withdraw"}
-            </button>
-          ))}
+          {(["deposit", "bet", "win", "withdraw"] as const).map(t => {
+            const on = t === "deposit" ? CHIP_ON_AMBER : t === "bet" ? CHIP_ON_CYAN : t === "win" ? CHIP_ON_EMERALD : CHIP_ON_VIOLET;
+            return (
+              <button key={t} onClick={() => setType(t)}
+                className={`${CHIP} px-3 py-1.5 text-xs font-bold capitalize ${type === t ? on : CHIP_OFF}`}>
+                {t === "deposit" ? "Deposit" : t === "bet" ? "Place Bet" : t === "win" ? "Bet Won" : "Withdraw"}
+              </button>
+            );
+          })}
         </div>
         <div className="flex gap-2">
           <input value={amount} onChange={e => setAmount(e.target.value)} placeholder="Amount" type="number"
@@ -3141,7 +3145,7 @@ function BankrollTracker() {
           <input value={desc} onChange={e => setDesc(e.target.value)}
             placeholder={type === "bet" ? "e.g. Arsenal Over 2.5 Goals" : "Description"}
             className="flex-1 rounded border border-white/15 bg-black/40 px-3 py-2 text-sm text-white outline-none focus:border-amber-400" />
-          <button onClick={submit} className="rounded bg-amber-400 px-4 py-2 text-sm font-bold text-slate-950 hover:bg-amber-300">Add</button>
+          <button onClick={submit} className={`${ACTION_AMBER} px-4 py-2 text-sm`}>Add</button>
         </div>
       </div>
 
@@ -3310,7 +3314,7 @@ function OddsCalculator() {
         <div className="text-xs text-slate-400 font-mono mb-2">ODDS CONVERTER</div>
         <div className="flex flex-wrap gap-2 mb-3">
           {(["decimal","american","fractional","probability"] as const).map(f => (
-            <button key={f} onClick={() => setFormat(f)} className={`rounded px-3 py-1 text-xs font-bold capitalize ${format===f?"bg-amber-400 text-slate-950":"bg-black/40 text-slate-300 border border-white/15"}`}>{f}</button>
+            <button key={f} onClick={() => setFormat(f)} className={`${CHIP} px-3 py-1 text-xs font-bold capitalize ${format===f?CHIP_ON_AMBER:CHIP_OFF}`}>{f}</button>
           ))}
         </div>
         <div className="flex gap-2">
@@ -3318,7 +3322,7 @@ function OddsCalculator() {
             placeholder={format === "decimal" ? "e.g. 2.50" : format === "american" ? "e.g. +150 or -200" : format === "fractional" ? "e.g. 3/2" : "e.g. 0.65"}
             onKeyDown={e => { if(e.key==="Enter") convert(); }}
             className="flex-1 rounded border border-white/15 bg-black/40 px-3 py-2 text-sm text-white outline-none focus:border-amber-400 font-mono" />
-          <button onClick={convert} className="rounded bg-amber-400 px-4 py-2 text-sm font-bold text-slate-950">Convert</button>
+          <button onClick={convert} className={`${ACTION_AMBER} px-4 py-2 text-sm`}>Convert</button>
         </div>
         {result && (
           <div className="grid grid-cols-2 gap-2 mt-3 sm:grid-cols-4">
@@ -3348,7 +3352,7 @@ function OddsCalculator() {
         <div className="flex gap-2">
           <input value={dutchOdds} onChange={e => setDutchOdds(e.target.value)} placeholder="2.50, 3.20, 4.00"
             className="flex-1 rounded border border-white/15 bg-black/40 px-3 py-2 text-sm text-white outline-none focus:border-amber-400 font-mono" />
-          <button onClick={calcDutch} className="rounded bg-amber-400 px-4 py-2 text-sm font-bold text-slate-950">Calculate</button>
+          <button onClick={calcDutch} className={`${ACTION_AMBER} px-4 py-2 text-sm`}>Calculate</button>
         </div>
         {dutchResult && (
           <div className="mt-3">

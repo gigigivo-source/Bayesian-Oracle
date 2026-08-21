@@ -22,6 +22,7 @@ import {
   type BetResult,
   type SortDir,
 } from "@/app/_components/perf/ui";
+import { OUTLINE_CYAN } from "@/app/_components/design";
 import { LEAGUE_MAP } from "@/lib/leagues";
 
 function competitionNameFor(slug: string | undefined | null): string | null {
@@ -309,7 +310,7 @@ function AccaContent({ slips, onRefresh }: { slips: Slip[]; onRefresh: () => voi
         right={
           <button
             onClick={onRefresh}
-            className="rounded-lg border border-white/15 bg-white/[0.03] px-3 py-1.5 text-xs font-semibold text-slate-300 transition hover:bg-white/10"
+            className={cn(OUTLINE_CYAN, "px-3 py-1.5 text-xs")}
           >
             ↻ Refresh
           </button>
@@ -379,7 +380,7 @@ function AccaContent({ slips, onRefresh }: { slips: Slip[]; onRefresh: () => voi
                   return (
                     <Fragment key={s.id}>
                       <tr
-                        className={cn("cursor-pointer border-l-2 transition hover:bg-white/[0.02]", rowTint)}
+                        className={cn("cursor-pointer select-none border-l-2 transition-all duration-200 hover:bg-white/[0.05] active:bg-white/[0.08]", rowTint)}
                         onClick={() => setExpanded(isOpen ? null : s.id)}
                       >
                         <td className="whitespace-nowrap px-3 py-2 font-mono text-[11px] text-slate-400">{dateKey(s)}</td>

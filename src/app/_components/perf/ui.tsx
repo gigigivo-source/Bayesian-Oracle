@@ -1,6 +1,7 @@
 "use client";
 
 import type { ReactNode } from "react";
+import { ACTION_BLUE } from "../design";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -341,7 +342,7 @@ export function ErrorState({ message, onRetry }: { message: string; onRetry?: ()
       {onRetry ? (
         <button
           onClick={onRetry}
-          className="rounded-lg border border-rose-500/40 bg-rose-500/15 px-4 py-2 text-xs font-bold text-rose-200 transition hover:bg-rose-500/25"
+          className={`${ACTION_BLUE} px-4 py-2 text-xs`}
         >
           ↻ Retry
         </button>
@@ -394,8 +395,8 @@ export function SortHeader({
       <button
         onClick={onClick}
         className={cn(
-          "inline-flex items-center gap-0.5 text-[11px] font-semibold uppercase tracking-wider transition",
-          active ? "text-amber-300" : "text-slate-400 hover:text-slate-200",
+          "inline-flex cursor-pointer select-none items-center gap-0.5 rounded text-[11px] font-semibold uppercase tracking-wider transition-all duration-200 hover:scale-105 active:scale-95",
+          active ? "text-amber-300" : "text-slate-400 hover:text-white",
         )}
       >
         {label}
