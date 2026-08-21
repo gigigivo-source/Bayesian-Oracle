@@ -146,7 +146,7 @@ function LeaguePerformanceInner() {
   return (
     <PerformanceShell
       title="League Performance"
-      subtitle="Every league, cup and competition — hit rate, ROI, P&L, streaks, factor accuracy and the raw bets behind every number. Filter by name, sort, and drill into any competition."
+      subtitle="Every league, cup and competition — hit rate, ROI, P&L, 10/10 hits, factor accuracy and the raw bets behind every number. Filter by name, sort, and drill into any competition."
     >
       {loading && !data ? (
         <>

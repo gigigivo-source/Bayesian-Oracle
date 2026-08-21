@@ -10,11 +10,12 @@
 //   3. backfills leagueSlug / competitionName on legacy performance rows so
 //      the league dashboard has full transparency across old + new data.
 //
+// POST /api/cron/settle?force=true manually runs an immediate uncapped sweep.
 // Fail-soft: a broken league or provider never aborts the whole job.
 
 import { db } from "@/db";
-import { performanceLog, savedSlips, valueBetLog } from "@/db/schema";
-import { and, eq, isNull, gt } from "drizzle-orm";
+import { dailyPicks, performanceLog, savedSlips, valueBetLog } from "@/db/schema";
+import { and, count, eq, isNull, gt } from "drizzle-orm";
 import { runSettlementEngine } from "@/lib/settlement/engine";
 import {
   getPendingSettlementItems,
@@ -36,10 +37,11 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
 const env = (name: string): string => (process.env[name] ?? "").trim();
-/** Cap on rows refreshed / settled per run (0 = unlimited, bounded by time). */
-const SWEEP_LIMIT = () => {
+/** Optional cap; by default every pending row is swept (bounded by maxDuration). */
+const SWEEP_LIMIT = (force = false) => {
+  if (force) return 100_000;
   const raw = Number(env("CRON_SETTLE_SWEEP_LIMIT"));
-  return Number.isFinite(raw) && raw > 0 ? raw : 300;
+  return Number.isFinite(raw) && raw > 0 ? raw : 100_000;
 };
 
 // ─── Fixture reconstruction for performance_log refresh ─────────────────────
@@ -69,13 +71,14 @@ function fixtureFromPerformanceRow(row: typeof performanceLog.$inferSelect): Fix
 
 // ─── Task 1: refresh performance_log rows with still-pending stat markets ────
 
-async function refreshPendingPerformanceRows(): Promise<number> {
+async function refreshPendingPerformanceRows(force = false): Promise<number> {
   const rows = await db
     .select()
     .from(performanceLog)
     .where(gt(performanceLog.pending, 0))
-    .limit(SWEEP_LIMIT());
+    .limit(SWEEP_LIMIT(force));
   let refreshed = 0;
+  const resolvedByLeague: Record<string, number> = {};
 
   for (const row of rows) {
     try {
@@ -103,10 +106,18 @@ async function refreshPendingPerformanceRows(): Promise<number> {
         hits, misses, pending,
         accuracy: decided > 0 ? hits / decided : row.accuracy,
       }).where(eq(performanceLog.id, row.id));
-      refreshed++;
+      const resolved = Math.max(0, row.pending - pending);
+      refreshed += resolved;
+      if (resolved > 0) {
+        const label = LEAGUE_MAP[row.leagueSlug ?? ""]?.name ?? row.competitionName ?? row.league;
+        resolvedByLeague[label] = (resolvedByLeague[label] ?? 0) + resolved;
+      }
     } catch {
       // best-effort per row
     }
+  }
+  for (const [league, resolved] of Object.entries(resolvedByLeague)) {
+    console.log(`[Settle] Resolved ${resolved} pending bets for ${league}`);
   }
   return refreshed;
 }
@@ -121,13 +132,15 @@ interface SettlePass {
   lost: number;
   void: number;
   stillPending: number;
+  failed: number;
+  resolvedByLeague: Record<string, number>;
 }
 
-async function settlePendingAcrossAllSources(): Promise<SettlePass> {
+async function settlePendingAcrossAllSources(force = false): Promise<SettlePass> {
   const queues = await getPendingSettlementItems({
-    accumulators: SWEEP_LIMIT(),
-    dailyPicks:   SWEEP_LIMIT(),
-    valueBets:    SWEEP_LIMIT(),
+    accumulators: SWEEP_LIMIT(force),
+    dailyPicks:   SWEEP_LIMIT(force),
+    valueBets:    SWEEP_LIMIT(force),
   });
 
   const cache = new Map<string, MatchResult | null>();
@@ -141,6 +154,11 @@ async function settlePendingAcrossAllSources(): Promise<SettlePass> {
 
   const pass: SettlePass = {
     dailyPicks: 0, valueBets: 0, accumulators: 0, won: 0, lost: 0, void: 0, stillPending: 0,
+    failed: 0, resolvedByLeague: {},
+  };
+  const recordResolved = (leagueSlug: string | null | undefined) => {
+    const label = LEAGUE_MAP[leagueSlug ?? ""]?.name ?? leagueSlug ?? "Unknown League";
+    pass.resolvedByLeague[label] = (pass.resolvedByLeague[label] ?? 0) + 1;
   };
 
   // ── Daily picks ─────────────────────────────────────────────────────────────
@@ -172,12 +190,13 @@ async function settlePendingAcrossAllSources(): Promise<SettlePass> {
       });
       if (changed) {
         pass.dailyPicks++;
+        recordResolved(row.leagueSlug);
         if (hits > 0) pass.won++;
         if (misses > 0) pass.lost++;
         if (voids > 0) pass.void++;
       }
     } catch {
-      pass.stillPending++;
+      pass.failed++;
     }
   }
 
@@ -192,10 +211,11 @@ async function settlePendingAcrossAllSources(): Promise<SettlePass> {
       const changed = await settleValueBet(row, { outcome, actualReturn, pnl: actualReturn - row.stake });
       if (changed) {
         pass.valueBets++;
+        recordResolved(row.leagueSlug);
         if (outcome === "won") pass.won++; else if (outcome === "lost") pass.lost++; else pass.void++;
       }
     } catch {
-      pass.stillPending++;
+      pass.failed++;
     }
   }
 
@@ -234,13 +254,17 @@ async function settlePendingAcrossAllSources(): Promise<SettlePass> {
       });
       if (changed) {
         pass.accumulators++;
+        recordResolved(slip.leagueSlug);
         if (status === "won") pass.won++; else pass.lost++;
       }
     } catch {
-      pass.stillPending++;
+      pass.failed++;
     }
   }
 
+  for (const [league, resolved] of Object.entries(pass.resolvedByLeague)) {
+    console.log(`[Settle] Resolved ${resolved} pending bets for ${league}`);
+  }
   return pass;
 }
 
@@ -310,11 +334,25 @@ export interface SettleSweepSummary {
   refreshedPerformanceRows: number;
   legacyBackfill: { performanceRows: number; valueBetRows: number; slipRows: number };
   failures: string[];
+  totalPending: number;
+  resolved: number;
+  failed: number;
   ranAt: string;
 }
 
-async function runAllLeagueSettlement(): Promise<SettleSweepSummary> {
+async function countPendingRows(): Promise<number> {
+  const [daily, value, slips, performance] = await Promise.all([
+    db.select({ value: count() }).from(dailyPicks).where(eq(dailyPicks.status, "pending")),
+    db.select({ value: count() }).from(valueBetLog).where(eq(valueBetLog.outcome, "pending")),
+    db.select({ value: count() }).from(savedSlips).where(eq(savedSlips.status, "pending")),
+    db.select({ value: count() }).from(performanceLog).where(gt(performanceLog.pending, 0)),
+  ]);
+  return Number(daily[0]?.value ?? 0) + Number(value[0]?.value ?? 0) + Number(slips[0]?.value ?? 0) + Number(performance[0]?.value ?? 0);
+}
+
+async function runAllLeagueSettlement(force = false): Promise<SettleSweepSummary> {
   const failures: string[] = [];
+  const totalPending = await countPendingRows();
 
   // 1) The existing settlement engine (accumulators / daily picks / value bets via ESPN).
   let engine: Awaited<ReturnType<typeof runSettlementEngine>> | null = null;
@@ -327,9 +365,10 @@ async function runAllLeagueSettlement(): Promise<SettleSweepSummary> {
   // 2) Multi-source pass — everything still pending across ALL competitions.
   let multiSource: SettlePass = {
     dailyPicks: 0, valueBets: 0, accumulators: 0, won: 0, lost: 0, void: 0, stillPending: 0,
+    failed: 0, resolvedByLeague: {},
   };
   try {
-    multiSource = await settlePendingAcrossAllSources();
+    multiSource = await settlePendingAcrossAllSources(force);
   } catch (err) {
     failures.push(`multi-source settlement: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -337,7 +376,7 @@ async function runAllLeagueSettlement(): Promise<SettleSweepSummary> {
   // 3) Refresh performance rows with late-arriving boxscores.
   let refreshedPerformanceRows = 0;
   try {
-    refreshedPerformanceRows = await refreshPendingPerformanceRows();
+    refreshedPerformanceRows = await refreshPendingPerformanceRows(force);
   } catch (err) {
     failures.push(`performance refresh: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -357,7 +396,8 @@ async function runAllLeagueSettlement(): Promise<SettleSweepSummary> {
     `legacy backfill ${legacyBackfill.performanceRows + legacyBackfill.valueBetRows + legacyBackfill.slipRows} rows`,
   );
 
-  return { ok: true, engine, multiSource, refreshedPerformanceRows, legacyBackfill, failures, ranAt: new Date().toISOString() };
+  const resolved = (engine?.settled.total ?? 0) + multiSource.dailyPicks + multiSource.valueBets + multiSource.accumulators + refreshedPerformanceRows;
+  return { ok: failures.length === 0, engine, multiSource, refreshedPerformanceRows, legacyBackfill, failures, totalPending, resolved, failed: multiSource.failed + failures.length, ranAt: new Date().toISOString() };
 }
 
 function authorized(req: Request): boolean {
@@ -371,7 +411,8 @@ function authorized(req: Request): boolean {
 export async function GET(req: Request) {
   if (!authorized(req)) return Response.json({ error: "Unauthorized" }, { status: 401 });
   try {
-    return Response.json(await runAllLeagueSettlement());
+    const force = new URL(req.url).searchParams.get("force") === "true";
+    return Response.json(await runAllLeagueSettlement(force));
   } catch (error) {
     console.error("[Cron][settle] failed:", error);
     return Response.json({ error: "Settlement failed" }, { status: 500 });
