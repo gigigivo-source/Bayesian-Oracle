@@ -69,7 +69,7 @@ function LeaguePageInner() {
   return (
     <PerformanceShell
       title={title}
-      subtitle={`${detail?.region ? `${detail.region} · ` : ""}${slug} · hit rate, ROI, P&L, streaks, factor accuracy and every individual bet — all derived directly from settled data.`}
+      subtitle={`${detail?.region ? `${detail.region} · ` : ""}${slug} · hit rate, ROI, P&L, 10/10 hits, factor accuracy and every individual bet — all derived directly from settled data.`}
     >
       <div className="flex flex-wrap items-center gap-2">
         <Link
@@ -119,7 +119,7 @@ function LeaguePageInner() {
               <span className={detail.hitRate >= 60 ? "text-emerald-300" : detail.hitRate >= 45 ? "text-amber-300" : "text-rose-300"}>
                 {detail.totalWins + detail.totalLosses > 0 ? `${detail.hitRate.toFixed(1)}%` : "—"}
               </span>{" "}
-              · streak: <span className="text-slate-300">{detail.currentStreak}</span>
+              · 10/10 hits: <span className="text-amber-300" title="Matches where all Top 10 predictions won.">{detail.total10of10Hits}</span>
             </div>
           </div>
 

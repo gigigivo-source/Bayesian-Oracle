@@ -46,7 +46,7 @@ export interface LeagueMetrics {
   last30DaysHitRate: number;
   averageOdds: number | null;
   averageEv: number | null;
-  currentStreak: string;
+  total10of10Hits: number;
   top1HitRate: number | null;
   top3HitRate: number | null;
   top10HitRate: number | null;
@@ -192,7 +192,7 @@ export function LeagueCard({
           </span>
         </div>
         <div className="font-mono text-[10px] text-slate-500">
-          {m.currentStreak}
+          <span title="Matches where all Top 10 predictions won.">🏆 10/10 Hits: {m.total10of10Hits}</span>
         </div>
       </div>
 
@@ -409,10 +409,10 @@ export function LeagueSummaryCards({ m }: { m: LeagueMetrics }) {
       tone: (m.roi ?? 0) >= 0 ? "pos" : "neg",
     },
     {
-      label: "Current Streak",
-      value: m.currentStreak,
-      sub: m.trendDirection === "up" ? "trending up" : m.trendDirection === "down" ? "trending down" : "flat",
-      tone: m.currentStreak.startsWith("No") ? "neu" : m.currentStreak.includes("Win") ? "pos" : "neg",
+      label: "Total 10/10 Hits",
+      value: `🏆 ${m.total10of10Hits}`,
+      sub: "Matches where all Top 10 predictions won.",
+      tone: "accent",
     },
     {
       label: "Avg Odds · Avg EV",

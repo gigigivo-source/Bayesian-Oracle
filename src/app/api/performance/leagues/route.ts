@@ -78,8 +78,8 @@ export interface LeagueMetrics {
   // Odds & EV.
   averageOdds: number | null; // stake-weighted
   averageEv: number | null;   // simple mean over bets with EV data (fraction)
-  // Streak + tier hit rates (percent).
-  currentStreak: string;
+  // Perfect-match count + tier hit rates (percent).
+  total10of10Hits: number;
   top1HitRate: number | null;
   top3HitRate: number | null;
   top10HitRate: number | null;
@@ -322,9 +322,6 @@ export function buildMetrics(a: Accumulator, days: number): LeagueMetrics {
   const losses30 = pickLosses30(a) + a.valueBets.filter((v) => settledIn30(v.outcome, v.date) && v.outcome === "lost").length
     + a.slips.filter((s) => settledIn30(s.status, s.date) && s.status === "lost").length;
 
-  // ── Streak (match-level from picks' created dates) ──
-  const streak = buildStreak(a);
-
   // ── Tier hit rates are attached by the caller from per-row pick positions ──
   const tier = { top1: { hits: 0, total: 0 }, top3: { hits: 0, total: 0 }, top10: { hits: 0, total: 0 } };
 
@@ -363,7 +360,7 @@ export function buildMetrics(a: Accumulator, days: number): LeagueMetrics {
     last30DaysHitRate: last30HitRate,
     averageOdds,
     averageEv,
-    currentStreak: streak,
+    total10of10Hits: 0, // attached below from match-level performance rows
     top1HitRate: tier.top1.total > 0 ? (tier.top1.hits / tier.top1.total) * 100 : null,
     top3HitRate: tier.top3.total > 0 ? (tier.top3.hits / tier.top3.total) * 100 : null,
     top10HitRate: tier.top10.total > 0 ? (tier.top10.hits / tier.top10.total) * 100 : null,
@@ -428,52 +425,22 @@ function pickLosses30(a: Accumulator): number {
   return n;
 }
 
-export function buildStreak(a: Accumulator): string {
-  // Match-level streak: bucket picks by match, decide each match by its
-  // settled picks (a match with any MISS counts as a loss), newest first.
-  const byMatch = new Map<string, { matchDate: string; hits: number; misses: number }>();
-  for (const entry of a.picks) {
-    const key = `${entry.match}|${entry.matchDate}`;
-    const cur = byMatch.get(key) ?? { matchDate: entry.matchDate, hits: 0, misses: 0 };
-    const r = pickResult(entry.pick.outcome);
-    if (r === "HIT") cur.hits++;
-    else if (r === "MISS") cur.misses++;
-    byMatch.set(key, cur);
-  }
-  const matches = [...byMatch.values()]
-    .filter((m) => m.hits + m.misses > 0)
-    .sort((x, y) => y.matchDate.localeCompare(x.matchDate));
-
-  let winStreak = 0;
-  let lossStreak = 0;
-  for (const m of matches) {
-    if (m.misses === 0) {
-      if (lossStreak > 0) break;
-      winStreak++;
-    } else {
-      if (winStreak > 0) break;
-      lossStreak++;
-    }
-  }
-  if (winStreak > 0) return `${winStreak} Win${winStreak > 1 ? "s" : ""}`;
-  if (lossStreak > 0) return `${lossStreak} Loss${lossStreak > 1 ? "es" : ""}`;
-  return "No settled bets";
-}
-
 // ─── Tier hit rates + factor accuracy need per-row data, computed here ────────
 
 interface RowDerived {
+  total10of10Hits: number;
   top1: { hits: number; total: number };
   top3: { hits: number; total: number };
   top10: { hits: number; total: number };
   factorBuckets: Map<string, { hits: number; total: number; recent: { hits: number; total: number }; prior: { hits: number; total: number } }>;
 }
 
-export function deriveFromRows(rows: Array<{ top10Detail: unknown; matchDate: string }>): RowDerived {
+export function deriveFromRows(rows: Array<{ eventId: string; top10Detail: unknown; matchDate: string }>): RowDerived {
   const top1 = { hits: 0, total: 0 };
   const top3 = { hits: 0, total: 0 };
   const top10 = { hits: 0, total: 0 };
   const buckets = new Map<string, { hits: number; total: number; recent: { hits: number; total: number }; prior: { hits: number; total: number } }>();
+  const matchPicks = new Map<string, StoredPick[]>();
   const now = Date.now();
   const day7 = 7 * 24 * 3600_000;
   const day14 = 14 * 24 * 3600_000;
@@ -501,6 +468,9 @@ export function deriveFromRows(rows: Array<{ top10Detail: unknown; matchDate: st
 
   for (const row of rows) {
     const detail = (row.top10Detail ?? []) as StoredPick[];
+    const match = matchPicks.get(row.eventId) ?? [];
+    match.push(...detail);
+    matchPicks.set(row.eventId, match);
     for (let i = 0; i < detail.length; i++) {
       const p = detail[i];
       const r = pickResult(p.outcome);
@@ -517,7 +487,10 @@ export function deriveFromRows(rows: Array<{ top10Detail: unknown; matchDate: st
       bump(factorForPick(p.name, p.family), p.outcome, row.matchDate);
     }
   }
-  return { top1, top3, top10, factorBuckets: buckets };
+  const total10of10Hits = [...matchPicks.values()].filter(
+    (picks) => picks.length === 10 && picks.every((pick) => pickResult(pick.outcome) === "HIT"),
+  ).length;
+  return { total10of10Hits, top1, top3, top10, factorBuckets: buckets };
 }
 
 // ─── Detailed breakdown for one league ────────────────────────────────────────
@@ -588,7 +561,7 @@ export async function GET(req: Request) {
 
     // Row-derived stats (tier rates + factor buckets) per slug.
     const rowDerived = new Map<string, RowDerived>();
-    const rowsBySlug = new Map<string, Array<{ top10Detail: unknown; matchDate: string }>>();
+    const rowsBySlug = new Map<string, Array<{ eventId: string; top10Detail: unknown; matchDate: string }>>();
     for (const row of perfRows) {
       const slug = row.leagueSlug ?? "unknown";
       const list = rowsBySlug.get(slug) ?? [];
@@ -601,6 +574,7 @@ export async function GET(req: Request) {
       const m = buildMetrics(a, days);
       const derived = rowDerived.get(a.slug);
       if (derived) {
+        m.total10of10Hits = derived.total10of10Hits;
         m.top1HitRate = derived.top1.total > 0 ? (derived.top1.hits / derived.top1.total) * 100 : null;
         m.top3HitRate = derived.top3.total > 0 ? (derived.top3.hits / derived.top3.total) * 100 : null;
         m.top10HitRate = derived.top10.total > 0 ? (derived.top10.hits / derived.top10.total) * 100 : null;
@@ -628,6 +602,7 @@ export async function GET(req: Request) {
         const base = buildMetrics(a, days);
         const derived = rowDerived.get(leagueSlug);
         if (derived) {
+          base.total10of10Hits = derived.total10of10Hits;
           base.top1HitRate = derived.top1.total > 0 ? (derived.top1.hits / derived.top1.total) * 100 : null;
           base.top3HitRate = derived.top3.total > 0 ? (derived.top3.hits / derived.top3.total) * 100 : null;
           base.top10HitRate = derived.top10.total > 0 ? (derived.top10.hits / derived.top10.total) * 100 : null;

@@ -28,12 +28,15 @@ import { performanceLog } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { LEAGUES } from "@/lib/leagues";
 import { runOracleWithStandings } from "@/lib/engine/oracle";
+import { evaluateFinishedMatch } from "@/lib/engine";
 import {
   fetchApiFootballFixtures,
   fetchEspnFixtures,
   fetchOpenLigaDbFixtures,
   fetchTheSportsDbFixtures,
   savePerformanceLog,
+  buildTop10Detail,
+  fetchEspnBoxscore,
   saveValueBets,
   oddsFromFixture,
   type AggregatedFixture,
@@ -174,11 +177,38 @@ async function runBackfill(body: {
         try {
           // Already processed in a previous run? (idempotent)
           const existing = await db
-            .select({ id: performanceLog.id })
+            .select({ id: performanceLog.id, pending: performanceLog.pending })
             .from(performanceLog)
             .where(eq(performanceLog.eventId, fx.id))
             .limit(1);
-          if (existing[0]) { summary.totalSucceeded++; continue; }
+          if (existing[0]) {
+            // Existing rows may pre-date late provider/boxscore data. Re-evaluate
+            // them during backfill instead of leaving their individual bets pending.
+            if (existing[0].pending > 0) {
+              const pred = await runOracleWithStandings(fx);
+              if (!pred) {
+                summary.totalFailed++;
+                summary.failures.push({ leagueSlug: slug, eventId: fx.id, error: "pending row could not be re-evaluated" });
+                continue;
+              }
+              const boxscore = await fetchEspnBoxscore(fx.leagueSlug, fx.id);
+              evaluateFinishedMatch(fx, pred, boxscore);
+              const detail = buildTop10Detail(pred);
+              const hits = detail.filter((pick) => pick.outcome === "HIT").length;
+              const misses = detail.filter((pick) => pick.outcome === "MISS").length;
+              const pending = detail.filter((pick) => pick.outcome === "PENDING").length;
+              const decided = hits + misses;
+              await db.update(performanceLog).set({
+                top10Detail: detail,
+                hits,
+                misses,
+                pending,
+                accuracy: decided > 0 ? hits / decided : 0,
+              }).where(eq(performanceLog.id, existing[0].id));
+            }
+            summary.totalSucceeded++;
+            continue;
+          }
 
           const pred = await runOracleWithStandings(fx);
           if (!pred) {
