@@ -224,7 +224,6 @@ export function buildRealLambdas(
   // formation-specific goal/corner/card multipliers on top of form-derived λ.
   if (sum?.homeFormation && sum?.awayFormation) {
     try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { analyseFormationMismatch } = require("./players") as { analyseFormationMismatch: (h: string, a: string) => { goalMultiplier: number; cornerMultiplier: number; cardMultiplier: number; description: string } };
       const fmm = analyseFormationMismatch(sum.homeFormation, sum.awayFormation);
       totalGoals   = clamp(totalGoals   * fmm.goalMultiplier,   0.5, 7.0);
