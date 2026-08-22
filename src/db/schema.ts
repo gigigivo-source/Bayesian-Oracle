@@ -111,6 +111,7 @@ export const performanceLog = pgTable("performance_log", {
   accuracy:        real("accuracy").notNull(),       // hits / (hits+misses)
   top10Detail:     jsonb("top10_detail").notNull(),  // full top10 with outcomes
   lowConfidence:   boolean("low_confidence").notNull().default(false), // confidence gate flag
+  rankingMode:     text("ranking_mode").notNull().default("B"),
   createdAt:       timestamp("created_at").defaultNow().notNull(),
 });
 
@@ -162,6 +163,7 @@ export const valueBetLog = pgTable("value_bet_log", {
   actualReturn:    real("actual_return"),
   pnl:             real("pnl"),
   lowConfidence:   boolean("low_confidence").notNull().default(false), // confidence gate flag
+  rankingMode:     text("ranking_mode").notNull().default("B"),
   createdAt:       timestamp("created_at").defaultNow().notNull(),
 });
 

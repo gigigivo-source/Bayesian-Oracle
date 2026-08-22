@@ -31,6 +31,7 @@ import {
 import { statsAggregator } from "@/lib/data/aggregator";
 import { evaluateFinishedMatch } from "@/lib/engine";
 import { runOracleWithStandings } from "@/lib/engine/oracle";
+import type { RankingMode } from "@/lib/engine/selector";
 import { LEAGUE_MAP } from "@/lib/leagues";
 import type { FixtureLite } from "@/lib/espn";
 
@@ -85,7 +86,8 @@ async function refreshPendingPerformanceRows(force = false): Promise<number> {
     try {
       const fx = fixtureFromPerformanceRow(row);
       if (!fx) continue;
-      const pred = await runOracleWithStandings(fx);
+      const rankingMode = (row.rankingMode as RankingMode) || 'B';
+      const pred = await runOracleWithStandings(fx, { rankingMode });
       if (!pred) continue;
       const boxscore = await fetchEspnBoxscore(fx.leagueSlug, fx.id);
       evaluateFinishedMatch(fx, pred, boxscore);

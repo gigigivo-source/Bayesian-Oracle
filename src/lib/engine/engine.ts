@@ -11,6 +11,7 @@ import {
   type SelectOptions,
   type SourceQualityContext,
   type TeamFormSignal,
+  type RankingMode,
 } from "./selector";
 import { round } from "./stats";
 import { statsAggregator } from "../data/aggregator";
@@ -187,6 +188,7 @@ export async function runEngineFromRealWithProfiles(
   fx:          FixtureLite,
   sum:         MatchSummary | null,
   liveStats?:  Record<string, number> | null,
+  rankingMode?: RankingMode,
 ): Promise<EngineResult> {
   let profiles: RealProfiles | undefined;
   try {
@@ -223,6 +225,7 @@ export async function runEngineFromRealWithProfiles(
     stats,
     context:       buildRankingContext(fx, sum),
     sourceQuality: buildSourceQuality(sum, stats, profiles),
+    rankingMode,
   };
 
   const result = runEngineFromReal(fx, sum, profiles, opts);
