@@ -2,20 +2,12 @@
 // ĞIGI GIVØ — Interactive Design System
 //
 // One central source of truth for every clickable element in the app.
-// Each archetype has its OWN unique, unmistakable design language:
-//
-//   TYPE 1 · NAV_PILL     — Primary navigation (header tabs & pills).
-//                           Bold, glowing, "glass-tech" fully-rounded pills.
-//   TYPE 2 · ACTION_*     — Primary action buttons (Submit, Verify, Save…).
-//                           Solid, heavy, rounded-xl CTAs with coloured glow.
-//   TYPE 3 · OUTLINE_*    — Secondary / outline buttons (Cancel, Back, Reset).
-//                           Sleek, minimal, border-focused rounded-lg buttons.
-//   TYPE 4 · CARD_*       — Interactive cards (match / league / slip cards).
-//                           Physical "elevated paper" with a glowing top edge.
-//   TYPE 5 · CHIP_*       — Filter chips / league pills (small toggles).
-//                           Compact duotone tags with a bold left accent bar.
-//   TYPE 6 · MENU_ITEM    — Menu / dropdown items (slide-in list links).
-//                           Flat items that slide right with a bright left bar.
+// Refined Sports Analytics palette:
+//   · Active tabs & primary CTAs: Amber/Gold (#F59E0B → #FF8C00)
+//   · Secondary CTAs: Cyan (#06B6D4)
+//   · Backgrounds: Deep slate (#0F1117, #1E293B)
+//   · Text: White for active states, Slate-400 for inactive states
+//   · No glass-morphism: solid slate surfaces and borders only
 //
 // Global interaction rules baked into every token:
 //   · cursor-pointer + select-none
@@ -27,73 +19,69 @@
 
 /** Shared interaction baseline required by every clickable element. */
 const IX = "cursor-pointer select-none transition-all duration-200";
+const GOLD_GRADIENT = "bg-gradient-to-r from-[#F59E0B] to-[#FF8C00]";
 
-/* ═══ TYPE 1 · PRIMARY NAVIGATION — glass-tech pills ═══════════════════════ */
+/* ═══ TYPE 1 · PRIMARY NAVIGATION — solid slate pills ══════════════════════ */
 
 export const NAV_PILL =
-  `${IX} inline-flex items-center gap-1.5 whitespace-nowrap rounded-full backdrop-blur-sm ` +
+  `${IX} inline-flex items-center gap-1.5 whitespace-nowrap rounded-full ` +
   "hover:scale-105 active:scale-95 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/70";
 
-/** Inactive pill: frosted glass, thin border, muted text, slight elevation. */
+/** Inactive pill: solid slate, muted text, slight elevation. */
 export const NAV_PILL_OFF =
-  "border border-white/10 bg-white/10 text-white/60 shadow-sm hover:bg-white/15 hover:text-white";
+  "border border-slate-700 bg-slate-800 text-slate-400 shadow-sm hover:bg-slate-700 hover:text-white";
 
-/** Active pill (main app): vibrant amber→orange gradient with a coloured glow. */
+/** Active pill (main app): amber/gold gradient with a coloured glow. */
 export const NAV_PILL_ON_AMBER =
-  "scale-105 bg-gradient-to-r from-amber-400 to-orange-500 font-bold text-white shadow-lg shadow-amber-500/50";
+  `scale-105 ${GOLD_GRADIENT} font-bold text-white shadow-lg shadow-amber-500/40`;
 
-/** Active pill (performance section): violet→fuchsia gradient glow. */
-export const NAV_PILL_ON_VIOLET =
-  "scale-105 bg-gradient-to-r from-violet-500 to-fuchsia-500 font-bold text-white shadow-lg shadow-fuchsia-500/50";
+/** Active pill (performance section): same refined amber/gold active-tab palette. */
+export const NAV_PILL_ON_VIOLET = NAV_PILL_ON_AMBER;
 
-/* ═══ TYPE 2 · PRIMARY ACTION BUTTONS — solid, heavy CTAs ══════════════════ */
+/* ═══ TYPE 2 · PRIMARY ACTION BUTTONS — gold/amber CTAs ═══════════════════ */
 
 const ACTION =
   `${IX} rounded-xl font-bold shadow-2xl hover:scale-105 hover:shadow-2xl active:scale-95 ` +
-  // Dark overlay gradient on hover (lays over the solid colour — never transparent).
-  "hover:bg-gradient-to-b hover:from-black/30 hover:to-transparent " +
-  "focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-[#05070d] " +
+  "hover:brightness-110 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-[#0F1117] " +
   "disabled:pointer-events-none disabled:opacity-50";
 
+const ACTION_GOLD =
+  `${ACTION} ${GOLD_GRADIENT} text-white shadow-amber-500/30 focus:ring-amber-300`;
+
 /** Success actions: Verify, Save, Run Backtest, Re-verify, Track confirmation. */
-export const ACTION_EMERALD =
-  `${ACTION} bg-emerald-500 text-white shadow-emerald-500/30 focus:ring-emerald-300`;
+export const ACTION_EMERALD = ACTION_GOLD;
 
 /** Brand actions: Send, Convert, Add, Start Tracking, Track Slip, Set PIN. */
-export const ACTION_AMBER =
-  `${ACTION} bg-amber-500 text-slate-950 shadow-amber-500/30 focus:ring-amber-300`;
+export const ACTION_AMBER = ACTION_GOLD;
 
 /** Info actions: Retry, Try Again, Resolve Pending (Web Search). */
-export const ACTION_BLUE =
-  `${ACTION} bg-blue-500 text-white shadow-blue-500/30 focus:ring-blue-300`;
+export const ACTION_BLUE = ACTION_GOLD;
 
 /** Destructive primary actions (rare). */
-export const ACTION_ROSE =
-  `${ACTION} bg-rose-500 text-white shadow-rose-500/30 focus:ring-rose-300`;
+export const ACTION_ROSE = ACTION_GOLD;
 
-/* ═══ TYPE 3 · SECONDARY / OUTLINE BUTTONS — sleek, border-focused ═════════ */
+/* ═══ TYPE 3 · SECONDARY / OUTLINE BUTTONS — cyan on slate ════════════════ */
 
 const OUTLINE =
   `${IX} rounded-lg border-2 bg-transparent font-bold ` +
-  "hover:scale-105 active:scale-95 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-[#05070d]";
+  "hover:scale-105 active:scale-95 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-[#0F1117]";
 
 /** Default secondary: Back / Cancel / Reset / Refresh. */
 export const OUTLINE_CYAN =
-  `${OUTLINE} border-cyan-400 text-cyan-400 hover:bg-cyan-400/10 focus:ring-cyan-300`;
+  `${OUTLINE} border-[#06B6D4] text-[#06B6D4] hover:bg-slate-800 hover:text-white focus:ring-cyan-300`;
 
 /** Accent secondary: open-page / jump-to-destination actions. */
-export const OUTLINE_AMBER =
-  `${OUTLINE} border-amber-400 text-amber-300 hover:bg-amber-400/10 focus:ring-amber-300`;
+export const OUTLINE_AMBER = OUTLINE_CYAN;
 
 /** Destructive secondary: Delete, cancel-edit. */
 export const OUTLINE_ROSE =
-  `${OUTLINE} border-rose-400 text-rose-300 hover:bg-rose-400/10 focus:ring-rose-300`;
+  `${OUTLINE} border-rose-400 text-rose-300 hover:bg-slate-800 hover:text-white focus:ring-rose-300`;
 
 /** Neutral secondary: Close, JSON export, dismiss banners. */
 export const OUTLINE_NEUTRAL =
-  `${OUTLINE} border-white/40 text-slate-200 hover:border-white/70 hover:bg-white/10 hover:text-white focus:ring-white/50`;
+  `${OUTLINE} border-slate-700 text-slate-400 hover:border-[#06B6D4] hover:bg-slate-800 hover:text-white focus:ring-cyan-300`;
 
-/* ═══ TYPE 4 · INTERACTIVE CARDS — physical "elevated paper" ═══════════════ */
+/* ═══ TYPE 4 · INTERACTIVE CARDS — solid elevated slate ═══════════════════ */
 
 /**
  * Fully clickable cards (match cards, league cards, expandable slip rows).
@@ -102,26 +90,26 @@ export const OUTLINE_NEUTRAL =
  * shift when it appears.
  */
 export const CARD_CLICK =
-  `${IX} block w-full rounded-2xl border border-white/5 border-t-2 border-t-transparent bg-white/5 ` +
-  "hover:-translate-y-2 hover:border-t-amber-400 hover:bg-white/[0.07] hover:shadow-2xl hover:shadow-amber-500/20 " +
+  `${IX} block w-full rounded-2xl border border-slate-700 border-t-2 border-t-transparent bg-slate-800 ` +
+  "hover:-translate-y-2 hover:border-t-amber-400 hover:bg-slate-700 hover:shadow-2xl hover:shadow-amber-500/20 " +
   "focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/60";
 
 /** Same physical lift for live fixtures — glow burns rose instead of amber. */
 export const CARD_CLICK_LIVE =
-  `${IX} block w-full rounded-2xl border border-white/5 border-t-2 border-t-transparent bg-white/5 ` +
-  "hover:-translate-y-2 hover:border-t-rose-400 hover:bg-white/[0.07] hover:shadow-2xl hover:shadow-rose-500/20 " +
+  `${IX} block w-full rounded-2xl border border-slate-700 border-t-2 border-t-transparent bg-slate-800 ` +
+  "hover:-translate-y-2 hover:border-t-rose-400 hover:bg-slate-700 hover:shadow-2xl hover:shadow-rose-500/20 " +
   "focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-400/60";
 
 /**
  * Card surfaces that contain buttons but aren't one big click target
- * (accumulator cards, saved-slip shells). Same elevated-paper language,
+ * (accumulator cards, saved-slip shells). Same elevated-slate language,
  * no global cursor-pointer, gentler lift.
  */
 export const CARD_SURFACE =
-  "rounded-2xl border border-white/5 bg-white/5 transition-all duration-200 " +
+  "rounded-2xl border border-slate-700 bg-slate-800 transition-all duration-200 " +
   "hover:-translate-y-1 hover:border-t-2 hover:border-t-amber-400/70 hover:shadow-2xl hover:shadow-amber-500/10";
 
-/* ═══ TYPE 5 · FILTER CHIPS / LEAGUE PILLS — compact duotone tags ══════════ */
+/* ═══ TYPE 5 · FILTER CHIPS / LEAGUE PILLS — solid slate tags ═════════════ */
 
 /**
  * Small scannable toggles. `border-l-4` is always present (transparent when
@@ -131,15 +119,15 @@ export const CHIP =
   `${IX} inline-flex items-center gap-1.5 whitespace-nowrap rounded-full border-l-4 border-l-transparent ` +
   "active:scale-90 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/60";
 
-/** Inactive chip: duotone grey tag. */
-export const CHIP_OFF = "bg-gray-800/50 text-gray-400 hover:bg-white/10 hover:text-slate-200";
+/** Inactive chip: solid slate tag. */
+export const CHIP_OFF = "bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-white";
 
-/** Active chip variants: tinted duotone + bold left accent bar. */
-export const CHIP_ON_AMBER = "border-l-amber-500 bg-amber-500/20 font-bold text-amber-300 hover:bg-amber-500/30";
-export const CHIP_ON_EMERALD = "border-l-emerald-500 bg-emerald-500/20 font-bold text-emerald-300 hover:bg-emerald-500/30";
-export const CHIP_ON_CYAN = "border-l-cyan-500 bg-cyan-500/20 font-bold text-cyan-300 hover:bg-cyan-500/30";
-export const CHIP_ON_ROSE = "border-l-rose-500 bg-rose-500/20 font-bold text-rose-300 hover:bg-rose-500/30";
-export const CHIP_ON_VIOLET = "border-l-violet-500 bg-violet-500/20 font-bold text-violet-300 hover:bg-violet-500/30";
+/** Active chip variants: solid colour + bold left accent bar. */
+export const CHIP_ON_AMBER = "border-l-[#FF8C00] bg-[#F59E0B] font-bold text-white hover:bg-[#FF8C00]";
+export const CHIP_ON_EMERALD = "border-l-emerald-400 bg-emerald-600 font-bold text-white hover:bg-emerald-500";
+export const CHIP_ON_CYAN = "border-l-cyan-400 bg-cyan-600 font-bold text-white hover:bg-cyan-500";
+export const CHIP_ON_ROSE = "border-l-rose-400 bg-rose-600 font-bold text-white hover:bg-rose-500";
+export const CHIP_ON_VIOLET = CHIP_ON_AMBER;
 
 /* ═══ TYPE 6 · MENU / DROPDOWN ITEMS — smooth slide-in links ═══════════════ */
 
@@ -149,9 +137,9 @@ export const CHIP_ON_VIOLET = "border-l-violet-500 bg-violet-500/20 font-bold te
  * avoid layout shift.
  */
 export const MENU_ITEM =
-  `${IX} block rounded-lg border-l-4 border-l-transparent text-white/70 ` +
-  "hover:translate-x-1 hover:border-l-amber-400 hover:bg-white/5 hover:text-white active:scale-[0.98] " +
+  `${IX} block rounded-lg border-l-4 border-l-transparent text-slate-400 ` +
+  "hover:translate-x-1 hover:border-l-amber-400 hover:bg-slate-800 hover:text-white active:scale-[0.98] " +
   "focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/60";
 
 /** Currently-selected menu row keeps the accent lit. */
-export const MENU_ITEM_ON = "border-l-amber-400 bg-white/5 font-bold text-white";
+export const MENU_ITEM_ON = "border-l-amber-400 bg-slate-800 font-bold text-white";

@@ -115,7 +115,7 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
   };
 
   return (
-    <div className="fixed inset-0 z-50 overflow-y-auto bg-black/70 backdrop-blur-sm">
+    <div className="fixed inset-0 z-50 overflow-y-auto bg-[#0F1117] ">
       <div className="mx-auto my-6 max-w-6xl px-4">
         {/* Modal Top Bar */}
         <div className="mb-4 flex items-center justify-between">
@@ -132,7 +132,7 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
         </div>
 
         {/* Match Score & Teams Header */}
-        <div className="mb-4 rounded-lg bg-black/60 p-4">
+        <div className="mb-4 rounded-lg bg-slate-900 p-4">
           <div className="mb-2 text-center text-xs text-slate-400 font-mono">
             {fixture.leagueName} · {new Date(fixture.date).toLocaleString()}
           </div>
@@ -158,7 +158,7 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
 
           {/* SECTION JUMP NAVIGATION CHIPS */}
           {result ? (
-            <div className="mt-4 flex flex-wrap items-center gap-1.5 pt-3 border-t border-white/10 text-xs font-mono">
+            <div className="mt-4 flex flex-wrap items-center gap-1.5 pt-3 border-t border-slate-700 text-xs font-mono">
               <span className="text-amber-300 font-bold mr-1">JUMP TO:</span>
               {[
                 { id: "sec-deep-stats", label: "Deep Stats" },
@@ -205,7 +205,7 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
         </div>
 
         {loading ? (
-          <div className="rounded-lg bg-black/50 p-10 text-center text-slate-200">
+          <div className="rounded-lg bg-slate-900 p-10 text-center text-slate-200">
             <div className="mb-3 animate-pulse font-mono text-lg text-amber-300">
               Running Deep Statistical Analysis…
             </div>
@@ -257,19 +257,19 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
             {/* MATCH INTELLIGENCE CONTEXT */}
             {result.deepStats?.matchContext ? (
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                <div className="rounded-lg border border-white/10 p-3">
+                <div className="rounded-lg border border-slate-700 p-3">
                   <div className="text-xs font-bold text-amber-300 font-mono mb-2">TACTICAL ANALYSIS</div>
                   <p className="text-sm text-slate-200 leading-relaxed">{result.deepStats.matchContext.tactics}</p>
                 </div>
-                <div className="rounded-lg border border-white/10 p-3">
+                <div className="rounded-lg border border-slate-700 p-3">
                   <div className="text-xs font-bold text-cyan-300 font-mono mb-2">MATCH IMPORTANCE</div>
                   <p className="text-sm text-slate-200 leading-relaxed">{result.deepStats.matchContext.importance}</p>
                 </div>
-                <div className="rounded-lg border border-white/10 p-3">
+                <div className="rounded-lg border border-slate-700 p-3">
                   <div className="text-xs font-bold text-emerald-300 font-mono mb-2">PLAYER vs PLAYER FORM</div>
                   <p className="text-sm text-slate-200 leading-relaxed">{result.deepStats.matchContext.playerMatchups}</p>
                 </div>
-                <div className="rounded-lg border border-white/10 p-3">
+                <div className="rounded-lg border border-slate-700 p-3">
                   <div className="text-xs font-bold text-rose-300 font-mono mb-2">ZERO BIAS GUARANTEE</div>
                   <p className="text-sm text-slate-200 leading-relaxed">{result.deepStats.matchContext.biasStatement}</p>
                 </div>
@@ -327,7 +327,7 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
             <Section title="CONDITIONAL λ VALUES (EXPECTED EVENT RATES)" subtitle="Grounded strictly in deep statistics & de-vigged market odds">
               <div className="grid grid-cols-2 gap-2 text-sm sm:grid-cols-4 font-mono">
                 {Object.entries(result.lambdas).map(([k, v]) => (
-                  <div key={k} className="rounded-md border border-white/10 px-3 py-2">
+                  <div key={k} className="rounded-md border border-slate-700 px-3 py-2">
                     <div className="text-[11px] text-slate-400">{k}</div>
                     <div className="text-base font-bold text-amber-300">{v}</div>
                   </div>
@@ -353,7 +353,7 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
               >
                 <div className="space-y-2">
                   {data.valueBets.filter(v => v.valueEdge > 0).slice(0, 8).map((v, i) => (
-                    <div key={i} className="bg-black/30 rounded-lg p-3 border border-emerald-500/20">
+                    <div key={i} className="bg-slate-800 rounded-lg p-3 border border-emerald-500/20">
                       <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
                         <div>
                           <div className="text-sm font-bold text-white">{v.market.name}</div>
@@ -367,19 +367,19 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
                         </div>
                       </div>
                       <div className="grid grid-cols-4 gap-2 text-center text-xs">
-                        <div className="bg-black/30 rounded p-2">
+                        <div className="bg-slate-800 rounded p-2">
                           <div className="text-[10px] text-slate-400 font-mono">ORACLE</div>
                           <div className="font-mono font-bold text-amber-300">{(v.oracleProbability * 100).toFixed(1)}%</div>
                         </div>
-                        <div className="bg-black/30 rounded p-2">
+                        <div className="bg-slate-800 rounded p-2">
                           <div className="text-[10px] text-slate-400 font-mono">BOOK IMPLIED</div>
                           <div className="font-mono font-bold text-slate-300">{(v.bookImpliedProbability * 100).toFixed(1)}%</div>
                         </div>
-                        <div className="bg-black/30 rounded p-2">
+                        <div className="bg-slate-800 rounded p-2">
                           <div className="text-[10px] text-slate-400 font-mono">BOOK ODDS</div>
                           <div className="font-mono font-bold text-white">{v.bookDecimalOdds.toFixed(2)}</div>
                         </div>
-                        <div className="bg-black/30 rounded p-2">
+                        <div className="bg-slate-800 rounded p-2">
                           <div className="text-[10px] text-slate-400 font-mono">KELLY STAKE</div>
                           <div className="font-mono font-bold text-cyan-300">{(v.kellyStake * 100).toFixed(1)}%</div>
                         </div>
@@ -428,7 +428,7 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
                 <Section title="HEAD-TO-HEAD HISTORY" subtitle="Real prior match outcomes">
                   <div className="space-y-1.5 text-sm">
                     {summary.h2h.map((g, i) => (
-                      <div key={i} className="flex items-center justify-between rounded-md border border-white/5 px-3 py-2 font-mono">
+                      <div key={i} className="flex items-center justify-between rounded-md border border-slate-700 px-3 py-2 font-mono">
                         <span className="text-slate-400 text-xs">{g.date?.slice(0, 10)}</span>
                         <span className="text-slate-200">
                           {g.home} <span className="font-bold text-amber-300 mx-2">{g.score}</span> {g.away}
@@ -452,7 +452,7 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
                 title="POST-MATCH TOP 10 VERIFICATION"
                 subtitle={`Oracle predictions verified against real ESPN boxscore · Final Score: ${fixture.home.name} ${fixture.home.score} - ${fixture.away.score} ${fixture.away.name}`}
               >
-                <div className="bg-black/40 rounded-lg p-4 mb-4">
+                <div className="bg-slate-800 rounded-lg p-4 mb-4">
                   <div className="flex items-center justify-between">
                     <div>
                       <div className="text-sm text-slate-300 font-mono">Accuracy Score</div>
@@ -475,7 +475,7 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
 
                 <div className="space-y-2">
                   {result.top10.map((m, i) => {
-                    const bgColor = m.outcome === "HIT" ? "bg-emerald-500/5 border-emerald-500/30" : m.outcome === "MISS" ? "bg-rose-500/5 border-rose-500/30" : "bg-black/30 border-white/10";
+                    const bgColor = m.outcome === "HIT" ? "bg-emerald-500/5 border-emerald-500/30" : m.outcome === "MISS" ? "bg-rose-500/5 border-rose-500/30" : "bg-slate-800 border-slate-700";
                     const bs = data?.boxscore;
                     const actual = getActualStat(m.name, fixture, bs);
                     const line = parseFloat(m.name.split("O/U ")[1]);
@@ -495,17 +495,17 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
                           </span>
                         </div>
                         <div className="mt-3 grid grid-cols-3 gap-2 text-center">
-                          <div className="bg-black/30 rounded-md p-2">
+                          <div className="bg-slate-800 rounded-md p-2">
                             <div className="text-[10px] text-slate-500 font-mono uppercase">Predicted</div>
                             <div className="font-mono font-bold text-amber-300 text-sm">{m.selection}</div>
                             <div className="text-[10px] text-slate-500">Hit Rate: {(m.hitRate * 100).toFixed(1)}%</div>
                           </div>
-                          <div className="bg-black/30 rounded-md p-2">
+                          <div className="bg-slate-800 rounded-md p-2">
                             <div className="text-[10px] text-slate-500 font-mono uppercase">Line</div>
                             <div className="font-mono font-bold text-white text-sm">{!isNaN(line) ? line.toFixed(1) : "—"}</div>
                             <div className="text-[10px] text-slate-500">Threshold</div>
                           </div>
-                          <div className="bg-black/30 rounded-md p-2">
+                          <div className="bg-slate-800 rounded-md p-2">
                             <div className="text-[10px] text-slate-500 font-mono uppercase">Actual</div>
                             <div className={`font-mono font-bold text-sm ${
                               m.outcome === "HIT" ? "text-emerald-300" : m.outcome === "MISS" ? "text-rose-300" : "text-slate-300"
@@ -540,7 +540,7 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
               }
             >
               {/* Family filter chips */}
-              <div className="mb-4 flex flex-wrap items-center gap-1.5 font-mono text-xs border-b border-white/10 pb-3">
+              <div className="mb-4 flex flex-wrap items-center gap-1.5 font-mono text-xs border-b border-slate-700 pb-3">
                 <span className="text-amber-300 font-bold mr-1">FAMILIES:</span>
                 <button
                   onClick={() => setFamilyFilter("ALL")}
@@ -564,7 +564,7 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
               </div>
 
               {showJson && (
-                <pre className="mb-4 max-h-80 overflow-auto rounded-lg border border-white/10 bg-black/80 p-3 text-[11px] text-emerald-300 font-mono">
+                <pre className="mb-4 max-h-80 overflow-auto rounded-lg border border-slate-700 bg-[#0F1117] p-3 text-[11px] text-emerald-300 font-mono">
                   {JSON.stringify({ match: result.input.match, date: result.input.date, markets: registry.slice(0, 30) }, null, 2)}
                 </pre>
               )}
@@ -605,16 +605,16 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
 function DeepStatsDashboard({ stats, homeName, awayName }: { stats: DeepStatsVector; homeName: string; awayName: string }) {
   return (
     <div className="space-y-4">
-      <div className="overflow-x-auto rounded-lg border border-white/10 bg-black/40 p-4">
+      <div className="overflow-x-auto rounded-lg border border-slate-700 bg-slate-800 p-4">
         <table className="w-full text-center text-xs font-mono">
           <thead>
-            <tr className="border-b border-white/10 text-slate-400 text-[11px] uppercase">
+            <tr className="border-b border-slate-700 text-slate-400 text-[11px] uppercase">
               <th className="py-2 text-left font-sans text-amber-300">{homeName}</th>
               <th className="py-2 px-3">Metric</th>
               <th className="py-2 text-right font-sans text-amber-300">{awayName}</th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-white/5 text-slate-200">
+          <tbody className="divide-y divide-slate-700 text-slate-200">
             {[
               [stats.homeXg.toFixed(2), "Expected Goals (xG)", stats.awayXg.toFixed(2)],
               [`${stats.homeGfAvg.toFixed(2)} / ${stats.homeGaAvg.toFixed(2)}`, "Goals Scored / Conceded per 90", `${stats.awayGfAvg.toFixed(2)} / ${stats.awayGaAvg.toFixed(2)}`],
@@ -646,7 +646,7 @@ function DeepStatsDashboard({ stats, homeName, awayName }: { stats: DeepStatsVec
         </div>
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 text-xs font-mono">
           {stats.sources.map((src) => (
-            <div key={src.name} className="rounded-md border border-white/10 p-2">
+            <div key={src.name} className="rounded-md border border-slate-700 p-2">
               <div className="flex items-center justify-between">
                 <span className="font-bold text-slate-200">{src.name}</span>
                 <span className="rounded bg-emerald-500/20 px-1.5 py-0.5 text-[10px] text-emerald-300 font-bold">
@@ -693,7 +693,7 @@ function OddsView({ odds, home, away }: { odds: FixtureLite["odds"]; home: strin
 
 function MlBox({ label, ml }: { label: string; ml: number | null | undefined }) {
   return (
-    <div className="rounded-md border border-white/10 px-2 py-2">
+    <div className="rounded-md border border-slate-700 px-2 py-2">
       <div className="text-[10px] uppercase text-slate-400 font-sans">{label}</div>
       <div className="font-mono text-slate-200 font-bold">
         {ml === null || ml === undefined ? "—" : ml > 0 ? `+${ml}` : ml}
@@ -739,7 +739,7 @@ function LineupPanel({ title, players }: { title: string; players: MatchSummary[
     <Section title={title} subtitle={`${starters.length} starters`}>
       <div className="grid grid-cols-2 gap-2 text-xs">
         {starters.map((p, i) => (
-          <div key={i} className="flex items-center gap-2 rounded border border-white/5 px-2 py-1">
+          <div key={i} className="flex items-center gap-2 rounded border border-slate-700 px-2 py-1">
             <span className="w-5 font-mono text-slate-400 font-bold">{p.jersey ?? "-"}</span>
             <span className="flex-1 truncate text-slate-200">{p.name}</span>
             <span className="text-[10px] font-mono text-amber-300">{p.position}</span>
@@ -768,8 +768,8 @@ function BoxscorePanel({ leagueSlug, eventId, homeName, awayName }: {
 
   return (
     <Section title="FINAL MATCH STATISTICS" subtitle="Real post-match boxscore from ESPN live feed">
-      <div className="rounded-lg bg-black/50 overflow-hidden">
-        <div className="grid grid-cols-3 text-center text-xs font-mono px-3 py-2 bg-black/30">
+      <div className="rounded-lg bg-slate-900 overflow-hidden">
+        <div className="grid grid-cols-3 text-center text-xs font-mono px-3 py-2 bg-slate-800">
           <span className="text-amber-300 font-bold text-left">{homeName}</span>
           <span className="text-slate-400">Stat</span>
           <span className="text-amber-300 font-bold text-right">{awayName}</span>
@@ -780,7 +780,7 @@ function BoxscorePanel({ leagueSlug, eventId, homeName, awayName }: {
           const total = h + a || 1;
           const hPct = (h / total) * 100;
           return (
-            <div key={i} className="px-3 py-1.5 border-t border-white/5">
+            <div key={i} className="px-3 py-1.5 border-t border-slate-700">
               <div className="grid grid-cols-3 text-center text-xs">
                 <span className={`text-left font-mono ${h >= a ? "text-white font-bold" : "text-slate-300"}`}>{s.home}</span>
                 <span className="text-slate-400 text-[11px]">{s.name}</span>
@@ -857,7 +857,7 @@ function LiveMatchCentre({ leagueSlug, eventId, isLive }: { leagueSlug: string; 
           {data.keyEvents.length === 0 ? (
             <p className="text-sm text-slate-500 font-mono">No key events yet.</p>
           ) : data.keyEvents.map((e, i) => (
-            <div key={i} className="flex items-center gap-3 bg-black/30 rounded-md px-3 py-2">
+            <div key={i} className="flex items-center gap-3 bg-slate-800 rounded-md px-3 py-2">
               <span className="font-mono text-xs text-amber-300 w-8 text-right font-bold">{e.minute}</span>
               <EventIcon type={e.type} />
               <div className="flex-1 min-w-0">
@@ -870,8 +870,8 @@ function LiveMatchCentre({ leagueSlug, eventId, isLive }: { leagueSlug: string; 
       )}
 
       {tab === "stats" && (
-        <div className="bg-black/30 rounded-lg overflow-hidden">
-          <div className="grid grid-cols-3 text-center text-xs font-mono px-3 py-2 bg-black/30 font-bold">
+        <div className="bg-slate-800 rounded-lg overflow-hidden">
+          <div className="grid grid-cols-3 text-center text-xs font-mono px-3 py-2 bg-slate-800 font-bold">
             <span className="text-amber-300 text-left">{data.homeTeam}</span>
             <span className="text-slate-400">Stat</span>
             <span className="text-amber-300 text-right">{data.awayTeam}</span>
@@ -883,13 +883,13 @@ function LiveMatchCentre({ leagueSlug, eventId, isLive }: { leagueSlug: string; 
             const a = parseFloat(s.away) || 0;
             const total = h + a || 1;
             return (
-              <div key={i} className="px-3 py-2 border-t border-white/5">
+              <div key={i} className="px-3 py-2 border-t border-slate-700">
                 <div className="grid grid-cols-3 text-center text-xs">
                   <span className={`text-left font-mono ${h >= a ? "text-white font-bold" : "text-slate-300"}`}>{s.home}</span>
                   <span className="text-slate-400 text-[11px]">{s.name}</span>
                   <span className={`text-right font-mono ${a >= h ? "text-white font-bold" : "text-slate-300"}`}>{s.away}</span>
                 </div>
-                <div className="mt-1 flex h-1 rounded-full bg-white/10 overflow-hidden">
+                <div className="mt-1 flex h-1 rounded-full bg-slate-800 overflow-hidden">
                   <div className="bg-amber-400/70" style={{ width: `${(h / total) * 100}%` }} />
                 </div>
               </div>
@@ -903,7 +903,7 @@ function LiveMatchCentre({ leagueSlug, eventId, isLive }: { leagueSlug: string; 
           {data.commentary.length === 0 ? (
             <p className="text-sm text-slate-500 font-mono">No commentary available.</p>
           ) : data.commentary.map((c, i) => (
-            <div key={i} className="flex gap-3 bg-black/20 rounded px-3 py-2 text-xs">
+            <div key={i} className="flex gap-3 bg-slate-800 rounded px-3 py-2 text-xs">
               <span className="font-mono text-amber-300 w-8 text-right font-bold shrink-0">{c.minute}</span>
               <span className="text-slate-200">{c.text}</span>
             </div>
