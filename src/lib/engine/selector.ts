@@ -1,64 +1,59 @@
 // ĞIGI GIVØ — Multi-Factor Market Selector
 //
-// Replaces the previous single-number "safety" ranking with a weighted,
-// multi-factor composite that scores every generated market across eleven
-// independent signals. The composite is monotonic: a market with a higher
-// composite is expected to have a higher true outcome probability, so Top-1
-// is — by construction — the single most reliable pick and cannot be
-// systematically worse than Top-2.
+// Balanced 12-factor composite ranking. Every generated market is scored
+// across twelve independent signals — all computed from REAL data supplied by
+// the multi-source stats aggregator and the enrichment pipeline (never
+// simulated values) — and ranked by the weighted composite. The composite is
+// monotonic: a market with a higher composite is expected to have a higher
+// true outcome probability, so Top-1 is — by construction — the single most
+// reliable pick.
 //
-// FACTOR WEIGHTS:
-//   The requested safety profile allocates 110 points (30+20+10+5+5+5+5+5+10+10+5).
-//   The selector preserves those exact relative priorities and normalizes by the
-//   total at calculation time so the final composite remains a 0..1 score.
+// FACTOR WEIGHTS (balanced profile, Σ = 100%):
 //
-//   1. Calibration / historical hit rate ............... 30%  ← calibration.ts
-//      The empirical reliability of the market TYPE, derived from observed
-//      hit/miss rates across backtested finished matches. Shrinks over-confident
-//      volatile families (saves 0.55, cards 0.66) and fully trusts structurally
-//      safe lines (extreme goal totals, Double Chance, Match Result).
+//   1. Deep statistical analysis ............. 9%   ← stats aggregator xG / shot quality
+//      Advanced-metric evidence (xG, xG-per-shot, SOT, shots) supporting the
+//      selected side of the market.
 //
-//   2. Poisson λ  (expected event rates) ............... 20%  ← xg.ts + statisticalAnchors.ts
-//      The raw event-rate evidence: how decisively the expected λ (goals,
-//      corners, cards, SOT, shots, offsides, saves — built by the caller from
-//      the xG model and league anchors) supports the selected side of the line.
+//   2. All data mesh ......................... 9%   ← multi-source mesh coverage
+//      How many independent real sources contributed (provider count), how
+//      much of the enrichment contract they filled, and league-anchor depth.
 //
-//   3. Player / team form ............................... 10%  ← ESPN form data
-//      Recent results momentum (GF/GA + points) mapped directionally onto the
-//      market: hot attacking form supports Overs/Wins, cold form supports
-//      Unders, and the in-form side is favoured in result markets.
+//   3. Stats ................................. 9%   ← stats aggregator + calibration
+//      The market's backing stat evidence. The historical hit rate /
+//      calibration is only ONE PART of this factor — it never dominates the
+//      composite on its own.
 //
-//   4. Tactical matchup .................................. 5%   ← home/away, H2H, formation
-//      Venue neutrality, head-to-head scoring history, and formation-mismatch
-//      multipliers (attacking vs defensive → corners/cards, open vs open → goals).
+//   4. Tactical analysis ..................... 8%   ← H2H, formations, venue
+//      Head-to-head scoring/result history and formation-mismatch multipliers.
 //
-//   5. Match importance .................................. 5%   ← derby, title race, relegation
-//      Stakes-driven predictability: derbies, title races, relegation six-pointers
-//      and knockout ties are more predictable than friendlies / dead rubbers.
+//   5. Match importance ...................... 8%   ← derby, title race, relegation
+//      Stakes-driven predictability (knockouts/derbies > dead rubbers).
 //
-//   6. League-specific depth .............................. 5%   ← leagueAnchors.ts
-//      Whether the fixture's league has a dedicated empirical baseline (high
-//      depth) versus a proxy/default anchor (low depth).
+//   6. Player vs player forms ................ 8%   ← injuries + formation duels
+//      Key-player availability (injury feed) and individual matchup edges
+//      (attacking vs defensive formation duels).
 //
-//   7. Market confidence / liquidity ...................... 5%   ← odds volume / movement
-//      Bookmaker coverage of the exact line, or a rank-confidence proxy when
-//      odds are unavailable.
+//   7. Deep statistical vector ............... 8%   ← per-team expected profiles
+//      Directional support of the per-team deep profile (λ vector) for the
+//      selected side/line.
 //
-//   8. Zero bias .......................................... 5%   ← neutralise home/away favouritism
-//      Penalises team-specific markets whose edge leans on the home/away
-//      asymmetry; total/neutral markets are venue-neutral and score fully.
+//   8. Zero bias ............................. 8%   ← neutralise home/away favouritism
+//      Penalises team-specific markets leaning on venue asymmetry; totals and
+//      neutral-venue fixtures score fully.
 //
-//   9. Injury impact ...................................... 10%  ← lineup / injury feed
-//      Full squads score 1.0; top scorer, main playmaker, starting GK, or other
-//      key-player outs score 0.0; missing injury data falls back to 0.7.
+//   9. Form .................................. 8%   ← team form (aggregator/ESPN)
+//      Recent results momentum mapped directionally onto the market.
 //
-//  10. Market volatility ................................. 10%  ← 6h odds movement
-//      Stable odds score 1.0; odds moves above 20% in the last six hours score
-//      0.0; missing movement data falls back to 0.8.
+//  10. Conditional λ values .................. 8%   ← λ conditioned on real stats
+//      Margin of the real-stat-conditioned λ against the line; excluded when
+//      the market's backing stat is missing from the aggregator.
 //
-//  11. Weather / pitch conditions ......................... 5%   ← match weather
-//      Perfect conditions score 1.0, clear conditions 0.8, heavy rain/snow/wind
-//      0.2; missing weather data falls back to 0.9.
+//  11. Poisson ............................... 8%   ← Poisson tail probability
+//      P(selection wins) under the Poisson model for the expected event rate.
+//
+//  12. Statistics all states filled .......... 9%   ← canonical stats completeness
+//      Share of all canonical stat fields actually filled by the aggregator
+//      for both teams.
 //
 // DATA-GAP CONTRACT (v2 — dynamic weight redistribution, no neutral stand-ins)
 //   Every factor is scored from whatever REAL data is available. When a
@@ -115,30 +110,54 @@ import type { LambdaSet } from "./lambdas";
 import { LEAGUE_ANCHORS, getAnchors } from "./statisticalAnchors";
 import { analyseFormationMismatch } from "./players";
 import type { OddsInfo } from "../espn";
-import type { CanonicalMatchStats, StatKey } from "../data/types";
+import {
+  STAT_FIELDS,
+  nonNullFieldCount,
+  type CanonicalMatchStats,
+  type StatKey,
+} from "../data/types";
 
-// ─── Factor weights ───────────────────────────────────────────────────────────
+// ─── Factor weights (balanced 12-factor profile, Σ = 100%) ──────────────────
 
 export const RANKING_WEIGHTS = {
-  calibration:       0.30,  // empirical reliability / historical hit rate — calibration.ts
-  lambda:            0.20,  // Poisson λ (expected event rates) — xg.ts + statisticalAnchors.ts
-  form:              0.10,  // player / team form — ESPN form data
-  tactical:          0.05,  // home/away, H2H, formation
-  importance:        0.05,  // derby / title race / relegation
-  leagueDepth:       0.05,  // league-specific anchors — leagueAnchors.ts
-  liquidity:         0.05,  // odds confidence / liquidity
-  bias:              0.05,  // neutralise home/away favouritism
-  injuryImpact:      0.10,  // key absences and starter availability
-  marketVolatility:  0.10,  // six-hour odds movement stability
-  weather:           0.05,  // weather / pitch conditions
+  deepStatisticalAnalysis:   0.09,  // advanced metrics (xG / shot quality) — stats aggregator
+  allDataMesh:               0.09,  // multi-source mesh coverage + league-anchor depth
+  stats:                     0.09,  // backing-stat evidence; hitRate/calibration is only one part
+  tacticalAnalysis:          0.08,  // H2H, formations, venue
+  matchImportance:           0.08,  // derby / title race / relegation / knockout
+  playerVsPlayerForms:       0.08,  // injuries + formation duels
+  deepStatisticalVector:     0.08,  // per-team deep profile (λ vector) support
+  zeroBias:                  0.08,  // neutralise home/away favouritism
+  form:                      0.08,  // team form momentum
+  conditionalLambda:         0.08,  // λ conditioned on real canonical stats
+  poisson:                   0.08,  // Poisson tail win probability
+  statisticsAllStatesFilled: 0.09,  // canonical stats completeness (all fields)
 } as const;
+
+/** Factor keys — mirror the fields of RANKING_WEIGHTS. */
+export type FactorKey = keyof typeof RANKING_WEIGHTS;
+
+/** Human-readable factor names — the exact keys used by the API `factors` map. */
+export const FACTOR_LABELS: Record<FactorKey, string> = {
+  deepStatisticalAnalysis:   "Deep statistical analysis",
+  allDataMesh:               "All data mesh",
+  stats:                     "Stats",
+  tacticalAnalysis:          "Tactical analysis",
+  matchImportance:           "Match importance",
+  playerVsPlayerForms:       "Player vs player forms",
+  deepStatisticalVector:     "Deep statistical vector",
+  zeroBias:                  "Zero bias",
+  form:                      "Form",
+  conditionalLambda:         "Conditional λ values",
+  poisson:                   "Poisson",
+  statisticsAllStatesFilled: "Statistics all states filled",
+};
 
 const MIN_CALIBRATION_HIT_RATE = 0.85;
 /** Backfill tier floor — used ONLY to complete the Top-10 when the trusted
  *  (≥85%) pool is exhausted. Picks from this tier are still qualified,
  *  injury-severity-checked, safety-net-checked and verifiable. */
 const MIN_BACKFILL_CALIBRATION_HIT_RATE = 0.55;
-const SIGNIFICANT_ODDS_MOVE_PCT = 20;
 
 // ─── Contextual Top-1 ban for high-line Unders (Part 1) ─────────────────────
 // Total Goals / Team Goals "Under X.5" lines at or above this value
@@ -161,9 +180,6 @@ const UNDER45_CALIBRATION_FLOOR = 0.93;
 /** Share of the excess above the floor that is removed from the hit rate
  *  (adjusted = raw − (raw − floor) × penalty). */
 const UNDER45_CALIBRATION_PENALTY = 0.4;
-
-/** Factor keys — mirror the fields of RANKING_WEIGHTS. */
-export type FactorKey = keyof typeof RANKING_WEIGHTS;
 
 const ALL_FACTOR_KEYS: FactorKey[] = Object.keys(RANKING_WEIGHTS) as FactorKey[];
 
@@ -595,6 +611,65 @@ function sigmaCushion(lambda: number, line: number): number {
   return Math.abs(lambda - line) / Math.sqrt(Math.max(0.5, lambda));
 }
 
+/** Parse the "O/U X(.5)" line out of a market name (null when absent). */
+function lineOf(m: Market): number | null {
+  const lineMatch = m.name.match(/O\/U\s+([\d.]+)/);
+  if (!lineMatch) return null;
+  const line = Number(lineMatch[1]);
+  return Number.isFinite(line) ? line : null;
+}
+
+/**
+ * Directional support of an expected total against an O/U line (0..1).
+ * The margin is expressed relative to the expectation itself, so a line far
+ * below (above) the expectation scores near 1 for Over (Under) and near 0
+ * for the opposite side; a line sitting on the expectation scores ~0.5.
+ */
+function supportScore(expectedTotal: number, line: number, over: boolean): number {
+  const margin = (expectedTotal - line) / Math.max(1.0, expectedTotal);
+  return over ? clamp(0.5 + margin, 0, 1) : clamp(0.5 - margin, 0, 1);
+}
+
+/**
+ * Directional support of a home/away strength share (0..1, home perspective)
+ * for a result-market selection (Win / Draw / Double Chance).
+ */
+function resultShareScore(m: Market, homeShare: number, homeName: string, awayName: string): number {
+  const sel = m.selection;
+  if (sel === "Draw") return clamp(1 - Math.abs(homeShare - 0.5) * 3, 0, 1);
+  if (sel.includes("(1X)") || sel === "1X") return clamp(0.6 + (homeShare - 0.5) * 1.5, 0, 1);
+  if (sel.includes("(X2)") || sel === "X2") return clamp(0.6 + (0.5 - homeShare) * 1.5, 0, 1);
+  if (sel.includes("(12)") || sel === "12") return clamp(0.55 + Math.abs(homeShare - 0.5) * 2, 0, 1);
+  if (teamMentions(sel, homeName)) return clamp(0.5 + (homeShare - 0.5) * 2, 0, 1);
+  if (teamMentions(sel, awayName)) return clamp(0.5 + (0.5 - homeShare) * 2, 0, 1);
+  return 0.5;
+}
+
+/** True for result-type markets (1X2 / Double Chance / DNB / AH). */
+function isResultMarket(m: Market): boolean {
+  return /Match Result|Double Chance|Draw No Bet|Asian Handicap/i.test(m.name);
+}
+
+/**
+ * Home/away expected-value pair for the market's stat family (null when the
+ * market has no direct λ-pair mapping). Always [home, away] — consumers pick
+ * the relevant side themselves. Feeds the deep-vector factor.
+ */
+function lambdaPairFor(m: Market, lam: LambdaSet): [number, number] | null {
+  const n = m.name;
+  if (n.includes("Goal Kick"))                     return [lam.homeGoalKicks, lam.awayGoalKicks];
+  if (n.includes("Goals"))                         return [lam.homeGoals,     lam.awayGoals];
+  if (n.includes("Corners"))                       return [lam.homeCorners,   lam.awayCorners];
+  if (n.includes("Cards"))                         return [lam.homeCards,     lam.awayCards];
+  if (n.includes("SOT"))                           return [lam.homeSot,       lam.awaySot];
+  if (n.includes("Shots"))                         return [lam.homeShots,     lam.awayShots];
+  if (n.includes("Offsides"))                      return [lam.homeOffsides,  lam.awayOffsides];
+  if (n.includes("Saves"))                         return [lam.homeSaves,     lam.awaySaves];
+  if (n.includes("Throw-ins"))                     return [lam.homeThrowIns,  lam.awayThrowIns];
+  if (n.includes("Fouls"))                         return [lam.homeFouls,     lam.awayFouls];
+  return null;
+}
+
 // ─── Ranking context (optional enrichment data) ───────────────────────────────
 
 /** Recent-form signal for one team (ESPN form / recent results). */
@@ -786,8 +861,23 @@ interface FactorResult {
   available?: boolean;
 }
 
-/** Factor 1 — Poisson λ (expected event rates). */
-function scoreLambda(
+// ─── 12-factor scorers ────────────────────────────────────────────────────────
+// Each scorer returns a 0..1 score from REAL data only. `available: false`
+// means the factor's underlying data is missing for this match — the factor is
+// then EXCLUDED from the composite and its weight redistributed across the
+// remaining factors (no simulated stand-ins, ever).
+
+/** Total canonical fields that can be filled (numeric home+away + cleanSheet). */
+const TOTAL_CANONICAL_FIELDS = STAT_FIELDS.length * 2 + 2;
+
+/** Advanced-metric fields driving the deep-statistical factors. */
+const DEEP_VECTOR_FIELDS: StatKey[] = [
+  "xg", "xgPerShot", "shots", "shotsOnTarget", "corners",
+  "yellowCards", "possession", "passes", "saves",
+];
+
+/** Factor 11 — Poisson: P(selection wins) under the Poisson model. */
+function scorePoisson(
   m: Market, lam: LambdaSet, homeName: string, awayName: string,
 ): FactorResult {
   const lambda = lambdaFor(m, lam, homeName, awayName);
@@ -795,7 +885,7 @@ function scoreLambda(
     return {
       score: 0.5,
       available: false,
-      gap: "no direct λ→selection mapping (non event-rate market) — λ factor excluded, weight redistributed",
+      gap: "no direct λ→selection mapping (non event-rate market) — Poisson factor excluded, weight redistributed",
     };
   }
   // P(selection wins) under Poisson(λ): 1 - tail risk of the selected side.
@@ -803,25 +893,265 @@ function scoreLambda(
   return { score: clamp(winProb, 0, 1) };
 }
 
-/** Factor 2 — Calibration / historical hit rate (market-type reliability). */
-function scoreCalibration(
+/** Factor 10 — Conditional λ values: margin of the real-stat-conditioned λ. */
+function scoreConditionalLambda(
   m: Market,
-  ctx: MatchVolatility,
-  effectiveHitRate?: number,
+  effLam: LambdaSet,
+  stats: CanonicalMatchStats | null,
+  homeName: string,
+  awayName: string,
 ): FactorResult {
-  // Part 2 — Under 4.5 (Total or Team) with an extreme raw hit rate (> 0.93)
-  // is scored with the CALIBRATED (penalised) hit rate instead of the raw one,
-  // so the ranking stops overvaluing its extreme probability. All other
-  // markets keep the empirical market-type reliability factor.
-  if (effectiveHitRate !== undefined && effectiveHitRate !== m.hitRate) {
-    return { score: clamp(effectiveHitRate, 0, 1) };
+  const lambda = lambdaFor(m, effLam, homeName, awayName);
+  if (lambda === null) {
+    return {
+      score: 0.5,
+      available: false,
+      gap: "no λ mapping — conditional-λ factor excluded, weight redistributed",
+    };
   }
-  // marketReliability is already the empirical hit-rate-derived factor (0.4..1.0).
-  const rel = marketReliability(m, ctx);
-  return { score: clamp(rel, 0, 1) };
+  const line = lineOf(m);
+  if (line === null) {
+    return {
+      score: 0.5,
+      available: false,
+      gap: "no O/U line — conditional-λ factor excluded, weight redistributed",
+    };
+  }
+  // Conditioning requires the market's backing stat to be REAL in the canonical
+  // stats; without it the λ fell back to model/league priors and cannot vote.
+  if (stats !== null && statConfidenceFor(m, stats) !== 1) {
+    return {
+      score: 0.5,
+      available: false,
+      gap: "backing stat missing from the aggregator — λ not conditioned on real data, factor excluded, weight redistributed",
+    };
+  }
+  const margin = (lambda - line) / Math.sqrt(Math.max(0.5, lambda));
+  const dir = isOverSelection(m) ? 1 : isUnderSelection(m) ? -1 : 0;
+  if (dir === 0) {
+    return {
+      score: 0.5,
+      available: false,
+      gap: "non O/U selection — conditional-λ factor excluded, weight redistributed",
+    };
+  }
+  return { score: clamp(0.5 + dir * margin * 0.25, 0, 1) };
 }
 
-/** Factor 3 — Player / team form. */
+/** Factor 1 — Deep statistical analysis: advanced-metric support (xG / shots). */
+function scoreDeepStatisticalAnalysis(
+  m: Market,
+  stats: CanonicalMatchStats | null,
+  homeName: string,
+  awayName: string,
+): FactorResult {
+  if (!stats) {
+    return {
+      score: 0.5,
+      available: false,
+      gap: "no canonical stats — deep statistical analysis excluded, weight redistributed",
+    };
+  }
+  const h = stats.home, a = stats.away;
+
+  // Result markets: deep xG share decides the directional support.
+  if (isResultMarket(m)) {
+    if (h.xg === null || a.xg === null) {
+      return {
+        score: 0.5,
+        available: false,
+        gap: "xG missing — deep statistical analysis excluded, weight redistributed",
+      };
+    }
+    const share = h.xg / Math.max(0.1, h.xg + a.xg);
+    return { score: resultShareScore(m, share, homeName, awayName) };
+  }
+
+  // Advanced metric per market family: xG for goals, shot quality for shots/SOT,
+  // the backing stat itself for the remaining event families.
+  const name = m.name.toLowerCase();
+  let metric: "xg" | "shotsOnTarget" | "shots" | StatKey | null = null;
+  if (name.includes("goal") && !name.includes("goal kick")) metric = "xg";
+  else if (name.includes("sot") || name.includes("shots on target")) metric = "shotsOnTarget";
+  else if (name.includes("shot")) metric = "shots";
+  else metric = statFieldFor(m);
+  if (!metric) {
+    return {
+      score: 0.5,
+      available: false,
+      gap: "no advanced metric for this market — deep statistical analysis excluded, weight redistributed",
+    };
+  }
+
+  const hv = h[metric], av = a[metric];
+  // xG fall-back chain: xg → goals (real scored/conceded grounding).
+  const hh = hv ?? (metric === "xg" ? h.goals : null);
+  const aa = av ?? (metric === "xg" ? a.goals : null);
+  if (hh === null || aa === null) {
+    return {
+      score: 0.5,
+      available: false,
+      gap: `advanced metric '${metric}' missing — deep statistical analysis excluded, weight redistributed`,
+    };
+  }
+
+  const line = lineOf(m);
+  const side = marketSide(m, homeName, awayName);
+  if (isResultMarket(m) || line === null) {
+    const share = hh / Math.max(0.1, hh + aa);
+    return { score: resultShareScore(m, share, homeName, awayName) };
+  }
+  const expected = side === "home" ? hh : side === "away" ? aa : hh + aa;
+  return { score: supportScore(expected, line, isOverSelection(m)) };
+}
+
+/** Factor 7 — Deep statistical vector: richness of the advanced-metric vector. */
+function scoreDeepStatisticalVector(stats: CanonicalMatchStats | null): FactorResult {
+  if (!stats) {
+    return {
+      score: 0.5,
+      available: false,
+      gap: "no canonical stats — deep statistical vector excluded, weight redistributed",
+    };
+  }
+  let filled = 0;
+  for (const f of DEEP_VECTOR_FIELDS) {
+    if (stats.home[f] !== null) filled++;
+    if (stats.away[f] !== null) filled++;
+  }
+  const total = DEEP_VECTOR_FIELDS.length * 2;
+  if (filled === 0) {
+    return {
+      score: 0.5,
+      available: false,
+      gap: "deep statistical vector empty — factor excluded, weight redistributed",
+    };
+  }
+  return { score: clamp(filled / total, 0, 1) };
+}
+
+/** Factor 12 — Statistics all states filled: canonical completeness share. */
+function scoreStatisticsAllStatesFilled(stats: CanonicalMatchStats | null): FactorResult {
+  if (!stats) {
+    return {
+      score: 0.5,
+      available: false,
+      gap: "no canonical stats — statistics-all-states-filled excluded, weight redistributed",
+    };
+  }
+  const filled = nonNullFieldCount(stats);
+  if (filled === 0) {
+    return {
+      score: 0.5,
+      available: false,
+      gap: "aggregator returned no filled stat fields — factor excluded, weight redistributed",
+    };
+  }
+  return { score: clamp(filled / TOTAL_CANONICAL_FIELDS, 0, 1) };
+}
+
+/** Factor 2 — All data mesh: breadth of the multi-source real-data mesh. */
+function scoreAllDataMesh(
+  context: RankingContext | null,
+  stats: CanonicalMatchStats | null,
+  opts?: SelectOptions,
+): FactorResult {
+  const components: number[] = [];
+  const gaps: string[] = [];
+
+  // (a) Number of independent real sources that contributed to this match.
+  const named = new Set<string>();
+  const sq = opts?.sourceQuality ?? null;
+  if (sq?.primarySource) named.add(sq.primarySource.toLowerCase());
+  for (const s of sq?.contributingSources ?? []) named.add(s.toLowerCase());
+  if (stats?.metadata.source) named.add(stats.metadata.source.toLowerCase());
+  named.delete("");
+  if (named.size > 0) {
+    components.push(clamp(named.size / 5, 0, 1)); // 5+ independent feeds = full mesh
+  } else {
+    gaps.push("no contributing sources recorded");
+  }
+
+  // (b) Share of the enrichment contract the mesh actually filled.
+  if (typeof sq?.fieldCoverage === "number" && Number.isFinite(sq.fieldCoverage)) {
+    components.push(clamp(sq.fieldCoverage, 0, 1));
+  } else {
+    gaps.push("field coverage unknown");
+  }
+
+  // (c) League-anchor depth — dedicated empirical baseline vs proxy.
+  const slug = context?.leagueSlug;
+  if (slug) {
+    if (LEAGUE_ANCHORS[slug]) components.push(1.0);
+    else if (getAnchors(slug)) components.push(0.65);
+    else components.push(0.35);
+  } else {
+    gaps.push("league slug missing");
+  }
+
+  if (components.length === 0) {
+    return {
+      score: 0.5,
+      available: false,
+      gap: `${gaps.join("; ")} — all-data-mesh factor excluded, weight redistributed`,
+    };
+  }
+  const score = components.reduce((s, v) => s + v, 0) / components.length;
+  return { score: clamp(score, 0, 1), gap: gaps.length ? gaps.join("; ") : undefined };
+}
+
+/**
+ * Factor 3 — Stats: the market's backing-stat evidence.
+ *
+ * The historical hit rate / calibration is ONLY ONE PART of this factor
+ * (never allowed to dominate the composite on its own): when the stats
+ * aggregator provides the market's real backing stat, the factor is a 50/50
+ * blend of calibration and the directional stat evidence; without the real
+ * stat it falls back to the calibration component alone (flagged as a gap).
+ */
+function scoreStats(
+  m: Market,
+  ctx: MatchVolatility,
+  effectiveHitRate: number,
+  stats: CanonicalMatchStats | null,
+  homeName: string,
+  awayName: string,
+): FactorResult {
+  // Calibration component — Under 4.5 markets with an extreme raw hit rate
+  // (> 0.93) are scored with the penalised hit rate, every other market with
+  // its empirical market-type reliability (0.4..1.0).
+  const calibrationComponent =
+    effectiveHitRate !== m.hitRate
+      ? clamp(effectiveHitRate, 0, 1)
+      : clamp(marketReliability(m, ctx), 0, 1);
+
+  const field = statFieldFor(m);
+  if (stats && field) {
+    const hv = stats.home[field];
+    const av = stats.away[field];
+    if (hv !== null && av !== null) {
+      const line = lineOf(m);
+      if (line !== null && (isOverSelection(m) || isUnderSelection(m))) {
+        const side = marketSide(m, homeName, awayName);
+        const expected = side === "home" ? hv : side === "away" ? av : hv + av;
+        const statComponent = supportScore(expected, line, isOverSelection(m));
+        return { score: clamp(0.5 * calibrationComponent + 0.5 * statComponent, 0, 1) };
+      }
+      if (isResultMarket(m)) {
+        const share = hv / Math.max(0.1, hv + av);
+        const statComponent = resultShareScore(m, share, homeName, awayName);
+        return { score: clamp(0.5 * calibrationComponent + 0.5 * statComponent, 0, 1) };
+      }
+    }
+  }
+
+  return {
+    score: calibrationComponent,
+    gap: "backing stat unavailable — Stats factor scored on calibration component only",
+  };
+}
+
+/** Factor 9 — Form (player / team form momentum). */
 function scoreForm(
   m: Market, homeName: string, awayName: string, context: RankingContext | null,
 ): FactorResult {
@@ -875,7 +1205,7 @@ function scoreForm(
   return { score: 0.5 };
 }
 
-/** Factor 4 — Tactical matchup (home/away, H2H, formation). */
+/** Factor 4 — Tactical analysis (home/away, H2H, formation). */
 function scoreTactical(
   m: Market, lam: LambdaSet, homeName: string, awayName: string, context: RankingContext | null,
 ): FactorResult {
@@ -989,52 +1319,6 @@ function scoreImportance(context: RankingContext | null, opts?: SelectOptions): 
   };
 }
 
-/** Factor 6 — League-specific depth (leagueAnchors.ts). */
-function scoreLeagueDepth(context: RankingContext | null): FactorResult {
-  const slug = context?.leagueSlug;
-  if (!slug) {
-    return {
-      score: 0.5,
-      available: false,
-      gap: "league slug missing — league-depth factor excluded, weight redistributed",
-    };
-  }
-  if (LEAGUE_ANCHORS[slug]) return { score: 1.0 };
-  const resolved = getAnchors(slug);
-  if (resolved) {
-    return { score: 0.65, gap: `league '${slug}' resolved via proxy anchors (no dedicated baseline)` };
-  }
-  return {
-    score: 0.5,
-    available: false,
-    gap: "no league anchors available — league-depth factor excluded, weight redistributed",
-  };
-}
-
-/** Factor 7 — Market confidence / liquidity (odds volume or movement). */
-function scoreLiquidity(
-  m: Market, confidenceMap: Record<string, number> | undefined, context: RankingContext | null,
-): FactorResult {
-  const conf = confidenceMap?.[m.id];
-  if (conf !== undefined) return { score: clamp(conf, 0, 1) };
-
-  const odds = context?.odds;
-  if (odds) {
-    const line = m.name.match(/O\/U\s+([\d.]+)/);
-    const matchesTotal = odds.overUnder != null && m.name.includes("Total Goals")
-      && line && Math.abs(Number(line[1]) - (odds.overUnder ?? 0)) < 0.01;
-    const matchesResult = (m.name.startsWith("Match Result") || m.name.includes("Double Chance"))
-      && (odds.homeML != null || odds.awayML != null || odds.drawML != null);
-    if (matchesTotal || matchesResult) return { score: 0.8 };
-    return { score: 0.55, gap: "odds present but no matching line for this market" };
-  }
-  return {
-    score: 0.5,
-    available: false,
-    gap: "no odds/volume data — liquidity factor excluded, weight redistributed",
-  };
-}
-
 /** Factor 8 — Zero bias (neutralise home/away favouritism). */
 function scoreBias(
   m: Market, lam: LambdaSet, homeName: string, awayName: string, context: RankingContext | null,
@@ -1104,8 +1388,8 @@ function scoreTeamInjuryImpact(team: TeamInjuryContext | null | undefined, label
   return { score: clamp(1 - out * 0.2, 0.4, 1) };
 }
 
-/** Factor 9 — Injury impact. */
-function scoreInjuryImpact(
+/** Injury/availability component for the player-vs-player factor. */
+function scoreInjuryComponent(
   m: Market, homeName: string, awayName: string, context: RankingContext | null,
 ): FactorResult {
   const side = marketSpecificSide(m, homeName, awayName);
@@ -1115,13 +1399,13 @@ function scoreInjuryImpact(
   if (side === "home") {
     // Side-specific market: only that side's availability matters.
     if (home.available === false) {
-      return { ...home, gap: `home injury data missing — injury factor excluded, weight redistributed` };
+      return { ...home, gap: `home injury data missing` };
     }
     return { score: home.score };
   }
   if (side === "away") {
     if (away.available === false) {
-      return { ...away, gap: `away injury data missing — injury factor excluded, weight redistributed` };
+      return { ...away, gap: `away injury data missing` };
     }
     return { score: away.score };
   }
@@ -1132,87 +1416,79 @@ function scoreInjuryImpact(
     return {
       score: Math.min(home.score, away.score),
       available: false,
-      gap: `${gaps.join("; ") || "injury data missing"} — injury factor excluded, weight redistributed`,
+      gap: gaps.join("; ") || "injury data missing",
     };
   }
   return { score: Math.min(home.score, away.score), gap: gaps.length ? gaps.join("; ") : undefined };
 }
 
-/** Factor 10 — Market volatility from odds movement in the last six hours. */
-function scoreMarketVolatility(m: Market, context: RankingContext | null): FactorResult {
-  const vol = context?.marketVolatility ?? null;
-  if (!vol || vol.dataAvailable === false) {
-    return {
-      score: 0.8,
-      available: false,
-      gap: "6h odds movement data missing — volatility factor excluded, weight redistributed",
-    };
+/** Formation-mismatch duel component for the player-vs-player factor. */
+function scoreFormationDuelComponent(
+  m: Market, context: RankingContext | null,
+): FactorResult {
+  const tac = context?.tactical ?? null;
+  if (!tac?.homeFormation || !tac?.awayFormation) {
+    return { score: 0.5, available: false, gap: "formation data missing" };
+  }
+  let fmm: ReturnType<typeof analyseFormationMismatch>;
+  try {
+    fmm = analyseFormationMismatch(tac.homeFormation, tac.awayFormation);
+  } catch {
+    return { score: 0.5, available: false, gap: "formation analysis failed" };
   }
 
-  const move = vol.marketMovePctLast6h?.[m.id] ?? vol.maxMovePctLast6h ?? null;
-  if (typeof move !== "number" || !Number.isFinite(move)) {
-    if (vol.stable === true) return { score: 1.0 };
-    return {
-      score: 0.8,
-      available: false,
-      gap: "6h odds movement data missing for market — volatility factor excluded, weight redistributed",
-    };
+  const name = m.name;
+  const over = isOverSelection(m);
+  const under = isUnderSelection(m);
+  // Map the duel multiplier onto the market family: >1 favours Overs, <1 Unders.
+  let mult = 1.0;
+  if (/Goals/.test(name)) mult = fmm.goalMultiplier;
+  else if (/Corners/.test(name)) mult = fmm.cornerMultiplier;
+  else if (/Cards/.test(name)) mult = fmm.cardMultiplier;
+  else {
+    // Result-type markets use the home-advantage edge of the duel.
+    return { score: clamp(0.5 + fmm.homeAdvantage, 0, 1) };
   }
-
-  const absMove = Math.abs(move);
-  if (absMove > SIGNIFICANT_ODDS_MOVE_PCT) return { score: 0.0 };
-  if (absMove <= 5) return { score: 1.0 };
-  return { score: clamp(1 - (absMove - 5) / (SIGNIFICANT_ODDS_MOVE_PCT - 5), 0, 1) };
+  if (over) return { score: clamp(0.5 + (mult - 1) * 2, 0, 1) };
+  if (under) return { score: clamp(0.5 - (mult - 1) * 2, 0, 1) };
+  return { score: 0.5 };
 }
 
-/** Factor 11 — Weather / pitch conditions. */
-function scoreWeather(context: RankingContext | null): FactorResult {
-  const wx = context?.weather ?? null;
-  if (!wx || wx.dataAvailable === false) {
+/**
+ * Factor 6 — Player vs player forms: individual matchup availability and
+ * edges. Blends the REAL injury/absence availability of the players involved
+ * with the formation duel (attacking vs defensive matchup multipliers).
+ */
+function scorePlayerVsPlayerForms(
+  m: Market, homeName: string, awayName: string, context: RankingContext | null,
+): FactorResult {
+  const components: number[] = [];
+  const gaps: string[] = [];
+
+  const injury = scoreInjuryComponent(m, homeName, awayName, context);
+  if (injury.available !== false) components.push(injury.score);
+  else if (injury.gap) gaps.push(injury.gap);
+
+  const duel = scoreFormationDuelComponent(m, context);
+  if (duel.available !== false) components.push(duel.score);
+  else if (duel.gap) gaps.push(duel.gap);
+
+  if (components.length === 0) {
     return {
-      score: 0.9,
+      score: 0.5,
       available: false,
-      gap: "weather/pitch data missing — weather factor excluded, weight redistributed",
+      gap: `${gaps.join("; ") || "no player-level data"} — player-vs-player factor excluded, weight redistributed`,
     };
   }
-
-  if (typeof wx.score === "number" && Number.isFinite(wx.score)) {
-    return { score: clamp(wx.score, 0, 1) };
-  }
-
-  const descriptor = `${wx.condition ?? ""} ${wx.pitch ?? ""}`.toLowerCase();
-  if (!descriptor.trim()) {
-    return {
-      score: 0.9,
-      available: false,
-      gap: "weather/pitch condition missing — weather factor excluded, weight redistributed",
-    };
-  }
-  if (/heavy|storm|thunder|snow|sleet|blizzard|gale|high wind|strong wind|waterlogged|frozen|poor pitch/.test(descriptor)) {
-    return { score: 0.2 };
-  }
-  if (/perfect|ideal|excellent/.test(descriptor)) return { score: 1.0 };
-  if (/clear|sunny|dry|fair|good|mild/.test(descriptor)) return { score: 0.8 };
-  if (/rain|wind|wet|mud|cold|fog/.test(descriptor)) return { score: 0.5 };
-  return { score: 0.8 };
+  const score = components.reduce((s, v) => s + v, 0) / components.length;
+  return { score: clamp(score, 0, 1), gap: gaps.length ? gaps.join("; ") : undefined };
 }
 
 // ─── Market score ─────────────────────────────────────────────────────────────
 
-/** Per-factor sub-scores for a market (all 0..1). */
-export interface FactorBreakdown {
-  lambda:            number;
-  calibration:       number;
-  form:              number;
-  tactical:          number;
-  importance:        number;
-  leagueDepth:       number;
-  liquidity:         number;
-  bias:              number;
-  injuryImpact:      number;
-  marketVolatility:  number;
-  weather:           number;
-}
+/** Per-factor sub-scores for a market (all 0..1), keyed by FactorKey. */
+export type FactorBreakdown = Record<FactorKey, number>;
+
 
 /** Full multi-factor score for a single market. */
 export interface MarketScore {
@@ -1224,18 +1500,20 @@ export interface MarketScore {
   breakdown:   FactorBreakdown;
   gaps:        string[];
   notes:       string;
+  /** Effective (calibrated) hit rate used for tiering and loss-probability. */
+  effectiveHitRate: number;
   /** Factors whose data was unavailable — excluded from this market's composite. */
   excludedFactors: FactorKey[];
   /**
    * Final (redistributed) factor weights applied to this market, as fractions
-   * of the active weight mass (Σ = 1). E.g. after excluding form + injuries,
-   * calibration = 0.30/0.90 = 0.333.
+   * of the active weight mass (Σ = 1). E.g. after excluding form + pvp-forms,
+   * poisson = 0.08/0.92 = 0.087.
    */
   appliedWeights: Partial<Record<FactorKey, number>>;
   /**
-   * Stat-confidence multiplier applied to the λ factor's weight (Part 3):
-   * 1.0 when the market's stat is real for both teams, 0.5 when it fell back
-   * to the historical league average.
+   * Stat-confidence of the market's backing stat (Part 3): 1.0 when the stat
+   * is real for both teams, 0.5 when it fell back to the historical league
+   * average. Gates the conditional-λ factor.
    */
   statConfidence: number;
   /** The TeamStats field that backs this market (null for non-stat markets). */
@@ -1245,8 +1523,13 @@ export interface MarketScore {
 }
 
 /**
- * Score a single market across all eleven factors, falling back to neutral
- * values and logging any missing data sources.
+ * Score a single market across all twelve factors. Every factor is computed
+ * from REAL data; unavailable factors are excluded and their weight is
+ * redistributed proportionally across the remaining factors.
+ *
+ * `confidenceMap` is accepted for API compatibility with older callers and is
+ * no longer part of the composite (market liquidity is outside the balanced
+ * 12-factor profile).
  */
 export function scoreMarket(
   m:             Market,
@@ -1256,11 +1539,12 @@ export function scoreMarket(
   confidenceMap?: Record<string, number>,
   opts?:         SelectOptions,
 ): MarketScore {
+  void confidenceMap; // kept for backward compatibility — see doc comment
   const context = opts?.context ?? null;
   const stats   = opts?.stats ?? null;
 
-  // Part 3 — ground λ in real canonical stats, and compute the market's
-  // stat-confidence multiplier (1.0 = real stat for both teams, 0.5 = fallback).
+  // Ground λ in real canonical stats (Part 3), and compute the market's
+  // stat-confidence (1.0 = real stat for both teams, 0.5 = fallback).
   const effLam = effectiveLambdas(lam, stats);
   const statConfidence = statConfidenceFor(m, stats);
   const statField = statFieldFor(m);
@@ -1270,111 +1554,97 @@ export function scoreMarket(
   const evenness = 1 - Math.min(1, Math.abs(effLam.homeGoals - effLam.awayGoals) / Math.max(0.5, totalGoals));
   const ctx: MatchVolatility = { totalGoals, evenness };
 
-  // Part 2 — Under 4.5 probability calibration. Markets with a raw hit rate
-  // above 0.93 are ranked with the penalised hit rate (adjusted = raw −
-  // (raw − 0.93) × 0.4) in the calibration factor and the loss-probability
-  // tiebreak, so the engine cannot overvalue them.
+  // Under 4.5 probability calibration: markets with a raw hit rate above 0.93
+  // are ranked with the penalised hit rate (adjusted = raw − (raw − 0.93) × 0.4)
+  // in the Stats factor and the loss-probability tiebreak.
   const hitRateCal = calibratedUnder45HitRate(m);
   if (hitRateCal.adjusted) {
     console.log(
       `[Selector] Calibrated Under 4.5 from ${m.hitRate.toFixed(2)} to ${hitRateCal.effective.toFixed(2)} for ${homeName} vs ${awayName}.`,
     );
   }
-  const lambda           = scoreLambda(m, effLam, homeName, awayName);
-  const calibration      = scoreCalibration(m, ctx, hitRateCal.effective);
-  const form             = scoreForm(m, homeName, awayName, context);
-  const tactical         = scoreTactical(m, effLam, homeName, awayName, context);
-  const importance       = scoreImportance(context, opts);
-  const leagueDepth      = scoreLeagueDepth(context);
-  const liquidity        = scoreLiquidity(m, confidenceMap, context);
-  const bias             = scoreBias(m, effLam, homeName, awayName, context);
-  const injuryImpact     = scoreInjuryImpact(m, homeName, awayName, context);
-  const marketVolatility = scoreMarketVolatility(m, context);
-  const weather          = scoreWeather(context);
 
-  const breakdown: FactorBreakdown = {
-    lambda:           lambda.score,
-    calibration:      calibration.score,
-    form:             form.score,
-    tactical:         tactical.score,
-    importance:       importance.score,
-    leagueDepth:      leagueDepth.score,
-    liquidity:        liquidity.score,
-    bias:             bias.score,
-    injuryImpact:     injuryImpact.score,
-    marketVolatility: marketVolatility.score,
-    weather:          weather.score,
+  // ── The balanced 12-factor scorecard (all real data, no stand-ins) ────────
+  const deepStatisticalAnalysis   = scoreDeepStatisticalAnalysis(m, stats, homeName, awayName);
+  const allDataMesh               = scoreAllDataMesh(context, stats, opts);
+  const statsFactor               = scoreStats(m, ctx, hitRateCal.effective, stats, homeName, awayName);
+  const tacticalAnalysis          = scoreTactical(m, effLam, homeName, awayName, context);
+  const matchImportance           = scoreImportance(context, opts);
+  const playerVsPlayerForms       = scorePlayerVsPlayerForms(m, homeName, awayName, context);
+  const deepStatisticalVector     = scoreDeepStatisticalVector(stats);
+  const zeroBias                  = scoreBias(m, effLam, homeName, awayName, context);
+  const form                      = scoreForm(m, homeName, awayName, context);
+  const conditionalLambda         = scoreConditionalLambda(m, effLam, stats, homeName, awayName);
+  const poisson                   = scorePoisson(m, effLam, homeName, awayName);
+  const statisticsAllStatesFilled = scoreStatisticsAllStatesFilled(stats);
+
+  const factorResults: Record<FactorKey, FactorResult> = {
+    deepStatisticalAnalysis,
+    allDataMesh,
+    stats: statsFactor,
+    tacticalAnalysis,
+    matchImportance,
+    playerVsPlayerForms,
+    deepStatisticalVector,
+    zeroBias,
+    form,
+    conditionalLambda,
+    poisson,
+    statisticsAllStatesFilled,
   };
 
-  // ── Dynamic weight redistribution (Part 2 of the multi-source contract) ──
+  const breakdown: FactorBreakdown = ALL_FACTOR_KEYS.reduce((acc, k) => {
+    acc[k] = factorResults[k].score;
+    return acc;
+  }, {} as FactorBreakdown);
+
+  // ── Dynamic weight redistribution (data-gap contract) ─────────────────────
   // Factors whose data is unavailable are EXCLUDED entirely — never replaced
   // with a neutral stand-in — and the remaining factors' weights are scaled
   // proportionally so they sum to exactly 100%.
-  const factorResults: Record<FactorKey, FactorResult> = {
-    lambda, calibration, form, tactical, importance,
-    leagueDepth, liquidity, bias, injuryImpact, marketVolatility, weather,
-  };
   const excludedFactors = ALL_FACTOR_KEYS.filter((k) => factorResults[k].available === false);
   const activeKeys = ALL_FACTOR_KEYS.filter((k) => factorResults[k].available !== false);
 
-  // ── Stat-confidence weighting (Part 3) ──────────────────────────────────────
-  // The λ factor's weight is multiplied by the market's stat-confidence: a real
-  // stat (both teams) keeps the full 0.20 weight; a missing stat (fallback to
-  // the historical league average) halves it, and the freed mass flows to the
-  // remaining active factors through the Σ=100% renormalisation below.
-  const effectiveWeight = (k: FactorKey): number =>
-    k === "lambda" ? RANKING_WEIGHTS.lambda * statConfidence : RANKING_WEIGHTS[k];
-
-  // Calibration is always data-backed, so this can never be zero.
-  const activeWeightTotal = activeKeys.reduce((sum, k) => sum + effectiveWeight(k), 0)
-    || RANKING_WEIGHTS.calibration
+  // The Stats factor is always data-backed (calibration component), so the
+  // active weight mass can never collapse to zero.
+  const activeWeightTotal = activeKeys.reduce((sum, k) => sum + RANKING_WEIGHTS[k], 0)
+    || RANKING_WEIGHTS.stats
     || 1;
 
   const weightedTotal = activeKeys.reduce(
-    (sum, k) => sum + effectiveWeight(k) * breakdown[k],
+    (sum, k) => sum + RANKING_WEIGHTS[k] * breakdown[k],
     0,
   );
   const composite = weightedTotal / activeWeightTotal;
 
   const appliedWeights: Partial<Record<FactorKey, number>> = {};
   for (const k of activeKeys) {
-    appliedWeights[k] = effectiveWeight(k) / activeWeightTotal;
+    appliedWeights[k] = RANKING_WEIGHTS[k] / activeWeightTotal;
   }
 
-  // Consensus loss probability for tiebreaks (1 − hit rate). Part 2: for
+  // Consensus loss probability for tiebreaks (1 − effective hit rate). For
   // Under 4.5 markets the CALIBRATED hit rate is used, so the re-rank is
   // driven by the adjusted probability rather than the raw one.
   const wrongProb = clamp(1 - hitRateCal.effective, 0, 1);
 
   // σ-cushion for λ markets (third tiebreak).
   const lamVal = lambdaFor(m, effLam, homeName, awayName);
-  const lineMatch = m.name.match(/O\/U\s+([\d.]+)/);
-  const marginUnits = lamVal !== null && lineMatch
-    ? sigmaCushion(lamVal, Number(lineMatch[1]))
+  const line = lineOf(m);
+  const marginUnits = lamVal !== null && line !== null
+    ? sigmaCushion(lamVal, line)
     : 0;
 
-  const gaps = [
-    lambda.gap,
-    form.gap,
-    tactical.gap,
-    importance.gap,
-    leagueDepth.gap,
-    liquidity.gap,
-    injuryImpact.gap,
-    marketVolatility.gap,
-    weather.gap,
-  ].filter((g): g is string => !!g);
+  const gaps = ALL_FACTOR_KEYS
+    .map((k) => factorResults[k].gap)
+    .filter((g): g is string => !!g);
 
   const notes =
-    `cal=${breakdown.calibration.toFixed(2)} λ=${breakdown.lambda.toFixed(2)} ` +
-    `form=${breakdown.form.toFixed(2)} tac=${breakdown.tactical.toFixed(2)} ` +
-    `imp=${breakdown.importance.toFixed(2)} lg=${breakdown.leagueDepth.toFixed(2)} ` +
-    `liq=${breakdown.liquidity.toFixed(2)} bias=${breakdown.bias.toFixed(2)} ` +
-    `inj=${breakdown.injuryImpact.toFixed(2)} vol=${breakdown.marketVolatility.toFixed(2)} ` +
-    `wx=${breakdown.weather.toFixed(2)} → composite=${composite.toFixed(3)} ` +
-    `loss=${(wrongProb * 100).toFixed(1)}% ` +
-    `w[${activeKeys.map((k) => `${k}=${((appliedWeights[k] ?? 0) * 100).toFixed(1)}%`).join(" ")}]` +
-    (excludedFactors.length ? ` excluded[${excludedFactors.join(",")}]` : "") +
+    ALL_FACTOR_KEYS
+      .map((k) => `${FACTOR_LABELS[k].split(" ").map((w) => w[0]).join("")}=${breakdown[k].toFixed(2)}`)
+      .join(" ") +
+    ` → composite=${composite.toFixed(3)} loss=${(wrongProb * 100).toFixed(1)}% ` +
+    `w[${activeKeys.map((k) => `${FACTOR_LABELS[k]}=${((appliedWeights[k] ?? 0) * 100).toFixed(1)}%`).join(" ")}]` +
+    (excludedFactors.length ? ` excluded[${excludedFactors.map((k) => FACTOR_LABELS[k]).join(",")}]` : "") +
     (statField ? ` stat=${statField}@${(statConfidence * 100).toFixed(0)}%${statFallback ? "(fallback)" : ""}` : "") +
     (gaps.length ? ` [gaps: ${gaps.join("; ")}]` : "");
 
@@ -1387,12 +1657,28 @@ export function scoreMarket(
     breakdown,
     gaps,
     notes,
+    effectiveHitRate: hitRateCal.effective,
     excludedFactors,
     appliedWeights,
     statConfidence,
     statField,
     statFallback,
   };
+}
+
+/**
+ * The API-facing factor breakdown for a market: AVAILABLE factors only, keyed
+ * by their human-readable label (the exact key format of the `factors` field
+ * in the API response). Excluded factors are omitted — they have no real
+ * score, and no simulated stand-in is ever emitted.
+ */
+export function labelledFactors(s: MarketScore): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const k of ALL_FACTOR_KEYS) {
+    if (s.excludedFactors.includes(k)) continue;
+    out[FACTOR_LABELS[k]] = Math.round(s.breakdown[k] * 100) / 100;
+  }
+  return out;
 }
 
 // ─── Key deduplication ────────────────────────────────────────────────────────
@@ -1634,11 +1920,11 @@ export function computeMatchConfidence(
   const cfg = resolveConfidenceOptions(opts?.confidence);
   const pickCount = picks.length;
   const backfillPicks = meta?.backfillPicks
-    ?? picks.filter((s) => s.breakdown.calibration < MIN_CALIBRATION_HIT_RATE).length;
+    ?? picks.filter((s) => s.effectiveHitRate < MIN_CALIBRATION_HIT_RATE).length;
 
   // ── Component 1: calibration / historical hit rate of the Top-10 ──────────
   const avgCalibration = pickCount
-    ? picks.reduce((sum, s) => sum + s.breakdown.calibration, 0) / pickCount
+    ? picks.reduce((sum, s) => sum + s.effectiveHitRate, 0) / pickCount
     : 0;
 
   // ── Component 2: factor coverage (share of real ranking weight mass) ──────
@@ -1821,7 +2107,7 @@ export function selectTopPicks(
 
   const gapLog = new Set<string>();
 
-  // ── Step 1: Score every non-rejected market across all eleven factors ───────
+  // ── Step 1: Score every non-rejected market across all twelve factors ───────
   const scored = markets
     .filter((m) => !m.rejected)
     .map((m) => {
@@ -1913,12 +2199,12 @@ export function selectTopPicks(
     return a.market.id.localeCompare(b.market.id);
   };
   const trustedTier = verifiableRanked
-    .filter((s) => s.breakdown.calibration >= MIN_CALIBRATION_HIT_RATE)
+    .filter((s) => s.effectiveHitRate >= MIN_CALIBRATION_HIT_RATE)
     .sort(comparator);
   const backfillTier = verifiableRanked
     .filter((s) =>
-      s.breakdown.calibration < MIN_CALIBRATION_HIT_RATE &&
-      s.breakdown.calibration >= MIN_BACKFILL_CALIBRATION_HIT_RATE)
+      s.effectiveHitRate < MIN_CALIBRATION_HIT_RATE &&
+      s.effectiveHitRate >= MIN_BACKFILL_CALIBRATION_HIT_RATE)
     .sort(comparator);
 
   const seen = new Set<string>();
@@ -1935,7 +2221,7 @@ export function selectTopPicks(
   const top10 = top10Scores.map((s) => s.market);
 
   const backfilledCount = top10Scores.filter(
-    (s) => s.breakdown.calibration < MIN_CALIBRATION_HIT_RATE,
+    (s) => s.effectiveHitRate < MIN_CALIBRATION_HIT_RATE,
   ).length;
   if (backfilledCount > 0) {
     gapLog.add(
@@ -2045,6 +2331,17 @@ export function selectTopPicks(
   // The blocked market stays in the Top-N; with no alternative the first pick
   // is kept (data-driven filter, never a permanent hard ban).
   const orderedPicks = applyTop1ExplosionBan(finalPicks, homeName, awayName, opts);
+
+  // ── Step 10: Factor transparency ──────────────────────────────────────────
+  // Attach the 12-factor breakdown + composite score to every returned pick as
+  // NEW additive fields (`factors` + `compositeScore`). No existing field is
+  // renamed, removed or restructured — the Top-10 array shape is unchanged.
+  for (const m of orderedPicks) {
+    const s = scored.find((x) => x.market === m);
+    if (!s) continue;
+    m.factors = labelledFactors(s);
+    m.compositeScore = Math.round(s.composite * 100) / 100;
+  }
 
   return {
     top1:  orderedPicks.slice(0, 1),

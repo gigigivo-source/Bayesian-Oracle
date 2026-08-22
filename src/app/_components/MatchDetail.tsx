@@ -50,6 +50,69 @@ function getActualStat(
   return null;
 }
 
+// ─── Ranking factors toggle (additive — hidden when a pick has no factors) ───
+
+function factorBarColor(v: number): string {
+  if (v >= 0.85) return "bg-emerald-400";
+  if (v >= 0.70) return "bg-amber-400";
+  if (v >= 0.55) return "bg-cyan-400";
+  return "bg-rose-400";
+}
+
+function RankingFactorsToggle({ market }: { market: Market }) {
+  const [open, setOpen] = useState(false);
+  const factors = market.factors;
+
+  // Optional by design: picks without a factor breakdown render nothing.
+  if (!factors || Object.keys(factors).length === 0) return null;
+
+  const entries = Object.entries(factors);
+  const composite = market.compositeScore;
+
+  return (
+    <div>
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className={`${CHIP} ${open ? CHIP_ON_AMBER : CHIP_OFF} px-3 py-1 text-xs font-semibold`}
+      >
+        {open ? "Hide Ranking Factors ▴" : "Show Ranking Factors ▾"}
+      </button>
+
+      {open && (
+        <div className="mt-3 rounded-lg border border-slate-700 bg-[#0F1117] p-3">
+          <div className="mb-2 flex items-center justify-between font-mono text-[11px] uppercase tracking-wider text-slate-400">
+            <span>12-Factor Ranking Breakdown</span>
+            {composite !== undefined && (
+              <span className="text-amber-300 font-bold">
+                Composite: {(composite * 100).toFixed(0)}%
+              </span>
+            )}
+          </div>
+          <ul className="space-y-1.5">
+            {entries.map(([name, value]) => (
+              <li key={name} className="flex items-center gap-2 text-xs">
+                <span className="w-44 shrink-0 truncate text-slate-300 font-mono">{name}</span>
+                <span className="flex-1 h-2 rounded-full bg-slate-800 overflow-hidden">
+                  <span
+                    className={`block h-full rounded-full ${factorBarColor(value)}`}
+                    style={{ width: `${Math.round(Math.min(1, Math.max(0, value)) * 100)}%` }}
+                  />
+                </span>
+                <span className="w-12 shrink-0 text-right font-mono font-bold text-slate-200">
+                  {(value * 100).toFixed(0)}%
+                </span>
+              </li>
+            ))}
+          </ul>
+          <p className="mt-2 text-[10px] text-slate-500 font-mono">
+            Unavailable factors are excluded and their weight redistributed — real data only.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 interface ValueBetData {
   market: { name: string; selection: string; hitRate: number; family: string };
   oracleProbability: number;
@@ -341,7 +404,11 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
               title="TOP 10 HIGHEST HIT RATE MARKETS"
               subtitle="Every pick contains rationale: Why Qualified · Why Selected · Why Outcome is Possible"
             >
-              <MarketTable markets={result.top10} showDeepExplanation={true} />
+              <MarketTable
+                markets={result.top10}
+                showDeepExplanation={true}
+                renderPickFooter={(m) => <RankingFactorsToggle market={m} />}
+              />
             </Section>
 
             {/* VALUE BETS */}
@@ -518,6 +585,9 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
                         {m.reason && (
                           <div className="mt-2 text-[11px] text-slate-400 font-mono">{m.reason}</div>
                         )}
+                        <div className="mt-2">
+                          <RankingFactorsToggle market={m} />
+                        </div>
                       </div>
                     );
                   })}

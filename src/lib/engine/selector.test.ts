@@ -5,10 +5,24 @@
 // historical-average fallback when the per-match stat is null.
 
 import { describe, expect, it } from "vitest";
-import { statFieldFor, statConfidenceFor, effectiveLambdas } from "./selector";
+import {
+  statFieldFor,
+  statConfidenceFor,
+  effectiveLambdas,
+  selectTopPicks,
+  scoreMarket,
+  RANKING_WEIGHTS,
+  FACTOR_LABELS,
+  type FactorKey,
+} from "./selector";
 import type { Market } from "./types";
 import type { LambdaSet } from "./lambdas";
-import { emptyCanonicalMatchStats, type CanonicalMatchStats, type MatchStatsQuery } from "../data/types";
+import {
+  emptyCanonicalMatchStats,
+  STAT_FIELDS,
+  type CanonicalMatchStats,
+  type MatchStatsQuery,
+} from "../data/types";
 
 function market(name: string, family: string, selection = "Over 1.5"): Market {
   return {
@@ -112,5 +126,138 @@ describe("effectiveLambdas", () => {
     const lam = baseLam();
     const out = effectiveLambdas(lam, null);
     expect(out).toBe(lam);
+  });
+});
+
+// ─── 12-factor balanced composite ─────────────────────────────────────────────
+
+const HOME = "Manchester United";
+const AWAY = "Arsenal";
+
+/** Distinct verifiable markets across several families. */
+function marketSet(): Market[] {
+  const defs: Array<[string, string, string, number]> = [
+    ["Total Goals O/U 2.5",        "goals",       "Over 2.5",     0.62],
+    ["Total Goals O/U 3.5",        "goals",       "Under 3.5",    0.66],
+    ["Total Corners O/U 9.5",      "corners",     "Over 9.5",     0.58],
+    ["Total Corners O/U 10.5",     "corners",     "Under 10.5",   0.60],
+    ["Total Cards O/U 3.5",        "cards",       "Over 3.5",     0.57],
+    ["Total SOT O/U 8.5",          "shots",       "Over 8.5",     0.59],
+    ["Total Shots O/U 24.5",       "shots",       "Over 24.5",    0.61],
+    ["Total Offsides O/U 2.5",     "offsides",    "Over 2.5",     0.56],
+    [`${AWAY} GK Saves O/U 2.5`,   "saves",       "Over 2.5",     0.55],
+    ["Both Teams To Score",        "btts",        "Yes",          0.63],
+    ["Match Result (1X2)",         "match_result", `${HOME} Win`, 0.55],
+    ["Double Chance 1X",           "double_chance", `${HOME} or Draw (1X)`, 0.70],
+  ];
+  return defs.map(([name, family, selection, hr], i) => ({
+    id: `mkt_${i}`, name, family, selection,
+    hitRate: hr, ciLower: hr - 0.08, ciUpper: Math.min(0.99, hr + 0.08), ciWidth: 0.16,
+    fairOddsBest: 1 / Math.min(0.99, hr + 0.08), fairOddsWorst: 1 / Math.max(0.01, hr - 0.08),
+    mqs: 6, grade: "B", confidence: "MEDIUM", disagreementIndex: 0.05,
+    rejected: false, niche: false,
+  }));
+}
+
+/** Canonical stats with every numeric field filled for both teams. */
+function fullStats(): CanonicalMatchStats {
+  const s = emptyCanonicalMatchStats(QUERY);
+  for (const key of STAT_FIELDS) {
+    (s.home[key] as number | null) = 5;
+    (s.away[key] as number | null) = 4;
+  }
+  s.home.cleanSheet = false;
+  s.away.cleanSheet = false;
+  s.home.xg = 2.0; s.away.xg = 1.2;
+  s.home.corners = 6; s.away.corners = 4;
+  s.home.shotsOnTarget = 6; s.away.shotsOnTarget = 4;
+  s.home.shots = 14; s.away.shots = 11;
+  s.metadata.source = "API-Football";
+  return s;
+}
+
+describe("12-factor balanced weights", () => {
+  it("has exactly 12 factors whose weights sum to 100%", () => {
+    const keys = Object.keys(RANKING_WEIGHTS);
+    expect(keys).toHaveLength(12);
+    const total = keys.reduce((sum, k) => sum + RANKING_WEIGHTS[k as FactorKey], 0);
+    expect(total).toBeCloseTo(1.0, 10);
+  });
+
+  it("exposes the 12 human-readable factor labels used by the API", () => {
+    const labels = Object.values(FACTOR_LABELS);
+    expect(labels).toHaveLength(12);
+    for (const expected of [
+      "Deep statistical analysis", "All data mesh", "Stats", "Tactical analysis",
+      "Match importance", "Player vs player forms", "Deep statistical vector",
+      "Zero bias", "Form", "Conditional λ values", "Poisson", "Statistics all states filled",
+    ]) {
+      expect(labels).toContain(expected);
+    }
+  });
+});
+
+describe("composite score", () => {
+  it("equals the weight-normalised sum of the AVAILABLE factors only", () => {
+    const s = scoreMarket(marketSet()[0], baseLam(), HOME, AWAY, undefined, { stats: fullStats() });
+    const active = (Object.keys(RANKING_WEIGHTS) as FactorKey[])
+      .filter((k) => !s.excludedFactors.includes(k));
+    const weightSum = active.reduce((sum, k) => sum + RANKING_WEIGHTS[k], 0);
+    const expected = active.reduce((sum, k) => sum + RANKING_WEIGHTS[k] * s.breakdown[k], 0) / weightSum;
+    expect(s.composite).toBeCloseTo(expected, 10);
+    // appliedWeights renormalise to exactly 1 across the active factors.
+    const applied = active.reduce((sum, k) => sum + (s.appliedWeights[k] ?? 0), 0);
+    expect(applied).toBeCloseTo(1.0, 10);
+  });
+
+  it("excludes stats-backed factors (redistributing weight) when no stats exist", () => {
+    const s = scoreMarket(marketSet()[0], baseLam(), HOME, AWAY, undefined, { stats: null });
+    expect(s.excludedFactors).toContain("statisticsAllStatesFilled");
+    expect(s.excludedFactors).toContain("deepStatisticalVector");
+    // Stats factor still votes via its calibration component.
+    expect(s.excludedFactors).not.toContain("stats");
+  });
+});
+
+describe("selectTopPicks factor attachment (non-breaking)", () => {
+  it("returns top10 and attaches factors + compositeScore to every pick", () => {
+    const res = selectTopPicks(marketSet(), baseLam(), HOME, AWAY, undefined, { stats: fullStats() });
+    expect(res.top10).toBeInstanceOf(Array);
+    expect(res.top10.length).toBeGreaterThan(0);
+    for (const pick of res.top10) {
+      expect(pick.factors).toBeDefined();
+      expect(typeof pick.compositeScore).toBe("number");
+      // Existing fields are untouched — no structural breaking change.
+      expect(typeof pick.id).toBe("string");
+      expect(typeof pick.name).toBe("string");
+      expect(typeof pick.hitRate).toBe("number");
+      // Every factor key is one of the 12 known labels.
+      for (const key of Object.keys(pick.factors!)) {
+        expect(Object.values(FACTOR_LABELS)).toContain(key);
+      }
+      // No excluded factor is reported.
+      const s = scoreMarket(pick, baseLam(), HOME, AWAY, undefined, { stats: fullStats() });
+      for (const k of s.excludedFactors) {
+        expect(pick.factors!).not.toHaveProperty(FACTOR_LABELS[k]);
+      }
+    }
+  });
+
+  it("scores Statistics-all-states-filled from real canonical completeness", () => {
+    const res = selectTopPicks(marketSet(), baseLam(), HOME, AWAY, undefined, { stats: fullStats() });
+    const pick = res.top10[0];
+    expect(pick.factors!["Statistics all states filled"]).toBeCloseTo(1.0, 5);
+    expect(pick.factors!["Deep statistical vector"]).toBeCloseTo(1.0, 5);
+  });
+
+  it("omits stats-backed factors when the aggregator has no stats", () => {
+    const res = selectTopPicks(marketSet(), baseLam(), HOME, AWAY, undefined, { stats: null });
+    const pick = res.top10[0];
+    expect(pick.factors).toBeDefined();
+    expect(pick.factors!).not.toHaveProperty("Statistics all states filled");
+    expect(pick.factors!).not.toHaveProperty("Deep statistical vector");
+    // Model-grounded factors still vote.
+    expect(pick.factors!).toHaveProperty("Zero bias");
+    expect(pick.factors!).toHaveProperty("Stats");
   });
 });
