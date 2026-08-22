@@ -22,6 +22,7 @@ import {
   type ConfidenceOptions,
   type ConfidencePolicy,
   type MatchConfidence,
+  resolveRankingMode,
 } from "./selector";
 import type { RankingMode } from "./selector";
 import { getStandings } from "../footballData";
@@ -2062,7 +2063,9 @@ export function runOracle(
     // the policy decides what happens to a low-confidence match.
     sourceQuality: buildSourceQuality(enrichment),
     confidence:    confidenceOptionsFromEnv(),
-    rankingMode: runOpts?.rankingMode ?? (process.env.RANKING_MODE as RankingMode) ?? 'B',
+    // Ranking mode A (Classic 11-factor) / B (12-Factor) / C (Hybrid) — the
+    // run option wins, then the RANKING_MODE env var, defaulting to B.
+    rankingMode: resolveRankingMode({ rankingMode: runOpts?.rankingMode }),
   });
   const confidence = selection.confidence;
   const top1  = selection.top1;

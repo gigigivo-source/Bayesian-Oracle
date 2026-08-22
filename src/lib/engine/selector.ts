@@ -118,19 +118,21 @@ import {
 } from "../data/types";
 
 
-// ─── Ranking mode (A = Classic 11-factor, B = 12-factor) ─────────────────────
-export type RankingMode = 'A' | 'B';
+// ─── Ranking mode (A = Classic 11-factor, B = 12-factor, C = Hybrid) ─────────
+export type RankingMode = 'A' | 'B' | 'C';
 
 export function resolveRankingMode(opts?: SelectOptions): RankingMode {
   const fromOpts = opts?.rankingMode ? String(opts.rankingMode).toUpperCase() : null;
-  if (fromOpts === 'A' || fromOpts === 'B') return fromOpts as RankingMode;
+  if (fromOpts === 'A' || fromOpts === 'B' || fromOpts === 'C') return fromOpts as RankingMode;
   const envRaw = (typeof process !== 'undefined' && process.env && process.env.RANKING_MODE) ? String(process.env.RANKING_MODE).toUpperCase() : '';
-  if (envRaw === 'A' || envRaw === 'B') return envRaw as RankingMode;
+  if (envRaw === 'A' || envRaw === 'B' || envRaw === 'C') return envRaw as RankingMode;
   return 'B';
 }
 
 export function rankingModeLogLine(mode: RankingMode): string {
-  return mode === 'A' ? 'Selector Ranking mode: A Classic' : 'Selector Ranking mode: B 12-Factor';
+  if (mode === 'A') return 'Selector Ranking mode: A Classic';
+  if (mode === 'B') return 'Selector Ranking mode: B 12-Factor';
+  return '[Selector] Ranking mode: C Hybrid';
 }
 
 // ─── Classic 11-factor weights (Rank A) ─────────────────────────────────────
@@ -897,7 +899,7 @@ export interface SelectOptions {
   sourceQuality?: SourceQualityContext;
   /** Confidence-gate configuration (threshold / policy). */
   confidence?:    ConfidenceOptions;
-  /** Ranking mode: A = Classic 11-factor, B = 12-factor (default B). */
+  /** Ranking mode: A = Classic 11-factor, B = 12-factor, C = Hybrid (A+B averaged; default B). */
   rankingMode?:  RankingMode;
 
 }
@@ -2174,6 +2176,9 @@ export function selectTopPicksClassic(
 
 // Alias required by task: rankClassic
 export const rankClassic = selectTopPicksClassic;
+// Alias for the 12-Factor engine (Rank B) — one of the two inputs the
+// hybrid (Rank C) averages.
+export const rankNew = selectTopPicks;
 
 
 // ─── Market score ─────────────────────────────────────────────────────────────
@@ -2802,6 +2807,9 @@ export function selectTopPicks(
   if (rankingMode === 'A') {
     return selectTopPicksClassic(markets, lam, homeName, awayName, confidenceMap, opts);
   }
+  if (rankingMode === 'C') {
+    return rankHybrid(markets, lam, homeName, awayName, confidenceMap, opts);
+  }
 
   const gapLog = new Set<string>();
 
@@ -3053,6 +3061,362 @@ export function selectTopPicks(
     }),
     weightLog,
     missingFactors: [...excludedUnion],
+    confidence,
+    confidenceLog,
+  };
+}
+
+// ─── Hybrid selection (Rank C) ───────────────────────────────────────────────
+// Rank C combines Rank A (Classic 11-factor) and Rank B (12-Factor) into one
+// unified Top 10. Both engines score every market in the pool EXACTLY as they
+// do in their own modes (their internals are untouched); Rank C only reads
+// their outputs and combines them:
+//
+//     compositeScore = (scoreA + scoreB) / 2
+//
+// All markets are ranked by that averaged score descending — the market with
+// the highest average score becomes Top 1 — and the Top 10 is the top 10
+// markets by the averaged score. After the average is computed, the exact
+// same downstream pipeline as the other modes applies, in the same order:
+// injury-severity hard filter → non-giant Under-3.5 safety net → verifiability
+// gate → Top-10 fill (trusted ≥85% tier, then 55–85% backfill) → confidence
+// gate → contextual Top-1 explosion ban for high-line Unders.
+//
+// The match-level confidence verdict is likewise the average of the two
+// engines' own (unchanged) verdicts on the resulting Top-10 set.
+
+interface HybridScore {
+  market: Market;
+  /** Averaged composite: (Classic + 12-Factor) / 2 — the hybrid final score. */
+  composite:        number;
+  /** Classic 11-factor composite (Rank A output). */
+  compositeA:       number;
+  /** 12-Factor composite (Rank B output). */
+  compositeB:       number;
+  /** Averaged effective hit rate — drives the trusted/backfill tier fill. */
+  effectiveHitRate: number;
+  /** Consensus loss probability (1 − effectiveHitRate) for tiebreaks. */
+  wrongProb:        number;
+  /** Averaged σ-cushion vs the line (third tiebreak). */
+  marginUnits:      number;
+  verifiable:       boolean;
+  /** Full Classic (Rank A) score — kept for the confidence gate + transparency. */
+  classic:          ClassicMarketScore;
+  /** Full 12-Factor (Rank B) score — kept for the confidence gate + transparency. */
+  balanced:         MarketScore;
+}
+
+function hybridNote(s: HybridScore): string {
+  return `hybrid composite=${s.composite.toFixed(3)} (A Classic=${s.compositeA.toFixed(3)} + B 12-Factor=${s.compositeB.toFixed(3)}) loss=${(s.wrongProb * 100).toFixed(1)}%`;
+}
+
+/**
+ * Blend the two engines' confidence verdicts for a hybrid (Rank C) selection.
+ * Each engine scores the SAME Top-10 set with its own gate (unchanged
+ * internals); the hybrid verdict averages the two, mirroring the hybrid
+ * composite rule. `cfg` is the shared resolved gate configuration.
+ */
+function averageMatchConfidence(
+  a:   MatchConfidence,
+  b:   MatchConfidence,
+  cfg: Required<ConfidenceOptions>,
+): MatchConfidence {
+  const score = clamp((a.score + b.score) / 2, 0, 1);
+
+  const componentKeys = Object.keys(CONFIDENCE_WEIGHTS) as ConfidenceComponentKey[];
+  const components = componentKeys.reduce((acc, k) => {
+    const ca = a.components[k];
+    const cb = b.components[k];
+    acc[k] = {
+      score:     clamp((ca.score + cb.score) / 2, 0, 1),
+      weight:    ca.weight,
+      applied:   (ca.applied + cb.applied) / 2,
+      available: ca.available && cb.available,
+      detail:    `A ${ca.detail} || B ${cb.detail}`,
+    };
+    return acc;
+  }, {} as Record<ConfidenceComponentKey, ConfidenceComponent>);
+
+  return {
+    score,
+    scorePct: Math.round(score * 1000) / 10,
+    level:         score < cfg.skipThreshold ? "VERY_LOW" : score < cfg.threshold ? "LOW" : "HIGH",
+    lowConfidence: cfg.enabled && score < cfg.threshold,
+    action:        "full",            // finalised by the gate in rankHybrid()
+    picksReturned: a.picksReturned,   // finalised by the gate in rankHybrid()
+    threshold:     cfg.threshold,
+    skipThreshold: cfg.skipThreshold,
+    policy:        cfg.policy,
+    components,
+    avgCalibration:      (a.avgCalibration + b.avgCalibration) / 2,
+    avgFactorsAvailable: (a.avgFactorsAvailable + b.avgFactorsAvailable) / 2,
+    totalFactors:        b.totalFactors,
+    missingFactors:      [...new Set([...a.missingFactors, ...b.missingFactors])],
+    sourceTier:          a.sourceTier,
+    sources:             a.sources,
+    backfillPicks:       a.backfillPicks,
+    reasons: [
+      ...a.reasons.map((r) => `[A Classic] ${r}`),
+      ...b.reasons.map((r) => `[B 12-Factor] ${r}`),
+    ],
+    summary: "",                      // finalised by the gate in rankHybrid()
+  };
+}
+
+export function rankHybrid(
+  markets:        Market[],
+  lam:            LambdaSet,
+  homeName:       string,
+  awayName:       string,
+  confidenceMap?: Record<string, number>,
+  opts?:          SelectOptions,
+): SelectionResult {
+  const gapLog  = new Set<string>();
+  const context = opts?.context ?? null;
+
+  // ── Step 1: Score every non-rejected market with BOTH engines ──────────────
+  // rankClassic (Classic 11-factor) and rankNew (12-Factor) each score the
+  // pool internally exactly as they would on their own; Rank C reads their
+  // per-market outputs and averages them: (scoreA + scoreB) / 2.
+  const scored: HybridScore[] = markets
+    .filter((m) => !m.rejected)
+    .map((m) => {
+      const classic  = scoreMarketClassic(m, lam, homeName, awayName, confidenceMap, opts);
+      const balanced = scoreMarket(m, lam, homeName, awayName, confidenceMap, opts);
+      classic.gaps.forEach((g) => gapLog.add(g));
+      balanced.gaps.forEach((g) => gapLog.add(g));
+      const composite = (classic.composite + balanced.composite) / 2;
+      const effectiveHitRate = (classic.effectiveHitRate + balanced.effectiveHitRate) / 2;
+      return {
+        market: m,
+        composite:        clamp(composite, 0, 1),
+        compositeA:       classic.composite,
+        compositeB:       balanced.composite,
+        effectiveHitRate: clamp(effectiveHitRate, 0, 1),
+        wrongProb:        clamp(1 - effectiveHitRate, 0, 1),
+        marginUnits:      (classic.marginUnits + balanced.marginUnits) / 2,
+        verifiable:       balanced.verifiable,
+        classic,
+        balanced,
+      };
+    });
+
+  if (scored.length === 0) {
+    return EMPTY_SELECTION("No qualified markets to rank.", [...gapLog]);
+  }
+
+  // ── Step 2: Deterministic ranking by the AVERAGED composite ────────────────
+  // Composite desc → loss prob asc → σ-cushion desc → id. The market with the
+  // highest average score leads before the contextual filters below.
+  const comparator = (a: HybridScore, b: HybridScore) => {
+    const dc = b.composite - a.composite;
+    if (Math.abs(dc) > 1e-6) return dc;
+    const dw = a.wrongProb - b.wrongProb;
+    if (Math.abs(dw) > 1e-6) return dw;
+    const dm = b.marginUnits - a.marginUnits;
+    if (Math.abs(dm) > 1e-6) return dm;
+    return a.market.id.localeCompare(b.market.id);
+  };
+  const ranked = [...scored].sort(comparator);
+
+  // ── Step 3: Hard safety filters BEFORE Top-10 assembly (injury severity) ──
+  const hardQualified = ranked.filter((s) => {
+    const blocked = injurySeverityBlocksMarket(s.market, context, homeName, awayName);
+    if (blocked) gapLog.add(`hard filter skipped ${s.market.id}: team-specific market blocked by injury severity filter`);
+    return !blocked;
+  });
+  if (hardQualified.length === 0) {
+    return EMPTY_SELECTION(
+      "No market remains after hard safety filters (injury severity).",
+      [...gapLog],
+    );
+  }
+
+  // ── Step 4: Safety net — block non-giant team-specific Under 3.5 Goals ─────
+  const topNQualified = hardQualified.filter((s) => {
+    const blocked = isBlockedTeamSpecificUnder35Goals(s.market, homeName, awayName);
+    if (blocked) gapLog.add(`safety net skipped ${s.market.id}: non-giant team-specific Under 3.5 Goals`);
+    return !blocked;
+  });
+  if (topNQualified.length === 0) {
+    return EMPTY_SELECTION(
+      "No Top-N-eligible market remains after applying the team-goals safety net.",
+      [...gapLog],
+    );
+  }
+
+  // ── Step 5: Top-N slots require verifiable markets (settleable picks) ──────
+  const verifiableRanked = topNQualified.filter((s) => s.verifiable);
+  if (verifiableRanked.length === 0) {
+    return EMPTY_SELECTION(
+      "No verifiable market remains after scoring and hard safety filters — match skipped.",
+      [...gapLog],
+    );
+  }
+
+  // ── Step 6: Top-10 fill guarantee (trusted tier → backfill tier → extras) ──
+  // Diversity first: one line per underlying stat. Trusted (≥85% effective
+  // calibration) lines fill the slots first; if fewer than 10 distinct trusted
+  // stats survive the safety filters, the backfill tier (0.55–0.85, still
+  // fully filtered and verifiable) and then additional lines of already-
+  // represented stats complete the Top-10. No safety filter is relaxed.
+  const trustedTier = verifiableRanked
+    .filter((s) => s.effectiveHitRate >= MIN_CALIBRATION_HIT_RATE)
+    .sort(comparator);
+  const backfillTier = verifiableRanked
+    .filter((s) =>
+      s.effectiveHitRate < MIN_CALIBRATION_HIT_RATE &&
+      s.effectiveHitRate >= MIN_BACKFILL_CALIBRATION_HIT_RATE)
+    .sort(comparator);
+
+  const seen = new Set<string>();
+  const deduped: HybridScore[] = [];
+  const extrasPool: HybridScore[] = [];
+  for (const s of [...trustedTier, ...backfillTier]) {
+    const key = statKey(s.market);
+    if (seen.has(key)) { extrasPool.push(s); continue; }
+    seen.add(key);
+    deduped.push(s);
+  }
+  const extras = extrasPool.sort(comparator);
+  const top10Scores = [...deduped, ...extras].slice(0, 10);
+  const top10 = top10Scores.map((s) => s.market);
+
+  const backfilledCount = top10Scores.filter(
+    (s) => s.effectiveHitRate < MIN_CALIBRATION_HIT_RATE,
+  ).length;
+  if (backfilledCount > 0) {
+    gapLog.add(
+      `Top-10 backfill tier used for ${backfilledCount}/10 slots (trusted ≥85% calibration pool exhausted; backfill picks still qualified, safety-net-checked and verifiable)`,
+    );
+  }
+
+  // ── Step 7: Logging — hybrid composite + missing factors per engine ────────
+  const excludedUnionA = new Set<ClassicFactorKey>();
+  for (const s of top10Scores) s.classic.excludedFactors.forEach((f) => excludedUnionA.add(f));
+  const excludedUnionB = new Set<FactorKey>();
+  for (const s of top10Scores) s.balanced.excludedFactors.forEach((f) => excludedUnionB.add(f));
+  const lead = top10Scores[0];
+  const weightLog: string[] = [];
+  if (lead) {
+    weightLog.push(
+      `hybrid composite = average of Classic (A=${lead.compositeA.toFixed(3)}) and 12-Factor (B=${lead.compositeB.toFixed(3)}) composites`,
+    );
+  }
+  const missingA = ALL_CLASSIC_KEYS.filter((k) => excludedUnionA.has(k));
+  const missingB = ALL_FACTOR_KEYS.filter((k) => excludedUnionB.has(k));
+  if (missingA.length) weightLog.push(`missing factors — Classic A (weight redistributed): ${missingA.join(", ")}`);
+  if (missingB.length) weightLog.push(`missing factors — 12-Factor B (weight redistributed): ${missingB.join(", ")}`);
+  if (backfilledCount > 0) {
+    weightLog.push(`top-10 fill: ${10 - backfilledCount}/10 from the trusted tier (calibration ≥ 85%), ${backfilledCount}/10 backfilled from the 0.55–0.85 tier — all fully filtered`);
+  }
+  console.log(
+    `[selector] ${homeName} vs ${awayName} — top10: ${top10.length}/10 (hybrid C: Classic A + 12-Factor B, averaged)` +
+    (backfilledCount ? ` (backfill: ${backfilledCount})` : "") +
+    (lead ? ` | top1 composite=${lead.composite.toFixed(3)} (A=${lead.compositeA.toFixed(3)} B=${lead.compositeB.toFixed(3)})` : ""),
+  );
+
+  // ── Step 8: Match-level confidence gate ────────────────────────────────────
+  // Both engines run their own (unchanged) gate on the SAME Top-10 set; the
+  // hybrid verdict is the average of the two, and the same flag/trim/skip
+  // policy as every other mode is applied to it.
+  const cfg = resolveConfidenceOptions(opts?.confidence);
+  const confA = computeMatchConfidenceClassic(top10Scores.map((s) => s.classic), opts, { backfillPicks: backfilledCount });
+  const confB = computeMatchConfidence(top10Scores.map((s) => s.balanced), opts, { backfillPicks: backfilledCount });
+  const confidence = averageMatchConfidence(confA, confB, cfg);
+
+  const shouldSkip = cfg.enabled && cfg.policy === "skip" && confidence.score < cfg.threshold;
+  const belowSkipFloor = cfg.enabled && cfg.policy !== "flag" && confidence.score < cfg.skipThreshold;
+  const shouldTrim = cfg.enabled && cfg.policy === "trim" && confidence.lowConfidence;
+
+  let finalPicks = top10;
+  if (shouldSkip || belowSkipFloor) {
+    confidence.action = "skipped";
+    confidence.picksReturned = 0;
+    finalPicks = [];
+  } else if (shouldTrim) {
+    confidence.action = "reduced";
+    finalPicks = top10.slice(0, cfg.lowConfidencePickCount);
+    confidence.picksReturned = finalPicks.length;
+  } else {
+    confidence.action = "full";
+    confidence.picksReturned = finalPicks.length;
+  }
+
+  confidence.summary =
+    `confidence ${confidence.scorePct.toFixed(1)}% (${confidence.level}) ` +
+    `vs threshold ${(confidence.threshold * 100).toFixed(0)}% → ` +
+    (confidence.action === "skipped"
+      ? "match SKIPPED (no picks returned)"
+      : confidence.action === "reduced"
+        ? `reduced to Top-${confidence.picksReturned}`
+        : `full Top-${confidence.picksReturned}`);
+
+  const confidenceLog = [
+    confidence.summary,
+    ...confidence.reasons.map((r) => `· ${r}`),
+  ];
+
+  // Monitoring: one confidence line per match.
+  console.log(
+    `[selector][confidence] ${homeName} vs ${awayName} — score ${confidence.scorePct.toFixed(1)}% ` +
+    `(${confidence.level}) | cal ${(confidence.components.calibration.score * 100).toFixed(1)}% ` +
+    `| factors ${(confidence.components.factorCoverage.score * 100).toFixed(1)}% ` +
+    `(${confidence.avgFactorsAvailable.toFixed(1)}/${confidence.totalFactors}) ` +
+    `| source ${confidence.components.sourceQuality.available
+      ? `${(confidence.components.sourceQuality.score * 100).toFixed(1)}% [${confidence.sourceTier}: ${confidence.sources.join("+") || "n/a"}]`
+      : "unavailable (weight redistributed)"} ` +
+    `| backfill ${confidence.backfillPicks}/${top10.length} ` +
+    `| threshold ${(confidence.threshold * 100).toFixed(0)}% | policy ${confidence.policy} ` +
+    `→ ${confidence.action.toUpperCase()} (${confidence.picksReturned} picks)`,
+  );
+
+  if (confidence.action === "skipped") {
+    return {
+      ...EMPTY_SELECTION(
+        `Low confidence (${confidence.scorePct.toFixed(1)}% < ${(confidence.threshold * 100).toFixed(0)}%) — match skipped by the confidence gate.`,
+        [...gapLog],
+      ),
+      rankingNotes: top10.map((m) => {
+        const s = scored.find((x) => x.market === m);
+        return s ? hybridNote(s) : `${m.name} · ${m.selection}`;
+      }),
+      weightLog,
+      missingFactors: [...excludedUnionA, ...excludedUnionB],
+      confidence,
+      confidenceLog,
+    };
+  }
+
+  // ── Step 9: Contextual Top-1 ban (Part 1) ──────────────────────────────────
+  // Before the Top-1 slot is finalised, high-line Unders (Under 4.5 / 5.5+)
+  // on explosive matches are demoted and the next best ranked market leads.
+  // The blocked market stays in the Top-N; with no alternative the first pick
+  // is kept (data-driven filter, never a permanent hard ban).
+  const orderedPicks = applyTop1ExplosionBan(finalPicks, homeName, awayName, opts);
+
+  // ── Step 10: Factor transparency ───────────────────────────────────────────
+  // Attach the hybrid composite (averaged score) to every returned pick; the
+  // per-factor breakdown shown is the 12-Factor (Rank B) scorecard.
+  for (const m of orderedPicks) {
+    const s = scored.find((x) => x.market === m);
+    if (!s) continue;
+    m.factors = labelledFactors(s.balanced);
+    m.compositeScore = Math.round(s.composite * 100) / 100;
+  }
+
+  return {
+    top1:  orderedPicks.slice(0, 1),
+    top3:  orderedPicks.slice(0, 3),
+    top5:  orderedPicks.slice(0, 5),
+    top10: orderedPicks,
+    gaps:         [...gapLog],
+    rankingNotes: orderedPicks.map((m) => {
+      const s = scored.find((x) => x.market === m);
+      return s ? hybridNote(s) : `${m.name} · ${m.selection}`;
+    }),
+    weightLog,
+    missingFactors: [...excludedUnionA, ...excludedUnionB],
     confidence,
     confidenceLog,
   };

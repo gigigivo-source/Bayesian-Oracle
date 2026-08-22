@@ -98,12 +98,13 @@ async function fetchBoxscore(
 // ─── Main handler ─────────────────────────────────────────────────────────────
 
 async function handlePost(req: Request): Promise<Response> {
-  // Ranking mode: query param ?ranking=A|B overrides env var RANKING_MODE (default B)
+  // Ranking mode: query param ?ranking=A|B|C overrides env var RANKING_MODE (default B)
+  // A = Classic 11-factor, B = 12-Factor, C = Hybrid (A+B averaged)
   let rankingMode: RankingMode = 'B';
   try {
     const url = new URL(req.url);
     const q = url.searchParams.get('ranking');
-    if (q && (q.toUpperCase() === 'A' || q.toUpperCase() === 'B')) {
+    if (q && (q.toUpperCase() === 'A' || q.toUpperCase() === 'B' || q.toUpperCase() === 'C')) {
       rankingMode = q.toUpperCase() as RankingMode;
     } else {
       rankingMode = resolveRankingMode(undefined);
