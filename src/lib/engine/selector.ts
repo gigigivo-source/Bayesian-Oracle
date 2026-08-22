@@ -2157,6 +2157,11 @@ export function selectTopPicksClassic(
     m.compositeScore = Math.round(s.composite * 100) / 100;
   }
 
+  {
+    const top1 = orderedPicks[0];
+    console.log("[Ranking] Mode A Top 1:", top1?.name, "score:", top1?.compositeScore);
+  }
+
   return {
     top1:  orderedPicks.slice(0, 1),
     top3:  orderedPicks.slice(0, 3),
@@ -2176,9 +2181,6 @@ export function selectTopPicksClassic(
 
 // Alias required by task: rankClassic
 export const rankClassic = selectTopPicksClassic;
-// Alias for the 12-Factor engine (Rank B) — one of the two inputs the
-// hybrid (Rank C) averages.
-export const rankNew = selectTopPicks;
 
 
 // ─── Market score ─────────────────────────────────────────────────────────────
@@ -2805,11 +2807,23 @@ export function selectTopPicks(
   const rankingMode = resolveRankingMode(opts);
   console.log(rankingModeLogLine(rankingMode));
   if (rankingMode === 'A') {
-    return selectTopPicksClassic(markets, lam, homeName, awayName, confidenceMap, opts);
+    return rankClassic(markets, lam, homeName, awayName, confidenceMap, opts);
   }
   if (rankingMode === 'C') {
     return rankHybrid(markets, lam, homeName, awayName, confidenceMap, opts);
   }
+  return rankNew(markets, lam, homeName, awayName, confidenceMap, opts);
+}
+
+/** Rank B — balanced 12-factor engine (no mode dispatch). */
+export function rankNew(
+  markets:        Market[],
+  lam:            LambdaSet,
+  homeName:       string,
+  awayName:       string,
+  confidenceMap?: Record<string, number>,
+  opts?:          SelectOptions,
+): SelectionResult {
 
   const gapLog = new Set<string>();
 
@@ -3047,6 +3061,11 @@ export function selectTopPicks(
     if (!s) continue;
     m.factors = labelledFactors(s);
     m.compositeScore = Math.round(s.composite * 100) / 100;
+  }
+
+  {
+    const top1 = orderedPicks[0];
+    console.log("[Ranking] Mode B Top 1:", top1?.name, "score:", top1?.compositeScore);
   }
 
   return {
