@@ -1,6 +1,5 @@
 "use client";
 
-import type { ReactNode } from "react";
 import Image from "next/image";
 import type { Market } from "@/lib/engine/types";
 import type { FixtureLite } from "@/lib/espn";
@@ -106,11 +105,9 @@ export function ConfidenceBar({
 export function MarketTable({
   markets,
   showDeepExplanation = false,
-  renderAfterMarket,
 }: {
   markets: Market[];
   showDeepExplanation?: boolean;
-  renderAfterMarket?: (market: Market, index: number) => ReactNode;
 }) {
   return (
     <div className="space-y-3">
@@ -185,7 +182,6 @@ export function MarketTable({
                   </strong>
                 </span>
               </div>
-              {renderAfterMarket?.(m, idx)}
             </div>
           ))}
         </div>

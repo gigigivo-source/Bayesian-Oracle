@@ -2016,8 +2016,8 @@ export function runOracle(
   const rejected  = markets.filter((m) => m.rejected);
 
   // Rank via the shared multi-factor selector (every qualified market is scored
-  // across the balanced 12-factor model. Missing real-data factors are excluded
-  // and their weights are redistributed proportionally before ranking).
+  // across all eight factors — λ, calibration, form, tactical, importance,
+  // league depth, liquidity, zero-bias — and ranked by composite score).
   const lam = toLambdaSet({
     homeGoals: expHG, awayGoals: expAG, totalGoals: expTotal,
     homeCorners: expHCorners, awayCorners: expACorners,
@@ -2137,7 +2137,7 @@ export function runOracle(
       ? [`λ grounded on REAL xG from aggregator: home ${realHomeXG?.toFixed(2) ?? "n/a"} / away ${realAwayXG?.toFixed(2) ?? "n/a"}`]
       : []),
     `De-vigged implied probs: H${Math.round(homeWin*100)}% D${Math.round(draw*100)}% A${Math.round(awayWin*100)}%`,
-    `Ranked by balanced 12-factor composite with dynamic weight redistribution — unavailable factors are excluded and remaining weights rescaled to Σ=100% (no neutral stand-ins)`,
+    `Ranked by 11-factor composite with dynamic weight redistribution — unavailable factors are excluded and remaining weights rescaled to Σ=100% (no neutral stand-ins)`,
     top1[0]
       ? `Pinned Top-1: ${top1[0].name} · ${top1[0].selection}`
       : (selection.skipped ?? "No Top-1 — match skipped or no eligible market"),
@@ -2145,7 +2145,7 @@ export function runOracle(
 
   // Surface the multi-factor ranking breakdown + any logged data gaps.
   if (selection.rankingNotes?.length) {
-    calibrationNotes.push("12-factor ranking (deep/mesh/stats/tactical/importance/player/vector/bias/form/λ/Poisson/completeness):");
+    calibrationNotes.push("Multi-factor ranking (λ/cal/form/tac/imp/league/liq/bias/inj/vol/wx):");
     for (const note of selection.rankingNotes) calibrationNotes.push(`  ${note}`);
   }
   if (selection.weightLog?.length) {

@@ -78,19 +78,6 @@ export interface Market {
   reason?:           string;          // summary rationale
   explanation?:      PickExplanation; // 3-part deep rationale
   outcome?:          PickOutcome;
-  /** Named scores for factors that participated in the 12-factor ranking. */
-  factors?:           Record<string, number>;
-  /** Redistributed weights actually used; values sum to 1. */
-  factorWeights?:     Record<string, number>;
-  /** Full 12-factor API/UI payload, including unavailable factors. */
-  factorBreakdown?:   Record<string, {
-    score: number | null;
-    baseWeight: number;
-    weight: number;
-    contribution: number;
-    available: boolean;
-  }>;
-  compositeScore?:    number;
 }
 
 /** @alias kept for backward compatibility */

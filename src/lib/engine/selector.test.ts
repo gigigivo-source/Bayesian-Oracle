@@ -5,7 +5,7 @@
 // historical-average fallback when the per-match stat is null.
 
 import { describe, expect, it } from "vitest";
-import { RANKING_WEIGHTS, effectiveLambdas, scoreMarket, statConfidenceFor, statFieldFor } from "./selector";
+import { statFieldFor, statConfidenceFor, effectiveLambdas } from "./selector";
 import type { Market } from "./types";
 import type { LambdaSet } from "./lambdas";
 import { emptyCanonicalMatchStats, type CanonicalMatchStats, type MatchStatsQuery } from "../data/types";
@@ -76,40 +76,6 @@ describe("statConfidenceFor", () => {
 
   it("defaults to full confidence when no stats are supplied (legacy)", () => {
     expect(statConfidenceFor(market("Total Corners O/U 9.5", "corners"), null)).toBe(1);
-  });
-});
-
-describe("12-factor ranking", () => {
-  it("uses the requested nominal weights and redistributes unavailable factors", () => {
-    expect(Object.keys(RANKING_WEIGHTS)).toHaveLength(12);
-    expect(Object.values(RANKING_WEIGHTS).reduce((sum, weight) => sum + weight, 0)).toBeCloseTo(1, 10);
-
-    const pick = market("Total Corners O/U 9.5", "corners", "Over 9.5");
-    const stats = statsWith((s) => {
-      s.home.corners = 6; s.away.corners = 5;
-      s.home.shots = 14; s.away.shots = 12;
-      s.home.possession = 52; s.away.possession = 48;
-    });
-    const scored = scoreMarket(pick, baseLam(), "Manchester United", "Arsenal", undefined, { stats });
-
-    expect(Object.keys(pick.factorBreakdown ?? {})).toHaveLength(12);
-    expect(scored.excludedFactors).toContain("playerVsPlayerForms");
-    expect(Object.values(scored.appliedWeights).reduce((sum, weight) => sum + (weight ?? 0), 0)).toBeCloseTo(1, 10);
-    expect(pick.compositeScore).toBeCloseTo(
-      Object.values(pick.factorBreakdown ?? {}).reduce((sum, factor) => sum + factor.contribution, 0),
-      10,
-    );
-  });
-
-  it("excludes real-data factors instead of simulating values", () => {
-    const pick = market("Total Corners O/U 9.5", "corners", "Over 9.5");
-    const scored = scoreMarket(pick, baseLam(), "Manchester United", "Arsenal", undefined, { stats: null });
-
-    expect(scored.breakdown.poisson).toBeNull();
-    expect(scored.breakdown.conditionalLambda).toBeNull();
-    expect(scored.breakdown.statisticsAllStatesFilled).toBeNull();
-    expect(pick.factorBreakdown?.Poisson.available).toBe(false);
-    expect(pick.factorWeights?.Poisson).toBeUndefined();
   });
 });
 
