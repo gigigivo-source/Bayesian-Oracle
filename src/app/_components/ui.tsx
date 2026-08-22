@@ -1,6 +1,7 @@
 "use client";
 
 import Image from "next/image";
+import type { ReactNode } from "react";
 import type { Market } from "@/lib/engine/types";
 import type { FixtureLite } from "@/lib/espn";
 import { OutcomeBadge, IconLive } from "./Icons";
@@ -105,9 +106,15 @@ export function ConfidenceBar({
 export function MarketTable({
   markets,
   showDeepExplanation = false,
+  renderPickFooter,
 }: {
   markets: Market[];
   showDeepExplanation?: boolean;
+  /**
+   * Optional additive footer rendered inside each deep-explanation pick card.
+   * Purely opt-in — when omitted the table renders exactly as before.
+   */
+  renderPickFooter?: (market: Market, index: number) => ReactNode;
 }) {
   return (
     <div className="space-y-3">
@@ -182,6 +189,13 @@ export function MarketTable({
                   </strong>
                 </span>
               </div>
+
+              {/* Additive footer (e.g. ranking-factors toggle) — only when provided */}
+              {renderPickFooter ? (
+                <div className="mt-2.5 pt-2 border-t border-slate-700">
+                  {renderPickFooter(m, idx)}
+                </div>
+              ) : null}
             </div>
           ))}
         </div>

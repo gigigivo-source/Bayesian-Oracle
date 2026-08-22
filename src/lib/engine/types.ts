@@ -78,6 +78,14 @@ export interface Market {
   reason?:           string;          // summary rationale
   explanation?:      PickExplanation; // 3-part deep rationale
   outcome?:          PickOutcome;
+  /**
+   * NEW (additive) — 12-factor ranking breakdown for Top-10 picks: factor
+   * display label → 0..1 score, containing only the factors whose real data
+   * was available. Absent on picks that were never ranked (e.g. registry).
+   */
+  factors?:          Record<string, number>;
+  /** NEW (additive) — weighted 0..1 composite of the available factors. */
+  compositeScore?:   number;
 }
 
 /** @alias kept for backward compatibility */

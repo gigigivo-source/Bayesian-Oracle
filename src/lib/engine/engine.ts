@@ -4,10 +4,19 @@ import { buildLambdas, type LambdaSet } from "./lambdas";
 import { buildRealLambdas, type RealProfiles } from "./realLambdas";
 import { getCachedMeshProfile } from "./dataMesh";
 import { MarketEngine } from "./markets";
-import { selectTopPicks } from "./selector";
+import {
+  selectTopPicks,
+  type ImportanceContext,
+  type RankingContext,
+  type SelectOptions,
+  type SourceQualityContext,
+  type TeamFormSignal,
+} from "./selector";
 import { round } from "./stats";
+import { statsAggregator } from "../data/aggregator";
+import type { CanonicalMatchStats } from "../data/types";
 import type { AgentSignal, EngineResult, LockedMatchObject, Market, PredictInput, DeepStatsVector } from "./types";
-import type { FixtureLite, MatchSummary } from "../espn";
+import type { FixtureLite, MatchSummary, TeamForm } from "../espn";
 
 const AGENTS: AgentSignal[] = [
   { name: "Statistical Agent",    weight: 0.16, description: "Poisson/NegBin/Beta on split λ from real form." },
@@ -65,6 +74,7 @@ function assemble(
   input:      PredictInput,
   extraNotes: string[],
   deepStats?: DeepStatsVector,
+  opts?:      SelectOptions,
 ): EngineResult {
   const engine    = new MarketEngine(match, lam);
   const markets   = engine.buildAll();
@@ -77,7 +87,7 @@ function assemble(
     confidenceMap[m.id] = 1 - i / Math.max(1, rankOrder.length - 1);
   });
 
-  const selection = selectTopPicks(qualified, lam, match.homeTeam, match.awayTeam, confidenceMap);
+  const selection = selectTopPicks(qualified, lam, match.homeTeam, match.awayTeam, confidenceMap, opts);
   const { top10, top5, top3, top1 } = selection;
 
   const safeMode = qualified
@@ -133,6 +143,7 @@ export function runEngineFromReal(
   fx:       FixtureLite,
   sum:      MatchSummary | null,
   profiles?: RealProfiles,
+  opts?:    SelectOptions,
 ): EngineResult {
   const { lam, completeness, notes, deepStats } = buildRealLambdas(fx, sum, profiles);
 
@@ -168,7 +179,7 @@ export function runEngineFromReal(
     date:   fx.date.slice(0, 10),
   };
 
-  return assemble(match, lam, input, notes, deepStats);
+  return assemble(match, lam, input, notes, deepStats, opts);
 }
 
 /** Real-data + mesh profiles (async — used by live single-match route). */
@@ -188,13 +199,151 @@ export async function runEngineFromRealWithProfiles(
     profiles = undefined;
   }
 
-  const result = runEngineFromReal(fx, sum, profiles);
+  // ── Canonical stats from the multi-source aggregator (fail-soft) ──────────
+  // Grounds the 12-factor ranking in REAL per-match stats. Null when no source
+  // has anything for the fixture — the stats-backed factors are then excluded
+  // and their weight redistributed (no simulated values).
+  let stats: CanonicalMatchStats | null = null;
+  try {
+    stats = await Promise.race([
+      statsAggregator.fetch({
+        leagueSlug: fx.leagueSlug,
+        eventId:    fx.id,
+        homeTeam:   fx.home.name,
+        awayTeam:   fx.away.name,
+        date:       fx.date,
+      }),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 25_000)),
+    ]);
+  } catch {
+    stats = null;
+  }
+
+  const opts: SelectOptions = {
+    stats,
+    context:       buildRankingContext(fx, sum),
+    sourceQuality: buildSourceQuality(sum, stats, profiles),
+  };
+
+  const result = runEngineFromReal(fx, sum, profiles, opts);
 
   // In-play re-calibration — lock markets already decided mid-match
   if (fx.state === "in" && liveStats) {
     applyLiveLock(fx, result, liveStats);
   }
   return result;
+}
+
+// ─── Ranking context for the single-match route ───────────────────────────────
+
+/** Map an ESPN TeamForm onto the selector's TeamFormSignal. */
+function teamFormSignal(name: string, tf: TeamForm | null): TeamFormSignal | null {
+  if (!tf || !tf.games.length) return null;
+  return {
+    teamName: name,
+    games:    tf.games.length,
+    gfAvg:    tf.gfAvg,
+    gaAvg:    tf.gaAvg,
+    points:   tf.points,
+  };
+}
+
+/** Derive match-importance flags from the fixture's league name + status. */
+function deriveImportance(fx: FixtureLite): ImportanceContext | null {
+  const text = `${fx.leagueName} ${fx.statusDetail ?? ""}`.toLowerCase();
+  const importance: ImportanceContext = {
+    derby:      /derby|classico|cl[aá]sico|rivalry/i.test(text),
+    knockout:   /final|semi.?final|quarter.?final|round of 16|knockout|elimination|play.?off/i.test(text),
+    friendly:   /friendl|pre-season|preseason|exhibition|testimonial/i.test(text),
+    titleRace:  false,
+    relegation: false,
+  };
+  return importance.derby || importance.knockout || importance.friendly ? importance : null;
+}
+
+/** Map ESPN H2H results onto the selector's HomeWin/Draw/AwayWin perspective. */
+function h2hResultsFor(
+  sum: MatchSummary | null,
+  fx:  FixtureLite,
+): Array<"HomeWin" | "Draw" | "AwayWin"> | null {
+  const h2h = sum?.h2h;
+  if (!h2h?.length) return null;
+  const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const hn = norm(fx.home.name);
+  const an = norm(fx.away.name);
+  const out: Array<"HomeWin" | "Draw" | "AwayWin"> = [];
+  for (const g of h2h) {
+    const [hs, as] = g.score.split(/\s*-\s*/).map(Number);
+    if (!Number.isFinite(hs) || !Number.isFinite(as)) continue;
+    const gh = norm(g.home), ga = norm(g.away);
+    // Align the historical meeting to the CURRENT fixture's home perspective.
+    if (gh === hn && ga === an) {
+      out.push(hs > as ? "HomeWin" : hs === as ? "Draw" : "AwayWin");
+    } else if (gh === an && ga === hn) {
+      out.push(as > hs ? "HomeWin" : hs === as ? "Draw" : "AwayWin");
+    }
+  }
+  return out.length ? out : null;
+}
+
+/** Average goals across the real H2H meetings (null without ≥3 scored games). */
+function h2hGoalsAvg(sum: MatchSummary | null): number | null {
+  const h2h = sum?.h2h;
+  if (!h2h?.length) return null;
+  const totals: number[] = [];
+  for (const g of h2h) {
+    const [hs, as] = g.score.split(/\s*-\s*/).map(Number);
+    if (Number.isFinite(hs) && Number.isFinite(as)) totals.push(hs + as);
+  }
+  return totals.length >= 3 ? totals.reduce((s, v) => s + v, 0) / totals.length : null;
+}
+
+/** Build the ranking context from the fixture + ESPN summary (real data only). */
+function buildRankingContext(fx: FixtureLite, sum: MatchSummary | null): RankingContext {
+  return {
+    homeForm: teamFormSignal(fx.home.name, sum?.homeForm ?? null),
+    awayForm: teamFormSignal(fx.away.name, sum?.awayForm ?? null),
+    tactical: {
+      neutralSite:   fx.neutralSite,
+      homeFormation: sum?.homeFormation ?? null,
+      awayFormation: sum?.awayFormation ?? null,
+      h2hGames:      sum?.h2h?.length ?? 0,
+      h2hGoalsAvg:   h2hGoalsAvg(sum),
+      h2hResults:    h2hResultsFor(sum, fx),
+    },
+    importance: deriveImportance(fx),
+    leagueSlug: fx.leagueSlug,
+    odds:       sum?.odds ?? fx.odds ?? null,
+    injury:     null,   // no injury feed on this route — weight redistributed
+    marketVolatility: null,
+    weather:    null,
+  };
+}
+
+/** Source provenance for the confidence gate + all-data-mesh factor. */
+function buildSourceQuality(
+  sum:      MatchSummary | null,
+  stats:    CanonicalMatchStats | null,
+  profiles?: RealProfiles,
+): SourceQualityContext {
+  const sources = new Set<string>(["espn"]);
+  if (stats?.metadata.source) sources.add(stats.metadata.source);
+  for (const p of [profiles?.home, profiles?.away]) {
+    for (const prov of p?.providers ?? []) sources.add(prov);
+  }
+  // Field coverage: which real signals this route actually carried.
+  const fields = [
+    sum?.homeForm, sum?.awayForm, sum?.odds,
+    sum?.h2h?.length ? sum.h2h : null,
+    sum?.homeFormation, sum?.awayFormation,
+    stats,
+  ];
+  const filled = fields.filter((f) => f != null && f !== undefined).length;
+  return {
+    primarySource:       "espn",
+    contributingSources: [...sources],
+    fieldCoverage:       filled / fields.length,
+  };
 }
 
 // ─── Post-match verification ──────────────────────────────────────────────────
