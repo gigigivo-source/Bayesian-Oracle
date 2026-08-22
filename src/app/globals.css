@@ -9,26 +9,13 @@
   display: none;
 }
 
-/* Mobile responsive */
-@media (max-width: 640px) {
-  nav { flex-wrap: wrap !important; gap: 2px !important; }
-  nav button { font-size: 10px !important; padding: 4px 8px !important; }
-  header h1 { font-size: 14px !important; }
-  header p { font-size: 8px !important; }
-  table { font-size: 11px; }
-  table th, table td { padding: 4px 6px !important; }
-  .grid { gap: 8px !important; }
-}
-
-@media (max-width: 480px) {
-  header { padding: 6px 8px !important; }
-  main { padding-left: 8px !important; padding-right: 8px !important; }
-  nav button { font-size: 9px !important; padding: 3px 6px !important; }
-}
-
-/* Touch-friendly tap targets */
+/* Touch-friendly tap targets — WCAG 2.5.5 (44px) on coarse pointers.
+   Excludes sortable table-header buttons so they stay compact. */
 @media (pointer: coarse) {
-  button, a { min-height: 36px; }
+  button:not(thead button):not([data-compact]),
+  a:not(thead a) {
+    min-height: 44px;
+  }
 }
 
 /* Smooth page transitions */

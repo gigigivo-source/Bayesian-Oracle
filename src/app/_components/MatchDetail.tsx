@@ -306,7 +306,7 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
 
         {/* Four ranking-mode pill chips (always visible, instant switching) */}
         <div
-          className="mb-4 flex items-center gap-2 rounded-lg border border-slate-800 bg-slate-900/60 p-2"
+          className="mb-4 flex flex-wrap items-center gap-2 rounded-lg border border-slate-800 bg-slate-900/60 p-2"
           title="Choose ranking system"
         >
           <span className="hidden sm:inline-block font-mono text-[10px] uppercase tracking-wider text-slate-500 px-2">
@@ -344,7 +344,7 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
             type="button"
             onClick={() => loadRankings(fixture, true)}
             title="Force a fresh ?ranking=all request and update the cache"
-            className={`${IX_BASE} ml-auto inline-flex items-center gap-1 rounded-full border border-slate-600 bg-slate-800 px-3 py-2 text-[11px] font-bold uppercase tracking-wider text-slate-200 hover:bg-slate-700`}
+            className={`${IX_BASE} w-full sm:w-auto sm:ml-auto inline-flex items-center justify-center gap-1 rounded-full border border-slate-600 bg-slate-800 px-3 py-2 text-[11px] font-bold uppercase tracking-wider text-slate-200 hover:bg-slate-700`}
           >
             🔄 Refresh All
           </button>
@@ -355,20 +355,20 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
           <div className="mb-2 text-center text-xs text-slate-400 font-mono">
             {fixture.leagueName} · {new Date(fixture.date).toLocaleString()}
           </div>
-          <div className="flex items-center justify-center gap-6">
-            <div className="flex flex-1 items-center justify-end gap-3">
-              <span className="text-right text-lg font-bold text-slate-100">{fixture.home.name}</span>
+          <div className="flex items-center justify-center gap-3 sm:gap-6">
+            <div className="flex flex-1 min-w-0 items-center justify-end gap-3">
+              <span className="truncate text-right text-base sm:text-lg font-bold text-slate-100">{fixture.home.name}</span>
               <TeamBadge logo={fixture.home.logo} name={fixture.home.name} size={48} />
             </div>
-            <div className="text-center min-w-[100px]">
-              <div className="font-mono text-3xl font-extrabold text-amber-300">
+            <div className="text-center min-w-[80px] sm:min-w-[100px]">
+              <div className="font-mono text-2xl sm:text-3xl font-extrabold text-amber-300">
                 {fixture.state === "pre" ? "VS" : `${fixture.home.score ?? 0} - ${fixture.away.score ?? 0}`}
               </div>
               <div className="text-[11px] font-mono text-emerald-400 mt-1">{fixture.statusDetail}</div>
             </div>
-            <div className="flex flex-1 items-center gap-3">
+            <div className="flex flex-1 min-w-0 items-center gap-3">
               <TeamBadge logo={fixture.away.logo} name={fixture.away.name} size={48} />
-              <span className="text-lg font-bold text-slate-100">{fixture.away.name}</span>
+              <span className="truncate text-base sm:text-lg font-bold text-slate-100">{fixture.away.name}</span>
             </div>
           </div>
           {fixture.venue ? (
@@ -597,7 +597,7 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
                           <div className="text-[10px] text-slate-400">value edge</div>
                         </div>
                       </div>
-                      <div className="grid grid-cols-4 gap-2 text-center text-xs">
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-center text-xs">
                         <div className="bg-slate-800 rounded p-2">
                           <div className="text-[10px] text-slate-400 font-mono">ORACLE</div>
                           <div className="font-mono font-bold text-amber-300">{(v.oracleProbability * 100).toFixed(1)}%</div>
@@ -977,7 +977,7 @@ function DeepStatsDashboard({ stats, homeName, awayName }: { stats: DeepStatsVec
   return (
     <div className="space-y-4">
       <div className="overflow-x-auto rounded-lg border border-slate-700 bg-slate-800 p-4">
-        <table className="w-full text-center text-xs font-mono">
+        <table className="w-full min-w-[420px] text-center text-xs font-mono">
           <thead>
             <tr className="border-b border-slate-700 text-slate-400 text-[11px] uppercase">
               <th className="py-2 text-left font-sans text-amber-300">{homeName}</th>
