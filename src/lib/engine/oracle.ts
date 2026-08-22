@@ -2063,8 +2063,8 @@ export function runOracle(
     // the policy decides what happens to a low-confidence match.
     sourceQuality: buildSourceQuality(enrichment),
     confidence:    confidenceOptionsFromEnv(),
-    // Ranking mode A (Classic 11-factor) / B (12-Factor) / C (Hybrid) — the
-    // run option wins, then the RANKING_MODE env var, defaulting to B.
+    // Ranking mode A (Classic 11-factor) / B (12-Factor) / C (Hybrid) /
+    // D (Consensus) — the run option wins, then RANKING_MODE, defaulting to B.
     rankingMode: resolveRankingMode({ rankingMode: runOpts?.rankingMode }),
   });
   const confidence = selection.confidence;
