@@ -4,6 +4,7 @@ import Image from "next/image";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { FixtureLite } from "@/lib/espn";
 import type { LeagueDef } from "@/lib/leagues";
+import { compareLeaguePriority, leagueTier } from "@/lib/leaguePriority";
 
 import { FixtureCard } from "./_components/ui";
 import { MatchDetail } from "./_components/MatchDetail";
@@ -249,10 +250,18 @@ function LivePage({ onSelect }: { onSelect: (fx: FixtureLite) => void }) {
       fetch("/api/top")
         .then((r) => r.json())
         .then((d: TopData) => {
-          setLive(d.live ?? []);
+          // Live feed: biggest leagues at the top, smallest at the bottom;
+          // within a tier, order by kickoff time.
+          const liveSorted = [...(d.live ?? [])].sort(
+            (a, b) =>
+              compareLeaguePriority(a, b) ||
+              new Date(a.date).getTime() - new Date(b.date).getTime(),
+          );
+          setLive(liveSorted);
           const finished = (d.featured ?? []).flatMap((b: FeaturedBlock) => b.fixtures.filter((f: FixtureLite) => f.state === "post")).slice(0, 8);
           const upcoming = (d.featured ?? []).flatMap((b: FeaturedBlock) => b.upcoming ?? []).slice(0, 8);
-          setRecent([...finished, ...upcoming]);
+          const recentSorted = [...finished, ...upcoming].sort(compareLeaguePriority);
+          setRecent(recentSorted);
           setLoading(false);
         })
         .catch(() => setLoading(false));
@@ -504,6 +513,9 @@ function TopFeed({
   const filterToday = (fx: FixtureLite) =>
     fx.date.slice(0, 10) === todayStr;
 
+  // Sort league blocks by importance tier (biggest competitions first).
+  // Sorting is applied AFTER date / league-chip filtering so it never changes
+  // which fixtures are shown, only their order.
   const filterBlocks = (blocks: FeaturedBlock[]) =>
     blocks
       .map((b) => ({
@@ -511,7 +523,8 @@ function TopFeed({
         upcoming: (b.upcoming ?? []).filter(showTodayOnly ? (f) => filterToday(f) : () => true),
         results:  (b.results  ?? []).filter(showTodayOnly ? (f) => filterToday(f) : () => true),
       }))
-      .filter((b) => b.upcoming.length > 0 || b.results.length > 0);
+      .filter((b) => b.upcoming.length > 0 || b.results.length > 0)
+      .sort((a, b) => leagueTier({ leagueSlug: a.slug }) - leagueTier({ leagueSlug: b.slug }));
 
   const filteredBlocks = filterBlocks(
     filterSlug ? data.featured.filter((b) => b.slug === filterSlug) : data.featured
@@ -691,9 +704,13 @@ function TopFeed({
             <h2 className="text-sm font-bold text-white">More Leagues</h2>
           </div>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-            {data.extra.flatMap((b) => b.fixtures).slice(0, 12).map((fx) => (
-              <FixtureCard key={`extra-${fx.leagueSlug}-${fx.id}`} fx={fx} onSelect={onSelect} />
-            ))}
+            {data.extra
+              .flatMap((b) => b.fixtures)
+              .sort(compareLeaguePriority)
+              .slice(0, 12)
+              .map((fx) => (
+                <FixtureCard key={`extra-${fx.leagueSlug}-${fx.id}`} fx={fx} onSelect={onSelect} />
+              ))}
           </div>
         </section>
       )}

@@ -1,5 +1,6 @@
 import { fetchScoreboard, type FixtureLite } from "@/lib/espn";
 import { LEAGUE_MAP } from "@/lib/leagues";
+import { compareLeaguePriority } from "@/lib/leaguePriority";
 
 export const dynamic = "force-dynamic";
 
@@ -34,16 +35,27 @@ export async function GET(req: Request) {
     if (!seen.has(fx.id)) { seen.add(fx.id); all.push(fx); }
   }
 
-  const live     = all.filter((f) => f.state === "in");
+  // League-priority comparator (biggest competitions first); ties fall through
+  // to date ordering handled per-section below.
+  const byPriorityThenDateAsc = (a: FixtureLite, b: FixtureLite) =>
+    compareLeaguePriority(a, b) ||
+    new Date(a.date).getTime() - new Date(b.date).getTime();
+  const byPriorityThenDateDesc = (a: FixtureLite, b: FixtureLite) =>
+    compareLeaguePriority(a, b) ||
+    new Date(b.date).getTime() - new Date(a.date).getTime();
+
+  const live     = all
+    .filter((f) => f.state === "in")
+    .sort(byPriorityThenDateAsc);
   const upcoming = all
     .filter((f) => f.state === "pre")
-    .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+    .sort(byPriorityThenDateAsc);
   const finished = all
     .filter((f) => f.state === "post")
-    .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+    .sort(byPriorityThenDateDesc)
     .slice(0, 20);
 
-  const allUpcoming = [...live, ...upcoming];
+  const allUpcoming = [...live, ...upcoming].sort(byPriorityThenDateAsc);
 
   return Response.json({
     league:        LEAGUE_MAP[league],
