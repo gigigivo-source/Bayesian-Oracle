@@ -5,7 +5,13 @@ import type { ReactNode } from "react";
 import type { Market } from "@/lib/engine/types";
 import type { FixtureLite } from "@/lib/espn";
 import { OutcomeBadge, IconLive } from "./Icons";
-import { CARD_CLICK, CARD_CLICK_LIVE } from "./design";
+import {
+  CARD_ACCENT_ORDER,
+  CARD_GLASS,
+  CARD_GLASS_SKIN,
+  GLASS_TEXT_SHADOW,
+  type CardAccent,
+} from "./design";
 import { leagueTier, tierLabel, LOWEST_TIER } from "@/lib/leaguePriority";
 
 // Tailwind classes per tier so the badge colour reflects competition size.
@@ -41,7 +47,7 @@ export function TeamBadge({
     return (
       <span
         style={{ width: size, height: size }}
-        className="flex items-center justify-center rounded-full bg-slate-700 text-[10px] font-bold text-slate-200"
+        className="flex shrink-0 items-center justify-center rounded-full bg-slate-950/60 text-[10px] font-bold text-slate-100 ring-1 ring-white/10"
       >
         {initials}
       </span>
@@ -312,16 +318,43 @@ function kickoffLabel(dateIso: string): string {
   });
 }
 
+/**
+ * Stable fallback tint for cards rendered without a list index: hashes the
+ * fixture id so a card always wears the same colour, even across re-renders.
+ */
+function accentForId(id: string): CardAccent {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) | 0;
+  return CARD_ACCENT_ORDER[Math.abs(h) % CARD_ACCENT_ORDER.length];
+}
+
 export function FixtureCard({
   fx,
   onSelect,
   live,
+  accentIndex,
 }: {
   fx: FixtureLite;
   onSelect: (fx: FixtureLite) => void;
   live?: boolean;
+  /**
+   * Position in the deck's colour cycle (amber → teal → violet → cyan →
+   * rose → emerald). Pass the `.map()` index so sibling cards alternate in a
+   * repeating rhythm; omitted, the tint is derived from the fixture id.
+   */
+  accentIndex?: number;
 }) {
   const isLive = fx.state === "in" || live === true;
+  // Live cards always burn rose (live-state colour); the rest cycle the deck.
+  const accent: CardAccent = isLive
+    ? "rose"
+    : accentIndex === undefined
+    ? accentForId(fx.id)
+    : CARD_ACCENT_ORDER[
+        ((accentIndex % CARD_ACCENT_ORDER.length) + CARD_ACCENT_ORDER.length) %
+          CARD_ACCENT_ORDER.length
+      ];
+  const glass = `${CARD_GLASS} ${CARD_GLASS_SKIN[accent]}`;
   const isFinished = fx.state === "post";
   const stateColor = isLive
     ? "text-rose-400"
@@ -345,11 +378,11 @@ export function FixtureCard({
   return (
     <button
       onClick={() => onSelect(fx)}
-      className={`group p-3 text-left ${isLive ? CARD_CLICK_LIVE : CARD_CLICK}`}
+      className={`group p-3 text-left ${glass} ${GLASS_TEXT_SHADOW}`}
     >
       <div className="mb-2 flex items-center justify-between text-[11px]">
         <span
-          className={`flex min-w-0 items-center gap-1.5 truncate ${isLive ? "text-rose-300 font-bold" : "text-slate-500"}`}
+          className={`flex min-w-0 items-center gap-1.5 truncate ${isLive ? "text-rose-300 font-bold" : "text-slate-400"}`}
         >
           {isLive && (
             <span className="inline-block h-2 w-2 shrink-0 animate-pulse rounded-full bg-rose-500" />
@@ -409,7 +442,7 @@ export function FixtureCard({
         </div>
       </div>
 
-      <div className="mt-2 flex items-center justify-between border-t border-slate-700 pt-2 text-[11px] text-slate-500">
+      <div className="mt-2 flex items-center justify-between border-t border-white/10 pt-2 text-[11px] text-slate-400">
         <span className="truncate">
           {fx.venue ?? (fx.neutralSite ? "Neutral" : "Home venue")}
         </span>
