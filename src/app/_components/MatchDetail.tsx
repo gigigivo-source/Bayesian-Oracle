@@ -126,7 +126,7 @@ interface ValueBetData {
   provider: string;
 }
 
-type RankingMode = 'A' | 'B' | 'C';
+type RankingMode = 'A' | 'B' | 'C' | 'D';
 
 /** A single ranking mode's prediction, plus its mode-specific value bets / boxscore. */
 interface RankingPayload {
@@ -186,12 +186,12 @@ function setCachedRankings(entry: CachedRankings): void {
 }
 
 export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClose: () => void }) {
-  // Selected ranking mode — A = Classic 11-factor, B = 12-Factor, C = Hybrid.
+  // Selected ranking mode — A = Classic 11-factor, B = 12-Factor, C = Hybrid, D = Consensus.
   // Persisted in localStorage so the user's preference survives a refresh.
   const [selectedMode, setSelectedMode] = useState<RankingMode>(() => {
     if (typeof window !== 'undefined') {
       const stored = localStorage.getItem('rankingMode');
-      if (stored === 'A' || stored === 'B' || stored === 'C') return stored as RankingMode;
+      if (stored === 'A' || stored === 'B' || stored === 'C' || stored === 'D') return stored as RankingMode;
     }
     return 'B';
   });
@@ -203,7 +203,7 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
   }, [selectedMode]);
 
   // The cache holds the FULL `?ranking=all` response per eventId (30-min TTL).
-  // Once hydrated, the three pill chips switch between modes INSTANTLY without
+  // Once hydrated, the four pill chips switch between modes INSTANTLY without
   // any network call.
   const [cached, setCached] = useState<CachedRankings | null>(() => getCachedRankings(fixture.id));
   const [loading, setLoading] = useState<boolean>(() => !getCachedRankings(fixture.id));
@@ -304,7 +304,7 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
           </button>
         </div>
 
-        {/* Three ranking-mode pill chips (always visible, instant switching) */}
+        {/* Four ranking-mode pill chips (always visible, instant switching) */}
         <div
           className="mb-4 flex items-center gap-2 rounded-lg border border-slate-800 bg-slate-900/60 p-2"
           title="Choose ranking system"
@@ -331,6 +331,13 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
             label="Hybrid C"
             description="Hybrid (A + B averaged)"
             active={selectedMode === 'C'}
+            onSelect={setSelectedMode}
+          />
+          <RankingChip
+            mode="D"
+            label="Consensus D"
+            description="Consensus — strongest agreement across all systems"
+            active={selectedMode === 'D'}
             onSelect={setSelectedMode}
           />
           <button
@@ -833,6 +840,7 @@ const MODE_LABEL: Record<RankingMode, string> = {
   A: "A (Classic)",
   B: "B (12-Factor)",
   C: "C (Hybrid)",
+  D: "D (Consensus)",
 };
 
 function pickLabel(m: Market | undefined): string {
@@ -869,6 +877,7 @@ function RankingDebugPanel({
     A: "bg-amber-500/20 border-amber-400/40",
     B: "bg-teal-500/20 border-cyan-400/40",
     C: "bg-purple-500/20 border-indigo-400/40",
+    D: "bg-gradient-to-br from-yellow-200/20 via-amber-400/15 to-white/10 border-yellow-200/50",
   };
 
   const top3 = (mode: RankingMode): string[] =>
@@ -889,8 +898,8 @@ function RankingDebugPanel({
         <span className="text-slate-400">{sourceLabel}</span>
       </div>
 
-      <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
-        {(["A", "B", "C"] as RankingMode[]).map((mode) => (
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4">
+        {(["A", "B", "C", "D"] as RankingMode[]).map((mode) => (
           <div key={mode} className={`rounded-md border p-2 ${colClass[mode]}`}>
             <div className="mb-1 font-bold text-slate-100">{MODE_LABEL[mode]}</div>
             <ol className="list-decimal list-inside space-y-0.5 text-slate-200">
@@ -904,7 +913,7 @@ function RankingDebugPanel({
       </div>
 
       <div className="space-y-0.5 text-[10px] text-slate-400">
-        {(["A", "B", "C"] as RankingMode[]).map((mode) => (
+        {(["A", "B", "C", "D"] as RankingMode[]).map((mode) => (
           <div key={`fp-${mode}`}>
             Fingerprint {mode}: {fingerprintOf(cached?.rankings[mode]?.prediction.top10)}
           </div>
@@ -915,10 +924,10 @@ function RankingDebugPanel({
 }
 
 /**
- * One pill-shaped ranking-mode button. Three of these are always visible at
+ * One pill-shaped ranking-mode button. Four of these are always visible at
  * the top of the match detail panel. The active chip is highlighted with a
  * mode-specific color (Classic A = amber/gold, 12-Factor B = teal/blue,
- * Hybrid C = purple/indigo); inactive chips are dimmed but clearly clickable
+ * Hybrid C = purple/indigo, Consensus D = gold/white); inactive chips are dimmed but clearly clickable
  * with a hover effect. Switching is instant — no network call, no spinner.
  */
 function RankingChip({
@@ -935,11 +944,12 @@ function RankingChip({
   onSelect: (mode: RankingMode) => void;
 }) {
   // Color per mode — exactly matches the task spec:
-  //   A = amber/gold   B = teal/blue   C = purple/indigo
+  //   A = amber/gold   B = teal/blue   C = purple/indigo   D = gold/white consensus
   const ACTIVE_STYLE: Record<RankingMode, string> = {
     A: "bg-gradient-to-r from-amber-500 to-yellow-500 text-white shadow-lg shadow-amber-500/40 ring-2 ring-amber-300/60",
     B: "bg-gradient-to-r from-teal-500 to-cyan-600 text-white shadow-lg shadow-teal-500/40 ring-2 ring-cyan-300/60",
     C: "bg-gradient-to-r from-purple-600 to-indigo-600 text-white shadow-lg shadow-purple-600/40 ring-2 ring-purple-300/60",
+    D: "bg-gradient-to-r from-yellow-200 via-amber-300 to-white text-slate-950 shadow-lg shadow-yellow-300/40 ring-2 ring-white/70",
   };
   const INACTIVE_STYLE =
     "bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-white border border-slate-700 hover:border-slate-500";

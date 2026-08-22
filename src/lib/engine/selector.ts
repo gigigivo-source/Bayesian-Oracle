@@ -118,21 +118,22 @@ import {
 } from "../data/types";
 
 
-// ─── Ranking mode (A = Classic 11-factor, B = 12-factor, C = Hybrid) ─────────
-export type RankingMode = 'A' | 'B' | 'C';
+// ─── Ranking mode (A = Classic 11-factor, B = 12-factor, C = Hybrid, D = Consensus) ─
+export type RankingMode = 'A' | 'B' | 'C' | 'D';
 
 export function resolveRankingMode(opts?: SelectOptions): RankingMode {
   const fromOpts = opts?.rankingMode ? String(opts.rankingMode).toUpperCase() : null;
-  if (fromOpts === 'A' || fromOpts === 'B' || fromOpts === 'C') return fromOpts as RankingMode;
+  if (fromOpts === 'A' || fromOpts === 'B' || fromOpts === 'C' || fromOpts === 'D') return fromOpts as RankingMode;
   const envRaw = (typeof process !== 'undefined' && process.env && process.env.RANKING_MODE) ? String(process.env.RANKING_MODE).toUpperCase() : '';
-  if (envRaw === 'A' || envRaw === 'B' || envRaw === 'C') return envRaw as RankingMode;
+  if (envRaw === 'A' || envRaw === 'B' || envRaw === 'C' || envRaw === 'D') return envRaw as RankingMode;
   return 'B';
 }
 
 export function rankingModeLogLine(mode: RankingMode): string {
   if (mode === 'A') return 'Selector Ranking mode: A Classic';
   if (mode === 'B') return 'Selector Ranking mode: B 12-Factor';
-  return '[Selector] Ranking mode: C Hybrid';
+  if (mode === 'C') return '[Selector] Ranking mode: C Hybrid';
+  return 'Selector Ranking mode: D Consensus';
 }
 
 // ─── Classic 11-factor weights (Rank A) ─────────────────────────────────────
@@ -899,7 +900,7 @@ export interface SelectOptions {
   sourceQuality?: SourceQualityContext;
   /** Confidence-gate configuration (threshold / policy). */
   confidence?:    ConfidenceOptions;
-  /** Ranking mode: A = Classic 11-factor, B = 12-factor, C = Hybrid (A+B averaged; default B). */
+  /** Ranking mode: A = Classic 11-factor, B = 12-factor, C = Hybrid, D = Consensus; default B. */
   rankingMode?:  RankingMode;
 
 }
@@ -2812,6 +2813,9 @@ export function selectTopPicks(
   if (rankingMode === 'C') {
     return rankHybrid(markets, lam, homeName, awayName, confidenceMap, opts);
   }
+  if (rankingMode === 'D') {
+    return rankConsensus(markets, lam, homeName, awayName, confidenceMap, opts);
+  }
   return rankNew(markets, lam, homeName, awayName, confidenceMap, opts);
 }
 
@@ -3436,6 +3440,257 @@ export function rankHybrid(
     }),
     weightLog,
     missingFactors: [...excludedUnionA, ...excludedUnionB],
+    confidence,
+    confidenceLog,
+  };
+}
+// ─── Consensus selection (Rank D) ────────────────────────────────────────────
+// Rank D reads the completed Top-10 outputs from A, B and C. Each market gets
+// its position in those three rankings; missing Top-10 entries receive rank 11.
+// The final consensus order is avgRank asc, with Rank C's hybrid composite
+// score as the first tiebreak (higher wins).
+
+interface ConsensusScore {
+  market: Market;
+  rankA: number;
+  rankB: number;
+  rankC: number;
+  avgRank: number;
+  rankCComposite: number;
+}
+
+function cloneMarketForRanking(m: Market): Market {
+  return {
+    ...m,
+    factors: m.factors ? { ...m.factors } : undefined,
+  };
+}
+
+function cloneMarketsForRanking(markets: Market[]): Market[] {
+  return markets.map(cloneMarketForRanking);
+}
+
+function marketRankMap(result: SelectionResult): Map<string, number> {
+  const out = new Map<string, number>();
+  result.top10.forEach((m, idx) => out.set(m.id, idx + 1));
+  return out;
+}
+
+function marketByIdMap(result: SelectionResult): Map<string, Market> {
+  const out = new Map<string, Market>();
+  result.top10.forEach((m) => out.set(m.id, m));
+  return out;
+}
+
+function averageThreeMatchConfidence(
+  a:   MatchConfidence | undefined,
+  b:   MatchConfidence | undefined,
+  c:   MatchConfidence | undefined,
+  cfg: Required<ConfidenceOptions>,
+  picksReturned: number,
+): MatchConfidence | undefined {
+  if (!a || !b || !c) return a ?? b ?? c;
+  const score = clamp((a.score + b.score + c.score) / 3, 0, 1);
+
+  const componentKeys = Object.keys(CONFIDENCE_WEIGHTS) as ConfidenceComponentKey[];
+  const components = componentKeys.reduce((acc, k) => {
+    const ca = a.components[k];
+    const cb = b.components[k];
+    const cc = c.components[k];
+    acc[k] = {
+      score:     clamp((ca.score + cb.score + cc.score) / 3, 0, 1),
+      weight:    ca.weight,
+      applied:   (ca.applied + cb.applied + cc.applied) / 3,
+      available: ca.available && cb.available && cc.available,
+      detail:    `A ${ca.detail} || B ${cb.detail} || C ${cc.detail}`,
+    };
+    return acc;
+  }, {} as Record<ConfidenceComponentKey, ConfidenceComponent>);
+
+  return {
+    score,
+    scorePct: Math.round(score * 1000) / 10,
+    level:         score < cfg.skipThreshold ? "VERY_LOW" : score < cfg.threshold ? "LOW" : "HIGH",
+    lowConfidence: cfg.enabled && score < cfg.threshold,
+    action:        "full",
+    picksReturned,
+    threshold:     cfg.threshold,
+    skipThreshold: cfg.skipThreshold,
+    policy:        cfg.policy,
+    components,
+    avgCalibration:      (a.avgCalibration + b.avgCalibration + c.avgCalibration) / 3,
+    avgFactorsAvailable: (a.avgFactorsAvailable + b.avgFactorsAvailable + c.avgFactorsAvailable) / 3,
+    totalFactors:        b.totalFactors,
+    missingFactors:      [...new Set([...a.missingFactors, ...b.missingFactors, ...c.missingFactors])],
+    sourceTier:          a.sourceTier,
+    sources:             [...new Set([...a.sources, ...b.sources, ...c.sources])],
+    backfillPicks:       Math.round((a.backfillPicks + b.backfillPicks + c.backfillPicks) / 3),
+    reasons: [
+      ...a.reasons.map((r) => `[A Classic] ${r}`),
+      ...b.reasons.map((r) => `[B 12-Factor] ${r}`),
+      ...c.reasons.map((r) => `[C Hybrid] ${r}`),
+    ],
+    summary: "",
+  };
+}
+
+function consensusNote(s: ConsensusScore): string {
+  return `consensus avgRank=${s.avgRank.toFixed(2)} (A=${s.rankA}, B=${s.rankB}, C=${s.rankC}; missing Top-10 = 11) · Rank C tiebreak=${s.rankCComposite.toFixed(3)}`;
+}
+
+export function rankConsensus(
+  markets:        Market[],
+  lam:            LambdaSet,
+  homeName:       string,
+  awayName:       string,
+  confidenceMap?: Record<string, number>,
+  opts?:          SelectOptions,
+): SelectionResult {
+  const resultA = rankClassic(cloneMarketsForRanking(markets), lam, homeName, awayName, confidenceMap, opts);
+  const resultB = rankNew(cloneMarketsForRanking(markets), lam, homeName, awayName, confidenceMap, opts);
+  const resultC = rankHybrid(cloneMarketsForRanking(markets), lam, homeName, awayName, confidenceMap, opts);
+
+  const ranksA = marketRankMap(resultA);
+  const ranksB = marketRankMap(resultB);
+  const ranksC = marketRankMap(resultC);
+  const marketsA = marketByIdMap(resultA);
+  const marketsB = marketByIdMap(resultB);
+  const marketsC = marketByIdMap(resultC);
+
+  const candidateIds = new Set<string>([
+    ...ranksA.keys(),
+    ...ranksB.keys(),
+    ...ranksC.keys(),
+  ]);
+
+  if (candidateIds.size === 0) {
+    return EMPTY_SELECTION("No ranked markets available from A, B or C for consensus.", [
+      ...(resultA.gaps ?? []),
+      ...(resultB.gaps ?? []),
+      ...(resultC.gaps ?? []),
+    ]);
+  }
+
+  const scored: ConsensusScore[] = [...candidateIds].map((id) => {
+    const rankA = ranksA.get(id) ?? 11;
+    const rankB = ranksB.get(id) ?? 11;
+    const rankC = ranksC.get(id) ?? 11;
+    const market = marketsC.get(id) ?? marketsB.get(id) ?? marketsA.get(id)!;
+    const rankCComposite = marketsC.get(id)?.compositeScore ?? 0;
+    return {
+      market: cloneMarketForRanking(market),
+      rankA,
+      rankB,
+      rankC,
+      avgRank: (rankA + rankB + rankC) / 3,
+      rankCComposite,
+    };
+  });
+
+  const orderedScores = scored.sort((a, b) => {
+    const dr = a.avgRank - b.avgRank;
+    if (Math.abs(dr) > 1e-9) return dr;
+    const dc = b.rankCComposite - a.rankCComposite;
+    if (Math.abs(dc) > 1e-9) return dc;
+    return a.market.id.localeCompare(b.market.id);
+  });
+
+  const top10Scores = orderedScores.slice(0, 10);
+  let finalPicks = top10Scores.map((s) => s.market);
+
+  const cfg = resolveConfidenceOptions(opts?.confidence);
+  const confidence = averageThreeMatchConfidence(
+    resultA.confidence,
+    resultB.confidence,
+    resultC.confidence,
+    cfg,
+    finalPicks.length,
+  );
+
+  if (confidence) {
+    const shouldSkip = cfg.enabled && cfg.policy === "skip" && confidence.score < cfg.threshold;
+    const belowSkipFloor = cfg.enabled && cfg.policy !== "flag" && confidence.score < cfg.skipThreshold;
+    const shouldTrim = cfg.enabled && cfg.policy === "trim" && confidence.lowConfidence;
+
+    if (shouldSkip || belowSkipFloor) {
+      confidence.action = "skipped";
+      confidence.picksReturned = 0;
+      finalPicks = [];
+    } else if (shouldTrim) {
+      confidence.action = "reduced";
+      finalPicks = finalPicks.slice(0, cfg.lowConfidencePickCount);
+      confidence.picksReturned = finalPicks.length;
+    } else {
+      confidence.action = "full";
+      confidence.picksReturned = finalPicks.length;
+    }
+
+    confidence.summary =
+      `confidence ${confidence.scorePct.toFixed(1)}% (${confidence.level}) ` +
+      `vs threshold ${(confidence.threshold * 100).toFixed(0)}% → ` +
+      (confidence.action === "skipped"
+        ? "match SKIPPED (no picks returned)"
+        : confidence.action === "reduced"
+          ? `reduced to Top-${confidence.picksReturned}`
+          : `full Top-${confidence.picksReturned}`);
+  }
+
+  const confidenceLog = confidence
+    ? [confidence.summary, ...confidence.reasons.map((r) => `· ${r}`)]
+    : undefined;
+
+  if (confidence?.action === "skipped") {
+    return {
+      ...EMPTY_SELECTION(
+        `Low confidence (${confidence.scorePct.toFixed(1)}% < ${(confidence.threshold * 100).toFixed(0)}%) — match skipped by the confidence gate.`,
+        [...new Set([...(resultA.gaps ?? []), ...(resultB.gaps ?? []), ...(resultC.gaps ?? [])])],
+      ),
+      rankingNotes: top10Scores.map(consensusNote),
+      weightLog: [
+        "consensus D = average rank position from A, B and C (missing Top-10 = 11); ties use Rank C composite score",
+      ],
+      missingFactors: [...new Set([...(resultA.missingFactors ?? []), ...(resultB.missingFactors ?? []), ...(resultC.missingFactors ?? [])])],
+      confidence,
+      confidenceLog,
+    };
+  }
+
+  finalPicks = applyTop1ExplosionBan(finalPicks, homeName, awayName, opts);
+
+  for (const m of finalPicks) {
+    const s = top10Scores.find((x) => x.market.id === m.id);
+    if (!s) continue;
+    m.compositeScore = Math.round(s.avgRank * 1000) / 1000;
+    m.factors = {
+      "Consensus Avg Rank": Math.round(s.avgRank * 1000) / 1000,
+      "Rank A Position": s.rankA,
+      "Rank B Position": s.rankB,
+      "Rank C Position": s.rankC,
+      "Rank C Tiebreak Score": Math.round(s.rankCComposite * 1000) / 1000,
+    };
+  }
+
+  const lead = top10Scores[0];
+  console.log(
+    `[selector] ${homeName} vs ${awayName} — top10: ${top10Scores.length}/10 (consensus D: average rank positions A+B+C)` +
+    (lead ? ` | top1 avgRank=${lead.avgRank.toFixed(2)} (A=${lead.rankA} B=${lead.rankB} C=${lead.rankC})` : ""),
+  );
+  console.log("[Ranking] Mode D Top 1:", finalPicks[0]?.name, "avgRank:", finalPicks[0]?.compositeScore);
+
+  return {
+    top1:  finalPicks.slice(0, 1),
+    top3:  finalPicks.slice(0, 3),
+    top5:  finalPicks.slice(0, 5),
+    top10: finalPicks,
+    gaps: [...new Set([...(resultA.gaps ?? []), ...(resultB.gaps ?? []), ...(resultC.gaps ?? [])])],
+    rankingNotes: finalPicks.map((m) => {
+      const s = top10Scores.find((x) => x.market.id === m.id);
+      return s ? consensusNote(s) : `${m.name} · ${m.selection}`;
+    }),
+    weightLog: [
+      "consensus D = average rank position from A, B and C (missing Top-10 = 11); ties use Rank C composite score",
+    ],
+    missingFactors: [...new Set([...(resultA.missingFactors ?? []), ...(resultB.missingFactors ?? []), ...(resultC.missingFactors ?? [])])],
     confidence,
     confidenceLog,
   };

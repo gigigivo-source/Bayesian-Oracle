@@ -98,9 +98,9 @@ async function fetchBoxscore(
 // ─── Main handler ─────────────────────────────────────────────────────────────
 
 /**
- * Parse the `?ranking=` query param. Accepts "A", "B", "C", or the special
- * "all" sentinel that triggers a single-response payload containing all three
- * ranking modes (A Classic 11-factor, B 12-Factor, C Hybrid). Anything else
+ * Parse the `?ranking=` query param. Accepts "A", "B", "C", "D", or the special
+ * "all" sentinel that triggers a single-response payload containing all four
+ * ranking modes (A Classic 11-factor, B 12-Factor, C Hybrid, D Consensus). Anything else
  * falls back to the env-var default (B).
  */
 type RankingRequest = RankingMode | "all";
@@ -111,7 +111,7 @@ function parseRankingMode(req: Request): RankingRequest {
     const q = url.searchParams.get('ranking');
     if (q) {
       const upper = q.toUpperCase();
-      if (upper === 'A' || upper === 'B' || upper === 'C') return upper as RankingMode;
+      if (upper === 'A' || upper === 'B' || upper === 'C' || upper === 'D') return upper as RankingMode;
       if (upper === 'ALL') return 'all';
     }
   } catch {
@@ -331,8 +331,8 @@ function computeValueBets(
 }
 
 async function handlePost(req: Request): Promise<Response> {
-  // Ranking mode: ?ranking=A|B|C|all — A = Classic 11-factor, B = 12-Factor,
-  // C = Hybrid (A+B averaged), "all" returns every mode in a single response.
+  // Ranking mode: ?ranking=A|B|C|D|all — A = Classic 11-factor, B = 12-Factor,
+  // C = Hybrid (A+B averaged), D = Consensus, "all" returns every mode in a single response.
   const rankingRequest = parseRankingMode(req);
   const isAll = rankingRequest === 'all';
   const rankingMode: RankingMode = isAll ? 'B' : rankingRequest;
@@ -364,8 +364,8 @@ async function handlePost(req: Request): Promise<Response> {
   // Bookmaker odds are ranking-independent — fetched once and shared.
   const { bookOdds, multiBookOdds } = await enrichBookmakerOdds(fixture, summary);
 
-  // ── Run the engine for one (single mode) or three (all) ranking modes ───────
-  const modes: RankingMode[] = isAll ? ['A', 'B', 'C'] : [rankingMode];
+  // ── Run the engine for one (single mode) or four (all) ranking modes ────────
+  const modes: RankingMode[] = isAll ? ['A', 'B', 'C', 'D'] : [rankingMode];
   const predictions = new Map<RankingMode, EngineResult>();
   for (const mode of modes) {
     predictions.set(mode, await runEngineForMode(fixture, summary, liveStats, mode));
