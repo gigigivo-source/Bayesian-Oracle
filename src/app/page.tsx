@@ -299,8 +299,8 @@ function LivePage({ onSelect }: { onSelect: (fx: FixtureLite) => void }) {
             <h2 className="text-sm font-bold text-white">LIVE NOW — {live.length} Match{live.length > 1 ? "es" : ""} In-Play</h2>
           </div>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {live.map((fx) => (
-              <FixtureCard key={`live-${fx.id}`} fx={fx} onSelect={onSelect} live />
+            {live.map((fx, i) => (
+              <FixtureCard key={`live-${fx.id}`} fx={fx} onSelect={onSelect} live accentIndex={i} />
             ))}
           </div>
         </div>
@@ -317,8 +317,8 @@ function LivePage({ onSelect }: { onSelect: (fx: FixtureLite) => void }) {
             <h2 className="text-sm font-bold text-white">Today&apos;s Schedule & Recent Results</h2>
           </div>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-            {recent.map((fx) => (
-              <FixtureCard key={`recent-${fx.leagueSlug}-${fx.id}`} fx={fx} onSelect={onSelect} />
+            {recent.map((fx, i) => (
+              <FixtureCard key={`recent-${fx.leagueSlug}-${fx.id}`} fx={fx} onSelect={onSelect} accentIndex={i} />
             ))}
           </div>
         </div>
@@ -627,8 +627,8 @@ function TopFeed({
                     <h2 className="text-sm font-bold text-white">{chipFixtures.label} — Upcoming ({chipFixtures.upcoming.length})</h2>
                   </div>
                   <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-                    {chipFixtures.upcoming.map((fx) => (
-                      <FixtureCard key={fx.id} fx={fx} onSelect={onSelect} />
+                    {chipFixtures.upcoming.map((fx, i) => (
+                      <FixtureCard key={fx.id} fx={fx} onSelect={onSelect} accentIndex={i} />
                     ))}
                   </div>
                 </div>
@@ -639,8 +639,8 @@ function TopFeed({
                     <h2 className="text-sm font-bold text-white">Recent Results ({chipFixtures.results.length})</h2>
                   </div>
                   <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-                    {chipFixtures.results.map((fx) => (
-                      <FixtureCard key={fx.id} fx={fx} onSelect={onSelect} />
+                    {chipFixtures.results.map((fx, i) => (
+                      <FixtureCard key={fx.id} fx={fx} onSelect={onSelect} accentIndex={i} />
                     ))}
                   </div>
                 </div>
@@ -674,8 +674,8 @@ function TopFeed({
                   )}
                 </div>
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-                  {[...block.upcoming, ...block.results].map((fx) => (
-                    <FixtureCard key={`today-extra-fx-${fx.id}`} fx={fx} onSelect={onSelect} />
+                  {[...block.upcoming, ...block.results].map((fx, i) => (
+                    <FixtureCard key={`today-extra-fx-${fx.id}`} fx={fx} onSelect={onSelect} accentIndex={i} />
                   ))}
                 </div>
               </section>
@@ -718,8 +718,8 @@ function TopFeed({
 
             {up.length > 0 && (
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-                {up.map((fx) => (
-                  <FixtureCard key={`${block.slug}-${fx.id}`} fx={fx} onSelect={onSelect} />
+                {up.map((fx, i) => (
+                  <FixtureCard key={`${block.slug}-${fx.id}`} fx={fx} onSelect={onSelect} accentIndex={i} />
                 ))}
               </div>
             )}
@@ -730,8 +730,8 @@ function TopFeed({
                   Recent Results
                 </div>
                 <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-                  {res.map((fx) => (
-                    <FixtureCard key={`res-${block.slug}-${fx.id}`} fx={fx} onSelect={onSelect} />
+                  {res.map((fx, i) => (
+                    <FixtureCard key={`res-${block.slug}-${fx.id}`} fx={fx} onSelect={onSelect} accentIndex={i} />
                   ))}
                 </div>
               </div>
@@ -750,8 +750,8 @@ function TopFeed({
               .flatMap((b) => b.fixtures)
               .sort(compareLeaguePriority)
               .slice(0, 12)
-              .map((fx) => (
-                <FixtureCard key={`extra-${fx.leagueSlug}-${fx.id}`} fx={fx} onSelect={onSelect} />
+              .map((fx, i) => (
+                <FixtureCard key={`extra-${fx.leagueSlug}-${fx.id}`} fx={fx} onSelect={onSelect} accentIndex={i} />
               ))}
           </div>
         </section>
@@ -867,9 +867,9 @@ function LeagueBrowser({ onSelect }: { onSelect: (fx: FixtureLite) => void }) {
                   <h2 className="text-sm font-bold text-white">Upcoming — {activeLeague.name} ({upcoming.length})</h2>
                 </div>
                 <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                  {upcoming.map((fx) => (
-                    <FixtureCard key={fx.id} fx={fx} onSelect={onSelect} />
-                  ))}
+                {upcoming.map((fx, i) => (
+                  <FixtureCard key={fx.id} fx={fx} onSelect={onSelect} accentIndex={i} />
+                ))}
                 </div>
               </div>
             )}
@@ -880,8 +880,8 @@ function LeagueBrowser({ onSelect }: { onSelect: (fx: FixtureLite) => void }) {
                   <h2 className="text-sm font-bold text-white">Recent Results — {activeLeague.name} ({results.length})</h2>
                 </div>
                 <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                  {results.map((fx) => (
-                    <FixtureCard key={`res-${fx.id}`} fx={fx} onSelect={onSelect} />
+                  {results.map((fx, i) => (
+                    <FixtureCard key={`res-${fx.id}`} fx={fx} onSelect={onSelect} accentIndex={i} />
                   ))}
                 </div>
                 <p className="mt-3 text-center text-xs text-slate-500 font-mono">
@@ -1402,8 +1402,8 @@ function ResultsPage({ onSelect }: { onSelect: (fx: FixtureLite) => void }) {
             <h2 className="text-sm font-bold text-white">Recent Results — {results.length} matches</h2>
           </div>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-            {results.map((fx) => (
-              <FixtureCard key={`res-${fx.leagueSlug}-${fx.id}`} fx={fx} onSelect={onSelect} />
+            {results.map((fx, i) => (
+              <FixtureCard key={`res-${fx.leagueSlug}-${fx.id}`} fx={fx} onSelect={onSelect} accentIndex={i} />
             ))}
           </div>
           <p className="mt-4 text-center text-xs text-slate-500 font-mono">
