@@ -90,7 +90,7 @@ function LeaguePageInner() {
       ) : error ? (
         <ErrorState message={error} onRetry={retry} />
       ) : !detail ? (
-        <div className="rounded-xl border border-slate-700 bg-slate-900 p-10 text-center">
+        <div className="responsive-card rounded-lg border border-slate-700 bg-slate-800 text-center">
           <div className="mb-3 text-3xl">🌍</div>
           <div className="mb-2 text-base font-bold text-slate-300">No data for this competition</div>
           <p className="mx-auto max-w-sm font-mono text-xs text-slate-400">
@@ -104,7 +104,7 @@ function LeaguePageInner() {
           <LeagueSummaryCards m={detail} />
 
           {/* W/L/P/V strip from the raw counts */}
-          <div className="rounded-xl border border-slate-700 bg-slate-800 p-4">
+          <div className="responsive-card rounded-lg border border-slate-700 bg-slate-800">
             <div className="mb-2 font-mono text-[11px] font-bold uppercase tracking-wider text-slate-400">
               Win / Loss / Push / Void / Pending
             </div>
@@ -140,7 +140,7 @@ function LeaguePageInner() {
               }
             >
               {chartPoints.length > 0 ? (
-                <div className="rounded-xl border border-slate-700 bg-slate-900 p-4">
+                <div className="responsive-card rounded-lg border border-slate-700 bg-slate-800 transition-all duration-200 hover:-translate-y-2 hover:shadow-2xl">
                   <PnLTrendChart points={chartPoints} />
                   <div className="mt-2 flex flex-wrap gap-2 font-mono text-[11px] text-slate-400">
                     <span>7d: <span className={detail.last7DaysPnl >= 0 ? "text-emerald-300" : "text-rose-300"}>{money(detail.last7DaysPnl)}</span></span>
@@ -149,7 +149,7 @@ function LeaguePageInner() {
                   </div>
                 </div>
               ) : (
-                <div className="rounded-xl border border-slate-700 bg-slate-900 p-8 text-center font-mono text-xs text-slate-500">
+                <div className="responsive-card rounded-lg border border-slate-700 bg-slate-800 text-center font-mono text-xs text-slate-500">
                   No staked P&L yet for this league.
                 </div>
               )}
@@ -166,7 +166,7 @@ function LeaguePageInner() {
 
           {/* Source breakdown */}
           <Section title="Source Breakdown" subtitle="where each bet came from">
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-4 lg:grid-cols-3 lg:gap-6">
               <SourceCard
                 title="Verification Picks"
                 data={detail.sourceBreakdown.picks}
@@ -203,7 +203,7 @@ function SourceCard({
   const settled = data.wins + data.losses;
   const rate = settled > 0 ? (data.wins / settled) * 100 : 0;
   return (
-    <div className="rounded-xl border border-slate-700 bg-slate-900 p-4">
+    <div className="responsive-card rounded-lg border border-slate-700 bg-slate-800 transition-all duration-200 hover:-translate-y-2 hover:shadow-2xl">
       <div className="text-xs font-bold uppercase tracking-wider text-slate-400">{title}</div>
       <div className="mt-2 font-mono text-2xl font-extrabold text-white">{data.total}</div>
       <div className="mt-1 text-[11px] text-slate-400">

@@ -30,7 +30,7 @@ export function TeamBadge({
     return (
       <span
         style={{ width: size, height: size }}
-        className="flex items-center justify-center rounded-full bg-slate-700 text-[10px] font-bold text-slate-200"
+        className="flex shrink-0 items-center justify-center rounded-full bg-slate-700 text-xs font-bold text-slate-200"
       >
         {initials}
       </span>
@@ -42,7 +42,7 @@ export function TeamBadge({
       alt={name}
       width={size}
       height={size}
-      className="object-contain"
+      className="shrink-0 object-contain"
       unoptimized
     />
   );
@@ -121,13 +121,13 @@ export function MarketTable({
       {showDeepExplanation ? (
         <div className="space-y-3">
           {markets.map((m, idx) => (
-            <div key={m.id} className="rounded-lg bg-slate-900 p-3">
+            <div key={m.id} className="responsive-card rounded-lg border border-slate-700 bg-slate-800">
               <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-700 pb-2.5">
                 <div className="flex items-center gap-2">
                   <span className="flex h-6 w-6 items-center justify-center rounded-full bg-amber-400/20 text-xs font-bold font-mono text-amber-300 border border-amber-400/40">
                     #{idx + 1}
                   </span>
-                  <span className="font-bold text-base text-slate-100">{m.name}</span>
+                  <span className="text-sm font-bold text-slate-100 sm:text-base lg:text-lg">{m.name}</span>
                   <span className="rounded bg-amber-400/10 px-2 py-0.5 text-xs font-mono text-amber-300 border border-amber-400/20">
                     {m.family}
                   </span>
@@ -144,7 +144,7 @@ export function MarketTable({
               </div>
 
               {/* 3-part Rationale */}
-              <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3 text-xs">
+                      <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-3 text-xs sm:gap-4 lg:gap-6">
                 <div className="rounded-lg border border-slate-700 p-2.5">
                   <div className="font-bold text-amber-300 mb-1 font-mono">1. WHY QUALIFIED</div>
                   <p className="text-slate-300 leading-relaxed text-[11px]">
@@ -200,9 +200,9 @@ export function MarketTable({
           ))}
         </div>
       ) : (
-        <div className="overflow-x-auto rounded-lg bg-slate-900">
-          <table className="w-full text-left text-sm">
-            <thead className="bg-slate-800 text-[11px] uppercase tracking-wider text-slate-400">
+        <div className="table-scroll rounded-lg bg-slate-900">
+          <table className="responsive-table w-full min-w-[500px] text-left text-xs sm:min-w-full sm:text-sm">
+            <thead className="sticky top-0 z-10 bg-slate-800 text-xs uppercase tracking-wider text-slate-400">
               <tr>
                 <th className="px-3 py-2.5">Market &amp; Rationale</th>
                 <th className="px-3 py-2.5">Pick</th>
@@ -280,10 +280,10 @@ export function Section({
   right?: React.ReactNode;
 }) {
   return (
-    <section id={id} className="scroll-mt-28">
-      <div className="mb-2 inline-block bg-slate-900 rounded-lg px-4 py-2">
-        <h2 className="text-base font-semibold text-white">{title}</h2>
-        {subtitle ? <p className="text-[11px] text-slate-300">{subtitle}</p> : null}
+    <section id={id} className="scroll-mt-28 space-y-4 sm:space-y-6 lg:space-y-8">
+      <div className="inline-block rounded-lg bg-slate-900 px-4 py-2">
+        <h2 className="text-base font-semibold text-white sm:text-lg lg:text-xl">{title}</h2>
+        {subtitle ? <p className="mt-1 text-xs text-slate-300 sm:text-sm">{subtitle}</p> : null}
         {right ? <div className="mt-1">{right}</div> : null}
       </div>
       {children}
@@ -330,9 +330,9 @@ export function FixtureCard({
   return (
     <button
       onClick={() => onSelect(fx)}
-      className={`group p-3 text-left ${isLive ? CARD_CLICK_LIVE : CARD_CLICK}`}
+      className={`group text-left ${isLive ? CARD_CLICK_LIVE : CARD_CLICK}`}
     >
-      <div className="mb-2 flex items-center justify-between text-[11px]">
+      <div className="mb-3 flex items-center justify-between gap-2 text-xs sm:text-sm">
         <span
           className={`truncate ${isLive ? "text-rose-300 font-bold" : "text-slate-500"}`}
         >
@@ -351,7 +351,7 @@ export function FixtureCard({
         <div className="flex items-center gap-2">
           <TeamBadge logo={fx.home.logo} name={fx.home.name} size={22} />
           <span
-            className={`flex-1 truncate text-sm ${
+            className={`responsive-card-title flex-1 truncate ${
               isLive ? "font-bold text-slate-100" : "text-slate-200"
             }`}
           >
@@ -370,7 +370,7 @@ export function FixtureCard({
         <div className="flex items-center gap-2">
           <TeamBadge logo={fx.away.logo} name={fx.away.name} size={22} />
           <span
-            className={`flex-1 truncate text-sm ${
+            className={`responsive-card-title flex-1 truncate ${
               isLive ? "font-bold text-slate-100" : "text-slate-200"
             }`}
           >
@@ -388,7 +388,7 @@ export function FixtureCard({
         </div>
       </div>
 
-      <div className="mt-2 flex items-center justify-between border-t border-slate-700 pt-2 text-[11px] text-slate-500">
+      <div className="mt-3 flex items-center justify-between gap-2 border-t border-slate-700 pt-3 text-xs text-slate-400 sm:text-sm">
         <span className="truncate">
           {fx.venue ?? (fx.neutralSite ? "Neutral" : "Home venue")}
         </span>

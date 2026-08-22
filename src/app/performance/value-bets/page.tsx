@@ -255,7 +255,7 @@ function ValueBetsContent({ bets, stats }: { bets: ValueBet[]; stats: VbStats })
   return (
     <>
       {/* ── Summary Cards ─────────────────────────────────────────────────── */}
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-4">
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-4 lg:grid-cols-3 lg:gap-6 xl:grid-cols-4">
         <StatCard
           label="Total Bets"
           value={stats.total}
@@ -282,7 +282,7 @@ function ValueBetsContent({ bets, stats }: { bets: ValueBet[]; stats: VbStats })
         />
       </div>
 
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-4">
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-4 lg:grid-cols-3 lg:gap-6 xl:grid-cols-4">
         <StatCard
           label="Avg Odds (weighted)"
           value={settled.length > 0 ? avgOdds.toFixed(2) : "—"}
@@ -295,7 +295,7 @@ function ValueBetsContent({ bets, stats }: { bets: ValueBet[]; stats: VbStats })
           sub={`avg edge ${signed(stats.avgEdge, 1)}%`}
           tone={avgEv >= 0 ? "positive" : "negative"}
         />
-        <div className="flex flex-col justify-between rounded-xl border border-slate-700 bg-slate-900 p-4">
+        <div className="responsive-card flex flex-col justify-between rounded-lg border border-slate-700 bg-slate-800 transition-all duration-200 hover:-translate-y-2 hover:shadow-2xl">
           <span className="text-[11px] font-medium uppercase tracking-wider text-slate-400">Current Streak</span>
           <div className="mt-2">
             <StreakBadge count={streak.count} type={streak.type} />
@@ -304,7 +304,7 @@ function ValueBetsContent({ bets, stats }: { bets: ValueBet[]; stats: VbStats })
             {streak.type === "W" ? "winning run" : streak.type === "L" ? "losing run" : "no settled bets"}
           </div>
         </div>
-        <div className="flex flex-col justify-between rounded-xl border border-slate-700 bg-slate-900 p-4">
+        <div className="responsive-card flex flex-col justify-between rounded-lg border border-slate-700 bg-slate-800 transition-all duration-200 hover:-translate-y-2 hover:shadow-2xl">
           <span className="text-[11px] font-medium uppercase tracking-wider text-slate-400">Result Mix</span>
           <div className="mt-2 flex flex-wrap gap-1.5">
             <Pill tone="win">{won.length} W</Pill>
@@ -317,7 +317,7 @@ function ValueBetsContent({ bets, stats }: { bets: ValueBet[]; stats: VbStats })
 
       {/* ── Trends ───────────────────────────────────────────────────────── */}
       <Section title="Profit / Loss Trend" subtitle="cumulative P&L across settled value bets">
-        <div className="rounded-xl border border-slate-700 bg-slate-900 p-4">
+        <div className="responsive-card rounded-lg border border-slate-700 bg-slate-800 transition-all duration-200 hover:-translate-y-2 hover:shadow-2xl">
           <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
             <div className="flex items-center gap-3">
               <span className="font-mono text-xs text-slate-400">Final P&amp;L</span>
@@ -360,9 +360,9 @@ function ValueBetsContent({ bets, stats }: { bets: ValueBet[]; stats: VbStats })
           </select>
         }
       >
-        <div className="overflow-x-auto rounded-xl border border-slate-700 bg-slate-900">
-          <table className="w-full text-left text-sm">
-            <thead className="border-b border-slate-700 bg-slate-800">
+        <div className="table-scroll rounded-xl border border-slate-700 bg-slate-900">
+          <table className="responsive-table w-full min-w-[500px] text-left text-xs sm:min-w-full sm:text-sm">
+            <thead className="sticky top-0 z-10 border-b border-slate-700 bg-slate-800">
               <tr>
                 <SortHeader label="Date" active={sortKey === "date"} dir={sortDir} onClick={() => toggleSort("date")} />
                 <th className="px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-400">Competition</th>

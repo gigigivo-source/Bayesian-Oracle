@@ -253,7 +253,7 @@ function AccaContent({ slips, onRefresh }: { slips: Slip[]; onRefresh: () => voi
   return (
     <>
       {/* ── Summary Cards ─────────────────────────────────────────────────── */}
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-4">
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-4 lg:grid-cols-3 lg:gap-6 xl:grid-cols-4">
         <StatCard label="Total Slips" value={slips.length} sub={`${settled.length} settled · ${pending.length} pending`} tone="neutral" />
         <StatCard
           label="Win Rate"
@@ -275,7 +275,7 @@ function AccaContent({ slips, onRefresh }: { slips: Slip[]; onRefresh: () => voi
         />
       </div>
 
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-4">
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-4 lg:grid-cols-3 lg:gap-6 xl:grid-cols-4">
         <StatCard
           label="Avg Combined Odds"
           value={settled.length > 0 ? avgOdds.toFixed(2) : "—"}
@@ -283,7 +283,7 @@ function AccaContent({ slips, onRefresh }: { slips: Slip[]; onRefresh: () => voi
           tone="info"
         />
         <StatCard label="Avg Legs" value={avgLegs.toFixed(1)} sub={`across ${slips.length} slips`} tone="accent" />
-        <div className="flex flex-col justify-between rounded-xl border border-slate-700 bg-slate-900 p-4">
+        <div className="responsive-card flex flex-col justify-between rounded-lg border border-slate-700 bg-slate-800 transition-all duration-200 hover:-translate-y-2 hover:shadow-2xl">
           <span className="text-[11px] font-medium uppercase tracking-wider text-slate-400">Current Streak</span>
           <div className="mt-2">
             <StreakBadge count={streak.count} type={streak.type} />
@@ -292,7 +292,7 @@ function AccaContent({ slips, onRefresh }: { slips: Slip[]; onRefresh: () => voi
             {streak.type === "W" ? "winning slips" : streak.type === "L" ? "losing slips" : "no settled slips"}
           </div>
         </div>
-        <div className="flex flex-col justify-between rounded-xl border border-slate-700 bg-slate-900 p-4">
+        <div className="responsive-card flex flex-col justify-between rounded-lg border border-slate-700 bg-slate-800 transition-all duration-200 hover:-translate-y-2 hover:shadow-2xl">
           <span className="text-[11px] font-medium uppercase tracking-wider text-slate-400">Result Mix</span>
           <div className="mt-2 flex flex-wrap gap-1.5">
             <Pill tone="win">{won.length} W</Pill>
@@ -316,7 +316,7 @@ function AccaContent({ slips, onRefresh }: { slips: Slip[]; onRefresh: () => voi
           </button>
         }
       >
-        <div className="rounded-xl border border-slate-700 bg-slate-900 p-4">
+        <div className="responsive-card rounded-lg border border-slate-700 bg-slate-800 transition-all duration-200 hover:-translate-y-2 hover:shadow-2xl">
           <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
             <div className="flex items-center gap-3">
               <span className="font-mono text-xs text-slate-400">Final P&amp;L</span>
@@ -333,7 +333,7 @@ function AccaContent({ slips, onRefresh }: { slips: Slip[]; onRefresh: () => voi
       </Section>
 
       {/* ── Accuracy Breakdown ───────────────────────────────────────────── */}
-      <div className="grid grid-cols-1 gap-8 lg:grid-cols-2">
+      <div className="grid grid-cols-1 gap-4 md:gap-6 lg:grid-cols-2">
         <Section title="Win Rate by Slip Type" subtitle="which slip strategy converts best">
           <AccuracyBreakdown factors={typeFactors} />
         </Section>
@@ -351,9 +351,9 @@ function AccaContent({ slips, onRefresh }: { slips: Slip[]; onRefresh: () => voi
         subtitle={`${sortedSlips.length} slips · click a row to expand its legs · sorted by ${sortKey}`}
       >
         <div className="overflow-hidden rounded-xl border border-slate-700 bg-slate-900">
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-sm">
-              <thead className="border-b border-slate-700 bg-slate-800">
+          <div className="table-scroll">
+            <table className="responsive-table w-full min-w-[500px] text-left text-xs sm:min-w-full sm:text-sm">
+              <thead className="sticky top-0 z-10 border-b border-slate-700 bg-slate-800">
                 <tr>
                   <SortHeader label="Date" active={sortKey === "date"} dir={sortDir} onClick={() => toggleSort("date")} />
                   <th className="px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-400">Slip</th>
@@ -416,7 +416,7 @@ function AccaContent({ slips, onRefresh }: { slips: Slip[]; onRefresh: () => voi
                       {isOpen ? (
                         <tr key={`${s.id}-legs`} className="bg-slate-800">
                           <td colSpan={7} className="px-3 py-2">
-                            <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
+                            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                               {s.picks.map((leg, i) => {
                                 const lr = classifyOutcome(leg.outcome);
                                 const dotCls =
