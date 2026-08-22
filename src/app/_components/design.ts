@@ -129,6 +129,44 @@ export const CHIP_ON_CYAN = "border-l-cyan-400 bg-cyan-600 font-bold text-white 
 export const CHIP_ON_ROSE = "border-l-rose-400 bg-rose-600 font-bold text-white hover:bg-rose-500";
 export const CHIP_ON_VIOLET = CHIP_ON_AMBER;
 
+/* ═══ TYPE 7 · PREMIUM GLASS SURFACES — for header, chips, dropdowns ═══════ */
+
+export const GLASS_PANEL =
+  "bg-white/[0.03] border border-white/[0.08] backdrop-blur-2xl shadow-[0_0_30px_-10px_rgba(245,158,11,0.15)]";
+
+export const GLASS_PILL_CONTAINER =
+  "flex gap-1 rounded-full border border-white/[0.08] bg-white/[0.04] backdrop-blur-xl p-1 shadow-inner shadow-black/20";
+
+export const GLASS_DROPDOWN =
+  "bg-[#080a10]/95 backdrop-blur-2xl border border-white/[0.08] shadow-[0_30px_60px_-15px_rgba(0,0,0,0.85)]";
+
+export const GOLD_GLOW_LINE =
+  "absolute top-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-amber-400/60 to-transparent";
+
+/* ═══ TYPE 8 · PREMIUM CHIP / PILL TOKENS ═══════════════════════════════════ */
+
+export const CHIP_PREMIUM =
+  `${IX} inline-flex items-center gap-1.5 whitespace-nowrap rounded-full border border-white/[0.08] bg-white/[0.05] ` +
+  "hover:bg-white/[0.1] hover:border-white/[0.15] focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/60";
+
+export const CHIP_PREMIUM_ON_AMBER =
+  "bg-gradient-to-r from-[#F59E0B] to-[#FF8C00] border-amber-300/30 text-white font-bold shadow-[0_0_20px_-5px_rgba(245,158,11,0.5)]";
+
+export const CHIP_PREMIUM_ON_EMERALD =
+  "bg-gradient-to-r from-emerald-500 to-emerald-400 border-emerald-300/40 text-white font-bold shadow-[0_0_20px_-5px_rgba(16,185,129,0.5)]";
+
+/* ═══ TYPE 9 · NAV PILL PREMIUM ════════════════════════════════════════════ */
+
+export const NAV_PILL_PREMIUM =
+  `${IX} inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-4 py-2 text-sm font-medium tracking-wide ` +
+  "hover:scale-[1.03] active:scale-95 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/60";
+
+export const NAV_PILL_PREMIUM_OFF =
+  "bg-white/[0.06] text-slate-300 border border-transparent hover:bg-white/[0.1] hover:text-white hover:border-white/[0.08]";
+
+export const NAV_PILL_PREMIUM_ON =
+  `bg-gradient-to-br from-[#F59E0B] to-[#FF8C00] text-white font-bold shadow-[0_0_25px_-8px_rgba(245,158,11,0.55)] scale-[1.05]`;
+
 /* ═══ TYPE 6 · MENU / DROPDOWN ITEMS — smooth slide-in links ═══════════════ */
 
 /**
