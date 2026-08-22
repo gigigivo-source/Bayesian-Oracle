@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState, useCallback } from "react";
 import type { EngineResult, Market, DeepStatsVector } from "@/lib/engine/types";
 import type { FixtureLite, MatchSummary, TeamForm } from "@/lib/espn";
+import type { BookmakerOdds } from "@/lib/engine/value";
 import { ConfidenceBar, GradeBadge, MarketTable, Section, TeamBadge } from "./ui";
 import { EventIcon, OutcomeBadge } from "./Icons";
 import { CHIP, CHIP_OFF, CHIP_ON_AMBER, CHIP_ON_EMERALD, CHIP_ON_ROSE, OUTLINE_NEUTRAL } from "./design";
@@ -125,76 +126,149 @@ interface ValueBetData {
   provider: string;
 }
 
-interface MatchResponse {
+type RankingMode = 'A' | 'B' | 'C';
+
+/** A single ranking mode's prediction, plus its mode-specific value bets / boxscore. */
+interface RankingPayload {
+  prediction: EngineResult;
+  boxscore: Record<string, number> | null;
+  valueBets: ValueBetData[];
+}
+
+/**
+ * Response shape for the `?ranking=all` endpoint variant. Shared fields
+ * (fixture, summary, bookOdds, multiBookOdds) live at the top level; the
+ * per-mode prediction / boxscore / valueBets live under `rankings`.
+ */
+interface MatchAllRankingsResponse {
   fixture: FixtureLite;
   summary: MatchSummary | null;
-  prediction: EngineResult;
-  boxscore?: Record<string, number> | null;
-  valueBets?: ValueBetData[];
-  rankingMode?: 'A' | 'B' | 'C';
+  bookOdds: BookmakerOdds | null;
+  multiBookOdds: Array<{ bookmaker: string; homeOdds: number; drawOdds: number; awayOdds: number }>;
+  rankings: Record<RankingMode, RankingPayload>;
+}
+
+// ─── In-memory cache (per-eventId, 30-minute TTL) ────────────────────────────
+
+const RANKINGS_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+
+/** One cached entry — shared fields + every mode's prediction payload. */
+interface CachedRankings {
+  fixture: FixtureLite;
+  summary: MatchSummary | null;
+  bookOdds: BookmakerOdds | null;
+  multiBookOdds: MatchAllRankingsResponse["multiBookOdds"];
+  rankings: Record<RankingMode, RankingPayload>;
+  /** Epoch ms when this entry was last (re)hydrated from the API. */
+  timestamp: number;
+}
+
+const rankingsCache: Map<string, CachedRankings> = (typeof globalThis !== "undefined"
+  ? (globalThis as { __matchDetailRankingsCache?: Map<string, CachedRankings> }).__matchDetailRankingsCache
+  : undefined) ?? new Map<string, CachedRankings>();
+
+if (typeof globalThis !== "undefined") {
+  (globalThis as { __matchDetailRankingsCache?: Map<string, CachedRankings> }).__matchDetailRankingsCache = rankingsCache;
+}
+
+function getCachedRankings(eventId: string): CachedRankings | null {
+  const entry = rankingsCache.get(eventId);
+  if (!entry) return null;
+  if (Date.now() - entry.timestamp > RANKINGS_CACHE_TTL_MS) {
+    rankingsCache.delete(eventId);
+    return null;
+  }
+  return entry;
+}
+
+function setCachedRankings(entry: CachedRankings): void {
+  rankingsCache.set(entry.fixture.id, entry);
 }
 
 export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClose: () => void }) {
-  // Ranking mode toggle (A = Classic 11-factor, B = 12-factor, C = Hybrid)
-  type RankingMode = 'A' | 'B' | 'C';
-  const [rankingMode, setRankingMode] = useState<RankingMode>(() => {
+  // Selected ranking mode — A = Classic 11-factor, B = 12-Factor, C = Hybrid.
+  // Persisted in localStorage so the user's preference survives a refresh.
+  const [selectedMode, setSelectedMode] = useState<RankingMode>(() => {
     if (typeof window !== 'undefined') {
       const stored = localStorage.getItem('rankingMode');
       if (stored === 'A' || stored === 'B' || stored === 'C') return stored as RankingMode;
     }
     return 'B';
   });
-  const [isSwitching, setIsSwitching] = useState(false);
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
-      localStorage.setItem('rankingMode', rankingMode);
+      localStorage.setItem('rankingMode', selectedMode);
     }
-  }, [rankingMode]);
+  }, [selectedMode]);
 
-  // Response is keyed by the fixture it was fetched for, so loading/error states
-  // are derived and never need to be reset synchronously inside the effect.
-  const [response, setResponse] = useState<{ fixture: FixtureLite; data: MatchResponse | null; error: string | null; rankingMode: RankingMode } | null>(null);
+  // The cache holds the FULL `?ranking=all` response per eventId (30-min TTL).
+  // Once hydrated, the three pill chips switch between modes INSTANTLY without
+  // any network call.
+  const [cached, setCached] = useState<CachedRankings | null>(() => getCachedRankings(fixture.id));
+  const [loading, setLoading] = useState<boolean>(() => !getCachedRankings(fixture.id));
+  const [error, setError] = useState<string | null>(null);
+
   const [familyFilter, setFamilyFilter] = useState("ALL");
   const [showJson, setShowJson] = useState(false);
 
-  const fetchWithRanking = useCallback((mode: RankingMode) => {
-    setIsSwitching(true);
-    // Clear previous response for this fixture to show loading state immediately
-    setResponse(null);
-    fetch(`/api/match?ranking=${mode}`, {
+  /**
+   * Load (or re-load) the rankings payload for the current fixture. Uses the
+   * in-memory cache if it is fresh; otherwise issues a single `?ranking=all`
+   * request and stores the result.
+   */
+  const loadRankings = useCallback((fx: FixtureLite) => {
+    const existing = getCachedRankings(fx.id);
+    if (existing) {
+      setCached(existing);
+      setLoading(false);
+      setError(null);
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+    fetch(`/api/match?ranking=all`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ fixture }),
+      body: JSON.stringify({ fixture: fx }),
     })
       .then((r) => r.json())
-      .then((d: MatchResponse & { error?: string; rankingMode?: RankingMode }) => {
-        if (d.error) setResponse({ fixture, data: null, error: d.error, rankingMode: mode });
-        else setResponse({ fixture, data: d, error: null, rankingMode: mode });
+      .then((d: MatchAllRankingsResponse & { error?: string }) => {
+        if (d.error || !d.rankings) {
+          setError(d.error ?? "Oracle returned no rankings.");
+          setLoading(false);
+          return;
+        }
+        const entry: CachedRankings = {
+          fixture: d.fixture ?? fx,
+          summary: d.summary ?? null,
+          bookOdds: d.bookOdds ?? null,
+          multiBookOdds: d.multiBookOdds ?? [],
+          rankings: d.rankings,
+          timestamp: Date.now(),
+        };
+        setCachedRankings(entry);
+        setCached(entry);
+        setLoading(false);
       })
-      .catch(() => { setResponse({ fixture, data: null, error: "Failed to reach oracle.", rankingMode: mode }); })
-      .finally(() => setIsSwitching(false));
-  }, [fixture]);
+      .catch(() => {
+        setError("Failed to reach oracle.");
+        setLoading(false);
+      });
+  }, []);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    fetchWithRanking(rankingMode);
-  }, [fixture, rankingMode, fetchWithRanking]);
+    loadRankings(fixture);
+  }, [fixture, loadRankings]);
 
-  const toggleRanking = () => {
-    // Cycle A → B → C → A
-    const next: RankingMode = rankingMode === 'A' ? 'B' : rankingMode === 'B' ? 'C' : 'A';
-    setRankingMode(next);
-    // fetch will be triggered by useEffect, but also update immediately for visual feedback
-  };
-
-  const current = response && response.fixture === fixture ? response : null;
-  const loading = !current || isSwitching;
-  const data = current?.data ?? null;
-  const error = current?.error ?? null;
-
-  const result = data?.prediction ?? null;
-  const summary = data?.summary ?? null;
+  // Derived view for the currently-selected ranking mode — purely client-side.
+  const activePayload: RankingPayload | null = cached?.rankings[selectedMode] ?? null;
+  const result = activePayload?.prediction ?? null;
+  const summary = cached?.summary ?? null;
+  const valueBets = activePayload?.valueBets ?? [];
+  const boxscore = activePayload?.boxscore ?? null;
 
   const families = useMemo(() => (result ? Object.keys(result.familyCounts).sort() : []), [result]);
   const registry: Market[] = useMemo(() => {
@@ -216,19 +290,6 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
           <div className="flex items-center gap-3">
             <span className="inline-block h-2.5 w-2.5 rounded-full bg-emerald-400 animate-pulse" />
             <h2 className="font-mono text-sm font-bold text-amber-300">ĞIGI GIVØ · DEEP STATISTICAL ORACLE</h2>
-            <button
-              onClick={toggleRanking}
-              title="Switch between Classic calibration-heavy, 12-Factor balanced, and Hybrid combined ranking"
-              className={`ml-2 inline-flex items-center justify-center rounded-full px-4 py-1.5 text-xs font-bold tracking-wider text-white shadow-md transition-all duration-200 hover:scale-105 hover:shadow-lg ${
-                rankingMode === 'A'
-                  ? 'bg-amber-500 hover:bg-amber-400 shadow-amber-500/20'
-                  : rankingMode === 'B'
-                    ? 'bg-teal-600 hover:bg-teal-500 shadow-teal-600/20'
-                    : 'bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 shadow-purple-600/30'
-              }`}
-            >
-              {isSwitching ? '...' : rankingMode === 'A' ? 'Classic A' : rankingMode === 'B' ? '12-Factor B' : 'Hybrid C'}
-            </button>
           </div>
           <button
             onClick={onClose}
@@ -236,6 +297,37 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
           >
             ✕ Close
           </button>
+        </div>
+
+        {/* Three ranking-mode pill chips (always visible, instant switching) */}
+        <div
+          className="mb-4 flex items-center gap-2 rounded-lg border border-slate-800 bg-slate-900/60 p-2"
+          title="Choose ranking system"
+        >
+          <span className="hidden sm:inline-block font-mono text-[10px] uppercase tracking-wider text-slate-500 px-2">
+            Choose ranking system
+          </span>
+          <RankingChip
+            mode="A"
+            label="Classic A"
+            description="Classic 11-factor calibration"
+            active={selectedMode === 'A'}
+            onSelect={setSelectedMode}
+          />
+          <RankingChip
+            mode="B"
+            label="12-Factor B"
+            description="Balanced 12-factor"
+            active={selectedMode === 'B'}
+            onSelect={setSelectedMode}
+          />
+          <RankingChip
+            mode="C"
+            label="Hybrid C"
+            description="Hybrid (A + B averaged)"
+            active={selectedMode === 'C'}
+            onSelect={setSelectedMode}
+          />
         </div>
 
         {/* Match Score & Teams Header */}
@@ -456,14 +548,14 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
             </Section>
 
             {/* VALUE BETS */}
-            {data?.valueBets && data.valueBets.length > 0 && fixture.state === "pre" && (
+            {valueBets && valueBets.length > 0 && fixture.state === "pre" && (
               <Section
                 id="sec-value"
                 title="VALUE BETS — Edge Over Bookmaker"
                 subtitle={`Markets where oracle probability exceeds bookmaker implied probability`}
               >
                 <div className="space-y-2">
-                  {data.valueBets.filter(v => v.valueEdge > 0).slice(0, 8).map((v, i) => (
+                  {valueBets.filter(v => v.valueEdge > 0).slice(0, 8).map((v, i) => (
                     <div key={i} className="bg-slate-800 rounded-lg p-3 border border-emerald-500/20">
                       <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
                         <div>
@@ -587,7 +679,7 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
                 <div className="space-y-2">
                   {result.top10.map((m, i) => {
                     const bgColor = m.outcome === "HIT" ? "bg-emerald-500/5 border-emerald-500/30" : m.outcome === "MISS" ? "bg-rose-500/5 border-rose-500/30" : "bg-slate-800 border-slate-700";
-                    const bs = data?.boxscore;
+                    const bs = boxscore;
                     const actual = getActualStat(m.name, fixture, bs);
                     const line = parseFloat(m.name.split("O/U ")[1]);
                     return (
@@ -715,6 +807,55 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
 }
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
+
+/**
+ * One pill-shaped ranking-mode button. Three of these are always visible at
+ * the top of the match detail panel. The active chip is highlighted with a
+ * mode-specific color (Classic A = amber/gold, 12-Factor B = teal/blue,
+ * Hybrid C = purple/indigo); inactive chips are dimmed but clearly clickable
+ * with a hover effect. Switching is instant — no network call, no spinner.
+ */
+function RankingChip({
+  mode,
+  label,
+  description,
+  active,
+  onSelect,
+}: {
+  mode: RankingMode;
+  label: string;
+  description: string;
+  active: boolean;
+  onSelect: (mode: RankingMode) => void;
+}) {
+  // Color per mode — exactly matches the task spec:
+  //   A = amber/gold   B = teal/blue   C = purple/indigo
+  const ACTIVE_STYLE: Record<RankingMode, string> = {
+    A: "bg-gradient-to-r from-amber-500 to-yellow-500 text-white shadow-lg shadow-amber-500/40 ring-2 ring-amber-300/60",
+    B: "bg-gradient-to-r from-teal-500 to-cyan-600 text-white shadow-lg shadow-teal-500/40 ring-2 ring-cyan-300/60",
+    C: "bg-gradient-to-r from-purple-600 to-indigo-600 text-white shadow-lg shadow-purple-600/40 ring-2 ring-purple-300/60",
+  };
+  const INACTIVE_STYLE =
+    "bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-white border border-slate-700 hover:border-slate-500";
+
+  return (
+    <button
+      type="button"
+      onClick={() => onSelect(mode)}
+      title={`Choose ranking system — ${description}`}
+      aria-pressed={active}
+      className={`${IX_BASE} flex-1 sm:flex-none inline-flex items-center justify-center gap-1.5 whitespace-nowrap rounded-full px-4 py-2 text-xs font-bold tracking-wider transition-all duration-200 ${
+        active ? `${ACTIVE_STYLE[mode]} scale-105` : `${INACTIVE_STYLE} hover:scale-105`
+      }`}
+    >
+      {label}
+    </button>
+  );
+}
+
+/** Shared interaction baseline (matches the project's `IX` design token). */
+const IX_BASE =
+  "cursor-pointer select-none focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/60 active:scale-95";
 
 function DeepStatsDashboard({ stats, homeName, awayName }: { stats: DeepStatsVector; homeName: string; awayName: string }) {
   return (

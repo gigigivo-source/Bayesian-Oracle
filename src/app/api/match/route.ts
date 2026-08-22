@@ -97,57 +97,64 @@ async function fetchBoxscore(
 
 // ─── Main handler ─────────────────────────────────────────────────────────────
 
-async function handlePost(req: Request): Promise<Response> {
-  // Ranking mode: query param ?ranking=A|B|C overrides env var RANKING_MODE (default B)
-  // A = Classic 11-factor, B = 12-Factor, C = Hybrid (A+B averaged)
-  let rankingMode: RankingMode = 'B';
+/**
+ * Parse the `?ranking=` query param. Accepts "A", "B", "C", or the special
+ * "all" sentinel that triggers a single-response payload containing all three
+ * ranking modes (A Classic 11-factor, B 12-Factor, C Hybrid). Anything else
+ * falls back to the env-var default (B).
+ */
+type RankingRequest = RankingMode | "all";
+
+function parseRankingMode(req: Request): RankingRequest {
   try {
     const url = new URL(req.url);
     const q = url.searchParams.get('ranking');
-    if (q && (q.toUpperCase() === 'A' || q.toUpperCase() === 'B' || q.toUpperCase() === 'C')) {
-      rankingMode = q.toUpperCase() as RankingMode;
-    } else {
-      rankingMode = resolveRankingMode(undefined);
+    if (q) {
+      const upper = q.toUpperCase();
+      if (upper === 'A' || upper === 'B' || upper === 'C') return upper as RankingMode;
+      if (upper === 'ALL') return 'all';
     }
   } catch {
-    rankingMode = resolveRankingMode(undefined);
+    /* fall through */
   }
+  return resolveRankingMode(undefined);
+}
 
-  let fixture: FixtureLite;
-  try {
-    const body = await req.json() as { fixture?: FixtureLite };
-    fixture = body.fixture as FixtureLite;
-  } catch {
-    return Response.json({ error: "Invalid JSON body." }, { status: 400 });
-  }
+type EngineResult = Awaited<ReturnType<typeof runEngineFromRealWithProfiles>>;
+type MatchSummaryLite = Awaited<ReturnType<typeof fetchSummary>>;
 
-  if (!fixture?.id || !fixture?.leagueSlug || !fixture?.home || !fixture?.away) {
-    return Response.json({ error: "Missing fixture data." }, { status: 400 });
-  }
-  if (!LEAGUE_MAP[fixture.leagueSlug]) {
-    return Response.json({ error: "Unknown league." }, { status: 400 });
-  }
-
-  const summary = await fetchSummary(fixture.leagueSlug, fixture.id);
-
-  // For LIVE matches, fetch current in-play stats so the engine can calibrate
-  // against live reality
-  let liveStats: Record<string, number> | null = null;
-  if (fixture.state === "in") {
-    liveStats = await fetchBoxscore(fixture.leagueSlug, fixture.id);
-  }
-
-  // Override env var for this request so selector picks up the query param
+/**
+ * Run the engine for a single ranking mode. Sets RANKING_MODE for the duration
+ * of the call so the selector picks up the requested mode via
+ * `resolveRankingMode`. The env var is restored in a `finally` block.
+ */
+async function runEngineForMode(
+  fixture: FixtureLite,
+  summary: MatchSummaryLite,
+  liveStats: Record<string, number> | null,
+  rankingMode: RankingMode,
+): Promise<EngineResult> {
   const prevRankingEnv = process.env.RANKING_MODE;
   process.env.RANKING_MODE = rankingMode;
-  let prediction;
   try {
-    prediction = await runEngineFromRealWithProfiles(fixture, summary, liveStats);
+    return await runEngineFromRealWithProfiles(fixture, summary, liveStats);
   } finally {
     if (prevRankingEnv === undefined) delete process.env.RANKING_MODE;
     else process.env.RANKING_MODE = prevRankingEnv;
   }
+}
 
+/**
+ * Persist one prediction + performance log row, and evaluate the post-match
+ * top-10 against the real boxscore when applicable. Wraps the side effects the
+ * single-mode route has always performed, so the engine output reaches the
+ * DB unchanged. Failures here are logged and swallowed — they must never
+ * fail the request.
+ */
+async function persistAndEvaluate(
+  fixture: FixtureLite,
+  prediction: EngineResult,
+): Promise<Record<string, number> | null> {
   // ── Post-match: fetch real boxscore, verify Top-10, log performance ──────────
   let boxscore: Record<string, number> | null = null;
   if (fixture.state === "post" && fixture.home.score !== null) {
@@ -210,6 +217,21 @@ async function handlePost(req: Request): Promise<Response> {
     console.error("persist match prediction failed", e);
   }
 
+  return boxscore;
+}
+
+/**
+ * Layer 1 + 2 + 3 bookmaker-odds enrichment. Shared across all three ranking
+ * modes for a given fixture (the odds do not depend on which ranking engine
+ * was used). Returns { bookOdds, multiBookOdds }.
+ */
+async function enrichBookmakerOdds(
+  fixture: FixtureLite,
+  summary: MatchSummaryLite,
+): Promise<{
+  bookOdds: BookmakerOdds | null;
+  multiBookOdds: Array<{ bookmaker: string; homeOdds: number; drawOdds: number; awayOdds: number }>;
+}> {
   // ── Bookmaker odds — layer 1: ESPN summary ───────────────────────────────────
   let bookOdds: BookmakerOdds | null = null;
   if (summary?.odds) {
@@ -257,7 +279,7 @@ async function handlePost(req: Request): Promise<Response> {
   }
 
   // ── Bookmaker odds — layer 3: API-Football multi-book (optional) ─────────────
-  let multiBookOdds: Array<{ bookmaker: string; homeOdds: number; drawOdds: number; awayOdds: number }> = [];
+  const multiBookOdds: Array<{ bookmaker: string; homeOdds: number; drawOdds: number; awayOdds: number }> = [];
   if (fixture.state === "pre") {
     try {
       const apiFootballId = await searchFixture(
@@ -268,7 +290,7 @@ async function handlePost(req: Request): Promise<Response> {
       if (apiFootballId) {
         const multiOdds = await getMultiBookOdds(apiFootballId);
         if (multiOdds) {
-          multiBookOdds = multiOdds.bookmakers;
+          multiBookOdds.push(...multiOdds.bookmakers);
           // Prefer Pinnacle (sharpest market); fall back to first bookmaker
           const pinnacle = multiOdds.bookmakers.find((b) => b.bookmaker === "Pinnacle");
           const best     = pinnacle ?? multiOdds.bookmakers[0];
@@ -290,26 +312,120 @@ async function handlePost(req: Request): Promise<Response> {
     }
   }
 
-  // ── Value bet detection ───────────────────────────────────────────────────────
-  let valueBets: ValueBet[] = [];
-  if (bookOdds && fixture.state === "pre") {
-    valueBets = findValueBets(
-      prediction.markets,
-      bookOdds,
-      fixture.home.name,
-      fixture.away.name,
-    );
+  return { bookOdds, multiBookOdds };
+}
+
+/** Detect value bets for a given ranking mode's market set. */
+function computeValueBets(
+  prediction: EngineResult,
+  bookOdds: BookmakerOdds | null,
+  fixture: FixtureLite,
+): ValueBet[] {
+  if (!bookOdds || fixture.state !== "pre") return [];
+  return findValueBets(
+    prediction.markets,
+    bookOdds,
+    fixture.home.name,
+    fixture.away.name,
+  );
+}
+
+async function handlePost(req: Request): Promise<Response> {
+  // Ranking mode: ?ranking=A|B|C|all — A = Classic 11-factor, B = 12-Factor,
+  // C = Hybrid (A+B averaged), "all" returns every mode in a single response.
+  const rankingRequest = parseRankingMode(req);
+  const isAll = rankingRequest === 'all';
+  const rankingMode: RankingMode = isAll ? 'B' : rankingRequest;
+
+  let fixture: FixtureLite;
+  try {
+    const body = await req.json() as { fixture?: FixtureLite };
+    fixture = body.fixture as FixtureLite;
+  } catch {
+    return Response.json({ error: "Invalid JSON body." }, { status: 400 });
   }
 
+  if (!fixture?.id || !fixture?.leagueSlug || !fixture?.home || !fixture?.away) {
+    return Response.json({ error: "Missing fixture data." }, { status: 400 });
+  }
+  if (!LEAGUE_MAP[fixture.leagueSlug]) {
+    return Response.json({ error: "Unknown league." }, { status: 400 });
+  }
+
+  const summary = await fetchSummary(fixture.leagueSlug, fixture.id);
+
+  // For LIVE matches, fetch current in-play stats so the engine can calibrate
+  // against live reality
+  let liveStats: Record<string, number> | null = null;
+  if (fixture.state === "in") {
+    liveStats = await fetchBoxscore(fixture.leagueSlug, fixture.id);
+  }
+
+  // Bookmaker odds are ranking-independent — fetched once and shared.
+  const { bookOdds, multiBookOdds } = await enrichBookmakerOdds(fixture, summary);
+
+  // ── Run the engine for one (single mode) or three (all) ranking modes ───────
+  const modes: RankingMode[] = isAll ? ['A', 'B', 'C'] : [rankingMode];
+  const predictions = new Map<RankingMode, EngineResult>();
+  for (const mode of modes) {
+    predictions.set(mode, await runEngineForMode(fixture, summary, liveStats, mode));
+  }
+
+  // ── Side effects (DB writes + post-match evaluation) per ranking mode ───────
+  // We keep the same behaviour as the single-mode route: every mode's result
+  // is evaluated against the boxscore and persisted, so DB consumers see one
+  // row per (eventId, rankingMode).
+  const boxscores = new Map<RankingMode, Record<string, number> | null>();
+  for (const mode of modes) {
+    const pred = predictions.get(mode);
+    if (!pred) continue;
+    boxscores.set(mode, await persistAndEvaluate(fixture, pred));
+  }
+
+  // ── Value bet detection (per mode; markets differ per ranking) ───────────────
+  const valueBetsByMode = new Map<RankingMode, ValueBet[]>();
+  for (const mode of modes) {
+    const pred = predictions.get(mode);
+    if (!pred) continue;
+    valueBetsByMode.set(mode, computeValueBets(pred, bookOdds, fixture));
+  }
+
+  // ── ?ranking=all — return every mode in a single payload ────────────────────
+  if (isAll) {
+    const rankings = {} as Record<RankingMode, {
+      prediction: EngineResult;
+      boxscore: Record<string, number> | null;
+      valueBets: ValueBet[];
+      rankingMode: RankingMode;
+    }>;
+    for (const mode of modes) {
+      rankings[mode] = {
+        prediction:  predictions.get(mode)!,
+        boxscore:    boxscores.get(mode) ?? null,
+        valueBets:   valueBetsByMode.get(mode) ?? [],
+        rankingMode: mode,
+      };
+    }
+    return Response.json({
+      fixture,
+      summary,
+      bookOdds,
+      multiBookOdds,
+      rankings,
+    });
+  }
+
+  // ── Single-mode response (legacy shape, unchanged) ──────────────────────────
+  const singleMode = modes[0];
   return Response.json({
     fixture,
     summary,
-    prediction,
-    boxscore,
+    prediction: predictions.get(singleMode),
+    boxscore:   boxscores.get(singleMode) ?? null,
     bookOdds,
-    valueBets,
+    valueBets:  valueBetsByMode.get(singleMode) ?? [],
     multiBookOdds,
-    rankingMode,
+    rankingMode: singleMode,
   });
 }
 
