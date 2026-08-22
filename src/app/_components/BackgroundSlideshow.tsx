@@ -61,7 +61,7 @@ export function BackgroundSlideshow() {
   }, [failed]);
 
   return (
-    <div className="pointer-events-none fixed inset-0 z-0 min-h-[100svh] overflow-hidden bg-slate-950" aria-hidden>
+    <div className="fixed inset-0 z-0 overflow-hidden" aria-hidden>
       {SLIDES.map((s, i) => (
         <div
           key={i}
@@ -73,7 +73,7 @@ export function BackgroundSlideshow() {
             <img
               src={s.url}
               alt="Football"
-              className="h-full w-full max-w-none object-cover object-center brightness-[0.3] sm:brightness-[0.35]"
+              className="h-full w-full object-cover brightness-[0.35]"
               loading={i < 2 ? "eager" : "lazy"}
               onError={() => {
                 setFailed((f) => {

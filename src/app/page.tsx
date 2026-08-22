@@ -118,11 +118,11 @@ export default function Home() {
     }
   }
 
-  if (hasPin === null) return <div className="flex min-h-screen items-center justify-center bg-slate-950 p-4 sm:p-6 lg:p-8"><div className="text-amber-300 font-mono animate-pulse">Loading...</div></div>;
+  if (hasPin === null) return <div className="min-h-screen bg-[#0F1117] flex items-center justify-center"><div className="text-amber-300 font-mono animate-pulse">Loading...</div></div>;
 
   if (!authed) return (
-    <div className="flex min-h-screen items-center justify-center bg-slate-950 p-4 sm:p-6 lg:p-8">
-      <div className="responsive-card w-full max-w-sm rounded-lg bg-slate-900 p-4 text-center sm:rounded-xl sm:p-6 lg:p-8">
+    <div className="min-h-screen bg-[#0F1117] flex items-center justify-center">
+      <div className="bg-slate-900 rounded-xl p-8 w-full max-w-sm text-center">
         <div className="w-[60px] h-[60px] rounded-lg mx-auto mb-4 bg-[#F59E0B] border border-[#FF8C00] flex items-center justify-center">
           <span className="text-2xl">⚽</span>
         </div>
@@ -144,15 +144,15 @@ export default function Home() {
   );
 
   return (
-    <div className={`min-h-screen bg-slate-950 text-slate-100 ${tab === "top" ? "relative" : ""}`}>
+    <div className={`min-h-screen text-slate-100 ${tab !== "top" ? "bg-[#0F1117]" : ""}`}>
       {tab === "top" && <BackgroundSlideshow />}
       <div className="relative z-10">
         <Header tab={tab} setTab={setTab} />
 
         {/* LEAGUE CHIPS — only on Top Matches tab */}
         {tab === "top" && (
-          <div className="scrollbar-none sticky top-[64px] z-30 overflow-x-auto bg-slate-950 px-4 py-2 md:top-[69px] md:px-6 lg:top-[88px] lg:px-8">
-            <div className="mx-auto flex max-w-7xl items-center gap-2 sm:gap-3">
+          <div className="sticky top-[99px] z-30 bg-[#0F1117] py-2 px-4 overflow-x-auto scrollbar-none">
+            <div className="mx-auto flex max-w-7xl items-center gap-3">
               <button
                 onClick={() => { setSelectedLeagueSlug(null); setShowTodayOnly(false); }}
                 className={`${CHIP} px-4 py-2 text-sm font-medium tracking-wide ${
@@ -196,7 +196,7 @@ export default function Home() {
           </div>
         )}
 
-        <main className="mx-auto max-w-7xl space-y-4 px-4 py-4 sm:px-6 sm:py-6 md:space-y-6 lg:space-y-8 lg:px-8 lg:py-8">
+        <main className="mx-auto max-w-7xl px-4 py-8">
           <ErrorBoundary key={tab}>
             {tab === "top" && (
               <TopFeed
@@ -230,7 +230,7 @@ export default function Home() {
           </ErrorBoundary>
         ) : null}
 
-        <footer className="bg-slate-900 px-4 py-6 text-center font-mono text-xs text-slate-300 sm:px-6 lg:px-8">
+        <footer className="bg-slate-900 py-4 text-center text-xs text-slate-300 font-mono">
           ĞIGI GIVØ Proprietary Sportsbook Engine · Real Data Mesh · Zero Simulation
         </footer>
       </div>
@@ -265,7 +265,7 @@ function LivePage({ onSelect }: { onSelect: (fx: FixtureLite) => void }) {
   if (loading) return <LoadingGrid label="Checking live matches worldwide…" />;
 
   return (
-    <div className="space-y-4 sm:space-y-6 lg:space-y-8">
+    <div className="space-y-8">
       {live.length > 0 ? (
         <div>
           <div className="mb-3 inline-flex items-center gap-2 bg-slate-900 rounded-lg px-3 py-1.5">
@@ -275,14 +275,14 @@ function LivePage({ onSelect }: { onSelect: (fx: FixtureLite) => void }) {
             </span>
             <h2 className="text-sm font-bold text-white">LIVE NOW — {live.length} Match{live.length > 1 ? "es" : ""} In-Play</h2>
           </div>
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-4 lg:grid-cols-3 lg:gap-6">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {live.map((fx) => (
               <FixtureCard key={`live-${fx.id}`} fx={fx} onSelect={onSelect} live />
             ))}
           </div>
         </div>
       ) : (
-        <div className="responsive-card bg-slate-900 rounded-lg p-10 text-center">
+        <div className="bg-slate-900 rounded-lg p-10 text-center">
           <div className="text-lg font-bold text-slate-300 mb-2">No matches are live right now</div>
           <p className="text-sm text-slate-400 font-mono">Live scores auto-refresh every 15 seconds. Check back during match hours.</p>
         </div>
@@ -293,7 +293,7 @@ function LivePage({ onSelect }: { onSelect: (fx: FixtureLite) => void }) {
           <div className="mb-3 inline-block bg-slate-900 rounded-lg px-3 py-1.5">
             <h2 className="text-sm font-bold text-white">Today&apos;s Schedule & Recent Results</h2>
           </div>
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-4 lg:grid-cols-3 lg:gap-6 xl:grid-cols-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
             {recent.map((fx) => (
               <FixtureCard key={`recent-${fx.leagueSlug}-${fx.id}`} fx={fx} onSelect={onSelect} />
             ))}
@@ -315,111 +315,84 @@ function Header({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
   ];
 
   const menuTabs: Array<{ id: Tab; label: string; desc: string }> = [
-    { id: "accumulators", label: "Accumulators", desc: "High-hit, value bets & bankroll" },
-    { id: "performance", label: "Performance", desc: "Track record & accuracy stats" },
-    { id: "backtest", label: "⚡ Backtest", desc: "Live engine accuracy on real finished matches" },
-    { id: "valuebets", label: "💰 Value Bets", desc: "Track value bets & post-match P&L verification" },
-    { id: "dailypicks", label: "Daily Picks", desc: "Today's best picks across all leagues" },
-    { id: "results", label: "Results", desc: "Recent finished matches across leagues" },
-    { id: "verified", label: "Verification", desc: "Post-match auto-verified oracle picks" },
-    { id: "oracle", label: "Oracle Search", desc: "Search & analyse any fixture" },
-    { id: "oddscalc", label: "Odds Calculator", desc: "Convert odds, dutching, hedging" },
-    { id: "chat", label: "Ask Anything", desc: "Web search chat assistant" },
+    { id: "accumulators", label: "Accumulators",  desc: "High-hit, value bets & bankroll" },
+    { id: "performance",  label: "Performance",   desc: "Track record & accuracy stats" },
+    { id: "backtest",     label: "⚡ Backtest",    desc: "Live engine accuracy on real finished matches" },
+    { id: "valuebets",    label: "💰 Value Bets", desc: "Track value bets & post-match P&L verification" },
+    { id: "dailypicks",   label: "Daily Picks",   desc: "Today's best picks across all leagues" },
+    { id: "results",      label: "Results",       desc: "Recent finished matches across leagues" },
+    { id: "verified",     label: "Verification",  desc: "Post-match auto-verified oracle picks" },
+    { id: "oracle",       label: "Oracle Search", desc: "Search & analyse any fixture" },
+    { id: "oddscalc",     label: "Odds Calculator", desc: "Convert odds, dutching, hedging" },
+    { id: "chat",         label: "Ask Anything",  desc: "Web search chat assistant" },
   ];
 
-  const activeInMenu = menuTabs.some((item) => item.id === tab);
-  const selectTab = (nextTab: Tab) => {
-    setTab(nextTab);
-    setMenuOpen(false);
-  };
+  const activeInMenu = menuTabs.some((t) => t.id === tab);
 
   return (
-    <header className="sticky top-0 z-40 bg-slate-900 shadow-lg">
-      <div className="relative mx-auto grid max-w-7xl grid-cols-[1fr_auto] items-center gap-3 px-4 py-3 text-sm md:grid-cols-[1fr_auto_1fr] md:px-6 md:py-3 lg:px-8 lg:py-4 lg:text-base">
-        <button
-          type="button"
-          onClick={() => selectTab("top")}
-          className="flex min-w-0 cursor-pointer select-none items-center gap-2 text-left transition-all duration-200 hover:opacity-90 active:scale-[0.98] sm:gap-3"
-          aria-label="Open Top Matches"
-        >
-          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-orange-500 bg-amber-500 text-xl" aria-hidden="true">⚽</span>
-          <span className="min-w-0">
-            <span className="block truncate bg-gradient-to-r from-amber-500 to-orange-500 bg-clip-text font-mono text-base font-extrabold tracking-tight text-transparent lg:text-lg">
-              ĞIGI GIVØ
-            </span>
-            <span className="hidden truncate font-mono text-xs text-slate-400 sm:block">Bayesian Oracle · Deep Statistical Engine</span>
-          </span>
-        </button>
-
-        <nav className="hidden items-center justify-center gap-2 rounded-full border border-slate-700 bg-slate-800 p-1.5 shadow-inner shadow-slate-950/40 md:flex" aria-label="Primary navigation">
-          {mainTabs.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              onClick={() => selectTab(item.id)}
-              className={`${NAV_PILL} px-3 py-2 text-sm font-medium tracking-wide lg:px-4 lg:text-base ${
-                tab === item.id ? NAV_PILL_ON_AMBER : NAV_PILL_OFF
-              }`}
-            >
-              {item.label}
-            </button>
-          ))}
-        </nav>
-
-        <div className="flex items-center justify-end">
-          <button
-            type="button"
-            onClick={() => setMenuOpen((open) => !open)}
-            aria-expanded={menuOpen}
-            aria-controls="app-menu"
-            aria-haspopup="menu"
-            aria-label={menuOpen ? "Close menu" : "Open menu"}
-            className={`${NAV_PILL} px-3 py-2 text-sm font-semibold lg:px-4 lg:text-base ${
-              activeInMenu ? NAV_PILL_ON_AMBER : NAV_PILL_OFF
-            }`}
-          >
-            <span aria-hidden="true" className="text-base leading-none">{menuOpen ? "✕" : "☰"}</span>
-            <span>Menu</span>
-          </button>
-        </div>
-
-        {menuOpen ? (
-          <div
-            id="app-menu"
-            role="menu"
-            className="absolute left-4 right-4 top-full z-50 mt-2 max-h-[calc(100vh-5rem)] overflow-y-auto rounded-xl border border-slate-700 bg-slate-950 p-2 shadow-2xl shadow-slate-950/60 md:left-auto md:right-6 md:w-72 lg:right-8"
-          >
-            <div className="grid grid-cols-2 gap-2 border-b border-slate-700 pb-2 md:hidden">
-              {mainTabs.map((item) => (
-                <button
-                  key={`mobile-${item.id}`}
-                  type="button"
-                  role="menuitem"
-                  onClick={() => selectTab(item.id)}
-                  className={`${NAV_PILL} w-full px-3 py-2 text-sm ${tab === item.id ? NAV_PILL_ON_AMBER : NAV_PILL_OFF}`}
-                >
-                  {item.label}
-                </button>
-              ))}
+    <>
+      <header className="sticky top-0 z-40 bg-slate-900 shadow-lg ">
+        <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3 px-4 py-2 sm:pr-28">
+          <div className="flex items-center gap-3">
+            <div className="h-[38px] w-[38px] rounded-lg bg-[#F59E0B] border border-[#FF8C00] flex items-center justify-center">
+              <span className="text-xl">⚽</span>
             </div>
-            <div className="mt-2 space-y-1 md:mt-0">
-              {menuTabs.map((item) => (
-                <button
-                  key={item.id}
-                  type="button"
-                  role="menuitem"
-                  onClick={() => selectTab(item.id)}
-                  className={`${MENU_ITEM} w-full px-4 py-3 text-left ${tab === item.id ? MENU_ITEM_ON : ""}`}
-                >
-                  <span className="block text-sm font-medium">{item.label}</span>
-                  <span className={`mt-0.5 block text-xs ${tab === item.id ? "text-slate-300" : "text-slate-400"}`}>{item.desc}</span>
-                </button>
-              ))}
+            <div>
+              <h1 className="bg-gradient-to-r from-[#F59E0B] to-[#FF8C00] bg-clip-text font-mono text-lg font-extrabold tracking-tight text-transparent">
+                ĞIGI GIVØ
+              </h1>
+              <p className="text-[10px] text-slate-400 font-mono">Bayesian Oracle · Deep Statistical Engine</p>
             </div>
           </div>
-        ) : null}
+          <nav className="flex gap-2 rounded-full border border-slate-700 bg-slate-800 p-1.5 items-center  shadow-inner shadow-slate-950/40">
+            {mainTabs.map((t) => (
+              <button
+                key={t.id}
+                onClick={() => { setTab(t.id); setMenuOpen(false); }}
+                className={`${NAV_PILL} px-4 py-2 text-sm font-medium tracking-wide ${
+                  tab === t.id ? NAV_PILL_ON_AMBER : NAV_PILL_OFF
+                }`}
+              >
+                {t.label}
+              </button>
+            ))}
+          </nav>
+        </div>
+      </header>
+
+      {/* Menu button — fixed to the top-right corner of the viewport */}
+      <div className="fixed top-4 right-4 z-50">
+        <button
+          onClick={() => setMenuOpen((o) => !o)}
+          aria-expanded={menuOpen}
+          aria-haspopup="menu"
+          aria-label="Menu"
+          className={`${NAV_PILL} px-4 py-2.5 text-sm font-semibold ${
+            activeInMenu ? NAV_PILL_ON_AMBER : NAV_PILL_OFF
+          }`}
+        >
+          <span aria-hidden="true" className="text-base leading-none">
+            {menuOpen ? "✕" : "☰"}
+          </span>
+          <span className="hidden sm:inline">Menu</span>
+        </button>
+
+        {menuOpen && (
+          <div className="absolute right-0 top-full mt-2 w-56 max-h-[calc(100vh-5rem)] overflow-y-auto rounded-xl bg-[#0F1117] border border-slate-700 shadow-2xl shadow-slate-950/60 p-1.5 space-y-0.5 ">
+            {menuTabs.map((t) => (
+              <button
+                key={t.id}
+                onClick={() => { setTab(t.id); setMenuOpen(false); }}
+                className={`${MENU_ITEM} w-full px-4 py-3 text-left ${tab === t.id ? MENU_ITEM_ON : ""}`}
+              >
+                <div className="text-sm font-medium">{t.label}</div>
+                <div className={`text-[10px] ${tab === t.id ? "text-slate-300" : "text-slate-400"}`}>{t.desc}</div>
+              </button>
+            ))}
+          </div>
+        )}
       </div>
-    </header>
+    </>
   );
 }
 
@@ -433,7 +406,7 @@ function LoadingGrid({ label }: { label: string }) {
         </span>
         <span className="animate-pulse font-mono text-sm text-amber-300">{label}</span>
       </div>
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-4 lg:grid-cols-3 lg:gap-6 xl:grid-cols-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
         {Array.from({ length: 8 }).map((_, i) => (
           <div key={i} className="overflow-hidden rounded-lg border border-slate-700 bg-slate-900 p-3">
             <div className="mb-3 flex items-center justify-between">
@@ -553,7 +526,7 @@ function TopFeed({
     : 0;
 
   return (
-    <div className="space-y-4 sm:space-y-6 lg:space-y-8">
+    <div className="space-y-10">
       {/* Active filter banners */}
       {showTodayOnly && (
         <div className="flex items-center justify-between rounded-lg bg-emerald-500/10 border border-emerald-500/30 px-4 py-2 text-sm text-emerald-200">
@@ -584,9 +557,9 @@ function TopFeed({
         <LoadingGrid label="Loading fixture schedule…" />
       )}
       {filterSlug && !showTodayOnly && !chipLoading && chipFixtures && (
-        <div className="space-y-4 sm:space-y-6 lg:space-y-8">
+        <div className="space-y-6">
           {chipFixtures.upcoming.length === 0 && chipFixtures.results.length === 0 ? (
-            <div className="responsive-card bg-slate-900 rounded-lg p-8 text-center">
+            <div className="bg-slate-900 rounded-lg p-8 text-center">
               <div className="text-2xl mb-3">📅</div>
               <div className="text-sm font-bold text-slate-300 mb-2">{chipFixtures.label}</div>
               <p className="text-xs text-slate-400 font-mono">No fixtures found. This league may be in pre-season or the schedule hasn&apos;t been released yet.</p>
@@ -598,7 +571,7 @@ function TopFeed({
                   <div className="inline-block bg-slate-900 rounded-lg px-3 py-1.5">
                     <h2 className="text-sm font-bold text-white">{chipFixtures.label} — Upcoming ({chipFixtures.upcoming.length})</h2>
                   </div>
-                  <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-4 lg:grid-cols-3 lg:gap-6 xl:grid-cols-4">
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
                     {chipFixtures.upcoming.map((fx) => (
                       <FixtureCard key={fx.id} fx={fx} onSelect={onSelect} />
                     ))}
@@ -610,7 +583,7 @@ function TopFeed({
                   <div className="inline-block bg-slate-900 rounded-lg px-3 py-1.5">
                     <h2 className="text-sm font-bold text-white">Recent Results ({chipFixtures.results.length})</h2>
                   </div>
-                  <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-4 lg:grid-cols-3 lg:gap-6 xl:grid-cols-4">
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
                     {chipFixtures.results.map((fx) => (
                       <FixtureCard key={fx.id} fx={fx} onSelect={onSelect} />
                     ))}
@@ -645,7 +618,7 @@ function TopFeed({
                     </span>
                   )}
                 </div>
-                <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-4 lg:grid-cols-3 lg:gap-6 xl:grid-cols-4">
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
                   {[...block.upcoming, ...block.results].map((fx) => (
                     <FixtureCard key={`today-extra-fx-${fx.id}`} fx={fx} onSelect={onSelect} />
                   ))}
@@ -657,7 +630,7 @@ function TopFeed({
       })()}
 
       {filteredBlocks.length === 0 && showTodayOnly && (
-        <div className="responsive-card bg-slate-900 rounded-lg p-10 text-center">
+        <div className="bg-slate-900 rounded-lg p-10 text-center">
           <div className="text-lg font-bold text-slate-300 mb-2">No matches found for today</div>
           <p className="text-sm text-slate-400 font-mono">Check back later or view all upcoming matches.</p>
         </div>
@@ -689,7 +662,7 @@ function TopFeed({
             </div>
 
             {up.length > 0 && (
-              <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-4 lg:grid-cols-3 lg:gap-6 xl:grid-cols-4">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
                 {up.map((fx) => (
                   <FixtureCard key={`${block.slug}-${fx.id}`} fx={fx} onSelect={onSelect} />
                 ))}
@@ -701,7 +674,7 @@ function TopFeed({
                 <div className="mb-2 inline-block bg-slate-800 rounded px-2 py-1 text-[11px] font-mono text-slate-400">
                   Recent Results
                 </div>
-                <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-4 lg:grid-cols-3 lg:gap-6 xl:grid-cols-4">
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
                   {res.map((fx) => (
                     <FixtureCard key={`res-${block.slug}-${fx.id}`} fx={fx} onSelect={onSelect} />
                   ))}
@@ -717,7 +690,7 @@ function TopFeed({
           <div className="mb-3 inline-block bg-slate-900 rounded-lg px-3 py-1.5">
             <h2 className="text-sm font-bold text-white">More Leagues</h2>
           </div>
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-4 lg:grid-cols-3 lg:gap-6 xl:grid-cols-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
             {data.extra.flatMap((b) => b.fixtures).slice(0, 12).map((fx) => (
               <FixtureCard key={`extra-${fx.leagueSlug}-${fx.id}`} fx={fx} onSelect={onSelect} />
             ))}
@@ -812,13 +785,13 @@ function LeagueBrowser({ onSelect }: { onSelect: (fx: FixtureLite) => void }) {
       </aside>
       <div id="league-fixtures" className="scroll-mt-24">
         {!activeLeague ? (
-          <div className="responsive-card bg-slate-900 rounded-lg p-10 text-center text-slate-400 font-mono">
+          <div className="bg-slate-900 rounded-lg p-10 text-center text-slate-400 font-mono">
             Select a league to load fixtures & results.
           </div>
         ) : loadingFx || !loaded ? (
           <LoadingGrid label={`Loading ${activeLeague.name}…`} />
         ) : upcoming.length === 0 && results.length === 0 ? (
-          <div className="responsive-card bg-slate-900 rounded-lg p-8 text-center">
+          <div className="bg-slate-900 rounded-lg p-8 text-center">
             <div className="text-2xl mb-3">📅</div>
             <div className="text-sm font-bold text-slate-300 mb-2">{activeLeague.name}</div>
             <p className="text-xs text-slate-400 font-mono max-w-xs mx-auto">
@@ -828,13 +801,13 @@ function LeagueBrowser({ onSelect }: { onSelect: (fx: FixtureLite) => void }) {
             </p>
           </div>
         ) : (
-          <div className="space-y-4 sm:space-y-6 lg:space-y-8">
+          <div className="space-y-8">
             {upcoming.length > 0 && (
               <div>
                 <div className="mb-3 inline-block bg-slate-900 rounded-lg px-3 py-1.5">
                   <h2 className="text-sm font-bold text-white">Upcoming — {activeLeague.name} ({upcoming.length})</h2>
                 </div>
-                <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-4 lg:grid-cols-3 lg:gap-6">
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
                   {upcoming.map((fx) => (
                     <FixtureCard key={fx.id} fx={fx} onSelect={onSelect} />
                   ))}
@@ -847,7 +820,7 @@ function LeagueBrowser({ onSelect }: { onSelect: (fx: FixtureLite) => void }) {
                 <div className="mb-3 inline-block bg-slate-900 rounded-lg px-3 py-1.5">
                   <h2 className="text-sm font-bold text-white">Recent Results — {activeLeague.name} ({results.length})</h2>
                 </div>
-                <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-4 lg:grid-cols-3 lg:gap-6">
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
                   {results.map((fx) => (
                     <FixtureCard key={`res-${fx.id}`} fx={fx} onSelect={onSelect} />
                   ))}
@@ -883,13 +856,13 @@ interface StandingsEntry {
 // Hoisted out of StandingsView so it isn't re-created on every render
 function StandingsTable({ entries, activeName }: { entries: StandingsEntry[]; activeName: string }) {
   return (
-    <div className="table-scroll rounded-lg bg-slate-900">
+    <div className="overflow-x-auto rounded-lg bg-slate-900">
       <div className="px-3 py-2 bg-slate-800 border-b border-slate-700 flex items-center gap-2">
         <span className="text-xs font-bold text-amber-300 font-mono">{activeName}</span>
         <span className="text-[10px] text-slate-500 font-mono">— {entries.length} teams</span>
       </div>
-      <table className="responsive-table w-full min-w-[500px] text-left text-xs font-mono sm:min-w-full sm:text-sm">
-        <thead className="sticky top-0 z-10 bg-slate-800 text-xs uppercase tracking-wider text-slate-400">
+      <table className="w-full text-left text-sm font-mono">
+        <thead className="bg-slate-800 text-[11px] uppercase tracking-wider text-slate-400">
           <tr>
             <th className="px-3 py-2 w-8">#</th>
             <th className="px-3 py-2">Team</th>
@@ -1018,7 +991,7 @@ function StandingsView() {
   return (
     <div className="space-y-4">
       {/* Header */}
-      <div className="responsive-card bg-slate-900 rounded-lg p-4">
+      <div className="bg-slate-900 rounded-lg p-4">
         <h2 className="text-base font-bold text-white">Standings</h2>
         <p className="text-xs text-slate-400 mt-0.5">243 leagues, cups & tournaments worldwide</p>
       </div>
@@ -1083,7 +1056,7 @@ function StandingsView() {
           {loading ? (
             <LoadingGrid label={`Loading ${activeName} standings…`} />
           ) : entries.length === 0 ? (
-            <div className="responsive-card bg-slate-900 rounded-lg p-8 text-center">
+            <div className="bg-slate-900 rounded-lg p-8 text-center">
               <div className="text-2xl mb-3">{standingsMeta?.knockoutFormat ? "🏆" : "📊"}</div>
               <div className="text-base font-bold text-slate-300 mb-2">{activeName}</div>
               {standingsMeta?.message ? (
@@ -1137,7 +1110,7 @@ function ManualOracle() {
 
   return (
     <div className="space-y-4">
-      <div className="responsive-card bg-slate-900 rounded-lg p-4">
+      <div className="bg-slate-900 rounded-lg p-4">
         <h2 className="text-base font-bold text-white">Oracle Search</h2>
         <p className="text-xs text-slate-400 mt-1">Search for any team, league, or match to run the oracle</p>
       </div>
@@ -1155,7 +1128,7 @@ function ManualOracle() {
       </div>
 
       {searchResults.length > 0 && !selectedFx && (
-        <div className="responsive-card bg-slate-800 border border-slate-700 rounded-2xl overflow-hidden p-1.5 space-y-0.5">
+        <div className="bg-slate-800 border border-slate-700 rounded-2xl overflow-hidden p-1.5 space-y-0.5">
           {searchResults.map((fx) => (
             <button
               key={`${fx.leagueSlug}-${fx.id}`}
@@ -1179,7 +1152,7 @@ function ManualOracle() {
       )}
 
       {query.length >= 2 && searchResults.length === 0 && !searching && (
-        <div className="responsive-card bg-slate-900 rounded-lg p-6 text-center text-slate-400 text-sm font-mono">
+        <div className="bg-slate-900 rounded-lg p-6 text-center text-slate-400 text-sm font-mono">
           No matches found for &quot;{query}&quot;
         </div>
       )}
@@ -1221,7 +1194,7 @@ function VerifiedPage() {
 
   if (matches.length === 0) {
     return (
-      <div className="responsive-card bg-slate-900 rounded-lg p-10 text-center">
+      <div className="bg-slate-900 rounded-lg p-10 text-center">
         <div className="text-lg font-bold text-slate-300 mb-2">No finished matches to verify</div>
         <p className="text-sm text-slate-400 font-mono">Check back after matches have been completed today.</p>
       </div>
@@ -1232,8 +1205,8 @@ function VerifiedPage() {
   const totalEval = matches.reduce((s, m) => s + m.evaluatedCount, 0);
 
   return (
-    <div className="space-y-4 sm:space-y-6 lg:space-y-8">
-      <div className="responsive-card bg-slate-900 rounded-lg p-5">
+    <div className="space-y-8">
+      <div className="bg-slate-900 rounded-lg p-5">
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div>
             <h2 className="text-lg font-extrabold text-emerald-300 font-mono flex items-center gap-2">
@@ -1333,7 +1306,7 @@ function ResultsPage({ onSelect }: { onSelect: (fx: FixtureLite) => void }) {
   useEffect(() => { fetchResults(null); }, [fetchResults]);
 
   return (
-    <div className="space-y-4 sm:space-y-6 lg:space-y-8">
+    <div className="space-y-6">
       <div className="flex flex-wrap gap-1.5">
         <button
           onClick={() => loadResults(null)}
@@ -1360,7 +1333,7 @@ function ResultsPage({ onSelect }: { onSelect: (fx: FixtureLite) => void }) {
       {loading ? (
         <LoadingGrid label="Loading recent results…" />
       ) : results.length === 0 ? (
-        <div className="responsive-card bg-slate-900 rounded-lg p-10 text-center">
+        <div className="bg-slate-900 rounded-lg p-10 text-center">
           <div className="text-lg font-bold text-slate-300 mb-2">No recent results found</div>
           <p className="text-sm text-slate-400 font-mono">Try a different league or check back later.</p>
         </div>
@@ -1369,7 +1342,7 @@ function ResultsPage({ onSelect }: { onSelect: (fx: FixtureLite) => void }) {
           <div className="mb-3 inline-block bg-slate-900 rounded-lg px-3 py-1.5">
             <h2 className="text-sm font-bold text-white">Recent Results — {results.length} matches</h2>
           </div>
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-4 lg:grid-cols-3 lg:gap-6 xl:grid-cols-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
             {results.map((fx) => (
               <FixtureCard key={`res-${fx.leagueSlug}-${fx.id}`} fx={fx} onSelect={onSelect} />
             ))}
@@ -1431,8 +1404,8 @@ function ValueBetsPage() {
   if (loading) return <LoadingGrid label="Loading value bet tracker…" />;
 
   return (
-    <div className="space-y-4 sm:space-y-6 lg:space-y-8">
-      <div className="responsive-card bg-slate-900 rounded-lg p-4 flex flex-wrap items-center justify-between gap-3">
+    <div className="space-y-6">
+      <div className="bg-slate-900 rounded-lg p-4 flex flex-wrap items-center justify-between gap-3">
         <div>
           <h2 className="text-base font-bold text-white">💰 Value Bet Tracker</h2>
           <p className="text-xs text-slate-400 mt-1">Post-match P&L verification — oracle edge vs real outcomes</p>
@@ -1455,7 +1428,7 @@ function ValueBetsPage() {
       )}
 
       {stats && stats.total > 0 && (
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-4 lg:grid-cols-3 lg:gap-6 xl:grid-cols-4">
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-7">
           {[
             { label: "Total Bets",  val: String(stats.total),          color: "text-white" },
             { label: "Won",         val: String(stats.won),            color: "text-emerald-300" },
@@ -1474,7 +1447,7 @@ function ValueBetsPage() {
       )}
 
       {bets.length === 0 ? (
-        <div className="responsive-card bg-slate-900 rounded-lg p-10 text-center">
+        <div className="bg-slate-900 rounded-lg p-10 text-center">
           <div className="text-2xl mb-3">💰</div>
           <div className="text-base font-bold text-slate-300 mb-2">No value bets tracked yet</div>
           <p className="text-xs text-slate-400 font-mono max-w-sm mx-auto">
@@ -1492,9 +1465,9 @@ function ValueBetsPage() {
               <span className="text-slate-400">P&L: <strong className={(stats?.totalPnl ?? 0) >= 0 ? "text-emerald-300" : "text-rose-300"}>{(stats?.totalPnl ?? 0) >= 0 ? "+" : ""}${(stats?.totalPnl ?? 0).toFixed(2)}</strong></span>
             </div>
           </div>
-          <div className="table-scroll rounded-lg bg-slate-900">
-            <table className="responsive-table w-full min-w-[500px] text-xs sm:min-w-full sm:text-sm">
-              <thead className="sticky top-0 z-10 border-b border-slate-700 bg-slate-800 text-xs uppercase text-slate-400">
+          <div className="bg-slate-900 rounded-lg overflow-hidden">
+            <table className="w-full text-xs">
+              <thead className="bg-slate-800 text-[10px] uppercase text-slate-400 border-b border-slate-700">
                 <tr>
                   <th className="px-3 py-2 text-left">Match</th>
                   <th className="px-3 py-2 text-left">Market</th>
@@ -1629,9 +1602,9 @@ function BacktestDashboard() {
   }
 
   return (
-    <div className="space-y-4 sm:space-y-6 lg:space-y-8">
+    <div className="space-y-6">
       {/* Header */}
-      <div className="responsive-card bg-slate-900 rounded-lg p-4">
+      <div className="bg-slate-900 rounded-lg p-4">
         <h2 className="text-base font-bold text-white flex items-center gap-2">
           <span className="text-amber-400">⚡</span> Live Backtest Engine
         </h2>
@@ -1642,7 +1615,7 @@ function BacktestDashboard() {
       </div>
 
       {/* Controls */}
-      <div className="responsive-card bg-slate-900 rounded-lg p-4 space-y-4">
+      <div className="bg-slate-900 rounded-lg p-4 space-y-4">
         <div className="flex flex-wrap gap-3 items-center">
           {/* Days */}
           <div>
@@ -1698,7 +1671,7 @@ function BacktestDashboard() {
       {ran && aggregate && (
         <>
           {/* Summary cards */}
-          <div className="responsive-card bg-slate-900 rounded-lg p-4 space-y-4">
+          <div className="bg-slate-900 rounded-lg p-4 space-y-4">
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-bold text-white">
                 Results — {aggregate.matchesAnalysed} matches · last {aggregate.daysWindow} days
@@ -1709,7 +1682,7 @@ function BacktestDashboard() {
             </div>
 
             {/* Tier accuracy grid */}
-            <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-4 lg:grid-cols-3 lg:gap-6 xl:grid-cols-4">
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
               <AccuracyBadge pct={aggregate.top1.hitRate}  label={`Top 1 (${aggregate.top1.hits}/${aggregate.top1.matchesWithPick})`} />
               <AccuracyBadge pct={aggregate.top3.totalPicks > 0 ? aggregate.top3.totalHits / aggregate.top3.totalPicks : 0}  label={`Top 3 Avg ${aggregate.top3.avgHits.toFixed(1)}/3`} />
               <AccuracyBadge pct={aggregate.top5.totalPicks > 0 ? aggregate.top5.totalHits / aggregate.top5.totalPicks : 0}  label={`Top 5 Avg ${aggregate.top5.avgHits.toFixed(1)}/5`} />
@@ -1870,7 +1843,7 @@ function BacktestDashboard() {
       )}
 
       {!ran && !loading && (
-        <div className="responsive-card bg-slate-900 rounded-lg p-12 text-center">
+        <div className="bg-slate-900 rounded-lg p-12 text-center">
           <div className="text-4xl mb-4">⚡</div>
           <div className="text-lg font-bold text-slate-300 mb-2">Backtest Engine Ready</div>
           <p className="text-sm text-slate-400 font-mono max-w-md mx-auto">
@@ -1948,12 +1921,12 @@ function PerformanceDashboard() {
 
   if (!data || data.totalMatches === 0) {
     return (
-      <div className="space-y-4 sm:space-y-6 lg:space-y-8">
-        <div className="responsive-card bg-slate-900 rounded-lg p-4">
+      <div className="space-y-6">
+        <div className="bg-slate-900 rounded-lg p-4">
           <h2 className="text-base font-bold text-white">ORACLE PERFORMANCE TRACKER</h2>
           <p className="text-xs text-slate-400 mt-1">Track record of every post-match verification</p>
         </div>
-        <div className="responsive-card bg-slate-900 rounded-lg p-10 text-center">
+        <div className="bg-slate-900 rounded-lg p-10 text-center">
           <div className="text-lg font-bold text-slate-300 mb-2">No verified matches yet</div>
           <p className="text-sm text-slate-400 font-mono">
             Tap any finished match to run the oracle. Post-match verification results will appear here.
@@ -1967,8 +1940,8 @@ function PerformanceDashboard() {
   const accaPerf = data.accumulatorPerformance?.all ?? null;
 
   return (
-    <div className="space-y-4 sm:space-y-6 lg:space-y-8">
-      <div className="responsive-card bg-slate-900 rounded-lg p-4 flex flex-wrap items-center justify-between gap-3">
+    <div className="space-y-6">
+      <div className="bg-slate-900 rounded-lg p-4 flex flex-wrap items-center justify-between gap-3">
         <div>
           <h2 className="text-base font-bold text-white">ORACLE PERFORMANCE TRACKER</h2>
           <p className="text-xs text-slate-400 mt-1">
@@ -1989,22 +1962,22 @@ function PerformanceDashboard() {
       {activeSubTab === "accuracy" && accuracy && (
         <div className="space-y-4">
           {/* Accuracy summary cards */}
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-4 lg:grid-cols-3 lg:gap-6 xl:grid-cols-4">
-            <div className="responsive-card bg-slate-900 rounded-lg p-3 text-center border border-emerald-500/20">
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <div className="bg-slate-900 rounded-lg p-3 text-center border border-emerald-500/20">
               <div className={`text-2xl font-extrabold font-mono ${(accuracy.cumulative?.accuracy ?? 0) >= 0.90 ? "text-emerald-300" : (accuracy.cumulative?.accuracy ?? 0) >= 0.75 ? "text-amber-300" : "text-rose-300"}`}>
                 {accuracy.cumulative?.accuracyPct ?? "—"}
               </div>
               <div className="text-[10px] text-slate-400 mt-0.5">30-Day Accuracy</div>
             </div>
-            <div className="responsive-card bg-slate-900 rounded-lg p-3 text-center">
+            <div className="bg-slate-900 rounded-lg p-3 text-center">
               <div className="text-2xl font-extrabold font-mono text-cyan-300">{accuracy.rolling7d?.accuracyPct ?? "—"}</div>
               <div className="text-[10px] text-slate-400 mt-0.5">Last 7 Days</div>
             </div>
-            <div className="responsive-card bg-slate-900 rounded-lg p-3 text-center">
+            <div className="bg-slate-900 rounded-lg p-3 text-center">
               <div className="text-2xl font-extrabold font-mono text-white">{accuracy.cumulative?.matches ?? 0}</div>
               <div className="text-[10px] text-slate-400 mt-0.5">Matches Logged</div>
             </div>
-            <div className="responsive-card bg-slate-900 rounded-lg p-3 text-center">
+            <div className="bg-slate-900 rounded-lg p-3 text-center">
               <div className={`text-lg font-extrabold font-mono ${accuracy.cumulative?.trend?.includes("↑") ? "text-emerald-300" : accuracy.cumulative?.trend?.includes("↓") ? "text-rose-300" : "text-amber-300"}`}>
                 {accuracy.cumulative?.trend ?? "—"}
               </div>
@@ -2013,7 +1986,7 @@ function PerformanceDashboard() {
           </div>
           {/* Daily bar chart (text-based) */}
           {accuracy.daily && accuracy.daily.length > 0 && (
-            <div className="responsive-card bg-slate-900 rounded-lg p-4">
+            <div className="bg-slate-900 rounded-lg p-4">
               <div className="text-xs font-bold text-white font-mono mb-3">DAILY ACCURACY (last 30 days)</div>
               <div className="flex items-end gap-1 h-20">
                 {accuracy.daily.slice(-30).map((day, i) => {
@@ -2043,7 +2016,7 @@ function PerformanceDashboard() {
 
       {activeSubTab === "calibration" && calibData && (
         <div className="space-y-4">
-          <div className="responsive-card bg-slate-900 rounded-lg p-4">
+          <div className="bg-slate-900 rounded-lg p-4">
             <div className="text-xs font-bold text-white font-mono mb-3">
               SELF-TUNING CALIBRATION — Empirical vs Model Reliability
             </div>
@@ -2051,9 +2024,9 @@ function PerformanceDashboard() {
               Based on {calibData.families?.reduce((s,f)=>s+f.total,0) ?? 0} verified picks from performance log.
               Green = increase reliability, Red = decrease, Grey = stable.
             </p>
-            <div className="table-scroll">
-              <table className="responsive-table w-full min-w-[500px] text-xs font-mono sm:min-w-full sm:text-sm">
-                <thead className="sticky top-0 z-10 border-b border-slate-700 bg-slate-800 text-xs uppercase text-slate-400">
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs font-mono">
+                <thead className="text-[10px] uppercase text-slate-400 border-b border-slate-700">
                   <tr>
                     <th className="text-left py-2 px-2">Family</th>
                     <th className="text-center py-2">Picks</th>
@@ -2085,7 +2058,7 @@ function PerformanceDashboard() {
         </div>
       )}
 
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-4 lg:grid-cols-3 lg:gap-6 xl:grid-cols-4">
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
         <StatCard label="Overall Accuracy" value={`${(data.overallAccuracy * 100).toFixed(1)}%`} sub={`${data.totalHits}H ${data.totalMisses}M / ${data.totalVerified} verified`} color={data.overallAccuracy >= 0.8 ? "text-emerald-300" : data.overallAccuracy >= 0.6 ? "text-amber-300" : "text-rose-300"} />
         <StatCard label="Total Matches" value={String(data.totalMatches)} sub={`${data.perfectMatches} perfect, ${data.totalMatches - data.perfectMatches} with misses`} color="text-amber-300" />
         <StatCard label="Picks Breakdown" value={`${data.totalHits}H / ${data.totalMisses}M`} sub={`${data.totalPending} pending to resolve`} color="text-white" />
@@ -2097,7 +2070,7 @@ function PerformanceDashboard() {
           <div className="mb-2 inline-block bg-slate-900 rounded-lg px-3 py-1.5">
             <h3 className="text-sm font-bold text-white">Tier Win Rate <span className="text-slate-400 font-normal">— clean-sweep (all legs hit)</span></h3>
           </div>
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-4 lg:grid-cols-3 lg:gap-6 xl:grid-cols-4">
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
             {[
               { key: "top1" as const, label: "TOP 1", desc: "Single safest pick" },
               { key: "top3" as const, label: "TOP 3", desc: "Safest treble" },
@@ -2128,7 +2101,7 @@ function PerformanceDashboard() {
 
       {data.top1.total > 0 && (
         <div className="grid grid-cols-3 gap-4">
-          <div className="responsive-card bg-slate-900 rounded-lg p-4">
+          <div className="bg-slate-900 rounded-lg p-4">
             <div className="text-xs text-slate-400 font-mono mb-1">TOP 1 PICK ACCURACY</div>
             <div className={`text-2xl font-extrabold font-mono ${data.top1.accuracy >= 0.8 ? "text-emerald-300" : data.top1.accuracy >= 0.6 ? "text-amber-300" : "text-rose-300"}`}>
               {(data.top1.accuracy * 100).toFixed(0)}%
@@ -2138,7 +2111,7 @@ function PerformanceDashboard() {
               <div className="h-full bg-emerald-500 rounded-full" style={{ width: `${data.top1.accuracy * 100}%` }} />
             </div>
           </div>
-          <div className="responsive-card bg-slate-900 rounded-lg p-4">
+          <div className="bg-slate-900 rounded-lg p-4">
             <div className="text-xs text-slate-400 font-mono mb-1">TOP 3 PICKS ACCURACY</div>
             <div className={`text-2xl font-extrabold font-mono ${data.top3.accuracy >= 0.8 ? "text-emerald-300" : data.top3.accuracy >= 0.6 ? "text-amber-300" : "text-rose-300"}`}>
               {(data.top3.accuracy * 100).toFixed(0)}%
@@ -2148,7 +2121,7 @@ function PerformanceDashboard() {
               <div className="h-full bg-emerald-500 rounded-full" style={{ width: `${data.top3.accuracy * 100}%` }} />
             </div>
           </div>
-          <div className="responsive-card bg-slate-900 rounded-lg p-4">
+          <div className="bg-slate-900 rounded-lg p-4">
             <div className="text-xs text-slate-400 font-mono mb-1">TOP 10 PICKS ACCURACY</div>
             <div className={`text-2xl font-extrabold font-mono ${data.top10.accuracy >= 0.8 ? "text-emerald-300" : data.top10.accuracy >= 0.6 ? "text-amber-300" : "text-rose-300"}`}>
               {(data.top10.accuracy * 100).toFixed(0)}%
@@ -2166,9 +2139,9 @@ function PerformanceDashboard() {
           <div className="mb-2 inline-block bg-slate-900 rounded-lg px-3 py-1.5">
             <h3 className="text-sm font-bold text-white">Accuracy by League</h3>
           </div>
-          <div className="table-scroll rounded-lg bg-slate-900">
-            <table className="responsive-table w-full min-w-[500px] text-xs font-mono sm:min-w-full sm:text-sm">
-              <thead className="sticky top-0 z-10 bg-slate-800 text-xs uppercase text-slate-400">
+          <div className="bg-slate-900 rounded-lg overflow-hidden">
+            <table className="w-full text-sm font-mono">
+              <thead className="bg-slate-800 text-[11px] uppercase text-slate-400">
                 <tr>
                   <th className="px-3 py-2 text-left">League</th>
                   <th className="px-3 py-2 text-center">Matches</th>
@@ -2202,26 +2175,26 @@ function PerformanceDashboard() {
           <div className="mb-2 inline-block bg-slate-900 rounded-lg px-3 py-1.5">
             <h3 className="text-sm font-bold text-white">Accumulator Performance</h3>
           </div>
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-4 lg:grid-cols-3 lg:gap-6 xl:grid-cols-4 mb-3">
-            <div className="responsive-card bg-slate-900 rounded-lg p-3 text-center">
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-5 mb-3">
+            <div className="bg-slate-900 rounded-lg p-3 text-center">
               <div className="text-xl font-extrabold font-mono text-amber-300">{accaPerf.total}</div>
               <div className="text-[10px] text-slate-400">Total Slips</div>
             </div>
-            <div className="responsive-card bg-slate-900 rounded-lg p-3 text-center">
+            <div className="bg-slate-900 rounded-lg p-3 text-center">
               <div className="text-xl font-extrabold font-mono text-emerald-300">{accaPerf.won}</div>
               <div className="text-[10px] text-slate-400">Won</div>
             </div>
-            <div className="responsive-card bg-slate-900 rounded-lg p-3 text-center">
+            <div className="bg-slate-900 rounded-lg p-3 text-center">
               <div className="text-xl font-extrabold font-mono text-rose-300">{accaPerf.lost}</div>
               <div className="text-[10px] text-slate-400">Lost</div>
             </div>
-            <div className="responsive-card bg-slate-900 rounded-lg p-3 text-center">
+            <div className="bg-slate-900 rounded-lg p-3 text-center">
               <div className={`text-xl font-extrabold font-mono ${accaPerf.winRate >= 50 ? "text-emerald-300" : "text-rose-300"}`}>
                 {accaPerf.winRate.toFixed(0)}%
               </div>
               <div className="text-[10px] text-slate-400">Win Rate</div>
             </div>
-            <div className="responsive-card bg-slate-900 rounded-lg p-3 text-center">
+            <div className="bg-slate-900 rounded-lg p-3 text-center">
               <div className={`text-xl font-extrabold font-mono ${accaPerf.roi >= 0 ? "text-emerald-300" : "text-rose-300"}`}>
                 {accaPerf.roi >= 0 ? "+" : ""}{accaPerf.roi.toFixed(1)}%
               </div>
@@ -2356,7 +2329,7 @@ function PerformanceDashboard() {
       {/* Accuracy Trend Panel */}
       {activeSubTab === "accuracy" && accuracy && (
         <div className="space-y-4">
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-4 lg:grid-cols-3 lg:gap-6 xl:grid-cols-4">
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
             {[
               { label: "30-Day Accuracy", val: accuracy.cumulative?.accuracyPct ?? "—", color: (accuracy.cumulative?.accuracy ?? 0) >= 0.90 ? "text-emerald-300" : "text-amber-300" },
               { label: "Last 7 Days",     val: accuracy.rolling7d?.accuracyPct ?? "—", color: "text-cyan-300" },
@@ -2370,7 +2343,7 @@ function PerformanceDashboard() {
             ))}
           </div>
           {accuracy.daily && accuracy.daily.length > 0 && (
-            <div className="responsive-card bg-slate-900 rounded-lg p-4">
+            <div className="bg-slate-900 rounded-lg p-4">
               <div className="text-xs font-bold text-white font-mono mb-3">DAILY ACCURACY — last {accuracy.daily.length} days</div>
               <div className="flex items-end gap-0.5 h-24">
                 {accuracy.daily.slice(-30).map((day, i) => {
@@ -2395,12 +2368,12 @@ function PerformanceDashboard() {
 
       {/* Calibration Panel */}
       {activeSubTab === "calibration" && calibData && (
-        <div className="responsive-card bg-slate-900 rounded-lg p-4">
+        <div className="bg-slate-900 rounded-lg p-4">
           <div className="text-xs font-bold text-white font-mono mb-2">SELF-TUNING CALIBRATION</div>
           <p className="text-[11px] text-slate-400 mb-3">Empirical hit rates vs current model reliability coefficients. Updates automatically from performance log.</p>
-          <div className="table-scroll">
-            <table className="responsive-table w-full min-w-[500px] text-xs font-mono sm:min-w-full sm:text-sm">
-              <thead className="sticky top-0 z-10 border-b border-slate-700 bg-slate-800 text-xs uppercase text-slate-400">
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs font-mono">
+              <thead className="text-[10px] uppercase text-slate-400 border-b border-slate-700">
                 <tr>
                   <th className="text-left py-2 px-2">Family</th>
                   <th className="text-center py-2">Picks</th>
@@ -2436,7 +2409,7 @@ function PerformanceDashboard() {
 
 function StatCard({ label, value, sub, color }: { label: string; value: string; sub: string; color: string }) {
   return (
-    <div className="responsive-card bg-slate-900 rounded-lg p-4 text-center">
+    <div className="bg-slate-900 rounded-lg p-4 text-center">
       <div className={`text-2xl font-extrabold font-mono ${color}`}>{value}</div>
       <div className="text-xs text-white font-medium mt-1">{label}</div>
       <div className="text-[10px] text-slate-400 mt-0.5">{sub}</div>
@@ -2573,7 +2546,7 @@ function AccumulatorPage() {
   return (
     <div className="space-y-4">
       {/* Header + stats */}
-      <div className="responsive-card bg-slate-900 rounded-lg p-4">
+      <div className="bg-slate-900 rounded-lg p-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h2 className="text-base font-bold text-white">ACCUMULATORS</h2>
@@ -2614,7 +2587,7 @@ function AccumulatorPage() {
       {/* ── HIGH HIT ── */}
       {accaTab === "highhit" && (
         accas.filter(a => a.type !== "value").length === 0 ? (
-          <div className="responsive-card bg-slate-900 rounded-lg p-10 text-center text-slate-400 text-sm font-mono">No accumulators available right now. Check back on match day.</div>
+          <div className="bg-slate-900 rounded-lg p-10 text-center text-slate-400 text-sm font-mono">No accumulators available right now. Check back on match day.</div>
         ) : (
           <div className="space-y-4">
             {accas.filter(a => a.type !== "value").map((acca, idx) => (
@@ -2627,7 +2600,7 @@ function AccumulatorPage() {
       {/* ── VALUE BETS ── */}
       {accaTab === "value" && (
         valueAccas.length === 0 ? (
-          <div className="responsive-card bg-slate-900 rounded-lg p-10 text-center text-slate-400 text-sm font-mono">No value bet accumulators found. Check back closer to match kick-off.</div>
+          <div className="bg-slate-900 rounded-lg p-10 text-center text-slate-400 text-sm font-mono">No value bet accumulators found. Check back closer to match kick-off.</div>
         ) : (
           <div className="space-y-4">
             {valueAccas.map((acca, idx) => (
@@ -2641,7 +2614,7 @@ function AccumulatorPage() {
       {accaTab === "slips" && (
         <div className="space-y-3">
           {savedSlips.length === 0 ? (
-            <div className="responsive-card bg-slate-900 rounded-lg p-10 text-center">
+            <div className="bg-slate-900 rounded-lg p-10 text-center">
               <div className="text-2xl mb-3">📋</div>
               <div className="text-sm font-bold text-slate-300 mb-2">No slips tracked yet</div>
               <p className="text-xs text-slate-400 font-mono">Click &quot;Track Slip&quot; on any accumulator to start tracking.</p>
@@ -2656,9 +2629,9 @@ function AccumulatorPage() {
 
       {/* ── PERFORMANCE ── */}
       {accaTab === "performance" && (
-        <div className="space-y-4 sm:space-y-6 lg:space-y-8">
+        <div className="space-y-6">
           {/* Stats grid */}
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-4 lg:grid-cols-3 lg:gap-6 xl:grid-cols-4">
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
             {[
               { label: "Total Slips",  val: String(savedSlips.length),          color: "text-white" },
               { label: "Won",          val: String(wonSlips.length),            color: "text-emerald-300" },
@@ -2689,7 +2662,7 @@ function AccumulatorPage() {
               </div>
             </div>
           ) : (
-            <div className="responsive-card bg-slate-900 rounded-lg p-6 text-center text-slate-400 text-sm font-mono">
+            <div className="bg-slate-900 rounded-lg p-6 text-center text-slate-400 text-sm font-mono">
               Performance data builds automatically as slips are verified after matches.
             </div>
           )}
@@ -2964,14 +2937,14 @@ function ChatAssistant() {
 
   return (
     <div className="space-y-4">
-      <div className="responsive-card bg-slate-900 rounded-lg p-4">
+      <div className="bg-slate-900 rounded-lg p-4">
         <h2 className="text-base font-bold text-white">Ask Anything</h2>
         <p className="text-xs text-slate-400 mt-1">Web search assistant — ask about players, transfers, stats, match previews, or anything football related</p>
       </div>
 
       <div className="space-y-3 min-h-[200px] max-h-[60vh] overflow-y-auto">
         {messages.length === 0 && (
-          <div className="responsive-card bg-slate-800 rounded-lg p-6 text-center text-slate-400 text-sm">
+          <div className="bg-slate-800 rounded-lg p-6 text-center text-slate-400 text-sm">
             <p className="mb-3">Ask me anything about football. For example:</p>
             <div className="flex flex-wrap justify-center gap-2">
               {["Who is the top scorer in World Cup 2026?", "Arsenal latest transfer news", "Mbappe career stats", "La Liga standings 2026"].map((q) => (
@@ -3017,20 +2990,20 @@ function ChatAssistant() {
 
         {loading && (
           <div className="flex justify-start">
-            <div className="responsive-card bg-slate-900 border border-slate-700 rounded-lg p-3 text-sm text-slate-400 animate-pulse font-mono">
+            <div className="bg-slate-900 border border-slate-700 rounded-lg p-3 text-sm text-slate-400 animate-pulse font-mono">
               Searching the web...
             </div>
           </div>
         )}
       </div>
 
-      <div className="flex flex-col gap-2 sm:flex-row">
+      <div className="flex gap-2">
         <input
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter") send(); }}
           placeholder="Ask anything about football..."
-          className="min-w-0 flex-1 rounded-lg border border-slate-700 bg-slate-900 px-4 py-3 text-sm text-slate-100 outline-none focus:border-amber-400 font-mono"
+          className="flex-1 rounded-lg border border-slate-700 bg-slate-900 px-4 py-3 text-sm text-slate-100 outline-none focus:border-amber-400 font-mono"
           disabled={loading}
         />
         <button
@@ -3100,19 +3073,19 @@ function BankrollTracker() {
 
   if (data && data.entries.length === 0) {
     return (
-      <div className="space-y-4 sm:space-y-6 lg:space-y-8">
-        <div className="responsive-card bg-slate-900 rounded-lg p-4">
+      <div className="space-y-6">
+        <div className="bg-slate-900 rounded-lg p-4">
           <h2 className="text-base font-bold text-white">Bankroll Tracker</h2>
           <p className="text-xs text-slate-400 mt-1">Enter your betting account balance to start tracking</p>
         </div>
-        <div className="responsive-card bg-slate-900 rounded-lg p-6">
+        <div className="bg-slate-900 rounded-lg p-6">
           <div className="text-sm font-bold text-white mb-2">What is your current betting account balance?</div>
           <p className="text-xs text-slate-400 mb-4">Enter the total amount currently in your betting account.</p>
           <div className="flex gap-2 items-center">
             <span className="text-2xl font-bold text-amber-300 font-mono">$</span>
             <input value={accountBalance} onChange={e => setAccountBalance(e.target.value)}
               placeholder="e.g. 500" type="number" step="0.01"
-              className="min-w-0 flex-1 rounded-lg border border-slate-700 bg-slate-800 px-4 py-3 text-xl text-white outline-none focus:border-amber-400 font-mono" />
+              className="flex-1 rounded-lg border border-slate-700 bg-slate-800 px-4 py-3 text-xl text-white outline-none focus:border-amber-400 font-mono" />
             <button onClick={setInitialBalance}
               className={`${ACTION_AMBER} px-6 py-3 text-sm`}>
               Start Tracking
@@ -3124,36 +3097,36 @@ function BankrollTracker() {
   }
 
   return (
-    <div className="space-y-4 sm:space-y-6 lg:space-y-8">
-      <div className="responsive-card bg-slate-900 rounded-lg p-4">
+    <div className="space-y-6">
+      <div className="bg-slate-900 rounded-lg p-4">
         <h2 className="text-base font-bold text-white">Bankroll Tracker</h2>
         <p className="text-xs text-slate-400 mt-1">Track your betting account balance, bets, wins and ROI</p>
       </div>
 
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-4 lg:grid-cols-3 lg:gap-6 xl:grid-cols-4">
-        <div className="responsive-card bg-slate-900 rounded-lg p-3 text-center">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <div className="bg-slate-900 rounded-lg p-3 text-center">
           <div className="text-xl font-extrabold font-mono text-amber-300">${(data?.balance ?? 0).toFixed(2)}</div>
           <div className="text-[10px] text-slate-400">Current Balance</div>
         </div>
-        <div className="responsive-card bg-slate-900 rounded-lg p-3 text-center">
+        <div className="bg-slate-900 rounded-lg p-3 text-center">
           <div className={`text-xl font-extrabold font-mono ${(data?.profitLoss ?? 0) >= 0 ? "text-emerald-300" : "text-rose-300"}`}>
             {(data?.profitLoss ?? 0) >= 0 ? "+" : ""}{(data?.profitLoss ?? 0).toFixed(2)}
           </div>
           <div className="text-[10px] text-slate-400">Profit / Loss</div>
         </div>
-        <div className="responsive-card bg-slate-900 rounded-lg p-3 text-center">
+        <div className="bg-slate-900 rounded-lg p-3 text-center">
           <div className={`text-xl font-extrabold font-mono ${(data?.roi ?? 0) >= 0 ? "text-emerald-300" : "text-rose-300"}`}>
             {(data?.roi ?? 0).toFixed(1)}%
           </div>
           <div className="text-[10px] text-slate-400">ROI</div>
         </div>
-        <div className="responsive-card bg-slate-900 rounded-lg p-3 text-center">
+        <div className="bg-slate-900 rounded-lg p-3 text-center">
           <div className="text-xl font-extrabold font-mono text-white">{data?.totalBets ?? 0}</div>
           <div className="text-[10px] text-slate-400">Total Bets</div>
         </div>
       </div>
 
-      <div className="responsive-card bg-slate-900 rounded-lg p-4">
+      <div className="bg-slate-900 rounded-lg p-4">
         <div className="text-xs text-slate-400 font-mono mb-2">RECORD TRANSACTION</div>
         <div className="flex flex-wrap gap-2 mb-3">
           {(["deposit", "bet", "win", "withdraw"] as const).map(t => {
@@ -3166,12 +3139,12 @@ function BankrollTracker() {
             );
           })}
         </div>
-        <div className="flex flex-col gap-2 sm:flex-row">
+        <div className="flex gap-2">
           <input value={amount} onChange={e => setAmount(e.target.value)} placeholder="Amount" type="number"
-            className="w-full rounded border sm:w-28 border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white outline-none focus:border-amber-400 font-mono" />
+            className="w-28 rounded border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white outline-none focus:border-amber-400 font-mono" />
           <input value={desc} onChange={e => setDesc(e.target.value)}
             placeholder={type === "bet" ? "e.g. Arsenal Over 2.5 Goals" : "Description"}
-            className="min-w-0 flex-1 rounded border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white outline-none focus:border-amber-400" />
+            className="flex-1 rounded border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white outline-none focus:border-amber-400" />
           <button onClick={submit} className={`${ACTION_AMBER} px-4 py-2 text-sm`}>Add</button>
         </div>
       </div>
@@ -3230,8 +3203,8 @@ function DailyPicksPage() {
   if (loading) return <LoadingGrid label="Generating today's best picks across all leagues..." />;
 
   return (
-    <div className="space-y-4 sm:space-y-6 lg:space-y-8">
-      <div className="responsive-card bg-slate-900 rounded-lg p-4">
+    <div className="space-y-6">
+      <div className="bg-slate-900 rounded-lg p-4">
         <h2 className="text-base font-bold text-white">Daily Picks Report — {data?.date}</h2>
         <p className="text-xs text-slate-400 mt-1">{data?.totalMatches ?? 0} matches analysed across top leagues</p>
       </div>
@@ -3272,7 +3245,7 @@ function DailyPicksPage() {
       ))}
 
       {(!data?.picks || data.picks.length === 0) && (
-        <div className="responsive-card bg-slate-900 rounded-lg p-10 text-center text-slate-400 text-sm font-mono">
+        <div className="bg-slate-900 rounded-lg p-10 text-center text-slate-400 text-sm font-mono">
           No upcoming matches to analyse right now.
         </div>
       )}
@@ -3331,41 +3304,41 @@ function OddsCalculator() {
   }
 
   return (
-    <div className="space-y-4 sm:space-y-6 lg:space-y-8">
-      <div className="responsive-card bg-slate-900 rounded-lg p-4">
+    <div className="space-y-6">
+      <div className="bg-slate-900 rounded-lg p-4">
         <h2 className="text-base font-bold text-white">Odds Calculator</h2>
         <p className="text-xs text-slate-400 mt-1">Convert between formats, calculate implied probability, dutching</p>
       </div>
 
-      <div className="responsive-card bg-slate-900 rounded-lg p-4">
+      <div className="bg-slate-900 rounded-lg p-4">
         <div className="text-xs text-slate-400 font-mono mb-2">ODDS CONVERTER</div>
         <div className="flex flex-wrap gap-2 mb-3">
           {(["decimal","american","fractional","probability"] as const).map(f => (
             <button key={f} onClick={() => setFormat(f)} className={`${CHIP} px-3 py-1 text-xs font-bold capitalize ${format===f?CHIP_ON_AMBER:CHIP_OFF}`}>{f}</button>
           ))}
         </div>
-        <div className="flex flex-col gap-2 sm:flex-row">
+        <div className="flex gap-2">
           <input value={input} onChange={e => setInput(e.target.value)}
             placeholder={format === "decimal" ? "e.g. 2.50" : format === "american" ? "e.g. +150 or -200" : format === "fractional" ? "e.g. 3/2" : "e.g. 0.65"}
             onKeyDown={e => { if(e.key==="Enter") convert(); }}
-            className="min-w-0 flex-1 rounded border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white outline-none focus:border-amber-400 font-mono" />
+            className="flex-1 rounded border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white outline-none focus:border-amber-400 font-mono" />
           <button onClick={convert} className={`${ACTION_AMBER} px-4 py-2 text-sm`}>Convert</button>
         </div>
         {result && (
-          <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-4 lg:grid-cols-4 lg:gap-6">
-            <div className="responsive-card bg-slate-800 rounded p-2 text-center">
+          <div className="grid grid-cols-2 gap-2 mt-3 sm:grid-cols-4">
+            <div className="bg-slate-800 rounded p-2 text-center">
               <div className="text-[10px] text-slate-400 font-mono">DECIMAL</div>
               <div className="font-mono font-bold text-amber-300">{result.decimal.toFixed(3)}</div>
             </div>
-            <div className="responsive-card bg-slate-800 rounded p-2 text-center">
+            <div className="bg-slate-800 rounded p-2 text-center">
               <div className="text-[10px] text-slate-400 font-mono">AMERICAN</div>
               <div className="font-mono font-bold text-white">{result.american > 0 ? "+" : ""}{result.american}</div>
             </div>
-            <div className="responsive-card bg-slate-800 rounded p-2 text-center">
+            <div className="bg-slate-800 rounded p-2 text-center">
               <div className="text-[10px] text-slate-400 font-mono">FRACTIONAL</div>
               <div className="font-mono font-bold text-white">{result.fractional}</div>
             </div>
-            <div className="responsive-card bg-slate-800 rounded p-2 text-center">
+            <div className="bg-slate-800 rounded p-2 text-center">
               <div className="text-[10px] text-slate-400 font-mono">PROBABILITY</div>
               <div className="font-mono font-bold text-emerald-300">{result.impliedProbability}%</div>
             </div>
@@ -3373,12 +3346,12 @@ function OddsCalculator() {
         )}
       </div>
 
-      <div className="responsive-card bg-slate-900 rounded-lg p-4">
+      <div className="bg-slate-900 rounded-lg p-4">
         <div className="text-xs text-slate-400 font-mono mb-2">DUTCHING CALCULATOR</div>
         <p className="text-[10px] text-slate-400 mb-2">Enter decimal odds separated by commas (e.g. 2.50, 3.20, 4.00)</p>
-        <div className="flex flex-col gap-2 sm:flex-row">
+        <div className="flex gap-2">
           <input value={dutchOdds} onChange={e => setDutchOdds(e.target.value)} placeholder="2.50, 3.20, 4.00"
-            className="min-w-0 flex-1 rounded border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white outline-none focus:border-amber-400 font-mono" />
+            className="flex-1 rounded border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white outline-none focus:border-amber-400 font-mono" />
           <button onClick={calcDutch} className={`${ACTION_AMBER} px-4 py-2 text-sm`}>Calculate</button>
         </div>
         {dutchResult && (
@@ -3407,13 +3380,13 @@ function OddsCalculator() {
 // --------------- ACCA PERF BLOCK ---------------
 function AccaPerfBlock({ data }: { data: AccaStats }) {
   if (data.total === 0) return (
-    <div className="responsive-card bg-slate-900 rounded-lg p-6 text-center text-slate-400 text-sm font-mono">
+    <div className="bg-slate-900 rounded-lg p-6 text-center text-slate-400 text-sm font-mono">
       No records yet — slips appear here automatically after verification.
     </div>
   );
   return (
     <div className="space-y-3">
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-4 lg:grid-cols-3 lg:gap-6 xl:grid-cols-4">
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
         {[
           { val: String(data.total),                                              label: "Total",    color: "text-amber-300" },
           { val: String(data.won),                                                label: "Won",      color: "text-emerald-300" },
@@ -3483,7 +3456,7 @@ function ValueAlerts() {
   if (loading || alerts.length === 0) return null;
 
   return (
-    <div className="responsive-card bg-slate-900 rounded-lg p-4">
+    <div className="bg-slate-900 rounded-lg p-4">
       <div className="text-xs font-bold text-emerald-300 font-mono mb-3">VALUE BET ALERTS — Oracle Edge Over Bookmaker</div>
       <div className="space-y-2">
         {alerts.map((a, i) => (
