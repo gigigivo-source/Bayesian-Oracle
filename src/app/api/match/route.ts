@@ -1,10 +1,11 @@
 import { db } from "@/db";
-import { predictions, performanceLog } from "@/db/schema";
+import { predictions, performanceLog, valueBetLog } from "@/db/schema";
 import { fetchSummary, type FixtureLite } from "@/lib/espn";
 import type { RankingMode } from "@/lib/engine/selector";
 import { resolveRankingMode } from "@/lib/engine/selector";
 import { runEngineFromRealWithProfiles, evaluateFinishedMatch } from "@/lib/engine";
 import { findValueBets, type BookmakerOdds, type ValueBet } from "@/lib/engine/value";
+import { evaluateLeg } from "@/lib/settlement/evaluate";
 import { searchFixture, getMultiBookOdds } from "@/lib/apiFootball";
 import { LEAGUE_MAP } from "@/lib/leagues";
 import { withMonitoring } from "@/lib/monitoring";
@@ -137,7 +138,7 @@ async function runEngineForMode(
   const prevRankingEnv = process.env.RANKING_MODE;
   process.env.RANKING_MODE = rankingMode;
   try {
-    return await runEngineFromRealWithProfiles(fixture, summary, liveStats);
+    return await runEngineFromRealWithProfiles(fixture, summary, liveStats, rankingMode);
   } finally {
     if (prevRankingEnv === undefined) delete process.env.RANKING_MODE;
     else process.env.RANKING_MODE = prevRankingEnv;
@@ -154,6 +155,8 @@ async function runEngineForMode(
 async function persistAndEvaluate(
   fixture: FixtureLite,
   prediction: EngineResult,
+  rankingMode: RankingMode,
+  valueBets: ValueBet[] = [],
 ): Promise<Record<string, number> | null> {
   // ── Post-match: fetch real boxscore, verify Top-10, log performance ──────────
   let boxscore: Record<string, number> | null = null;
@@ -168,30 +171,79 @@ async function persistAndEvaluate(
 
     try {
       await db.insert(performanceLog).values({
-        eventId:    fixture.id,
-        matchLabel: `${fixture.home.name} vs ${fixture.away.name}`,
-        homeTeam:   fixture.home.name,
-        awayTeam:   fixture.away.name,
-        league:     fixture.leagueName,
-        leagueSlug: fixture.leagueSlug,
-        matchDate:  fixture.date.slice(0, 10),
-        homeScore:  Number(fixture.home.score) || 0,
-        awayScore:  Number(fixture.away.score) || 0,
-        totalPicks: prediction.top10.length,
-        hits:       h,
-        misses:     miss,
-        pending:    pend,
-        accuracy:   evalC > 0 ? h / evalC : 0,
-        top10Detail: prediction.top10.map((m) => ({
+        eventId:         fixture.id,
+        matchLabel:      `${fixture.home.name} vs ${fixture.away.name}`,
+        homeTeam:        fixture.home.name,
+        awayTeam:        fixture.away.name,
+        league:          fixture.leagueName,
+        leagueSlug:      fixture.leagueSlug,
+        competitionName: fixture.leagueName,
+        matchDate:       fixture.date.slice(0, 10),
+        homeScore:       Number(fixture.home.score) || 0,
+        awayScore:       Number(fixture.away.score) || 0,
+        totalPicks:      prediction.top10.length,
+        hits:            h,
+        misses:          miss,
+        pending:         pend,
+        accuracy:        evalC > 0 ? h / evalC : 0,
+        top10Detail:     prediction.top10.map((m) => ({
           name:      m.name,
           selection: m.selection,
           hitRate:   m.hitRate,
           outcome:   m.outcome,
           family:    m.family,
         })),
+        rankingMode,
       });
     } catch (e) {
       console.error("performance log failed", e);
+    }
+  }
+
+  // ── Persist value bets for this ranking mode ─────────────────────────────────
+  if (valueBets.length > 0) {
+    const isPost = fixture.state === "post" && fixture.home.score !== null;
+    const result = isPost ? {
+      eventId: fixture.id,
+      leagueSlug: fixture.leagueSlug,
+      date: fixture.date,
+      homeName: fixture.home.name,
+      awayName: fixture.away.name,
+      homeScore: Number(fixture.home.score) || 0,
+      awayScore: Number(fixture.away.score) || 0,
+    } : null;
+
+    for (const vb of valueBets) {
+      try {
+        const stake = 10;
+        const outcome = result
+          ? evaluateLeg({ marketName: vb.market.name, selection: vb.market.selection }, result)
+          : "pending";
+        const actualReturn =
+          outcome === "won" ? stake * vb.bookDecimalOdds : outcome === "void" ? stake : outcome === "lost" ? 0 : null;
+
+        await db.insert(valueBetLog).values({
+          eventId:         fixture.id,
+          leagueSlug:      fixture.leagueSlug,
+          competitionName: fixture.leagueName,
+          match:           `${fixture.home.name} vs ${fixture.away.name}`,
+          matchDate:       fixture.date.slice(0, 10),
+          marketName:      vb.market.name,
+          selection:       vb.market.selection,
+          oracleProb:      vb.oracleProbability,
+          bookOdds:        vb.bookDecimalOdds,
+          valueEdge:       vb.valueEdge,
+          kellyStake:      vb.kellyStake,
+          stake,
+          potentialReturn: parseFloat((stake * vb.bookDecimalOdds).toFixed(2)),
+          outcome,
+          actualReturn,
+          pnl:             actualReturn !== null ? actualReturn - stake : null,
+          rankingMode,
+        });
+      } catch (e) {
+        console.error("value bet log failed", e);
+      }
     }
   }
 
@@ -371,6 +423,14 @@ async function handlePost(req: Request): Promise<Response> {
     predictions.set(mode, await runEngineForMode(fixture, summary, liveStats, mode));
   }
 
+  // ── Value bet detection (per mode; markets differ per ranking) ───────────────
+  const valueBetsByMode = new Map<RankingMode, ValueBet[]>();
+  for (const mode of modes) {
+    const pred = predictions.get(mode);
+    if (!pred) continue;
+    valueBetsByMode.set(mode, computeValueBets(pred, bookOdds, fixture));
+  }
+
   // ── Side effects (DB writes + post-match evaluation) per ranking mode ───────
   // We keep the same behaviour as the single-mode route: every mode's result
   // is evaluated against the boxscore and persisted, so DB consumers see one
@@ -379,15 +439,8 @@ async function handlePost(req: Request): Promise<Response> {
   for (const mode of modes) {
     const pred = predictions.get(mode);
     if (!pred) continue;
-    boxscores.set(mode, await persistAndEvaluate(fixture, pred));
-  }
-
-  // ── Value bet detection (per mode; markets differ per ranking) ───────────────
-  const valueBetsByMode = new Map<RankingMode, ValueBet[]>();
-  for (const mode of modes) {
-    const pred = predictions.get(mode);
-    if (!pred) continue;
-    valueBetsByMode.set(mode, computeValueBets(pred, bookOdds, fixture));
+    const vbs = valueBetsByMode.get(mode) ?? [];
+    boxscores.set(mode, await persistAndEvaluate(fixture, pred, mode, vbs));
   }
 
   // ── ?ranking=all — return every mode in a single payload ────────────────────
