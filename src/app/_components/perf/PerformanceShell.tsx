@@ -23,9 +23,9 @@ export function PerformanceShell({
 }) {
   const pathname = usePathname();
   return (
-    <div className="min-h-screen bg-[#05070d] text-slate-100 antialiased">
+    <div className="min-h-screen bg-[#0F1117] text-slate-100 antialiased">
       {/* Header */}
-      <header className="sticky top-0 z-40 border-b border-white/5 bg-black/60 shadow-lg backdrop-blur-sm">
+      <header className="sticky top-0 z-40 border-b border-slate-700 bg-slate-900 shadow-lg ">
         <div className="mx-auto max-w-7xl px-4 py-3">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <Link href="/" className="flex cursor-pointer select-none items-center gap-3 transition-all duration-200 hover:scale-[1.02] hover:opacity-90 active:scale-95">
@@ -33,15 +33,15 @@ export function PerformanceShell({
                 <span className="text-xl">⚽</span>
               </div>
               <div>
-                <h1 className="bg-gradient-to-r from-amber-300 via-yellow-200 to-emerald-300 bg-clip-text font-mono text-base font-extrabold tracking-tight text-transparent">
+                <h1 className="bg-gradient-to-r from-[#F59E0B] to-[#FF8C00] bg-clip-text font-mono text-base font-extrabold tracking-tight text-transparent">
                   ĞIGI GIVØ
                 </h1>
                 <p className="font-mono text-[10px] text-slate-400">Performance · Transparent Track Record</p>
               </div>
             </Link>
             <div className="flex items-center gap-2">
-              {/* Sub-page nav — TYPE 1 glass-tech pills (violet/fuchsia section accent) */}
-              <nav className="flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.03] p-1.5 shadow-inner shadow-black/20 backdrop-blur-md">
+              {/* Sub-page nav — TYPE 1 solid slate pills (gold active state) */}
+              <nav className="flex items-center gap-2 rounded-full border border-slate-700 bg-slate-800 p-1.5 shadow-inner shadow-slate-950/40 ">
                 {NAV.map((n) => {
                   const active =
                     n.href === "/performance"
@@ -72,7 +72,7 @@ export function PerformanceShell({
       </header>
 
       {/* Title banner */}
-      <div className="border-b border-white/5 bg-gradient-to-b from-black/40 to-transparent">
+      <div className="border-b border-slate-700 bg-slate-900">
         <div className="mx-auto max-w-7xl px-4 py-6">
           <h2 className="text-xl font-extrabold tracking-tight text-white sm:text-2xl">{title}</h2>
           <p className="mt-1 max-w-3xl text-sm text-slate-400">{subtitle}</p>
@@ -81,7 +81,7 @@ export function PerformanceShell({
 
       <main className="mx-auto max-w-7xl space-y-8 px-4 py-8">{children}</main>
 
-      <footer className="border-t border-white/5 bg-black/40 py-4 text-center">
+      <footer className="border-t border-slate-700 bg-slate-800 py-4 text-center">
         <p className="font-mono text-[11px] text-slate-500">
           ĞIGI GIVØ · All metrics derived from verified post-match data · No hidden calculations
         </p>

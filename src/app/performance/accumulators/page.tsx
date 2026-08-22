@@ -283,7 +283,7 @@ function AccaContent({ slips, onRefresh }: { slips: Slip[]; onRefresh: () => voi
           tone="info"
         />
         <StatCard label="Avg Legs" value={avgLegs.toFixed(1)} sub={`across ${slips.length} slips`} tone="accent" />
-        <div className="flex flex-col justify-between rounded-xl border border-white/10 bg-black/50 p-4">
+        <div className="flex flex-col justify-between rounded-xl border border-slate-700 bg-slate-900 p-4">
           <span className="text-[11px] font-medium uppercase tracking-wider text-slate-400">Current Streak</span>
           <div className="mt-2">
             <StreakBadge count={streak.count} type={streak.type} />
@@ -292,7 +292,7 @@ function AccaContent({ slips, onRefresh }: { slips: Slip[]; onRefresh: () => voi
             {streak.type === "W" ? "winning slips" : streak.type === "L" ? "losing slips" : "no settled slips"}
           </div>
         </div>
-        <div className="flex flex-col justify-between rounded-xl border border-white/10 bg-black/50 p-4">
+        <div className="flex flex-col justify-between rounded-xl border border-slate-700 bg-slate-900 p-4">
           <span className="text-[11px] font-medium uppercase tracking-wider text-slate-400">Result Mix</span>
           <div className="mt-2 flex flex-wrap gap-1.5">
             <Pill tone="win">{won.length} W</Pill>
@@ -316,7 +316,7 @@ function AccaContent({ slips, onRefresh }: { slips: Slip[]; onRefresh: () => voi
           </button>
         }
       >
-        <div className="rounded-xl border border-white/10 bg-black/50 p-4">
+        <div className="rounded-xl border border-slate-700 bg-slate-900 p-4">
           <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
             <div className="flex items-center gap-3">
               <span className="font-mono text-xs text-slate-400">Final P&amp;L</span>
@@ -350,10 +350,10 @@ function AccaContent({ slips, onRefresh }: { slips: Slip[]; onRefresh: () => voi
         title="Detailed Performance Table"
         subtitle={`${sortedSlips.length} slips · click a row to expand its legs · sorted by ${sortKey}`}
       >
-        <div className="overflow-hidden rounded-xl border border-white/10 bg-black/50">
+        <div className="overflow-hidden rounded-xl border border-slate-700 bg-slate-900">
           <div className="overflow-x-auto">
             <table className="w-full text-left text-sm">
-              <thead className="border-b border-white/10 bg-black/40">
+              <thead className="border-b border-slate-700 bg-slate-800">
                 <tr>
                   <SortHeader label="Date" active={sortKey === "date"} dir={sortDir} onClick={() => toggleSort("date")} />
                   <th className="px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-400">Slip</th>
@@ -364,7 +364,7 @@ function AccaContent({ slips, onRefresh }: { slips: Slip[]; onRefresh: () => voi
                   <SortHeader label="P&L" active={sortKey === "pnl"} dir={sortDir} onClick={() => toggleSort("pnl")} align="right" />
                 </tr>
               </thead>
-              <tbody className="divide-y divide-white/5">
+              <tbody className="divide-y divide-slate-700">
                 {sortedSlips.map((s) => {
                   const { result, label } = slipResult(s.status);
                   const rowTint =
@@ -380,7 +380,7 @@ function AccaContent({ slips, onRefresh }: { slips: Slip[]; onRefresh: () => voi
                   return (
                     <Fragment key={s.id}>
                       <tr
-                        className={cn("cursor-pointer select-none border-l-2 transition-all duration-200 hover:bg-white/[0.05] active:bg-white/[0.08]", rowTint)}
+                        className={cn("cursor-pointer select-none border-l-2 transition-all duration-200 hover:bg-slate-700 active:bg-slate-700", rowTint)}
                         onClick={() => setExpanded(isOpen ? null : s.id)}
                       >
                         <td className="whitespace-nowrap px-3 py-2 font-mono text-[11px] text-slate-400">{dateKey(s)}</td>
@@ -414,7 +414,7 @@ function AccaContent({ slips, onRefresh }: { slips: Slip[]; onRefresh: () => voi
                         </td>
                       </tr>
                       {isOpen ? (
-                        <tr key={`${s.id}-legs`} className="bg-black/30">
+                        <tr key={`${s.id}-legs`} className="bg-slate-800">
                           <td colSpan={7} className="px-3 py-2">
                             <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
                               {s.picks.map((leg, i) => {
@@ -428,12 +428,12 @@ function AccaContent({ slips, onRefresh }: { slips: Slip[]; onRefresh: () => voi
                                         ? "bg-amber-500"
                                         : "bg-slate-600";
                                 return (
-                                  <div key={i} className="flex items-center gap-2 rounded-md border border-white/5 bg-black/40 px-2.5 py-1.5 text-xs">
+                                  <div key={i} className="flex items-center gap-2 rounded-md border border-slate-700 bg-slate-800 px-2.5 py-1.5 text-xs">
                                     <span className={cn("h-2 w-2 shrink-0 rounded-full", dotCls)} />
                                     <span className="text-[10px] font-mono text-slate-500">{i + 1}.</span>
                                     <span className="min-w-0 flex-1 truncate text-slate-200">{leg.matchLabel ?? "—"}</span>
                                     {competitionNameFor(leg.league) ? (
-                                      <span className="hidden shrink-0 max-w-[120px] truncate rounded bg-white/5 px-1.5 py-0.5 font-mono text-[10px] text-cyan-300/80 md:block">
+                                      <span className="hidden shrink-0 max-w-[120px] truncate rounded bg-slate-800 px-1.5 py-0.5 font-mono text-[10px] text-cyan-300/80 md:block">
                                         {competitionNameFor(leg.league)}
                                       </span>
                                     ) : null}

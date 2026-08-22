@@ -295,7 +295,7 @@ function ValueBetsContent({ bets, stats }: { bets: ValueBet[]; stats: VbStats })
           sub={`avg edge ${signed(stats.avgEdge, 1)}%`}
           tone={avgEv >= 0 ? "positive" : "negative"}
         />
-        <div className="flex flex-col justify-between rounded-xl border border-white/10 bg-black/50 p-4">
+        <div className="flex flex-col justify-between rounded-xl border border-slate-700 bg-slate-900 p-4">
           <span className="text-[11px] font-medium uppercase tracking-wider text-slate-400">Current Streak</span>
           <div className="mt-2">
             <StreakBadge count={streak.count} type={streak.type} />
@@ -304,7 +304,7 @@ function ValueBetsContent({ bets, stats }: { bets: ValueBet[]; stats: VbStats })
             {streak.type === "W" ? "winning run" : streak.type === "L" ? "losing run" : "no settled bets"}
           </div>
         </div>
-        <div className="flex flex-col justify-between rounded-xl border border-white/10 bg-black/50 p-4">
+        <div className="flex flex-col justify-between rounded-xl border border-slate-700 bg-slate-900 p-4">
           <span className="text-[11px] font-medium uppercase tracking-wider text-slate-400">Result Mix</span>
           <div className="mt-2 flex flex-wrap gap-1.5">
             <Pill tone="win">{won.length} W</Pill>
@@ -317,7 +317,7 @@ function ValueBetsContent({ bets, stats }: { bets: ValueBet[]; stats: VbStats })
 
       {/* ── Trends ───────────────────────────────────────────────────────── */}
       <Section title="Profit / Loss Trend" subtitle="cumulative P&L across settled value bets">
-        <div className="rounded-xl border border-white/10 bg-black/50 p-4">
+        <div className="rounded-xl border border-slate-700 bg-slate-900 p-4">
           <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
             <div className="flex items-center gap-3">
               <span className="font-mono text-xs text-slate-400">Final P&amp;L</span>
@@ -349,7 +349,7 @@ function ValueBetsContent({ bets, stats }: { bets: ValueBet[]; stats: VbStats })
           <select
             value={leagueFilter}
             onChange={(e) => setLeagueFilter(e.target.value)}
-            className="rounded-lg border border-white/10 bg-black/50 px-3 py-1.5 text-xs text-slate-200 focus:border-amber-400/50 focus:outline-none"
+            className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-slate-200 focus:border-amber-400/50 focus:outline-none"
           >
             <option value="all">All competitions ({bets.length})</option>
             {leagueOptions.map(([slug, name]) => (
@@ -360,9 +360,9 @@ function ValueBetsContent({ bets, stats }: { bets: ValueBet[]; stats: VbStats })
           </select>
         }
       >
-        <div className="overflow-x-auto rounded-xl border border-white/10 bg-black/50">
+        <div className="overflow-x-auto rounded-xl border border-slate-700 bg-slate-900">
           <table className="w-full text-left text-sm">
-            <thead className="border-b border-white/10 bg-black/40">
+            <thead className="border-b border-slate-700 bg-slate-800">
               <tr>
                 <SortHeader label="Date" active={sortKey === "date"} dir={sortDir} onClick={() => toggleSort("date")} />
                 <th className="px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-400">Competition</th>
@@ -374,7 +374,7 @@ function ValueBetsContent({ bets, stats }: { bets: ValueBet[]; stats: VbStats })
                 <SortHeader label="P&L" active={sortKey === "pnl"} dir={sortDir} onClick={() => toggleSort("pnl")} align="right" />
               </tr>
             </thead>
-            <tbody className="divide-y divide-white/5">
+            <tbody className="divide-y divide-slate-700">
               {sortedBets.map((b) => {
                 const { result, label } = classifyOutcome(b.outcome);
                 const rowTint =
@@ -387,7 +387,7 @@ function ValueBetsContent({ bets, stats }: { bets: ValueBet[]; stats: VbStats })
                         : "border-l-slate-600";
                 const ev = evPerUnit(b);
                 return (
-                  <tr key={b.id} className={cn("border-l-2 transition hover:bg-white/[0.02]", rowTint)}>
+                  <tr key={b.id} className={cn("border-l-2 transition hover:bg-slate-800", rowTint)}>
                     <td className="whitespace-nowrap px-3 py-2 font-mono text-[11px] text-slate-400">{dateKey(b)}</td>
                     <td className="max-w-[140px] truncate px-3 py-2">
                       <div className="truncate text-[11px] font-semibold text-slate-200">{competitionNameFor(b.league)}</div>

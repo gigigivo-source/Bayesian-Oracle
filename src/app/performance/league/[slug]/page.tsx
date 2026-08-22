@@ -90,7 +90,7 @@ function LeaguePageInner() {
       ) : error ? (
         <ErrorState message={error} onRetry={retry} />
       ) : !detail ? (
-        <div className="rounded-xl border border-white/10 bg-black/50 p-10 text-center">
+        <div className="rounded-xl border border-slate-700 bg-slate-900 p-10 text-center">
           <div className="mb-3 text-3xl">🌍</div>
           <div className="mb-2 text-base font-bold text-slate-300">No data for this competition</div>
           <p className="mx-auto max-w-sm font-mono text-xs text-slate-400">
@@ -104,7 +104,7 @@ function LeaguePageInner() {
           <LeagueSummaryCards m={detail} />
 
           {/* W/L/P/V strip from the raw counts */}
-          <div className="rounded-xl border border-white/10 bg-black/40 p-4">
+          <div className="rounded-xl border border-slate-700 bg-slate-800 p-4">
             <div className="mb-2 font-mono text-[11px] font-bold uppercase tracking-wider text-slate-400">
               Win / Loss / Push / Void / Pending
             </div>
@@ -140,7 +140,7 @@ function LeaguePageInner() {
               }
             >
               {chartPoints.length > 0 ? (
-                <div className="rounded-xl border border-white/10 bg-black/50 p-4">
+                <div className="rounded-xl border border-slate-700 bg-slate-900 p-4">
                   <PnLTrendChart points={chartPoints} />
                   <div className="mt-2 flex flex-wrap gap-2 font-mono text-[11px] text-slate-400">
                     <span>7d: <span className={detail.last7DaysPnl >= 0 ? "text-emerald-300" : "text-rose-300"}>{money(detail.last7DaysPnl)}</span></span>
@@ -149,7 +149,7 @@ function LeaguePageInner() {
                   </div>
                 </div>
               ) : (
-                <div className="rounded-xl border border-white/10 bg-black/50 p-8 text-center font-mono text-xs text-slate-500">
+                <div className="rounded-xl border border-slate-700 bg-slate-900 p-8 text-center font-mono text-xs text-slate-500">
                   No staked P&L yet for this league.
                 </div>
               )}
@@ -203,14 +203,14 @@ function SourceCard({
   const settled = data.wins + data.losses;
   const rate = settled > 0 ? (data.wins / settled) * 100 : 0;
   return (
-    <div className="rounded-xl border border-white/10 bg-black/50 p-4">
+    <div className="rounded-xl border border-slate-700 bg-slate-900 p-4">
       <div className="text-xs font-bold uppercase tracking-wider text-slate-400">{title}</div>
       <div className="mt-2 font-mono text-2xl font-extrabold text-white">{data.total}</div>
       <div className="mt-1 text-[11px] text-slate-400">
         {data.wins}W · {data.losses}L · {data.pending} pending
       </div>
       <div className="mt-2">
-        <div className="h-1.5 w-full overflow-hidden rounded-full bg-black/60">
+        <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-900">
           <div
             className={cn("h-full rounded-full", rate >= 60 ? "bg-emerald-500" : rate >= 45 ? "bg-amber-500" : "bg-rose-500")}
             style={{ width: `${settled > 0 ? rate : 0}%` }}

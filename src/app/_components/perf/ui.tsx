@@ -139,7 +139,7 @@ export function Section({
   return (
     <section className={cn("scroll-mt-28", className)}>
       <div className="mb-3 flex flex-wrap items-end justify-between gap-2">
-        <div className="inline-block rounded-lg bg-black/60 px-4 py-2">
+        <div className="inline-block rounded-lg bg-slate-900 px-4 py-2">
           <h2 className="text-sm font-bold text-white">{title}</h2>
           {subtitle ? <p className="text-[11px] text-slate-300/80">{subtitle}</p> : null}
         </div>
@@ -168,9 +168,9 @@ export function Card({
           ? "border-amber-500/30"
           : accent === "info"
             ? "border-cyan-500/30"
-            : "border-white/10";
+            : "border-slate-700";
   return (
-    <div className={cn("rounded-xl border bg-black/50 p-4", border, className)}>{children}</div>
+    <div className={cn("rounded-xl border bg-slate-900 p-4", border, className)}>{children}</div>
   );
 }
 
@@ -193,7 +193,7 @@ export function StatCard({
 }) {
   return (
     <div
-      className="group relative overflow-hidden rounded-xl border border-white/10 bg-black/50 p-4 transition hover:border-white/20"
+      className="group relative overflow-hidden rounded-xl border border-slate-700 bg-slate-900 p-4 transition hover:border-slate-600"
       title={hint}
     >
       <div className="flex items-start justify-between gap-2">
@@ -278,7 +278,7 @@ export function ProgressBar({
               ? "bg-amber-400"
               : "bg-emerald-500";
   return (
-    <div className={cn("h-2 w-full overflow-hidden rounded-full bg-black/50", className)}>
+    <div className={cn("h-2 w-full overflow-hidden rounded-full bg-slate-900", className)}>
       <div className={cn("h-full rounded-full transition-all", bar)} style={{ width: pctW }} />
     </div>
   );
@@ -289,7 +289,7 @@ export function ProgressBar({
 export function StreakBadge({ count, type }: { count: number; type: "W" | "L" | null }) {
   if (count === 0 || !type) {
     return (
-      <span className="inline-flex items-center gap-1.5 rounded-md border border-white/10 bg-black/40 px-2.5 py-1 font-mono text-xs text-slate-400">
+      <span className="inline-flex items-center gap-1.5 rounded-md border border-slate-700 bg-slate-800 px-2.5 py-1 font-mono text-xs text-slate-400">
         — No streak
       </span>
     );
@@ -316,7 +316,7 @@ export function StreakBadge({ count, type }: { count: number; type: "W" | "L" | 
 export function LoadingState({ label }: { label: string }) {
   return (
     <div className="space-y-4">
-      <div className="flex items-center gap-2 rounded-lg bg-black/50 px-4 py-3">
+      <div className="flex items-center gap-2 rounded-lg bg-slate-900 px-4 py-3">
         <span className="relative flex h-3 w-3">
           <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-amber-400 opacity-75" />
           <span className="relative inline-flex h-3 w-3 rounded-full bg-amber-500" />
@@ -325,10 +325,10 @@ export function LoadingState({ label }: { label: string }) {
       </div>
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         {Array.from({ length: 4 }).map((_, i) => (
-          <div key={i} className="h-24 animate-pulse rounded-xl border border-white/10 bg-black/50" />
+          <div key={i} className="h-24 animate-pulse rounded-xl border border-slate-700 bg-slate-900" />
         ))}
       </div>
-      <div className="h-64 animate-pulse rounded-xl border border-white/10 bg-black/50" />
+      <div className="h-64 animate-pulse rounded-xl border border-slate-700 bg-slate-900" />
     </div>
   );
 }
@@ -361,7 +361,7 @@ export function EmptyState({
   message: string;
 }) {
   return (
-    <div className="rounded-xl border border-white/10 bg-black/50 p-10 text-center">
+    <div className="rounded-xl border border-slate-700 bg-slate-900 p-10 text-center">
       <div className="mb-3 text-3xl">{icon}</div>
       <div className="mb-2 text-base font-bold text-slate-300">{title}</div>
       <p className="mx-auto max-w-sm font-mono text-xs text-slate-400">{message}</p>
@@ -423,7 +423,7 @@ export function Pill({
           ? "bg-cyan-500/10 text-cyan-300 border-cyan-500/20"
           : tone === "accent" || tone === "pending" || tone === "warning"
             ? "bg-amber-500/10 text-amber-300 border-amber-500/20"
-            : "bg-white/5 text-slate-200 border-white/10";
+            : "bg-slate-800 text-slate-200 border-slate-700";
   return (
     <span className={cn("inline-block rounded border px-1.5 py-0.5 font-mono text-[11px] font-semibold", cls)}>
       {children}

@@ -157,7 +157,7 @@ function LeaguePerformanceInner() {
       ) : error && !data ? (
         <ErrorState message={error} onRetry={retry} />
       ) : !data || data.leagues.length === 0 ? (
-        <div className="rounded-xl border border-white/10 bg-black/50 p-10 text-center">
+        <div className="rounded-xl border border-slate-700 bg-slate-900 p-10 text-center">
           <div className="mb-3 text-3xl">🌍</div>
           <div className="mb-2 text-base font-bold text-slate-300">No league data yet</div>
           <p className="mx-auto max-w-sm font-mono text-xs text-slate-400">
@@ -193,7 +193,7 @@ function LeaguePerformanceInner() {
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 placeholder="Search competitions (e.g. Premier League, Champions, LaLiga)…"
-                className="w-full rounded-lg border border-white/10 bg-black/50 py-2 pl-9 pr-3 text-sm text-slate-200 placeholder:text-slate-500 focus:border-amber-400/50 focus:outline-none"
+                className="w-full rounded-lg border border-slate-700 bg-slate-900 py-2 pl-9 pr-3 text-sm text-slate-200 placeholder:text-slate-500 focus:border-amber-400/50 focus:outline-none"
               />
             </div>
             <div className="flex gap-1.5">
@@ -234,7 +234,7 @@ function LeaguePerformanceInner() {
             subtitle={`${filtered.length} of ${data!.totalLeagues} competitions · sorted by ${SORT_OPTIONS.find((o) => o.key === sortBy)?.label ?? sortBy} · last ${days} days`}
           >
             {filtered.length === 0 ? (
-              <div className="rounded-xl border border-white/10 bg-black/50 p-8 text-center font-mono text-xs text-slate-400">
+              <div className="rounded-xl border border-slate-700 bg-slate-900 p-8 text-center font-mono text-xs text-slate-400">
                 No competitions match “{search}”.
               </div>
             ) : (
@@ -280,7 +280,7 @@ function GlobalStat({
   const text =
     tone === "positive" ? "text-emerald-300" : tone === "negative" ? "text-rose-300" : "text-white";
   return (
-    <div className="rounded-xl border border-white/10 bg-black/50 p-4">
+    <div className="rounded-xl border border-slate-700 bg-slate-900 p-4">
       <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">{label}</div>
       <div className={cn("mt-1.5 font-mono text-2xl font-extrabold tabular-nums", text)}>{value}</div>
       <div className="mt-1 text-[11px] text-slate-400">{sub}</div>
@@ -303,10 +303,10 @@ function LeagueDetailSection({
   const chartPoints: ChartPoint[] = trendPoints.map((p) => ({ label: p.label, value: p.value, delta: p.delta }));
 
   return (
-    <section id="league-detail" className="scroll-mt-28 space-y-6 rounded-2xl border border-amber-400/20 bg-black/30 p-4 sm:p-6">
+    <section id="league-detail" className="scroll-mt-28 space-y-6 rounded-2xl border border-amber-400/20 bg-slate-800 p-4 sm:p-6">
       {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="inline-block rounded-lg bg-black/60 px-4 py-2">
+        <div className="inline-block rounded-lg bg-slate-900 px-4 py-2">
           <h2 className="text-base font-bold text-white">
             {league?.competitionName ?? detail?.competitionName ?? "League detail"}
           </h2>
@@ -332,7 +332,7 @@ function LeagueDetailSection({
       {loading && !detail ? (
         <LeagueSkeletonGrid count={4} />
       ) : !detail ? (
-        <div className="rounded-xl border border-white/10 bg-black/50 p-8 text-center font-mono text-xs text-slate-400">
+        <div className="rounded-xl border border-slate-700 bg-slate-900 p-8 text-center font-mono text-xs text-slate-400">
           No data recorded for this competition in the selected window.
         </div>
       ) : (
@@ -351,7 +351,7 @@ function LeagueDetailSection({
               right={<TrendArrow dir={detail.trendDirection} />}
             >
               {chartPoints.length > 0 ? (
-                <div className="rounded-xl border border-white/10 bg-black/50 p-4">
+                <div className="rounded-xl border border-slate-700 bg-slate-900 p-4">
                   <PnLTrendChart points={chartPoints} />
                   <div className="mt-2 flex flex-wrap gap-2 font-mono text-[11px] text-slate-400">
                     <span>
@@ -366,7 +366,7 @@ function LeagueDetailSection({
                   </div>
                 </div>
               ) : (
-                <div className="rounded-xl border border-white/10 bg-black/50 p-8 text-center font-mono text-xs text-slate-500">
+                <div className="rounded-xl border border-slate-700 bg-slate-900 p-8 text-center font-mono text-xs text-slate-500">
                   No staked P&L yet for this league — trend appears once value bets or slips settle.
                 </div>
               )}

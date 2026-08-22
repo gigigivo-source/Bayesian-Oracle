@@ -185,7 +185,7 @@ export function LeagueCard({
         </div>
       </div>
 
-      <div className="mt-3 flex items-center justify-between border-t border-white/5 pt-2">
+      <div className="mt-3 flex items-center justify-between border-t border-slate-700 pt-2">
         <div className="font-mono text-[11px] text-slate-400">
           P&amp;L{" "}
           <span className={cn("font-bold", m.totalPnl >= 0 ? "text-emerald-300" : "text-rose-300")}>
@@ -198,9 +198,9 @@ export function LeagueCard({
       </div>
 
       <div className="mt-2 flex items-center gap-2 font-mono text-[10px] text-slate-500">
-        <span className="rounded border border-white/10 bg-white/5 px-1.5 py-0.5">7d {pctNum(m.last7DaysHitRate, 0)}</span>
-        <span className="rounded border border-white/10 bg-white/5 px-1.5 py-0.5">30d {pctNum(m.last30DaysHitRate, 0)}</span>
-        <span className="rounded border border-white/10 bg-white/5 px-1.5 py-0.5">{m.totalWins}W·{m.totalLosses}L</span>
+        <span className="rounded border border-slate-700 bg-slate-800 px-1.5 py-0.5">7d {pctNum(m.last7DaysHitRate, 0)}</span>
+        <span className="rounded border border-slate-700 bg-slate-800 px-1.5 py-0.5">30d {pctNum(m.last30DaysHitRate, 0)}</span>
+        <span className="rounded border border-slate-700 bg-slate-800 px-1.5 py-0.5">{m.totalWins}W·{m.totalLosses}L</span>
       </div>
     </>
   );
@@ -230,7 +230,7 @@ export function LeagueSkeletonGrid({ count = 8 }: { count?: number }) {
   return (
     <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
       {Array.from({ length: count }).map((_, i) => (
-        <div key={i} className="h-44 animate-pulse rounded-xl border border-white/10 bg-black/50" />
+        <div key={i} className="h-44 animate-pulse rounded-xl border border-slate-700 bg-slate-900" />
       ))}
     </div>
   );
@@ -241,15 +241,15 @@ export function LeagueSkeletonGrid({ count = 8 }: { count?: number }) {
 export function FactorAccuracyTable({ factors }: { factors: FactorStat[] }) {
   if (factors.length === 0) {
     return (
-      <div className="rounded-xl border border-white/10 bg-black/50 p-8 text-center font-mono text-xs text-slate-400">
+      <div className="rounded-xl border border-slate-700 bg-slate-900 p-8 text-center font-mono text-xs text-slate-400">
         No settled picks for this league yet — factor accuracy appears once bets resolve.
       </div>
     );
   }
   return (
-    <div className="overflow-x-auto rounded-xl border border-white/10 bg-black/50">
+    <div className="overflow-x-auto rounded-xl border border-slate-700 bg-slate-900">
       <table className="w-full text-left text-sm">
-        <thead className="border-b border-white/10 bg-black/40">
+        <thead className="border-b border-slate-700 bg-slate-800">
           <tr>
             <th className="px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-400">Factor Name</th>
             <th className="px-3 py-2.5 text-right text-[11px] font-semibold uppercase tracking-wider text-slate-400">Hit Rate %</th>
@@ -258,11 +258,11 @@ export function FactorAccuracyTable({ factors }: { factors: FactorStat[] }) {
             <th className="px-3 py-2.5 text-center text-[11px] font-semibold uppercase tracking-wider text-slate-400">Trend</th>
           </tr>
         </thead>
-        <tbody className="divide-y divide-white/5">
+        <tbody className="divide-y divide-slate-700">
           {factors.map((f) => {
             const rate = f.hitRate / 100;
             return (
-              <tr key={f.factor} className="transition hover:bg-white/[0.02]">
+              <tr key={f.factor} className="transition hover:bg-slate-800">
                 <td className="px-3 py-2.5">
                   <div className="font-medium text-slate-100">{f.factor}</div>
                   <ProgressBar
@@ -321,16 +321,16 @@ export function LeagueBetsTable({ bets }: { bets: BetRow[] }) {
 
   if (bets.length === 0) {
     return (
-      <div className="rounded-xl border border-white/10 bg-black/50 p-8 text-center font-mono text-xs text-slate-400">
+      <div className="rounded-xl border border-slate-700 bg-slate-900 p-8 text-center font-mono text-xs text-slate-400">
         No individual bets recorded for this league yet.
       </div>
     );
   }
 
   return (
-    <div className="max-h-[560px] overflow-auto rounded-xl border border-white/10 bg-black/50">
+    <div className="max-h-[560px] overflow-auto rounded-xl border border-slate-700 bg-slate-900">
       <table className="w-full text-left text-sm">
-        <thead className="sticky top-0 z-10 border-b border-white/10 bg-[#0b0f1a]">
+        <thead className="sticky top-0 z-10 border-b border-slate-700 bg-[#0b0f1a]">
           <tr>
             <SortHeader label="Date" active={sortKey === "date"} dir={sortDir} onClick={() => toggle("date")} />
             <th className="px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-400">Match</th>
@@ -341,7 +341,7 @@ export function LeagueBetsTable({ bets }: { bets: BetRow[] }) {
             <SortHeader label="P&L" active={sortKey === "pnl"} dir={sortDir} onClick={() => toggle("pnl")} align="right" />
           </tr>
         </thead>
-        <tbody className="divide-y divide-white/5">
+        <tbody className="divide-y divide-slate-700">
           {sorted.map((b, i) => {
             const { result, label } = classifyOutcome(b.result);
             const rowTint =
@@ -350,7 +350,7 @@ export function LeagueBetsTable({ bets }: { bets: BetRow[] }) {
               : result === "pending" ? "border-l-amber-500"
               : "border-l-slate-600";
             return (
-              <tr key={`${b.date}-${b.match}-${b.market}-${b.selection}-${i}`} className={cn("border-l-2 transition hover:bg-white/[0.02]", rowTint)}>
+              <tr key={`${b.date}-${b.match}-${b.market}-${b.selection}-${i}`} className={cn("border-l-2 transition hover:bg-slate-800", rowTint)}>
                 <td className="whitespace-nowrap px-3 py-2 font-mono text-[11px] text-slate-400">{b.date}</td>
                 <td className="px-3 py-2">
                   <div className="max-w-[200px] truncate font-medium text-slate-100">{b.match}</div>
@@ -457,7 +457,7 @@ export function LeagueSummaryCards({ m }: { m: LeagueMetrics }) {
   return (
     <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
       {cards.map((c) => (
-        <div key={c.label} className="rounded-xl border border-white/10 bg-black/50 p-4">
+        <div key={c.label} className="rounded-xl border border-slate-700 bg-slate-900 p-4">
           <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">{c.label}</div>
           <div className={cn("mt-1.5 font-mono text-xl font-extrabold tabular-nums", toneText[c.tone])}>{c.value}</div>
           <div className="mt-1 text-[11px] text-slate-400">{c.sub}</div>

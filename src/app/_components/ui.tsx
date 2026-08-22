@@ -114,8 +114,8 @@ export function MarketTable({
       {showDeepExplanation ? (
         <div className="space-y-3">
           {markets.map((m, idx) => (
-            <div key={m.id} className="rounded-lg bg-black/50 p-3">
-              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/10 pb-2.5">
+            <div key={m.id} className="rounded-lg bg-slate-900 p-3">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-700 pb-2.5">
                 <div className="flex items-center gap-2">
                   <span className="flex h-6 w-6 items-center justify-center rounded-full bg-amber-400/20 text-xs font-bold font-mono text-amber-300 border border-amber-400/40">
                     #{idx + 1}
@@ -138,14 +138,14 @@ export function MarketTable({
 
               {/* 3-part Rationale */}
               <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3 text-xs">
-                <div className="rounded-lg border border-white/5 p-2.5">
+                <div className="rounded-lg border border-slate-700 p-2.5">
                   <div className="font-bold text-amber-300 mb-1 font-mono">1. WHY QUALIFIED</div>
                   <p className="text-slate-300 leading-relaxed text-[11px]">
                     {m.explanation?.whyQualified ??
                       "Passed 5-step gate with low agent disagreement & tight Wilson score CI."}
                   </p>
                 </div>
-                <div className="rounded-lg border border-white/5 p-2.5">
+                <div className="rounded-lg border border-slate-700 p-2.5">
                   <div className="font-bold text-cyan-300 mb-1 font-mono">
                     2. WHY SELECTED FOR THIS MATCH
                   </div>
@@ -155,7 +155,7 @@ export function MarketTable({
                       "Grounded in recent form, xG, and de-vigged bookmaker probabilities."}
                   </p>
                 </div>
-                <div className="rounded-lg border border-white/5 p-2.5">
+                <div className="rounded-lg border border-slate-700 p-2.5">
                   <div className="font-bold text-emerald-300 mb-1 font-mono">
                     3. WHY OUTCOME IS POSSIBLE
                   </div>
@@ -166,7 +166,7 @@ export function MarketTable({
                 </div>
               </div>
 
-              <div className="mt-2.5 flex items-center justify-between text-[11px] font-mono text-slate-500 pt-2 border-t border-white/5">
+              <div className="mt-2.5 flex items-center justify-between text-[11px] font-mono text-slate-500 pt-2 border-t border-slate-700">
                 <span>
                   Fair Odds Worst:{" "}
                   <strong className="text-slate-300">{m.fairOddsWorst.toFixed(2)}</strong>
@@ -186,9 +186,9 @@ export function MarketTable({
           ))}
         </div>
       ) : (
-        <div className="overflow-x-auto rounded-lg bg-black/50">
+        <div className="overflow-x-auto rounded-lg bg-slate-900">
           <table className="w-full text-left text-sm">
-            <thead className="bg-black/30 text-[11px] uppercase tracking-wider text-slate-400">
+            <thead className="bg-slate-800 text-[11px] uppercase tracking-wider text-slate-400">
               <tr>
                 <th className="px-3 py-2.5">Market &amp; Rationale</th>
                 <th className="px-3 py-2.5">Pick</th>
@@ -198,14 +198,14 @@ export function MarketTable({
                 <th className="px-3 py-2.5 text-center">Grade</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-white/5">
+            <tbody className="divide-y divide-slate-700">
               {markets.map((m) => (
-                <tr key={m.id} className="hover:bg-white/5 transition">
+                <tr key={m.id} className="hover:bg-slate-700 transition">
                   <td className="px-3 py-2.5 max-w-xs sm:max-w-md">
                     <div className="font-semibold text-slate-100">{m.name}</div>
                     <div className="text-[11px] text-amber-300/80 font-mono mt-0.5">{m.family}</div>
                     {m.reason ? (
-                      <div className="text-[11px] text-slate-400 mt-1 leading-relaxed p-1.5 rounded border border-white/5">
+                      <div className="text-[11px] text-slate-400 mt-1 leading-relaxed p-1.5 rounded border border-slate-700">
                         <span className="text-slate-300 font-sans">{m.reason}</span>
                       </div>
                     ) : null}
@@ -267,7 +267,7 @@ export function Section({
 }) {
   return (
     <section id={id} className="scroll-mt-28">
-      <div className="mb-2 inline-block bg-black/60 rounded-lg px-4 py-2">
+      <div className="mb-2 inline-block bg-slate-900 rounded-lg px-4 py-2">
         <h2 className="text-base font-semibold text-white">{title}</h2>
         {subtitle ? <p className="text-[11px] text-slate-300">{subtitle}</p> : null}
         {right ? <div className="mt-1">{right}</div> : null}
@@ -374,7 +374,7 @@ export function FixtureCard({
         </div>
       </div>
 
-      <div className="mt-2 flex items-center justify-between border-t border-white/5 pt-2 text-[11px] text-slate-500">
+      <div className="mt-2 flex items-center justify-between border-t border-slate-700 pt-2 text-[11px] text-slate-500">
         <span className="truncate">
           {fx.venue ?? (fx.neutralSite ? "Neutral" : "Home venue")}
         </span>

@@ -34,7 +34,7 @@ export function AccuracyBreakdown({
   const settled = factors.filter((f) => f.total > 0);
   if (settled.length === 0) {
     return (
-      <div className="rounded-xl border border-white/10 bg-black/50 p-8 text-center font-mono text-xs text-slate-400">
+      <div className="rounded-xl border border-slate-700 bg-slate-900 p-8 text-center font-mono text-xs text-slate-400">
         {emptyLabel}
       </div>
     );
@@ -63,7 +63,7 @@ export function AccuracyBreakdown({
         return (
           <div
             key={f.label}
-            className="rounded-lg border border-white/10 bg-black/40 p-3"
+            className="rounded-lg border border-slate-700 bg-slate-800 p-3"
           >
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="min-w-0">
@@ -71,7 +71,7 @@ export function AccuracyBreakdown({
                   <span className="truncate text-sm font-semibold text-slate-100">{f.label}</span>
                   {f.expected !== undefined ? (
                     <span
-                      className="rounded border border-white/10 bg-white/5 px-1.5 py-0.5 font-mono text-[10px] text-slate-400"
+                      className="rounded border border-slate-700 bg-slate-800 px-1.5 py-0.5 font-mono text-[10px] text-slate-400"
                       title="Model reliability coefficient"
                     >
                       model {pct(f.expected, 0)}

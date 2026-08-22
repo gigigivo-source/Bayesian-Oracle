@@ -118,23 +118,23 @@ export default function Home() {
     }
   }
 
-  if (hasPin === null) return <div className="min-h-screen bg-[#05070d] flex items-center justify-center"><div className="text-amber-300 font-mono animate-pulse">Loading...</div></div>;
+  if (hasPin === null) return <div className="min-h-screen bg-[#0F1117] flex items-center justify-center"><div className="text-amber-300 font-mono animate-pulse">Loading...</div></div>;
 
   if (!authed) return (
-    <div className="min-h-screen bg-[#05070d] flex items-center justify-center">
-      <div className="bg-black/50 rounded-xl p-8 w-full max-w-sm text-center">
-        <div className="w-[60px] h-[60px] rounded-lg mx-auto mb-4 bg-amber-400/20 border border-amber-400/30 flex items-center justify-center">
+    <div className="min-h-screen bg-[#0F1117] flex items-center justify-center">
+      <div className="bg-slate-900 rounded-xl p-8 w-full max-w-sm text-center">
+        <div className="w-[60px] h-[60px] rounded-lg mx-auto mb-4 bg-[#F59E0B] border border-[#FF8C00] flex items-center justify-center">
           <span className="text-2xl">⚽</span>
         </div>
         <h1 className="text-xl font-bold text-amber-300 font-mono mb-1">GIGI GIVO</h1>
         <p className="text-xs text-slate-400 mb-6">{hasPin ? "Enter your PIN to continue" : "Set a PIN to secure your app"}</p>
         {!hasPin && (
           <input value={pinName} onChange={e => setPinName(e.target.value)} placeholder="Your name"
-            className="w-full rounded-lg border border-white/15 bg-black/40 px-4 py-2.5 text-sm text-white outline-none focus:border-amber-400 mb-3" />
+            className="w-full rounded-lg border border-slate-700 bg-slate-800 px-4 py-2.5 text-sm text-white outline-none focus:border-amber-400 mb-3" />
         )}
         <input value={pinInput} onChange={e => setPinInput(e.target.value)} placeholder={hasPin ? "Enter PIN" : "Create PIN (4+ digits)"}
           type="password" onKeyDown={e => { if (e.key === "Enter") handlePin(); }}
-          className="w-full rounded-lg border border-white/15 bg-black/40 px-4 py-3 text-center text-2xl tracking-[0.5em] text-white outline-none focus:border-amber-400 font-mono" />
+          className="w-full rounded-lg border border-slate-700 bg-slate-800 px-4 py-3 text-center text-2xl tracking-[0.5em] text-white outline-none focus:border-amber-400 font-mono" />
         {pinError && <p className="text-rose-400 text-xs mt-2">{pinError}</p>}
         <button onClick={handlePin} className={`w-full mt-4 px-4 py-3 text-sm ${ACTION_AMBER}`}>
           {hasPin ? "Unlock" : "Set PIN & Start"}
@@ -144,14 +144,14 @@ export default function Home() {
   );
 
   return (
-    <div className={`min-h-screen text-slate-100 ${tab !== "top" ? "bg-[#05070d]" : ""}`}>
+    <div className={`min-h-screen text-slate-100 ${tab !== "top" ? "bg-[#0F1117]" : ""}`}>
       {tab === "top" && <BackgroundSlideshow />}
       <div className="relative z-10">
         <Header tab={tab} setTab={setTab} />
 
         {/* LEAGUE CHIPS — only on Top Matches tab */}
         {tab === "top" && (
-          <div className="sticky top-[99px] z-30 bg-black/55 py-2 px-4 overflow-x-auto scrollbar-none">
+          <div className="sticky top-[99px] z-30 bg-[#0F1117] py-2 px-4 overflow-x-auto scrollbar-none">
             <div className="mx-auto flex max-w-7xl items-center gap-3">
               <button
                 onClick={() => { setSelectedLeagueSlug(null); setShowTodayOnly(false); }}
@@ -165,7 +165,7 @@ export default function Home() {
               <button
                 onClick={() => { setShowTodayOnly(true); setSelectedLeagueSlug(null); }}
                 className={`${CHIP} px-4 py-2 text-sm font-medium tracking-wide ${
-                  showTodayOnly ? CHIP_ON_EMERALD : "bg-gray-800/50 text-emerald-300/80 hover:bg-emerald-500/15 hover:text-emerald-200"
+                  showTodayOnly ? CHIP_ON_EMERALD : "bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-white"
                 }`}
               >
                 <span className="relative flex h-2 w-2">
@@ -175,7 +175,7 @@ export default function Home() {
                 Today
               </button>
               {/* separator */}
-              <span className="h-4 w-px bg-white/15 mx-1 shrink-0" />
+              <span className="h-4 w-px bg-slate-800 mx-1 shrink-0" />
               {TOP_LEAGUE_PILLS.map((lg) => (
                 <button
                   key={lg.slug}
@@ -230,7 +230,7 @@ export default function Home() {
           </ErrorBoundary>
         ) : null}
 
-        <footer className="bg-black/50 py-4 text-center text-xs text-slate-300 font-mono">
+        <footer className="bg-slate-900 py-4 text-center text-xs text-slate-300 font-mono">
           ĞIGI GIVØ Proprietary Sportsbook Engine · Real Data Mesh · Zero Simulation
         </footer>
       </div>
@@ -268,7 +268,7 @@ function LivePage({ onSelect }: { onSelect: (fx: FixtureLite) => void }) {
     <div className="space-y-8">
       {live.length > 0 ? (
         <div>
-          <div className="mb-3 inline-flex items-center gap-2 bg-black/60 rounded-lg px-3 py-1.5">
+          <div className="mb-3 inline-flex items-center gap-2 bg-slate-900 rounded-lg px-3 py-1.5">
             <span className="relative flex h-3 w-3">
               <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75" />
               <span className="relative inline-flex h-3 w-3 rounded-full bg-rose-500" />
@@ -282,7 +282,7 @@ function LivePage({ onSelect }: { onSelect: (fx: FixtureLite) => void }) {
           </div>
         </div>
       ) : (
-        <div className="bg-black/50 rounded-lg p-10 text-center">
+        <div className="bg-slate-900 rounded-lg p-10 text-center">
           <div className="text-lg font-bold text-slate-300 mb-2">No matches are live right now</div>
           <p className="text-sm text-slate-400 font-mono">Live scores auto-refresh every 15 seconds. Check back during match hours.</p>
         </div>
@@ -290,7 +290,7 @@ function LivePage({ onSelect }: { onSelect: (fx: FixtureLite) => void }) {
 
       {recent.length > 0 && (
         <div>
-          <div className="mb-3 inline-block bg-black/60 rounded-lg px-3 py-1.5">
+          <div className="mb-3 inline-block bg-slate-900 rounded-lg px-3 py-1.5">
             <h2 className="text-sm font-bold text-white">Today&apos;s Schedule & Recent Results</h2>
           </div>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
@@ -331,20 +331,20 @@ function Header({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
 
   return (
     <>
-      <header className="sticky top-0 z-40 bg-black/60 shadow-lg backdrop-blur-sm">
+      <header className="sticky top-0 z-40 bg-slate-900 shadow-lg ">
         <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3 px-4 py-2 sm:pr-28">
           <div className="flex items-center gap-3">
-            <div className="h-[38px] w-[38px] rounded-lg bg-amber-400/20 border border-amber-400/30 flex items-center justify-center">
+            <div className="h-[38px] w-[38px] rounded-lg bg-[#F59E0B] border border-[#FF8C00] flex items-center justify-center">
               <span className="text-xl">⚽</span>
             </div>
             <div>
-              <h1 className="bg-gradient-to-r from-amber-300 via-yellow-200 to-emerald-300 bg-clip-text font-mono text-lg font-extrabold tracking-tight text-transparent">
+              <h1 className="bg-gradient-to-r from-[#F59E0B] to-[#FF8C00] bg-clip-text font-mono text-lg font-extrabold tracking-tight text-transparent">
                 ĞIGI GIVØ
               </h1>
               <p className="text-[10px] text-slate-400 font-mono">Bayesian Oracle · Deep Statistical Engine</p>
             </div>
           </div>
-          <nav className="flex gap-2 rounded-full border border-white/10 bg-white/[0.03] p-1.5 items-center backdrop-blur-md shadow-inner shadow-black/20">
+          <nav className="flex gap-2 rounded-full border border-slate-700 bg-slate-800 p-1.5 items-center  shadow-inner shadow-slate-950/40">
             {mainTabs.map((t) => (
               <button
                 key={t.id}
@@ -378,7 +378,7 @@ function Header({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
         </button>
 
         {menuOpen && (
-          <div className="absolute right-0 top-full mt-2 w-56 max-h-[calc(100vh-5rem)] overflow-y-auto rounded-xl bg-black/90 border border-white/15 shadow-2xl shadow-black/60 p-1.5 space-y-0.5 backdrop-blur-md">
+          <div className="absolute right-0 top-full mt-2 w-56 max-h-[calc(100vh-5rem)] overflow-y-auto rounded-xl bg-[#0F1117] border border-slate-700 shadow-2xl shadow-slate-950/60 p-1.5 space-y-0.5 ">
             {menuTabs.map((t) => (
               <button
                 key={t.id}
@@ -399,7 +399,7 @@ function Header({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
 function LoadingGrid({ label }: { label: string }) {
   return (
     <div className="space-y-4">
-      <div className="flex items-center gap-2 rounded-lg bg-black/50 px-4 py-3">
+      <div className="flex items-center gap-2 rounded-lg bg-slate-900 px-4 py-3">
         <span className="relative flex h-3 w-3">
           <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75" />
           <span className="relative inline-flex h-3 w-3 rounded-full bg-amber-500" />
@@ -408,24 +408,24 @@ function LoadingGrid({ label }: { label: string }) {
       </div>
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
         {Array.from({ length: 8 }).map((_, i) => (
-          <div key={i} className="overflow-hidden rounded-lg border border-white/10 bg-black/50 p-3">
+          <div key={i} className="overflow-hidden rounded-lg border border-slate-700 bg-slate-900 p-3">
             <div className="mb-3 flex items-center justify-between">
-              <div className="h-2.5 w-20 animate-pulse bg-white/10 rounded" />
-              <div className="h-2.5 w-10 animate-pulse bg-white/10 rounded" />
+              <div className="h-2.5 w-20 animate-pulse bg-slate-800 rounded" />
+              <div className="h-2.5 w-10 animate-pulse bg-slate-800 rounded" />
             </div>
             <div className="space-y-2">
               <div className="flex items-center gap-2">
-                <div className="h-5 w-5 animate-pulse bg-white/10 rounded-full" />
-                <div className="h-3 flex-1 animate-pulse bg-white/10 rounded" />
-                <div className="h-3 w-5 animate-pulse bg-white/10 rounded" />
+                <div className="h-5 w-5 animate-pulse bg-slate-800 rounded-full" />
+                <div className="h-3 flex-1 animate-pulse bg-slate-800 rounded" />
+                <div className="h-3 w-5 animate-pulse bg-slate-800 rounded" />
               </div>
               <div className="flex items-center gap-2">
-                <div className="h-5 w-5 animate-pulse bg-white/10 rounded-full" />
-                <div className="h-3 flex-1 animate-pulse bg-white/10 rounded" />
-                <div className="h-3 w-5 animate-pulse bg-white/10 rounded" />
+                <div className="h-5 w-5 animate-pulse bg-slate-800 rounded-full" />
+                <div className="h-3 flex-1 animate-pulse bg-slate-800 rounded" />
+                <div className="h-3 w-5 animate-pulse bg-slate-800 rounded" />
               </div>
             </div>
-            <div className="mt-3 h-2 w-24 animate-pulse bg-white/10 rounded border-t border-white/5 pt-2" />
+            <div className="mt-3 h-2 w-24 animate-pulse bg-slate-800 rounded border-t border-slate-700 pt-2" />
           </div>
         ))}
       </div>
@@ -544,7 +544,7 @@ function TopFeed({
         </div>
       )}
       {filterSlug && !showTodayOnly ? (
-        <div className="flex items-center justify-between rounded-lg bg-black/50 px-4 py-2 text-sm text-amber-200">
+        <div className="flex items-center justify-between rounded-lg bg-slate-900 px-4 py-2 text-sm text-amber-200">
           <span>Filtering: <strong>{TOP_LEAGUE_PILLS.find((p) => p.slug === filterSlug)?.name ?? filterSlug}</strong></span>
           <button onClick={onClearFilter} className={`${OUTLINE_NEUTRAL} px-3 py-1 text-xs font-mono`}>
             Show All ✕
@@ -559,7 +559,7 @@ function TopFeed({
       {filterSlug && !showTodayOnly && !chipLoading && chipFixtures && (
         <div className="space-y-6">
           {chipFixtures.upcoming.length === 0 && chipFixtures.results.length === 0 ? (
-            <div className="bg-black/50 rounded-lg p-8 text-center">
+            <div className="bg-slate-900 rounded-lg p-8 text-center">
               <div className="text-2xl mb-3">📅</div>
               <div className="text-sm font-bold text-slate-300 mb-2">{chipFixtures.label}</div>
               <p className="text-xs text-slate-400 font-mono">No fixtures found. This league may be in pre-season or the schedule hasn&apos;t been released yet.</p>
@@ -568,7 +568,7 @@ function TopFeed({
             <>
               {chipFixtures.upcoming.length > 0 && (
                 <div className="space-y-3">
-                  <div className="inline-block bg-black/60 rounded-lg px-3 py-1.5">
+                  <div className="inline-block bg-slate-900 rounded-lg px-3 py-1.5">
                     <h2 className="text-sm font-bold text-white">{chipFixtures.label} — Upcoming ({chipFixtures.upcoming.length})</h2>
                   </div>
                   <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
@@ -580,7 +580,7 @@ function TopFeed({
               )}
               {chipFixtures.results.length > 0 && (
                 <div className="space-y-3">
-                  <div className="inline-block bg-black/60 rounded-lg px-3 py-1.5">
+                  <div className="inline-block bg-slate-900 rounded-lg px-3 py-1.5">
                     <h2 className="text-sm font-bold text-white">Recent Results ({chipFixtures.results.length})</h2>
                   </div>
                   <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
@@ -605,7 +605,7 @@ function TopFeed({
           <div className="space-y-4">
             {extraToday.map((block) => (
               <section id={`league-sec-${block.slug}`} key={`today-extra-${block.slug}`} className="scroll-mt-36 space-y-3">
-                <div className="inline-flex items-center gap-2 bg-black/60 rounded-lg px-3 py-1.5">
+                <div className="inline-flex items-center gap-2 bg-slate-900 rounded-lg px-3 py-1.5">
                   <h2 className="text-sm font-bold text-white">{block.label}</h2>
                   {block.upcoming.length > 0 && (
                     <span className="rounded bg-emerald-500/20 px-2 py-0.5 text-[10px] text-emerald-300 font-mono">
@@ -613,7 +613,7 @@ function TopFeed({
                     </span>
                   )}
                   {block.results.length > 0 && (
-                    <span className="rounded bg-white/10 px-2 py-0.5 text-[10px] text-slate-300 font-mono">
+                    <span className="rounded bg-slate-800 px-2 py-0.5 text-[10px] text-slate-300 font-mono">
                       {block.results.length} results
                     </span>
                   )}
@@ -630,7 +630,7 @@ function TopFeed({
       })()}
 
       {filteredBlocks.length === 0 && showTodayOnly && (
-        <div className="bg-black/50 rounded-lg p-10 text-center">
+        <div className="bg-slate-900 rounded-lg p-10 text-center">
           <div className="text-lg font-bold text-slate-300 mb-2">No matches found for today</div>
           <p className="text-sm text-slate-400 font-mono">Check back later or view all upcoming matches.</p>
         </div>
@@ -644,7 +644,7 @@ function TopFeed({
         const pill = TOP_LEAGUE_PILLS.find((p) => p.slug === block.slug);
         return (
           <section id={`league-sec-${block.slug}`} key={block.slug} className="scroll-mt-36 space-y-4">
-            <div className="inline-flex items-center gap-2 bg-black/60 rounded-lg px-3 py-1.5">
+            <div className="inline-flex items-center gap-2 bg-slate-900 rounded-lg px-3 py-1.5">
               {pill && (
                 <Image src={pill.logo} alt={block.label} width={20} height={20} className="object-contain" unoptimized />
               )}
@@ -655,7 +655,7 @@ function TopFeed({
                 </span>
               )}
               {res.length > 0 && (
-                <span className="rounded bg-white/10 px-2 py-0.5 text-[10px] text-slate-300 font-mono font-medium">
+                <span className="rounded bg-slate-800 px-2 py-0.5 text-[10px] text-slate-300 font-mono font-medium">
                   {res.length} results
                 </span>
               )}
@@ -671,7 +671,7 @@ function TopFeed({
 
             {res.length > 0 && (
               <div>
-                <div className="mb-2 inline-block bg-black/40 rounded px-2 py-1 text-[11px] font-mono text-slate-400">
+                <div className="mb-2 inline-block bg-slate-800 rounded px-2 py-1 text-[11px] font-mono text-slate-400">
                   Recent Results
                 </div>
                 <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
@@ -686,8 +686,8 @@ function TopFeed({
       })}
 
       {!filterSlug && !showTodayOnly && data.extra.length > 0 && (
-        <section className="pt-4 border-t border-white/10">
-          <div className="mb-3 inline-block bg-black/60 rounded-lg px-3 py-1.5">
+        <section className="pt-4 border-t border-slate-700">
+          <div className="mb-3 inline-block bg-slate-900 rounded-lg px-3 py-1.5">
             <h2 className="text-sm font-bold text-white">More Leagues</h2>
           </div>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
@@ -760,7 +760,7 @@ function LeagueBrowser({ onSelect }: { onSelect: (fx: FixtureLite) => void }) {
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           placeholder="Search leagues…"
-          className="w-full rounded-md border border-white/15 bg-black/50 px-3 py-2 text-sm text-slate-100 outline-none focus:border-amber-400"
+          className="w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none focus:border-amber-400"
         />
         <div className="max-h-[75vh] space-y-3 overflow-y-auto pr-1">
           {Object.entries(filtered).map(([region, lgs]) => (
@@ -785,13 +785,13 @@ function LeagueBrowser({ onSelect }: { onSelect: (fx: FixtureLite) => void }) {
       </aside>
       <div id="league-fixtures" className="scroll-mt-24">
         {!activeLeague ? (
-          <div className="bg-black/50 rounded-lg p-10 text-center text-slate-400 font-mono">
+          <div className="bg-slate-900 rounded-lg p-10 text-center text-slate-400 font-mono">
             Select a league to load fixtures & results.
           </div>
         ) : loadingFx || !loaded ? (
           <LoadingGrid label={`Loading ${activeLeague.name}…`} />
         ) : upcoming.length === 0 && results.length === 0 ? (
-          <div className="bg-black/50 rounded-lg p-8 text-center">
+          <div className="bg-slate-900 rounded-lg p-8 text-center">
             <div className="text-2xl mb-3">📅</div>
             <div className="text-sm font-bold text-slate-300 mb-2">{activeLeague.name}</div>
             <p className="text-xs text-slate-400 font-mono max-w-xs mx-auto">
@@ -804,7 +804,7 @@ function LeagueBrowser({ onSelect }: { onSelect: (fx: FixtureLite) => void }) {
           <div className="space-y-8">
             {upcoming.length > 0 && (
               <div>
-                <div className="mb-3 inline-block bg-black/60 rounded-lg px-3 py-1.5">
+                <div className="mb-3 inline-block bg-slate-900 rounded-lg px-3 py-1.5">
                   <h2 className="text-sm font-bold text-white">Upcoming — {activeLeague.name} ({upcoming.length})</h2>
                 </div>
                 <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -817,7 +817,7 @@ function LeagueBrowser({ onSelect }: { onSelect: (fx: FixtureLite) => void }) {
 
             {results.length > 0 && (
               <div>
-                <div className="mb-3 inline-block bg-black/60 rounded-lg px-3 py-1.5">
+                <div className="mb-3 inline-block bg-slate-900 rounded-lg px-3 py-1.5">
                   <h2 className="text-sm font-bold text-white">Recent Results — {activeLeague.name} ({results.length})</h2>
                 </div>
                 <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -856,13 +856,13 @@ interface StandingsEntry {
 // Hoisted out of StandingsView so it isn't re-created on every render
 function StandingsTable({ entries, activeName }: { entries: StandingsEntry[]; activeName: string }) {
   return (
-    <div className="overflow-x-auto rounded-lg bg-black/50">
-      <div className="px-3 py-2 bg-black/40 border-b border-white/5 flex items-center gap-2">
+    <div className="overflow-x-auto rounded-lg bg-slate-900">
+      <div className="px-3 py-2 bg-slate-800 border-b border-slate-700 flex items-center gap-2">
         <span className="text-xs font-bold text-amber-300 font-mono">{activeName}</span>
         <span className="text-[10px] text-slate-500 font-mono">— {entries.length} teams</span>
       </div>
       <table className="w-full text-left text-sm font-mono">
-        <thead className="bg-black/30 text-[11px] uppercase tracking-wider text-slate-400">
+        <thead className="bg-slate-800 text-[11px] uppercase tracking-wider text-slate-400">
           <tr>
             <th className="px-3 py-2 w-8">#</th>
             <th className="px-3 py-2">Team</th>
@@ -876,14 +876,14 @@ function StandingsTable({ entries, activeName }: { entries: StandingsEntry[]; ac
             <th className="px-3 py-2 text-center font-bold">Pts</th>
           </tr>
         </thead>
-        <tbody className="divide-y divide-white/5">
+        <tbody className="divide-y divide-slate-700">
           {entries.map((e, i) => (
             <tr
               key={i}
               className={[
                 i < 4  ? "border-l-2 border-l-emerald-500 bg-emerald-500/[0.03]" : "",
                 i >= entries.length - 3 ? "border-l-2 border-l-rose-500 bg-rose-500/[0.03]" : "",
-                i >= 4 && i < entries.length - 3 ? "hover:bg-white/[0.02]" : "",
+                i >= 4 && i < entries.length - 3 ? "hover:bg-slate-800" : "",
               ].join(" ")}
             >
               <td className="px-3 py-1.5 text-slate-400 text-xs">{e.rank}</td>
@@ -909,7 +909,7 @@ function StandingsTable({ entries, activeName }: { entries: StandingsEntry[]; ac
           ))}
         </tbody>
       </table>
-      <div className="px-3 py-2 bg-black/20 border-t border-white/5 flex gap-4 text-[10px] font-mono">
+      <div className="px-3 py-2 bg-slate-800 border-t border-slate-700 flex gap-4 text-[10px] font-mono">
         <span className="flex items-center gap-1.5"><span className="inline-block w-2 h-2 rounded-full bg-emerald-500" /> Champions / UCL spots</span>
         <span className="flex items-center gap-1.5"><span className="inline-block w-2 h-2 rounded-full bg-rose-500" /> Relegation zone</span>
       </div>
@@ -991,7 +991,7 @@ function StandingsView() {
   return (
     <div className="space-y-4">
       {/* Header */}
-      <div className="bg-black/50 rounded-lg p-4">
+      <div className="bg-slate-900 rounded-lg p-4">
         <h2 className="text-base font-bold text-white">Standings</h2>
         <p className="text-xs text-slate-400 mt-0.5">243 leagues, cups & tournaments worldwide</p>
       </div>
@@ -1019,7 +1019,7 @@ function StandingsView() {
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search 243 leagues & cups…"
-            className="w-full rounded-md border border-white/15 bg-black/50 px-3 py-2 text-sm text-slate-100 outline-none focus:border-amber-400"
+            className="w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none focus:border-amber-400"
           />
           <div className="max-h-[65vh] overflow-y-auto space-y-2 pr-1 scrollbar-none">
             {Object.entries(filteredLeagues).map(([region, lgs]) => (
@@ -1056,7 +1056,7 @@ function StandingsView() {
           {loading ? (
             <LoadingGrid label={`Loading ${activeName} standings…`} />
           ) : entries.length === 0 ? (
-            <div className="bg-black/50 rounded-lg p-8 text-center">
+            <div className="bg-slate-900 rounded-lg p-8 text-center">
               <div className="text-2xl mb-3">{standingsMeta?.knockoutFormat ? "🏆" : "📊"}</div>
               <div className="text-base font-bold text-slate-300 mb-2">{activeName}</div>
               {standingsMeta?.message ? (
@@ -1110,7 +1110,7 @@ function ManualOracle() {
 
   return (
     <div className="space-y-4">
-      <div className="bg-black/50 rounded-lg p-4">
+      <div className="bg-slate-900 rounded-lg p-4">
         <h2 className="text-base font-bold text-white">Oracle Search</h2>
         <p className="text-xs text-slate-400 mt-1">Search for any team, league, or match to run the oracle</p>
       </div>
@@ -1120,7 +1120,7 @@ function ManualOracle() {
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder="Search team, league or match... (e.g. Arsenal, World Cup, Barcelona)"
-          className="w-full rounded-lg border border-white/15 bg-black/50 px-4 py-3 text-sm text-slate-100 outline-none focus:border-amber-400 font-mono"
+          className="w-full rounded-lg border border-slate-700 bg-slate-900 px-4 py-3 text-sm text-slate-100 outline-none focus:border-amber-400 font-mono"
         />
         {searching && (
           <div className="absolute right-3 top-3 text-xs text-amber-300 font-mono animate-pulse">Searching...</div>
@@ -1128,7 +1128,7 @@ function ManualOracle() {
       </div>
 
       {searchResults.length > 0 && !selectedFx && (
-        <div className="bg-white/5 border border-white/5 rounded-2xl overflow-hidden p-1.5 space-y-0.5">
+        <div className="bg-slate-800 border border-slate-700 rounded-2xl overflow-hidden p-1.5 space-y-0.5">
           {searchResults.map((fx) => (
             <button
               key={`${fx.leagueSlug}-${fx.id}`}
@@ -1152,7 +1152,7 @@ function ManualOracle() {
       )}
 
       {query.length >= 2 && searchResults.length === 0 && !searching && (
-        <div className="bg-black/50 rounded-lg p-6 text-center text-slate-400 text-sm font-mono">
+        <div className="bg-slate-900 rounded-lg p-6 text-center text-slate-400 text-sm font-mono">
           No matches found for &quot;{query}&quot;
         </div>
       )}
@@ -1194,7 +1194,7 @@ function VerifiedPage() {
 
   if (matches.length === 0) {
     return (
-      <div className="bg-black/50 rounded-lg p-10 text-center">
+      <div className="bg-slate-900 rounded-lg p-10 text-center">
         <div className="text-lg font-bold text-slate-300 mb-2">No finished matches to verify</div>
         <p className="text-sm text-slate-400 font-mono">Check back after matches have been completed today.</p>
       </div>
@@ -1206,7 +1206,7 @@ function VerifiedPage() {
 
   return (
     <div className="space-y-8">
-      <div className="bg-black/50 rounded-lg p-5">
+      <div className="bg-slate-900 rounded-lg p-5">
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div>
             <h2 className="text-lg font-extrabold text-emerald-300 font-mono flex items-center gap-2">
@@ -1216,7 +1216,7 @@ function VerifiedPage() {
               Oracle predictions verified against real ESPN boxscore data (shots, SOT, corners, cards, offsides, saves)
             </p>
           </div>
-          <div className="bg-black/40 rounded-lg px-5 py-3 text-center border border-emerald-500/30">
+          <div className="bg-slate-800 rounded-lg px-5 py-3 text-center border border-emerald-500/30">
             <div className="text-3xl font-extrabold font-mono text-emerald-300">
               {totalHits}/{totalEval}
             </div>
@@ -1231,8 +1231,8 @@ function VerifiedPage() {
         const pct = vm.evaluatedCount > 0 ? ((vm.hitCount / vm.evaluatedCount) * 100).toFixed(0) : "—";
         const perfect = vm.hitCount === vm.evaluatedCount && vm.evaluatedCount > 0;
         return (
-          <div key={vm.fixture.id} className="bg-black/50 rounded-lg p-4">
-            <div className="flex flex-wrap items-center justify-between gap-3 mb-3 pb-3 border-b border-white/10">
+          <div key={vm.fixture.id} className="bg-slate-900 rounded-lg p-4">
+            <div className="flex flex-wrap items-center justify-between gap-3 mb-3 pb-3 border-b border-slate-700">
               <div className="flex items-center gap-3">
                 {vm.fixture.home.logo && (
                   <Image src={vm.fixture.home.logo} alt={vm.fixture.home.shortName} width={24} height={24} className="object-contain" unoptimized />
@@ -1261,7 +1261,7 @@ function VerifiedPage() {
                   pick.outcome === "HIT" ? "text-emerald-300" :
                   pick.outcome === "MISS" ? "text-rose-300" : "text-slate-400";
                 return (
-                  <div key={i} className="flex items-center gap-3 rounded-md bg-black/30 px-3 py-2">
+                  <div key={i} className="flex items-center gap-3 rounded-md bg-slate-800 px-3 py-2">
                     <span className="text-xs font-mono text-slate-500 w-5">{i + 1}.</span>
                     <span className={`text-sm ${badgeColor}`}>{pick.outcome}</span>
                     <span className="text-sm text-white font-medium flex-1">{pick.name}</span>
@@ -1333,13 +1333,13 @@ function ResultsPage({ onSelect }: { onSelect: (fx: FixtureLite) => void }) {
       {loading ? (
         <LoadingGrid label="Loading recent results…" />
       ) : results.length === 0 ? (
-        <div className="bg-black/50 rounded-lg p-10 text-center">
+        <div className="bg-slate-900 rounded-lg p-10 text-center">
           <div className="text-lg font-bold text-slate-300 mb-2">No recent results found</div>
           <p className="text-sm text-slate-400 font-mono">Try a different league or check back later.</p>
         </div>
       ) : (
         <div>
-          <div className="mb-3 inline-block bg-black/60 rounded-lg px-3 py-1.5">
+          <div className="mb-3 inline-block bg-slate-900 rounded-lg px-3 py-1.5">
             <h2 className="text-sm font-bold text-white">Recent Results — {results.length} matches</h2>
           </div>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
@@ -1405,7 +1405,7 @@ function ValueBetsPage() {
 
   return (
     <div className="space-y-6">
-      <div className="bg-black/50 rounded-lg p-4 flex flex-wrap items-center justify-between gap-3">
+      <div className="bg-slate-900 rounded-lg p-4 flex flex-wrap items-center justify-between gap-3">
         <div>
           <h2 className="text-base font-bold text-white">💰 Value Bet Tracker</h2>
           <p className="text-xs text-slate-400 mt-1">Post-match P&L verification — oracle edge vs real outcomes</p>
@@ -1438,7 +1438,7 @@ function ValueBetsPage() {
             { label: "ROI",         val: `${stats.roi >= 0 ? "+" : ""}${stats.roi.toFixed(1)}%`, color: stats.roi >= 0 ? "text-emerald-300" : "text-rose-300" },
             { label: "Avg Edge",    val: `+${stats.avgEdge.toFixed(1)}%`, color: "text-cyan-300" },
           ].map((c) => (
-            <div key={c.label} className="bg-black/50 rounded-lg p-3 text-center border border-white/5">
+            <div key={c.label} className="bg-slate-900 rounded-lg p-3 text-center border border-slate-700">
               <div className={`text-xl font-extrabold font-mono ${c.color}`}>{c.val}</div>
               <div className="text-[10px] text-slate-400 mt-0.5">{c.label}</div>
             </div>
@@ -1447,7 +1447,7 @@ function ValueBetsPage() {
       )}
 
       {bets.length === 0 ? (
-        <div className="bg-black/50 rounded-lg p-10 text-center">
+        <div className="bg-slate-900 rounded-lg p-10 text-center">
           <div className="text-2xl mb-3">💰</div>
           <div className="text-base font-bold text-slate-300 mb-2">No value bets tracked yet</div>
           <p className="text-xs text-slate-400 font-mono max-w-sm mx-auto">
@@ -1465,9 +1465,9 @@ function ValueBetsPage() {
               <span className="text-slate-400">P&L: <strong className={(stats?.totalPnl ?? 0) >= 0 ? "text-emerald-300" : "text-rose-300"}>{(stats?.totalPnl ?? 0) >= 0 ? "+" : ""}${(stats?.totalPnl ?? 0).toFixed(2)}</strong></span>
             </div>
           </div>
-          <div className="bg-black/50 rounded-lg overflow-hidden">
+          <div className="bg-slate-900 rounded-lg overflow-hidden">
             <table className="w-full text-xs">
-              <thead className="bg-black/30 text-[10px] uppercase text-slate-400 border-b border-white/5">
+              <thead className="bg-slate-800 text-[10px] uppercase text-slate-400 border-b border-slate-700">
                 <tr>
                   <th className="px-3 py-2 text-left">Match</th>
                   <th className="px-3 py-2 text-left">Market</th>
@@ -1478,9 +1478,9 @@ function ValueBetsPage() {
                   <th className="px-3 py-2 text-right">P&L</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-white/5">
+              <tbody className="divide-y divide-slate-700">
                 {bets.map((b) => (
-                  <tr key={b.id} className="hover:bg-white/[0.02]">
+                  <tr key={b.id} className="hover:bg-slate-800">
                     <td className="px-3 py-2">
                       <div className="text-slate-200 font-medium truncate max-w-[140px]">{b.match}</div>
                       <div className="text-[10px] text-slate-500 font-mono">{b.matchDate}</div>
@@ -1604,7 +1604,7 @@ function BacktestDashboard() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="bg-black/50 rounded-lg p-4">
+      <div className="bg-slate-900 rounded-lg p-4">
         <h2 className="text-base font-bold text-white flex items-center gap-2">
           <span className="text-amber-400">⚡</span> Live Backtest Engine
         </h2>
@@ -1615,7 +1615,7 @@ function BacktestDashboard() {
       </div>
 
       {/* Controls */}
-      <div className="bg-black/50 rounded-lg p-4 space-y-4">
+      <div className="bg-slate-900 rounded-lg p-4 space-y-4">
         <div className="flex flex-wrap gap-3 items-center">
           {/* Days */}
           <div>
@@ -1671,7 +1671,7 @@ function BacktestDashboard() {
       {ran && aggregate && (
         <>
           {/* Summary cards */}
-          <div className="bg-black/50 rounded-lg p-4 space-y-4">
+          <div className="bg-slate-900 rounded-lg p-4 space-y-4">
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-bold text-white">
                 Results — {aggregate.matchesAnalysed} matches · last {aggregate.daysWindow} days
@@ -1696,7 +1696,7 @@ function BacktestDashboard() {
                 { label: "Top-5 Perfect (5/5)", rate: aggregate.top5.perfectRate,  n: aggregate.top5.perfectMatches,  total: aggregate.top5.settled },
                 { label: "Top-10 Perfect (10/10)",rate: aggregate.top10.perfectRate, n: aggregate.top10.perfectMatches, total: aggregate.top10.settled },
               ].map((t) => (
-                <div key={t.label} className="bg-black/40 rounded-lg p-3 text-center border border-white/5">
+                <div key={t.label} className="bg-slate-800 rounded-lg p-3 text-center border border-slate-700">
                   <div className={`text-2xl font-extrabold font-mono ${t.rate >= 0.5 ? "text-emerald-300" : t.rate >= 0.3 ? "text-amber-300" : "text-rose-300"}`}>
                     {(t.rate * 100).toFixed(0)}%
                   </div>
@@ -1716,7 +1716,7 @@ function BacktestDashboard() {
                 <span>Misses: <strong className="text-rose-300">{aggregate.top1.matchesWithPick - aggregate.top1.hits}</strong></span>
                 <span>Hit rate: <strong className={aggregate.top1.hitRate >= 0.90 ? "text-emerald-300" : "text-amber-300"}>{aggregate.top1.hitRatePct}</strong></span>
               </div>
-              <div className="mt-2 h-2 bg-black/40 rounded-full overflow-hidden">
+              <div className="mt-2 h-2 bg-slate-800 rounded-full overflow-hidden">
                 <div className={`h-full rounded-full ${aggregate.top1.hitRate >= 0.90 ? "bg-emerald-500" : aggregate.top1.hitRate >= 0.75 ? "bg-amber-500" : "bg-rose-500"}`}
                   style={{ width: `${aggregate.top1.hitRate * 100}%` }} />
               </div>
@@ -1744,10 +1744,10 @@ function BacktestDashboard() {
                              : "border-l-amber-500";
 
               return (
-                <div key={idx} className={`overflow-hidden rounded-2xl border border-white/5 border-l-2 bg-white/5 transition-all duration-200 hover:-translate-y-1 hover:shadow-2xl hover:shadow-black/50 ${top1Color}`}>
+                <div key={idx} className={`overflow-hidden rounded-2xl border border-slate-700 border-l-2 bg-slate-800 transition-all duration-200 hover:-translate-y-1 hover:shadow-2xl hover:shadow-slate-950/50 ${top1Color}`}>
                   <button
                     onClick={() => setExpandedMatch(isExpanded ? null : `${idx}`)}
-                    className="block w-full cursor-pointer select-none p-3 text-left transition-all duration-200 hover:bg-white/5 active:scale-[0.995]"
+                    className="block w-full cursor-pointer select-none p-3 text-left transition-all duration-200 hover:bg-slate-700 active:scale-[0.995]"
                   >
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div className="flex items-center gap-3">
@@ -1809,7 +1809,7 @@ function BacktestDashboard() {
 
                   {/* Expanded pick details */}
                   {isExpanded && (
-                    <div className="border-t border-white/5 p-3 space-y-3">
+                    <div className="border-t border-slate-700 p-3 space-y-3">
                       {[
                         { label: "TOP-1", picks: m.top1.outcome !== "EMPTY" ? [m.top1] : [], color: "emerald" },
                         { label: "TOP-3", picks: m.top3, color: "amber" },
@@ -1822,7 +1822,7 @@ function BacktestDashboard() {
                             {picks.length === 0
                               ? <div className="text-[10px] text-slate-600 font-mono italic">No pick issued</div>
                               : picks.map((p, pi) => (
-                                <div key={pi} className="flex items-center gap-2 bg-black/30 rounded px-2 py-1.5 text-xs">
+                                <div key={pi} className="flex items-center gap-2 bg-slate-800 rounded px-2 py-1.5 text-xs">
                                   <span className="font-mono text-slate-500 w-4">{pi + 1}.</span>
                                   <span className="text-white flex-1 truncate">{p.pick}</span>
                                   <span className="text-amber-300 font-mono text-[10px]">{p.selection}</span>
@@ -1843,7 +1843,7 @@ function BacktestDashboard() {
       )}
 
       {!ran && !loading && (
-        <div className="bg-black/50 rounded-lg p-12 text-center">
+        <div className="bg-slate-900 rounded-lg p-12 text-center">
           <div className="text-4xl mb-4">⚡</div>
           <div className="text-lg font-bold text-slate-300 mb-2">Backtest Engine Ready</div>
           <p className="text-sm text-slate-400 font-mono max-w-md mx-auto">
@@ -1922,11 +1922,11 @@ function PerformanceDashboard() {
   if (!data || data.totalMatches === 0) {
     return (
       <div className="space-y-6">
-        <div className="bg-black/50 rounded-lg p-4">
+        <div className="bg-slate-900 rounded-lg p-4">
           <h2 className="text-base font-bold text-white">ORACLE PERFORMANCE TRACKER</h2>
           <p className="text-xs text-slate-400 mt-1">Track record of every post-match verification</p>
         </div>
-        <div className="bg-black/50 rounded-lg p-10 text-center">
+        <div className="bg-slate-900 rounded-lg p-10 text-center">
           <div className="text-lg font-bold text-slate-300 mb-2">No verified matches yet</div>
           <p className="text-sm text-slate-400 font-mono">
             Tap any finished match to run the oracle. Post-match verification results will appear here.
@@ -1941,7 +1941,7 @@ function PerformanceDashboard() {
 
   return (
     <div className="space-y-6">
-      <div className="bg-black/50 rounded-lg p-4 flex flex-wrap items-center justify-between gap-3">
+      <div className="bg-slate-900 rounded-lg p-4 flex flex-wrap items-center justify-between gap-3">
         <div>
           <h2 className="text-base font-bold text-white">ORACLE PERFORMANCE TRACKER</h2>
           <p className="text-xs text-slate-400 mt-1">
@@ -1963,21 +1963,21 @@ function PerformanceDashboard() {
         <div className="space-y-4">
           {/* Accuracy summary cards */}
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-            <div className="bg-black/50 rounded-lg p-3 text-center border border-emerald-500/20">
+            <div className="bg-slate-900 rounded-lg p-3 text-center border border-emerald-500/20">
               <div className={`text-2xl font-extrabold font-mono ${(accuracy.cumulative?.accuracy ?? 0) >= 0.90 ? "text-emerald-300" : (accuracy.cumulative?.accuracy ?? 0) >= 0.75 ? "text-amber-300" : "text-rose-300"}`}>
                 {accuracy.cumulative?.accuracyPct ?? "—"}
               </div>
               <div className="text-[10px] text-slate-400 mt-0.5">30-Day Accuracy</div>
             </div>
-            <div className="bg-black/50 rounded-lg p-3 text-center">
+            <div className="bg-slate-900 rounded-lg p-3 text-center">
               <div className="text-2xl font-extrabold font-mono text-cyan-300">{accuracy.rolling7d?.accuracyPct ?? "—"}</div>
               <div className="text-[10px] text-slate-400 mt-0.5">Last 7 Days</div>
             </div>
-            <div className="bg-black/50 rounded-lg p-3 text-center">
+            <div className="bg-slate-900 rounded-lg p-3 text-center">
               <div className="text-2xl font-extrabold font-mono text-white">{accuracy.cumulative?.matches ?? 0}</div>
               <div className="text-[10px] text-slate-400 mt-0.5">Matches Logged</div>
             </div>
-            <div className="bg-black/50 rounded-lg p-3 text-center">
+            <div className="bg-slate-900 rounded-lg p-3 text-center">
               <div className={`text-lg font-extrabold font-mono ${accuracy.cumulative?.trend?.includes("↑") ? "text-emerald-300" : accuracy.cumulative?.trend?.includes("↓") ? "text-rose-300" : "text-amber-300"}`}>
                 {accuracy.cumulative?.trend ?? "—"}
               </div>
@@ -1986,7 +1986,7 @@ function PerformanceDashboard() {
           </div>
           {/* Daily bar chart (text-based) */}
           {accuracy.daily && accuracy.daily.length > 0 && (
-            <div className="bg-black/50 rounded-lg p-4">
+            <div className="bg-slate-900 rounded-lg p-4">
               <div className="text-xs font-bold text-white font-mono mb-3">DAILY ACCURACY (last 30 days)</div>
               <div className="flex items-end gap-1 h-20">
                 {accuracy.daily.slice(-30).map((day, i) => {
@@ -2016,7 +2016,7 @@ function PerformanceDashboard() {
 
       {activeSubTab === "calibration" && calibData && (
         <div className="space-y-4">
-          <div className="bg-black/50 rounded-lg p-4">
+          <div className="bg-slate-900 rounded-lg p-4">
             <div className="text-xs font-bold text-white font-mono mb-3">
               SELF-TUNING CALIBRATION — Empirical vs Model Reliability
             </div>
@@ -2026,7 +2026,7 @@ function PerformanceDashboard() {
             </p>
             <div className="overflow-x-auto">
               <table className="w-full text-xs font-mono">
-                <thead className="text-[10px] uppercase text-slate-400 border-b border-white/10">
+                <thead className="text-[10px] uppercase text-slate-400 border-b border-slate-700">
                   <tr>
                     <th className="text-left py-2 px-2">Family</th>
                     <th className="text-center py-2">Picks</th>
@@ -2036,9 +2036,9 @@ function PerformanceDashboard() {
                     <th className="text-center py-2">Action</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-white/5">
+                <tbody className="divide-y divide-slate-700">
                   {(calibData.families ?? []).map((f) => (
-                    <tr key={f.family} className="hover:bg-white/[0.02]">
+                    <tr key={f.family} className="hover:bg-slate-800">
                       <td className="py-2 px-2 text-slate-200 font-medium">{f.family}</td>
                       <td className="py-2 text-center text-slate-400">{f.total}</td>
                       <td className="py-2 text-center font-bold text-white">{f.observedPct}</td>
@@ -2067,7 +2067,7 @@ function PerformanceDashboard() {
 
       {data.tierSweep && (
         <div>
-          <div className="mb-2 inline-block bg-black/60 rounded-lg px-3 py-1.5">
+          <div className="mb-2 inline-block bg-slate-900 rounded-lg px-3 py-1.5">
             <h3 className="text-sm font-bold text-white">Tier Win Rate <span className="text-slate-400 font-normal">— clean-sweep (all legs hit)</span></h3>
           </div>
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
@@ -2082,13 +2082,13 @@ function PerformanceDashboard() {
               const color = rate >= 0.9 ? "text-emerald-300" : rate >= 0.75 ? "text-cyan-300" : rate >= 0.6 ? "text-amber-300" : "text-rose-300";
               const bar = rate >= 0.9 ? "bg-emerald-500" : rate >= 0.75 ? "bg-cyan-500" : rate >= 0.6 ? "bg-amber-500" : "bg-rose-500";
               return (
-                <div key={t.key} className="bg-black/50 rounded-lg p-4">
+                <div key={t.key} className="bg-slate-900 rounded-lg p-4">
                   <div className="flex items-baseline justify-between">
                     <span className="text-xs font-bold text-white font-mono">{t.label}</span>
                     <span className={`text-2xl font-extrabold font-mono ${color}`}>{n > 0 ? `${(rate * 100).toFixed(0)}%` : "—"}</span>
                   </div>
                   <div className="text-[10px] text-slate-400 mt-0.5">{t.desc}</div>
-                  <div className="mt-2 h-2 bg-black/40 rounded-full overflow-hidden">
+                  <div className="mt-2 h-2 bg-slate-800 rounded-full overflow-hidden">
                     <div className={`h-full rounded-full ${bar}`} style={{ width: `${rate * 100}%` }} />
                   </div>
                   <div className="text-[10px] text-slate-500 mt-1 font-mono">{n} settled</div>
@@ -2101,33 +2101,33 @@ function PerformanceDashboard() {
 
       {data.top1.total > 0 && (
         <div className="grid grid-cols-3 gap-4">
-          <div className="bg-black/50 rounded-lg p-4">
+          <div className="bg-slate-900 rounded-lg p-4">
             <div className="text-xs text-slate-400 font-mono mb-1">TOP 1 PICK ACCURACY</div>
             <div className={`text-2xl font-extrabold font-mono ${data.top1.accuracy >= 0.8 ? "text-emerald-300" : data.top1.accuracy >= 0.6 ? "text-amber-300" : "text-rose-300"}`}>
               {(data.top1.accuracy * 100).toFixed(0)}%
             </div>
             <div className="text-[10px] text-slate-400 mt-1">{data.top1.hits} hit / {data.top1.total - data.top1.hits} miss across {data.top1.total} matches</div>
-            <div className="mt-2 h-2 bg-black/40 rounded-full overflow-hidden">
+            <div className="mt-2 h-2 bg-slate-800 rounded-full overflow-hidden">
               <div className="h-full bg-emerald-500 rounded-full" style={{ width: `${data.top1.accuracy * 100}%` }} />
             </div>
           </div>
-          <div className="bg-black/50 rounded-lg p-4">
+          <div className="bg-slate-900 rounded-lg p-4">
             <div className="text-xs text-slate-400 font-mono mb-1">TOP 3 PICKS ACCURACY</div>
             <div className={`text-2xl font-extrabold font-mono ${data.top3.accuracy >= 0.8 ? "text-emerald-300" : data.top3.accuracy >= 0.6 ? "text-amber-300" : "text-rose-300"}`}>
               {(data.top3.accuracy * 100).toFixed(0)}%
             </div>
             <div className="text-[10px] text-slate-400 mt-1">{data.top3.hits} hit / {data.top3.total - data.top3.hits} miss across {data.top3.total} picks</div>
-            <div className="mt-2 h-2 bg-black/40 rounded-full overflow-hidden">
+            <div className="mt-2 h-2 bg-slate-800 rounded-full overflow-hidden">
               <div className="h-full bg-emerald-500 rounded-full" style={{ width: `${data.top3.accuracy * 100}%` }} />
             </div>
           </div>
-          <div className="bg-black/50 rounded-lg p-4">
+          <div className="bg-slate-900 rounded-lg p-4">
             <div className="text-xs text-slate-400 font-mono mb-1">TOP 10 PICKS ACCURACY</div>
             <div className={`text-2xl font-extrabold font-mono ${data.top10.accuracy >= 0.8 ? "text-emerald-300" : data.top10.accuracy >= 0.6 ? "text-amber-300" : "text-rose-300"}`}>
               {(data.top10.accuracy * 100).toFixed(0)}%
             </div>
             <div className="text-[10px] text-slate-400 mt-1">{data.top10.hits} hit / {data.top10.total - data.top10.hits} miss across {data.top10.total} picks</div>
-            <div className="mt-2 h-2 bg-black/40 rounded-full overflow-hidden">
+            <div className="mt-2 h-2 bg-slate-800 rounded-full overflow-hidden">
               <div className="h-full bg-emerald-500 rounded-full" style={{ width: `${data.top10.accuracy * 100}%` }} />
             </div>
           </div>
@@ -2136,12 +2136,12 @@ function PerformanceDashboard() {
 
       {data.leagueBreakdown.length > 0 && (
         <div>
-          <div className="mb-2 inline-block bg-black/60 rounded-lg px-3 py-1.5">
+          <div className="mb-2 inline-block bg-slate-900 rounded-lg px-3 py-1.5">
             <h3 className="text-sm font-bold text-white">Accuracy by League</h3>
           </div>
-          <div className="bg-black/50 rounded-lg overflow-hidden">
+          <div className="bg-slate-900 rounded-lg overflow-hidden">
             <table className="w-full text-sm font-mono">
-              <thead className="bg-black/30 text-[11px] uppercase text-slate-400">
+              <thead className="bg-slate-800 text-[11px] uppercase text-slate-400">
                 <tr>
                   <th className="px-3 py-2 text-left">League</th>
                   <th className="px-3 py-2 text-center">Matches</th>
@@ -2150,7 +2150,7 @@ function PerformanceDashboard() {
                   <th className="px-3 py-2 text-right">Accuracy</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-white/5">
+              <tbody className="divide-y divide-slate-700">
                 {data.leagueBreakdown.map((lg) => (
                   <tr key={lg.league}>
                     <td className="px-3 py-2 text-slate-200 font-medium">{lg.league}</td>
@@ -2172,36 +2172,36 @@ function PerformanceDashboard() {
 
       {accaPerf && accaPerf.total > 0 && (
         <div>
-          <div className="mb-2 inline-block bg-black/60 rounded-lg px-3 py-1.5">
+          <div className="mb-2 inline-block bg-slate-900 rounded-lg px-3 py-1.5">
             <h3 className="text-sm font-bold text-white">Accumulator Performance</h3>
           </div>
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-5 mb-3">
-            <div className="bg-black/50 rounded-lg p-3 text-center">
+            <div className="bg-slate-900 rounded-lg p-3 text-center">
               <div className="text-xl font-extrabold font-mono text-amber-300">{accaPerf.total}</div>
               <div className="text-[10px] text-slate-400">Total Slips</div>
             </div>
-            <div className="bg-black/50 rounded-lg p-3 text-center">
+            <div className="bg-slate-900 rounded-lg p-3 text-center">
               <div className="text-xl font-extrabold font-mono text-emerald-300">{accaPerf.won}</div>
               <div className="text-[10px] text-slate-400">Won</div>
             </div>
-            <div className="bg-black/50 rounded-lg p-3 text-center">
+            <div className="bg-slate-900 rounded-lg p-3 text-center">
               <div className="text-xl font-extrabold font-mono text-rose-300">{accaPerf.lost}</div>
               <div className="text-[10px] text-slate-400">Lost</div>
             </div>
-            <div className="bg-black/50 rounded-lg p-3 text-center">
+            <div className="bg-slate-900 rounded-lg p-3 text-center">
               <div className={`text-xl font-extrabold font-mono ${accaPerf.winRate >= 50 ? "text-emerald-300" : "text-rose-300"}`}>
                 {accaPerf.winRate.toFixed(0)}%
               </div>
               <div className="text-[10px] text-slate-400">Win Rate</div>
             </div>
-            <div className="bg-black/50 rounded-lg p-3 text-center">
+            <div className="bg-slate-900 rounded-lg p-3 text-center">
               <div className={`text-xl font-extrabold font-mono ${accaPerf.roi >= 0 ? "text-emerald-300" : "text-rose-300"}`}>
                 {accaPerf.roi >= 0 ? "+" : ""}{accaPerf.roi.toFixed(1)}%
               </div>
               <div className="text-[10px] text-slate-400">ROI</div>
             </div>
           </div>
-          <div className="bg-black/50 rounded-lg divide-y divide-white/5">
+          <div className="bg-slate-900 rounded-lg divide-y divide-slate-700">
             {accaPerf.slips.map(s => (
               <div key={s.id} className="flex items-center justify-between px-4 py-2 text-xs">
                 <div>
@@ -2221,14 +2221,14 @@ function PerformanceDashboard() {
       )}
 
       <div>
-        <div className="mb-2 inline-block bg-black/60 rounded-lg px-3 py-1.5">
+        <div className="mb-2 inline-block bg-slate-900 rounded-lg px-3 py-1.5">
           <h3 className="text-sm font-bold text-white">Match-by-Match History</h3>
         </div>
         <div className="space-y-3">
           {data.recentMatches.map((m) => {
             const perfect = m.misses === 0 && m.hits > 0;
             return (
-              <div key={m.id} className="bg-black/50 rounded-lg p-3">
+              <div key={m.id} className="bg-slate-900 rounded-lg p-3">
                 <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
                   <div>
                     <span className="text-sm font-bold text-white">{m.matchLabel}</span>
@@ -2275,7 +2275,7 @@ function PerformanceDashboard() {
                 </div>
                 <div className="grid grid-cols-1 gap-1">
                   {m.top10Detail.map((pick, i) => (
-                    <div key={i} className="flex items-center gap-2 text-xs bg-black/20 rounded px-2 py-1.5">
+                    <div key={i} className="flex items-center gap-2 text-xs bg-slate-800 rounded px-2 py-1.5">
                       <span className={`w-12 shrink-0 text-right font-mono font-bold ${
                         pick.outcome === "HIT" ? "text-emerald-400" : pick.outcome === "MISS" ? "text-rose-400" : "text-amber-400"
                       }`}>
@@ -2336,14 +2336,14 @@ function PerformanceDashboard() {
               { label: "Matches Logged",  val: String(accuracy.cumulative?.matches ?? 0), color: "text-white" },
               { label: "Trend",           val: accuracy.cumulative?.trend ?? "—", color: (accuracy.cumulative?.trend ?? "").includes("↑") ? "text-emerald-300" : "text-amber-300" },
             ].map((c) => (
-              <div key={c.label} className="bg-black/50 rounded-lg p-3 text-center border border-white/5">
+              <div key={c.label} className="bg-slate-900 rounded-lg p-3 text-center border border-slate-700">
                 <div className={`text-xl font-extrabold font-mono ${c.color}`}>{c.val}</div>
                 <div className="text-[10px] text-slate-400 mt-0.5">{c.label}</div>
               </div>
             ))}
           </div>
           {accuracy.daily && accuracy.daily.length > 0 && (
-            <div className="bg-black/50 rounded-lg p-4">
+            <div className="bg-slate-900 rounded-lg p-4">
               <div className="text-xs font-bold text-white font-mono mb-3">DAILY ACCURACY — last {accuracy.daily.length} days</div>
               <div className="flex items-end gap-0.5 h-24">
                 {accuracy.daily.slice(-30).map((day, i) => {
@@ -2368,12 +2368,12 @@ function PerformanceDashboard() {
 
       {/* Calibration Panel */}
       {activeSubTab === "calibration" && calibData && (
-        <div className="bg-black/50 rounded-lg p-4">
+        <div className="bg-slate-900 rounded-lg p-4">
           <div className="text-xs font-bold text-white font-mono mb-2">SELF-TUNING CALIBRATION</div>
           <p className="text-[11px] text-slate-400 mb-3">Empirical hit rates vs current model reliability coefficients. Updates automatically from performance log.</p>
           <div className="overflow-x-auto">
             <table className="w-full text-xs font-mono">
-              <thead className="text-[10px] uppercase text-slate-400 border-b border-white/10">
+              <thead className="text-[10px] uppercase text-slate-400 border-b border-slate-700">
                 <tr>
                   <th className="text-left py-2 px-2">Family</th>
                   <th className="text-center py-2">Picks</th>
@@ -2383,9 +2383,9 @@ function PerformanceDashboard() {
                   <th className="text-center py-2">Action</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-white/5">
+              <tbody className="divide-y divide-slate-700">
                 {(calibData.families ?? []).map((f) => (
-                  <tr key={f.family} className="hover:bg-white/[0.02]">
+                  <tr key={f.family} className="hover:bg-slate-800">
                     <td className="py-2 px-2 text-slate-200 font-medium">{f.family}</td>
                     <td className="py-2 text-center text-slate-400">{f.total}</td>
                     <td className="py-2 text-center font-bold text-white">{f.observedPct}</td>
@@ -2409,7 +2409,7 @@ function PerformanceDashboard() {
 
 function StatCard({ label, value, sub, color }: { label: string; value: string; sub: string; color: string }) {
   return (
-    <div className="bg-black/50 rounded-lg p-4 text-center">
+    <div className="bg-slate-900 rounded-lg p-4 text-center">
       <div className={`text-2xl font-extrabold font-mono ${color}`}>{value}</div>
       <div className="text-xs text-white font-medium mt-1">{label}</div>
       <div className="text-[10px] text-slate-400 mt-0.5">{sub}</div>
@@ -2546,7 +2546,7 @@ function AccumulatorPage() {
   return (
     <div className="space-y-4">
       {/* Header + stats */}
-      <div className="bg-black/50 rounded-lg p-4">
+      <div className="bg-slate-900 rounded-lg p-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h2 className="text-base font-bold text-white">ACCUMULATORS</h2>
@@ -2587,7 +2587,7 @@ function AccumulatorPage() {
       {/* ── HIGH HIT ── */}
       {accaTab === "highhit" && (
         accas.filter(a => a.type !== "value").length === 0 ? (
-          <div className="bg-black/50 rounded-lg p-10 text-center text-slate-400 text-sm font-mono">No accumulators available right now. Check back on match day.</div>
+          <div className="bg-slate-900 rounded-lg p-10 text-center text-slate-400 text-sm font-mono">No accumulators available right now. Check back on match day.</div>
         ) : (
           <div className="space-y-4">
             {accas.filter(a => a.type !== "value").map((acca, idx) => (
@@ -2600,7 +2600,7 @@ function AccumulatorPage() {
       {/* ── VALUE BETS ── */}
       {accaTab === "value" && (
         valueAccas.length === 0 ? (
-          <div className="bg-black/50 rounded-lg p-10 text-center text-slate-400 text-sm font-mono">No value bet accumulators found. Check back closer to match kick-off.</div>
+          <div className="bg-slate-900 rounded-lg p-10 text-center text-slate-400 text-sm font-mono">No value bet accumulators found. Check back closer to match kick-off.</div>
         ) : (
           <div className="space-y-4">
             {valueAccas.map((acca, idx) => (
@@ -2614,7 +2614,7 @@ function AccumulatorPage() {
       {accaTab === "slips" && (
         <div className="space-y-3">
           {savedSlips.length === 0 ? (
-            <div className="bg-black/50 rounded-lg p-10 text-center">
+            <div className="bg-slate-900 rounded-lg p-10 text-center">
               <div className="text-2xl mb-3">📋</div>
               <div className="text-sm font-bold text-slate-300 mb-2">No slips tracked yet</div>
               <p className="text-xs text-slate-400 font-mono">Click &quot;Track Slip&quot; on any accumulator to start tracking.</p>
@@ -2639,7 +2639,7 @@ function AccumulatorPage() {
               { label: "Win Rate",     val: `${winRate.toFixed(0)}%`,           color: winRate >= 50 ? "text-emerald-300" : "text-rose-300" },
               { label: "P&L",          val: `${overallPnl >= 0 ? "+" : ""}$${overallPnl.toFixed(2)}`, color: overallPnl >= 0 ? "text-emerald-300" : "text-rose-300" },
             ].map((c) => (
-              <div key={c.label} className="bg-black/50 rounded-lg p-3 text-center border border-white/5">
+              <div key={c.label} className="bg-slate-900 rounded-lg p-3 text-center border border-slate-700">
                 <div className={`text-xl font-extrabold font-mono ${c.color}`}>{c.val}</div>
                 <div className="text-[10px] text-slate-400 mt-0.5">{c.label}</div>
               </div>
@@ -2662,7 +2662,7 @@ function AccumulatorPage() {
               </div>
             </div>
           ) : (
-            <div className="bg-black/50 rounded-lg p-6 text-center text-slate-400 text-sm font-mono">
+            <div className="bg-slate-900 rounded-lg p-6 text-center text-slate-400 text-sm font-mono">
               Performance data builds automatically as slips are verified after matches.
             </div>
           )}
@@ -2691,9 +2691,9 @@ function SavedSlipCard({
                                                "border-l-amber-500";
 
   return (
-    <div className={`overflow-hidden rounded-2xl border border-white/5 border-l-2 bg-white/5 transition-all duration-200 hover:-translate-y-1 hover:shadow-2xl hover:shadow-black/50 ${statusColor}`}>
+    <div className={`overflow-hidden rounded-2xl border border-slate-700 border-l-2 bg-slate-800 transition-all duration-200 hover:-translate-y-1 hover:shadow-2xl hover:shadow-slate-950/50 ${statusColor}`}>
       {/* Header */}
-      <button onClick={() => setExpanded(e => !e)} className="block w-full cursor-pointer select-none p-3 text-left transition-all duration-200 hover:bg-white/5 active:scale-[0.995]">
+      <button onClick={() => setExpanded(e => !e)} className="block w-full cursor-pointer select-none p-3 text-left transition-all duration-200 hover:bg-slate-700 active:scale-[0.995]">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
             <div className="text-sm font-bold text-white">{slip.name}</div>
@@ -2741,7 +2741,7 @@ function SavedSlipCard({
           {editingStake ? (
             <div className="flex gap-1 items-center">
               <input value={stakeVal} onChange={e => setStakeVal(e.target.value)} type="number" min="1"
-                className="w-16 rounded bg-black/50 border border-white/20 px-2 py-0.5 text-xs text-white outline-none font-mono" />
+                className="w-16 rounded bg-slate-900 border border-slate-700 px-2 py-0.5 text-xs text-white outline-none font-mono" />
               <button onClick={() => { onUpdateStake(slip.id, parseFloat(stakeVal) || 10); setEditingStake(false); }}
                 className={`${ACTION_AMBER} px-2 py-0.5 text-[10px]`}>Save</button>
               <button onClick={() => setEditingStake(false)} className={`${OUTLINE_ROSE} px-1.5 py-0.5 text-[10px]`}>✕</button>
@@ -2756,9 +2756,9 @@ function SavedSlipCard({
 
       {/* Expanded legs */}
       {expanded && (
-        <div className="border-t border-white/5">
+        <div className="border-t border-slate-700">
           {picks.map((pick, i) => (
-            <div key={i} className={`flex items-center gap-2 px-3 py-2 text-xs border-b border-white/5 ${
+            <div key={i} className={`flex items-center gap-2 px-3 py-2 text-xs border-b border-slate-700 ${
               pick.outcome === "HIT"  ? "bg-emerald-500/5" :
               pick.outcome === "MISS" ? "bg-rose-500/5" : ""
             }`}>
@@ -2777,7 +2777,7 @@ function SavedSlipCard({
               </div>
             </div>
           ))}
-          <div className="flex gap-2 px-3 py-2 bg-black/20">
+          <div className="flex gap-2 px-3 py-2 bg-slate-800">
             <button onClick={onVerify} className={`${ACTION_EMERALD} px-3 py-1 text-[10px]`}>⚡ Re-verify</button>
             <button onClick={() => onDelete(slip.id)} className={`${OUTLINE_ROSE} px-3 py-1 text-[10px]`}>🗑 Delete</button>
           </div>
@@ -2820,7 +2820,7 @@ function AccaCardRender({ acca, onSave }: { acca: Acca; onSave?: () => void }) {
   return (
     <div className={`${CARD_SURFACE} overflow-hidden`}>
       {/* Header */}
-      <div className="flex flex-wrap items-center justify-between gap-3 p-4 border-b border-white/10">
+      <div className="flex flex-wrap items-center justify-between gap-3 p-4 border-b border-slate-700">
         <div>
           <h3 className="text-sm font-bold text-white">{acca.name}</h3>
           <span className="text-xs text-slate-400 font-mono">{acca.legs} legs</span>
@@ -2843,7 +2843,7 @@ function AccaCardRender({ acca, onSave }: { acca: Acca; onSave?: () => void }) {
       </div>
 
       {/* Picks */}
-      <div className="divide-y divide-white/5">
+      <div className="divide-y divide-slate-700">
         {acca.picks.map((pick, i) => (
           <div key={i} className="flex items-center gap-3 px-4 py-2.5">
             <span className="text-xs font-mono text-slate-500 w-5 shrink-0">{i + 1}.</span>
@@ -2866,14 +2866,14 @@ function AccaCardRender({ acca, onSave }: { acca: Acca; onSave?: () => void }) {
       </div>
 
       {/* Stake + Track footer */}
-      <div className="p-3 bg-black/30 border-t border-white/5">
+      <div className="p-3 bg-slate-800 border-t border-slate-700">
         <div className="flex items-center gap-3 flex-wrap">
           <div className="flex items-center gap-2">
             <span className="text-xs text-slate-400 font-mono">Stake:</span>
             <input
               type="number" min="1" value={stake}
               onChange={e => setStake(Math.max(1, parseInt(e.target.value) || 1))}
-              className="w-16 rounded bg-black/50 border border-white/20 px-2 py-1 text-xs text-white outline-none font-mono focus:border-amber-400"
+              className="w-16 rounded bg-slate-900 border border-slate-700 px-2 py-1 text-xs text-white outline-none font-mono focus:border-amber-400"
             />
             <span className="text-xs text-slate-400 font-mono">→</span>
             <span className="text-xs font-bold text-amber-300 font-mono">${(stake * acca.combinedOdds).toFixed(2)}</span>
@@ -2937,14 +2937,14 @@ function ChatAssistant() {
 
   return (
     <div className="space-y-4">
-      <div className="bg-black/50 rounded-lg p-4">
+      <div className="bg-slate-900 rounded-lg p-4">
         <h2 className="text-base font-bold text-white">Ask Anything</h2>
         <p className="text-xs text-slate-400 mt-1">Web search assistant — ask about players, transfers, stats, match previews, or anything football related</p>
       </div>
 
       <div className="space-y-3 min-h-[200px] max-h-[60vh] overflow-y-auto">
         {messages.length === 0 && (
-          <div className="bg-black/30 rounded-lg p-6 text-center text-slate-400 text-sm">
+          <div className="bg-slate-800 rounded-lg p-6 text-center text-slate-400 text-sm">
             <p className="mb-3">Ask me anything about football. For example:</p>
             <div className="flex flex-wrap justify-center gap-2">
               {["Who is the top scorer in World Cup 2026?", "Arsenal latest transfer news", "Mbappe career stats", "La Liga standings 2026"].map((q) => (
@@ -2964,12 +2964,12 @@ function ChatAssistant() {
           <div key={i} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
             <div className={`max-w-[85%] rounded-lg p-3 ${
               msg.role === "user"
-                ? "bg-amber-400/20 border border-amber-400/30 text-slate-100"
-                : "bg-black/50 border border-white/10 text-slate-200"
+                ? "bg-[#F59E0B] border border-[#FF8C00] text-slate-100"
+                : "bg-slate-900 border border-slate-700 text-slate-200"
             }`}>
               <div className="text-sm whitespace-pre-wrap">{msg.content}</div>
               {msg.sources && msg.sources.length > 0 && (
-                <div className="mt-2 pt-2 border-t border-white/10 space-y-1">
+                <div className="mt-2 pt-2 border-t border-slate-700 space-y-1">
                   <div className="text-[10px] text-slate-400 font-mono">Sources:</div>
                   {msg.sources.map((s, si) => (
                     <a
@@ -2990,7 +2990,7 @@ function ChatAssistant() {
 
         {loading && (
           <div className="flex justify-start">
-            <div className="bg-black/50 border border-white/10 rounded-lg p-3 text-sm text-slate-400 animate-pulse font-mono">
+            <div className="bg-slate-900 border border-slate-700 rounded-lg p-3 text-sm text-slate-400 animate-pulse font-mono">
               Searching the web...
             </div>
           </div>
@@ -3003,7 +3003,7 @@ function ChatAssistant() {
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter") send(); }}
           placeholder="Ask anything about football..."
-          className="flex-1 rounded-lg border border-white/15 bg-black/50 px-4 py-3 text-sm text-slate-100 outline-none focus:border-amber-400 font-mono"
+          className="flex-1 rounded-lg border border-slate-700 bg-slate-900 px-4 py-3 text-sm text-slate-100 outline-none focus:border-amber-400 font-mono"
           disabled={loading}
         />
         <button
@@ -3074,18 +3074,18 @@ function BankrollTracker() {
   if (data && data.entries.length === 0) {
     return (
       <div className="space-y-6">
-        <div className="bg-black/50 rounded-lg p-4">
+        <div className="bg-slate-900 rounded-lg p-4">
           <h2 className="text-base font-bold text-white">Bankroll Tracker</h2>
           <p className="text-xs text-slate-400 mt-1">Enter your betting account balance to start tracking</p>
         </div>
-        <div className="bg-black/50 rounded-lg p-6">
+        <div className="bg-slate-900 rounded-lg p-6">
           <div className="text-sm font-bold text-white mb-2">What is your current betting account balance?</div>
           <p className="text-xs text-slate-400 mb-4">Enter the total amount currently in your betting account.</p>
           <div className="flex gap-2 items-center">
             <span className="text-2xl font-bold text-amber-300 font-mono">$</span>
             <input value={accountBalance} onChange={e => setAccountBalance(e.target.value)}
               placeholder="e.g. 500" type="number" step="0.01"
-              className="flex-1 rounded-lg border border-white/15 bg-black/40 px-4 py-3 text-xl text-white outline-none focus:border-amber-400 font-mono" />
+              className="flex-1 rounded-lg border border-slate-700 bg-slate-800 px-4 py-3 text-xl text-white outline-none focus:border-amber-400 font-mono" />
             <button onClick={setInitialBalance}
               className={`${ACTION_AMBER} px-6 py-3 text-sm`}>
               Start Tracking
@@ -3098,35 +3098,35 @@ function BankrollTracker() {
 
   return (
     <div className="space-y-6">
-      <div className="bg-black/50 rounded-lg p-4">
+      <div className="bg-slate-900 rounded-lg p-4">
         <h2 className="text-base font-bold text-white">Bankroll Tracker</h2>
         <p className="text-xs text-slate-400 mt-1">Track your betting account balance, bets, wins and ROI</p>
       </div>
 
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <div className="bg-black/50 rounded-lg p-3 text-center">
+        <div className="bg-slate-900 rounded-lg p-3 text-center">
           <div className="text-xl font-extrabold font-mono text-amber-300">${(data?.balance ?? 0).toFixed(2)}</div>
           <div className="text-[10px] text-slate-400">Current Balance</div>
         </div>
-        <div className="bg-black/50 rounded-lg p-3 text-center">
+        <div className="bg-slate-900 rounded-lg p-3 text-center">
           <div className={`text-xl font-extrabold font-mono ${(data?.profitLoss ?? 0) >= 0 ? "text-emerald-300" : "text-rose-300"}`}>
             {(data?.profitLoss ?? 0) >= 0 ? "+" : ""}{(data?.profitLoss ?? 0).toFixed(2)}
           </div>
           <div className="text-[10px] text-slate-400">Profit / Loss</div>
         </div>
-        <div className="bg-black/50 rounded-lg p-3 text-center">
+        <div className="bg-slate-900 rounded-lg p-3 text-center">
           <div className={`text-xl font-extrabold font-mono ${(data?.roi ?? 0) >= 0 ? "text-emerald-300" : "text-rose-300"}`}>
             {(data?.roi ?? 0).toFixed(1)}%
           </div>
           <div className="text-[10px] text-slate-400">ROI</div>
         </div>
-        <div className="bg-black/50 rounded-lg p-3 text-center">
+        <div className="bg-slate-900 rounded-lg p-3 text-center">
           <div className="text-xl font-extrabold font-mono text-white">{data?.totalBets ?? 0}</div>
           <div className="text-[10px] text-slate-400">Total Bets</div>
         </div>
       </div>
 
-      <div className="bg-black/50 rounded-lg p-4">
+      <div className="bg-slate-900 rounded-lg p-4">
         <div className="text-xs text-slate-400 font-mono mb-2">RECORD TRANSACTION</div>
         <div className="flex flex-wrap gap-2 mb-3">
           {(["deposit", "bet", "win", "withdraw"] as const).map(t => {
@@ -3141,20 +3141,20 @@ function BankrollTracker() {
         </div>
         <div className="flex gap-2">
           <input value={amount} onChange={e => setAmount(e.target.value)} placeholder="Amount" type="number"
-            className="w-28 rounded border border-white/15 bg-black/40 px-3 py-2 text-sm text-white outline-none focus:border-amber-400 font-mono" />
+            className="w-28 rounded border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white outline-none focus:border-amber-400 font-mono" />
           <input value={desc} onChange={e => setDesc(e.target.value)}
             placeholder={type === "bet" ? "e.g. Arsenal Over 2.5 Goals" : "Description"}
-            className="flex-1 rounded border border-white/15 bg-black/40 px-3 py-2 text-sm text-white outline-none focus:border-amber-400" />
+            className="flex-1 rounded border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white outline-none focus:border-amber-400" />
           <button onClick={submit} className={`${ACTION_AMBER} px-4 py-2 text-sm`}>Add</button>
         </div>
       </div>
 
       {data?.entries && data.entries.length > 0 && (
         <div>
-          <div className="mb-2 inline-block bg-black/60 rounded-lg px-3 py-1.5">
+          <div className="mb-2 inline-block bg-slate-900 rounded-lg px-3 py-1.5">
             <h3 className="text-sm font-bold text-white">Transaction History</h3>
           </div>
-          <div className="bg-black/50 rounded-lg divide-y divide-white/5">
+          <div className="bg-slate-900 rounded-lg divide-y divide-slate-700">
             {data.entries.map(e => (
               <div key={e.id} className="flex items-center justify-between px-4 py-2.5 text-xs">
                 <div className="flex items-center gap-2">
@@ -3204,13 +3204,13 @@ function DailyPicksPage() {
 
   return (
     <div className="space-y-6">
-      <div className="bg-black/50 rounded-lg p-4">
+      <div className="bg-slate-900 rounded-lg p-4">
         <h2 className="text-base font-bold text-white">Daily Picks Report — {data?.date}</h2>
         <p className="text-xs text-slate-400 mt-1">{data?.totalMatches ?? 0} matches analysed across top leagues</p>
       </div>
 
       {data?.picks?.map((p, idx) => (
-        <div key={idx} className="bg-black/50 rounded-lg p-4">
+        <div key={idx} className="bg-slate-900 rounded-lg p-4">
           <div className="flex items-center gap-2 mb-3">
             {p.homeLogo && <Image src={p.homeLogo} alt="" width={20} height={20} className="object-contain" unoptimized />}
             <span className="text-sm font-bold text-white">{p.match}</span>
@@ -3220,7 +3220,7 @@ function DailyPicksPage() {
           <div className="text-[10px] text-slate-400 font-mono mb-1">TOP 3 PICKS</div>
           <div className="space-y-1 mb-3">
             {p.top3.map((pick, i) => (
-              <div key={i} className="flex items-center gap-2 bg-black/30 rounded px-3 py-2 text-xs">
+              <div key={i} className="flex items-center gap-2 bg-slate-800 rounded px-3 py-2 text-xs">
                 <span className="font-mono text-slate-500 w-4">{i+1}.</span>
                 <span className="text-white flex-1">{pick.name}</span>
                 <span className="rounded bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 font-mono font-bold text-emerald-300">{pick.selection}</span>
@@ -3245,7 +3245,7 @@ function DailyPicksPage() {
       ))}
 
       {(!data?.picks || data.picks.length === 0) && (
-        <div className="bg-black/50 rounded-lg p-10 text-center text-slate-400 text-sm font-mono">
+        <div className="bg-slate-900 rounded-lg p-10 text-center text-slate-400 text-sm font-mono">
           No upcoming matches to analyse right now.
         </div>
       )}
@@ -3305,12 +3305,12 @@ function OddsCalculator() {
 
   return (
     <div className="space-y-6">
-      <div className="bg-black/50 rounded-lg p-4">
+      <div className="bg-slate-900 rounded-lg p-4">
         <h2 className="text-base font-bold text-white">Odds Calculator</h2>
         <p className="text-xs text-slate-400 mt-1">Convert between formats, calculate implied probability, dutching</p>
       </div>
 
-      <div className="bg-black/50 rounded-lg p-4">
+      <div className="bg-slate-900 rounded-lg p-4">
         <div className="text-xs text-slate-400 font-mono mb-2">ODDS CONVERTER</div>
         <div className="flex flex-wrap gap-2 mb-3">
           {(["decimal","american","fractional","probability"] as const).map(f => (
@@ -3321,24 +3321,24 @@ function OddsCalculator() {
           <input value={input} onChange={e => setInput(e.target.value)}
             placeholder={format === "decimal" ? "e.g. 2.50" : format === "american" ? "e.g. +150 or -200" : format === "fractional" ? "e.g. 3/2" : "e.g. 0.65"}
             onKeyDown={e => { if(e.key==="Enter") convert(); }}
-            className="flex-1 rounded border border-white/15 bg-black/40 px-3 py-2 text-sm text-white outline-none focus:border-amber-400 font-mono" />
+            className="flex-1 rounded border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white outline-none focus:border-amber-400 font-mono" />
           <button onClick={convert} className={`${ACTION_AMBER} px-4 py-2 text-sm`}>Convert</button>
         </div>
         {result && (
           <div className="grid grid-cols-2 gap-2 mt-3 sm:grid-cols-4">
-            <div className="bg-black/30 rounded p-2 text-center">
+            <div className="bg-slate-800 rounded p-2 text-center">
               <div className="text-[10px] text-slate-400 font-mono">DECIMAL</div>
               <div className="font-mono font-bold text-amber-300">{result.decimal.toFixed(3)}</div>
             </div>
-            <div className="bg-black/30 rounded p-2 text-center">
+            <div className="bg-slate-800 rounded p-2 text-center">
               <div className="text-[10px] text-slate-400 font-mono">AMERICAN</div>
               <div className="font-mono font-bold text-white">{result.american > 0 ? "+" : ""}{result.american}</div>
             </div>
-            <div className="bg-black/30 rounded p-2 text-center">
+            <div className="bg-slate-800 rounded p-2 text-center">
               <div className="text-[10px] text-slate-400 font-mono">FRACTIONAL</div>
               <div className="font-mono font-bold text-white">{result.fractional}</div>
             </div>
-            <div className="bg-black/30 rounded p-2 text-center">
+            <div className="bg-slate-800 rounded p-2 text-center">
               <div className="text-[10px] text-slate-400 font-mono">PROBABILITY</div>
               <div className="font-mono font-bold text-emerald-300">{result.impliedProbability}%</div>
             </div>
@@ -3346,19 +3346,19 @@ function OddsCalculator() {
         )}
       </div>
 
-      <div className="bg-black/50 rounded-lg p-4">
+      <div className="bg-slate-900 rounded-lg p-4">
         <div className="text-xs text-slate-400 font-mono mb-2">DUTCHING CALCULATOR</div>
         <p className="text-[10px] text-slate-400 mb-2">Enter decimal odds separated by commas (e.g. 2.50, 3.20, 4.00)</p>
         <div className="flex gap-2">
           <input value={dutchOdds} onChange={e => setDutchOdds(e.target.value)} placeholder="2.50, 3.20, 4.00"
-            className="flex-1 rounded border border-white/15 bg-black/40 px-3 py-2 text-sm text-white outline-none focus:border-amber-400 font-mono" />
+            className="flex-1 rounded border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white outline-none focus:border-amber-400 font-mono" />
           <button onClick={calcDutch} className={`${ACTION_AMBER} px-4 py-2 text-sm`}>Calculate</button>
         </div>
         {dutchResult && (
           <div className="mt-3">
             <div className="space-y-1 mb-2">
               {dutchResult.selections.map((s, i) => (
-                <div key={i} className="flex items-center justify-between bg-black/30 rounded px-3 py-1.5 text-xs font-mono">
+                <div key={i} className="flex items-center justify-between bg-slate-800 rounded px-3 py-1.5 text-xs font-mono">
                   <span className="text-white">Selection {i+1}: <span className="text-amber-300">{s.odds.toFixed(2)}</span></span>
                   <span className="text-slate-300">Stake: <span className="text-emerald-300">${s.stake.toFixed(2)}</span></span>
                   <span className="text-slate-400">{s.impliedProb}</span>
@@ -3380,7 +3380,7 @@ function OddsCalculator() {
 // --------------- ACCA PERF BLOCK ---------------
 function AccaPerfBlock({ data }: { data: AccaStats }) {
   if (data.total === 0) return (
-    <div className="bg-black/50 rounded-lg p-6 text-center text-slate-400 text-sm font-mono">
+    <div className="bg-slate-900 rounded-lg p-6 text-center text-slate-400 text-sm font-mono">
       No records yet — slips appear here automatically after verification.
     </div>
   );
@@ -3394,14 +3394,14 @@ function AccaPerfBlock({ data }: { data: AccaStats }) {
           { val: `${data.winRate.toFixed(0)}%`,                                   label: "Win Rate", color: data.winRate >= 50 ? "text-emerald-300" : "text-rose-300" },
           { val: `${data.roi >= 0 ? "+" : ""}${data.roi.toFixed(1)}%`,           label: "ROI",      color: data.roi >= 0 ? "text-emerald-300" : "text-rose-300" },
         ].map((c) => (
-          <div key={c.label} className="bg-black/50 rounded-lg p-2.5 text-center">
+          <div key={c.label} className="bg-slate-900 rounded-lg p-2.5 text-center">
             <div className={`text-lg font-extrabold font-mono ${c.color}`}>{c.val}</div>
             <div className="text-[9px] text-slate-400">{c.label}</div>
           </div>
         ))}
       </div>
       {data.slips.length > 0 && (
-        <div className="bg-black/50 rounded-lg divide-y divide-white/5">
+        <div className="bg-slate-900 rounded-lg divide-y divide-slate-700">
           {data.slips.map(s => (
             <div key={s.id} className="flex items-center justify-between px-3 py-2 text-xs">
               <div>
@@ -3456,7 +3456,7 @@ function ValueAlerts() {
   if (loading || alerts.length === 0) return null;
 
   return (
-    <div className="bg-black/50 rounded-lg p-4">
+    <div className="bg-slate-900 rounded-lg p-4">
       <div className="text-xs font-bold text-emerald-300 font-mono mb-3">VALUE BET ALERTS — Oracle Edge Over Bookmaker</div>
       <div className="space-y-2">
         {alerts.map((a, i) => (

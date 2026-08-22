@@ -99,7 +99,7 @@ export function PnLTrendChart({
 
   if (points.length === 0) {
     return (
-      <div className="flex items-center justify-center rounded-xl border border-white/10 bg-black/50" style={{ height }}>
+      <div className="flex items-center justify-center rounded-xl border border-slate-700 bg-slate-900" style={{ height }}>
         <span className="font-mono text-xs text-slate-500">{emptyLabel}</span>
       </div>
     );
@@ -160,7 +160,7 @@ export function PnLTrendChart({
       <path d={linePath} fill="none" stroke={color} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
 
       {/* end point dot */}
-      <circle cx={xFor(points.length - 1)} cy={yFor(finalValue)} r="3.5" fill={color} stroke="#05070d" strokeWidth="1.5" />
+      <circle cx={xFor(points.length - 1)} cy={yFor(finalValue)} r="3.5" fill={color} stroke="#0F1117" strokeWidth="1.5" />
 
       {/* x labels: first + last */}
       <text x={padL} y={h - 6} textAnchor="start" className="fill-slate-500" style={{ fontSize: 9, fontFamily: "monospace" }}>
@@ -186,14 +186,14 @@ export function AccuracyBars({
 }) {
   if (daily.length === 0) {
     return (
-      <div className="flex items-center justify-center rounded-xl border border-white/10 bg-black/50" style={{ height }}>
+      <div className="flex items-center justify-center rounded-xl border border-slate-700 bg-slate-900" style={{ height }}>
         <span className="font-mono text-xs text-slate-500">{emptyLabel}</span>
       </div>
     );
   }
   const last = daily.slice(-30);
   return (
-    <div className="rounded-xl border border-white/10 bg-black/50 p-4">
+    <div className="rounded-xl border border-slate-700 bg-slate-900 p-4">
       <div className="mb-2 flex items-center justify-between">
         <span className="font-mono text-xs font-bold text-white">DAILY HIT RATE (last {last.length} days)</span>
         <div className="flex gap-3 font-mono text-[10px] text-slate-400">
