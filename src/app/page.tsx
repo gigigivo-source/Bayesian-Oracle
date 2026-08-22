@@ -226,7 +226,7 @@ export default function Home() {
 
         {selected ? (
           <ErrorBoundary>
-            <MatchDetail fixture={selected} onClose={() => setSelected(null)} />
+            <MatchDetail key={`${selected.leagueSlug}-${selected.id}`} fixture={selected} onClose={() => setSelected(null)} />
           </ErrorBoundary>
         ) : null}
 
@@ -1158,7 +1158,7 @@ function ManualOracle() {
       )}
 
       {selectedFx && (
-        <MatchDetail fixture={selectedFx} onClose={() => setSelectedFx(null)} />
+        <MatchDetail key={`${selectedFx.leagueSlug}-${selectedFx.id}`} fixture={selectedFx} onClose={() => setSelectedFx(null)} />
       )}
     </div>
   );

@@ -70,6 +70,49 @@ interface MatchResponse {
   valueBets?: ValueBetData[];
 }
 
+function RankingFactors({ market }: { market: Market }) {
+  const factors = Object.entries(market.factorBreakdown ?? {});
+  if (!factors.length) return null;
+
+  return (
+    <details className="group mt-3 border-t border-slate-700 pt-3">
+      <summary className="flex min-h-11 cursor-pointer list-none touch-manipulation items-center justify-between rounded-lg border border-amber-400/20 bg-slate-800 px-3 py-2 text-xs font-bold text-amber-300 transition hover:border-amber-400/40 hover:bg-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 [&::-webkit-details-marker]:hidden">
+        <span>Show Ranking Factors</span>
+        <span className="font-mono text-slate-400">
+          Composite {market.compositeScore?.toFixed(3) ?? "—"}
+          <span className="ml-2 inline-block transition-transform group-open:rotate-180">⌄</span>
+        </span>
+      </summary>
+      <div className="mt-2 rounded-lg border border-slate-700 bg-slate-950/50 p-3">
+        <div className="space-y-2.5">
+          {factors.map(([name, factor]) => (
+            <div key={name} className="grid grid-cols-[minmax(0,1fr)_3.5rem] gap-x-3 gap-y-1 sm:grid-cols-[minmax(9rem,0.8fr)_minmax(8rem,1.5fr)_4rem] sm:items-center">
+              <div className="truncate text-[11px] font-medium text-slate-300" title={name}>{name}</div>
+              <div className="col-span-2 h-2.5 overflow-hidden rounded-full bg-slate-700 sm:col-span-1" title={factor.available ? `Applied weight: ${(factor.weight * 100).toFixed(1)}%` : "Unavailable — weight redistributed"}>
+                <div
+                  className={`h-full rounded-full ${factor.available ? "bg-gradient-to-r from-amber-600 to-amber-300" : "bg-slate-600"}`}
+                  style={{ width: `${factor.available ? Math.max(2, (factor.score ?? 0) * 100) : 0}%` }}
+                />
+              </div>
+              <div className={`row-start-1 text-right font-mono text-[11px] font-bold sm:col-start-3 ${factor.available ? "text-amber-200" : "text-slate-500"}`}>
+                {factor.score == null ? "N/A" : factor.score.toFixed(2)}
+              </div>
+              <div className="col-span-2 text-[9px] font-mono text-slate-500 sm:col-start-2 sm:col-span-2">
+                {factor.available
+                  ? `Weight ${(factor.weight * 100).toFixed(1)}% · Contribution ${factor.contribution.toFixed(3)}`
+                  : `Unavailable · ${(factor.baseWeight * 100).toFixed(0)}% base weight redistributed`}
+              </div>
+            </div>
+          ))}
+        </div>
+        <p className="mt-3 border-t border-slate-700 pt-2 text-[10px] text-slate-400">
+          Higher score = stronger factor influence on ranking. Unavailable factors are excluded and their weight is redistributed proportionally.
+        </p>
+      </div>
+    </details>
+  );
+}
+
 export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClose: () => void }) {
   // Response is keyed by the fixture it was fetched for, so loading/error states
   // are derived and never need to be reset synchronously inside the effect.
@@ -338,10 +381,14 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
             {/* Top 10 */}
             <Section
               id="sec-top-10"
-              title="TOP 10 HIGHEST HIT RATE MARKETS"
+              title="TOP 10 COMPOSITE-RANKED MARKETS"
               subtitle="Every pick contains rationale: Why Qualified · Why Selected · Why Outcome is Possible"
             >
-              <MarketTable markets={result.top10} showDeepExplanation={true} />
+              <MarketTable
+                markets={result.top10}
+                showDeepExplanation={true}
+                renderAfterMarket={(market) => <RankingFactors market={market} />}
+              />
             </Section>
 
             {/* VALUE BETS */}
