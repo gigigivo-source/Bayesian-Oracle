@@ -130,7 +130,7 @@ export function PnLTrendChart({
   const fmt = (v: number) => (money ? `${v >= 0 ? "" : "-"}$${Math.abs(v).toFixed(0)}` : v.toFixed(0));
 
   return (
-    <svg viewBox={`0 0 ${w} ${h}`} className="w-full" style={{ height }} preserveAspectRatio="xMidYMid meet">
+    <div className="table-scroll"><svg viewBox={`0 0 ${w} ${h}`} className="h-auto w-full min-w-[500px]" style={{ height }} preserveAspectRatio="xMidYMid meet">
       <defs>
         <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
           <stop offset="0%" stopColor={color} stopOpacity="0.30" />
@@ -169,7 +169,7 @@ export function PnLTrendChart({
       <text x={w - padR} y={h - 6} textAnchor="end" className="fill-slate-500" style={{ fontSize: 9, fontFamily: "monospace" }}>
         {points[points.length - 1].label}
       </text>
-    </svg>
+    </svg></div>
   );
 }
 
@@ -193,10 +193,10 @@ export function AccuracyBars({
   }
   const last = daily.slice(-30);
   return (
-    <div className="rounded-xl border border-slate-700 bg-slate-900 p-4">
-      <div className="mb-2 flex items-center justify-between">
+    <div className="responsive-card rounded-lg border border-slate-700 bg-slate-800">
+      <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <span className="font-mono text-xs font-bold text-white">DAILY HIT RATE (last {last.length} days)</span>
-        <div className="flex gap-3 font-mono text-[10px] text-slate-400">
+        <div className="flex flex-wrap gap-3 font-mono text-xs text-slate-400">
           <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-sm bg-emerald-500" /> ≥90%</span>
           <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-sm bg-amber-500" /> ≥75%</span>
           <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-sm bg-rose-500" /> &lt;60%</span>

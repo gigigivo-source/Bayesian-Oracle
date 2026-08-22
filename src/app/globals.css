@@ -1,35 +1,296 @@
 @import "tailwindcss";
 
-/* Hide scrollbar on league chips bar */
+/* ─── Responsive foundations ─────────────────────────────────────────────── */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  min-width: 320px;
+  background: #020617;
+  color-scheme: dark;
+  overflow-x: clip;
+  scroll-behavior: smooth;
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  min-width: 320px;
+  min-height: 100vh;
+  margin: 0;
+  background: #020617;
+  overflow-x: clip;
+}
+
+main {
+  min-width: 0;
+  transition: opacity 0.15s ease;
+}
+
+img,
+video,
+iframe {
+  width: auto;
+  max-width: 100%;
+  height: auto;
+}
+
+button,
+a,
+input,
+select,
+textarea {
+  touch-action: manipulation;
+}
+
+button,
+[role="button"],
+.tap-target {
+  min-width: 44px;
+  min-height: 44px;
+}
+
+input,
+select,
+textarea {
+  min-height: 44px;
+  max-width: 100%;
+}
+
+/* Hide a scrollbar without disabling touch/trackpad scrolling. */
 .scrollbar-none {
   -ms-overflow-style: none;
   scrollbar-width: none;
 }
+
 .scrollbar-none::-webkit-scrollbar {
   display: none;
 }
 
-/* Mobile responsive */
-@media (max-width: 640px) {
-  nav { flex-wrap: wrap !important; gap: 2px !important; }
-  nav button { font-size: 10px !important; padding: 4px 8px !important; }
-  header h1 { font-size: 14px !important; }
-  header p { font-size: 8px !important; }
-  table { font-size: 11px; }
-  table th, table td { padding: 4px 6px !important; }
-  .grid { gap: 8px !important; }
+/* Every data table gets momentum scrolling and an intentional mobile bleed. */
+.table-scroll {
+  width: calc(100% + 2rem);
+  max-width: none;
+  margin-inline: -1rem;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+  scrollbar-color: #475569 #0f172a;
 }
 
-@media (max-width: 480px) {
-  header { padding: 6px 8px !important; }
-  main { padding-left: 8px !important; padding-right: 8px !important; }
-  nav button { font-size: 9px !important; padding: 3px 6px !important; }
+.responsive-table,
+.table-scroll > table,
+.table-scroll table {
+  width: 100%;
+  min-width: 500px;
+  border-collapse: collapse;
+  font-size: 0.75rem;
 }
 
-/* Touch-friendly tap targets */
-@media (pointer: coarse) {
-  button, a { min-height: 36px; }
+.responsive-table thead,
+.table-scroll thead {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: #1e293b;
 }
 
-/* Smooth page transitions */
-main { transition: opacity 0.15s ease; }
+.responsive-table th,
+.table-scroll th {
+  padding: 0.5rem 0.75rem !important;
+  white-space: nowrap;
+}
+
+.responsive-table td,
+.table-scroll td {
+  padding: 0.5rem !important;
+}
+
+/* Shared component primitives. Specific classes remain in JSX for clarity. */
+.responsive-card {
+  min-width: 0;
+  border-radius: 0.5rem !important;
+  padding: 1rem !important;
+  transition: transform 200ms ease, box-shadow 200ms ease, border-color 200ms ease;
+}
+
+.responsive-card:hover {
+  transform: translateY(-0.5rem);
+  box-shadow: 0 20px 25px -5px rgb(2 6 23 / 0.45);
+}
+
+.responsive-card-title {
+  font-size: 0.875rem;
+  line-height: 1.25rem;
+  font-weight: 700;
+}
+
+.responsive-body {
+  font-size: 0.875rem;
+  line-height: 1.5;
+}
+
+.btn-responsive {
+  width: 100%;
+  min-height: 44px;
+  padding: 0.5rem 1rem !important;
+  border-radius: 0.5rem !important;
+  font-size: 0.75rem !important;
+}
+
+.chip-responsive {
+  min-height: 44px;
+}
+
+/* Prevent long API values, team names, and debug fingerprints escaping cards. */
+p,
+li,
+td,
+th,
+pre,
+code {
+  overflow-wrap: anywhere;
+}
+
+/* Essential mobile copy never drops below 14px. Compact chips, tables and the
+   QA badge intentionally keep their requested 12px label size. */
+@media (max-width: 767px) {
+  body .text-xs,
+  body [class~="text-[11px]"],
+  body [class~="text-[10px]"],
+  body [class~="text-[9px]"],
+  body [class~="text-[8px]"] {
+    font-size: 0.875rem !important;
+    line-height: 1.25rem;
+  }
+
+  body .chip-responsive,
+  body .responsive-table,
+  body .responsive-table .text-xs,
+  body .responsive-table [class~="text-[11px]"],
+  body .responsive-table [class~="text-[10px]"],
+  body .table-scroll table,
+  body .table-scroll table .text-xs,
+  body .table-scroll table [class~="text-[11px]"],
+  body .table-scroll table [class~="text-[10px]"],
+  body .viewport-debug {
+    font-size: 0.75rem !important;
+    line-height: 1rem;
+  }
+}
+
+/* ─── Tablet: 768–1023px ─────────────────────────────────────────────────── */
+@media (min-width: 768px) {
+  .table-scroll {
+    width: 100%;
+    margin-inline: 0;
+  }
+
+  .responsive-table,
+  .table-scroll > table,
+  .table-scroll table {
+    min-width: 100% !important;
+    font-size: 0.875rem;
+  }
+
+  .responsive-table th,
+  .table-scroll th {
+    padding: 0.625rem 1rem !important;
+  }
+
+  .responsive-table td,
+  .table-scroll td {
+    padding: 0.625rem 0.75rem !important;
+  }
+
+  .responsive-card {
+    border-radius: 0.75rem !important;
+    padding: 1.25rem !important;
+  }
+
+  .responsive-card-title {
+    font-size: 1rem;
+    line-height: 1.5rem;
+  }
+
+  .btn-responsive {
+    width: auto;
+    padding: 0.5rem 1.25rem !important;
+    border-radius: 0.5rem !important;
+    font-size: 0.875rem !important;
+  }
+}
+
+@media (min-width: 768px) and (max-width: 1023px) {
+  .responsive-table,
+  .table-scroll > table,
+  .table-scroll table {
+    table-layout: fixed;
+  }
+
+  .responsive-table th,
+  .table-scroll th {
+    white-space: normal;
+  }
+
+  .responsive-table td,
+  .table-scroll td {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+}
+
+/* ─── Desktop: 1024px+ ───────────────────────────────────────────────────── */
+@media (min-width: 1024px) {
+  .responsive-table th,
+  .table-scroll th {
+    padding: 0.75rem 1.5rem !important;
+  }
+
+  .responsive-table td,
+  .table-scroll td {
+    padding: 0.75rem 1rem !important;
+  }
+
+  .responsive-card {
+    border-radius: 1rem !important;
+    padding: 1.5rem !important;
+  }
+
+  .responsive-card-title {
+    font-size: 1.125rem;
+    line-height: 1.75rem;
+  }
+
+  .responsive-body {
+    font-size: 1rem;
+  }
+
+  .btn-responsive {
+    padding: 0.625rem 1.5rem !important;
+    border-radius: 0.75rem !important;
+    font-size: 0.875rem !important;
+  }
+}
+
+/* Keep the QA indicator compact even though interactive controls are 44px. */
+.viewport-debug {
+  min-width: 0;
+  min-height: 0;
+  pointer-events: none;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

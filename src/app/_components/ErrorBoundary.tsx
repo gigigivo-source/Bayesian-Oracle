@@ -31,15 +31,15 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
   render() {
     if (this.state.hasError) {
       return (
-        <div className="bg-black/50 rounded-lg p-10 text-center">
-          <div className="text-2xl mb-3">⚠️</div>
-          <div className="text-lg font-bold text-slate-300 mb-2">Something went wrong rendering this section</div>
+        <div className="responsive-card w-full rounded-lg border border-slate-700 bg-slate-900 text-center">
+          <div className="mb-3 text-2xl">⚠️</div>
+          <div className="mb-2 text-base font-bold text-slate-300 sm:text-lg">Something went wrong rendering this section</div>
           {this.state.message && (
-            <p className="text-xs text-slate-500 font-mono mb-4 max-w-md mx-auto truncate">{this.state.message}</p>
+            <p className="mx-auto mb-4 max-w-md break-words font-mono text-sm text-slate-400">{this.state.message}</p>
           )}
           <button
             onClick={() => this.setState({ hasError: false, message: null })}
-            className={`${ACTION_BLUE} px-4 py-2 text-xs`}
+            className={ACTION_BLUE}
           >
             Try Again
           </button>
