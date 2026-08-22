@@ -151,7 +151,7 @@ export default function Home() {
 
         {/* LEAGUE CHIPS — only on Top Matches tab */}
         {tab === "top" && (
-          <div className="sticky top-[99px] z-30 bg-[#0F1117] py-2 px-4 overflow-x-auto scrollbar-none">
+          <div className="sticky top-[56px] z-30 bg-[#0F1117] py-2 px-4 overflow-x-auto scrollbar-none">
             <div className="mx-auto flex max-w-7xl items-center gap-3">
               <button
                 onClick={() => { setSelectedLeagueSlug(null); setShowTodayOnly(false); }}
@@ -332,7 +332,7 @@ function Header({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
   return (
     <>
       <header className="sticky top-0 z-40 bg-slate-900 shadow-lg ">
-        <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3 px-4 py-2 sm:pr-28">
+        <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3 px-4 py-2 pr-16 sm:pr-28">
           <div className="flex items-center gap-3">
             <div className="h-[38px] w-[38px] rounded-lg bg-[#F59E0B] border border-[#FF8C00] flex items-center justify-center">
               <span className="text-xl">⚽</span>
@@ -344,7 +344,7 @@ function Header({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
               <p className="text-[10px] text-slate-400 font-mono">Bayesian Oracle · Deep Statistical Engine</p>
             </div>
           </div>
-          <nav className="flex gap-2 rounded-full border border-slate-700 bg-slate-800 p-1.5 items-center  shadow-inner shadow-slate-950/40">
+          <nav className="flex gap-2 rounded-full border border-slate-700 bg-slate-800 p-1.5 items-center max-w-full flex-nowrap overflow-x-auto scrollbar-none shadow-inner shadow-slate-950/40">
             {mainTabs.map((t) => (
               <button
                 key={t.id}
@@ -861,7 +861,7 @@ function StandingsTable({ entries, activeName }: { entries: StandingsEntry[]; ac
         <span className="text-xs font-bold text-amber-300 font-mono">{activeName}</span>
         <span className="text-[10px] text-slate-500 font-mono">— {entries.length} teams</span>
       </div>
-      <table className="w-full text-left text-sm font-mono">
+      <table className="w-full min-w-[560px] text-left text-sm font-mono">
         <thead className="bg-slate-800 text-[11px] uppercase tracking-wider text-slate-400">
           <tr>
             <th className="px-3 py-2 w-8">#</th>
@@ -1233,15 +1233,15 @@ function VerifiedPage() {
         return (
           <div key={vm.fixture.id} className="bg-slate-900 rounded-lg p-4">
             <div className="flex flex-wrap items-center justify-between gap-3 mb-3 pb-3 border-b border-slate-700">
-              <div className="flex items-center gap-3">
+              <div className="flex flex-wrap items-center gap-3 min-w-0">
                 {vm.fixture.home.logo && (
                   <Image src={vm.fixture.home.logo} alt={vm.fixture.home.shortName} width={24} height={24} className="object-contain" unoptimized />
                 )}
-                <span className="font-bold text-white">{vm.fixture.home.name}</span>
+                <span className="font-bold text-white min-w-0 truncate">{vm.fixture.home.name}</span>
                 <span className="font-mono text-xl font-extrabold text-amber-300">
                   {vm.fixture.home.score} - {vm.fixture.away.score}
                 </span>
-                <span className="font-bold text-white">{vm.fixture.away.name}</span>
+                <span className="font-bold text-white min-w-0 truncate">{vm.fixture.away.name}</span>
                 {vm.fixture.away.logo && (
                   <Image src={vm.fixture.away.logo} alt={vm.fixture.away.shortName} width={24} height={24} className="object-contain" unoptimized />
                 )}
@@ -1264,7 +1264,7 @@ function VerifiedPage() {
                   <div key={i} className="flex items-center gap-3 rounded-md bg-slate-800 px-3 py-2">
                     <span className="text-xs font-mono text-slate-500 w-5">{i + 1}.</span>
                     <span className={`text-sm ${badgeColor}`}>{pick.outcome}</span>
-                    <span className="text-sm text-white font-medium flex-1">{pick.name}</span>
+                    <span className="text-sm text-white font-medium flex-1 min-w-0 truncate">{pick.name}</span>
                     <span className="text-xs font-mono bg-emerald-500/10 text-emerald-300 px-2 py-0.5 rounded border border-emerald-500/20">
                       {pick.selection}
                     </span>
@@ -1465,8 +1465,8 @@ function ValueBetsPage() {
               <span className="text-slate-400">P&L: <strong className={(stats?.totalPnl ?? 0) >= 0 ? "text-emerald-300" : "text-rose-300"}>{(stats?.totalPnl ?? 0) >= 0 ? "+" : ""}${(stats?.totalPnl ?? 0).toFixed(2)}</strong></span>
             </div>
           </div>
-          <div className="bg-slate-900 rounded-lg overflow-hidden">
-            <table className="w-full text-xs">
+          <div className="bg-slate-900 rounded-lg overflow-x-auto">
+            <table className="w-full min-w-[640px] text-xs">
               <thead className="bg-slate-800 text-[10px] uppercase text-slate-400 border-b border-slate-700">
                 <tr>
                   <th className="px-3 py-2 text-left">Match</th>
@@ -1690,7 +1690,7 @@ function BacktestDashboard() {
             </div>
 
             {/* Perfect rates */}
-            <div className="grid grid-cols-3 gap-3">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
               {[
                 { label: "Top-3 Perfect (3/3)", rate: aggregate.top3.perfectRate,  n: aggregate.top3.perfectMatches,  total: aggregate.top3.settled },
                 { label: "Top-5 Perfect (5/5)", rate: aggregate.top5.perfectRate,  n: aggregate.top5.perfectMatches,  total: aggregate.top5.settled },
@@ -1760,26 +1760,26 @@ function BacktestDashboard() {
                       <div className="flex items-center gap-2 flex-wrap">
                         {/* Top-1 */}
                         <div className="text-center">
-                          <div className="text-[9px] text-slate-500 font-mono">T1</div>
+                          <div className="text-[10px] text-slate-500 font-mono">T1</div>
                           <OutcomePill outcome={m.top1.outcome} />
                         </div>
                         {/* Top-3 */}
                         <div className="text-center">
-                          <div className="text-[9px] text-slate-500 font-mono">T3</div>
+                          <div className="text-[10px] text-slate-500 font-mono">T3</div>
                           <span className={`text-xs font-bold font-mono ${m.top3Perfect ? "text-emerald-300" : m.top3Hits === m.top3Total && m.top3Total > 0 ? "text-emerald-300" : m.top3Hits > 0 ? "text-amber-300" : "text-rose-300"}`}>
                             {m.top3Hits}/{m.top3Total}
                           </span>
                         </div>
                         {/* Top-5 */}
                         <div className="text-center">
-                          <div className="text-[9px] text-slate-500 font-mono">T5</div>
+                          <div className="text-[10px] text-slate-500 font-mono">T5</div>
                           <span className={`text-xs font-bold font-mono ${m.top5Perfect ? "text-emerald-300" : m.top5Hits >= m.top5Total * 0.8 ? "text-amber-300" : "text-rose-300"}`}>
                             {m.top5Hits}/{m.top5Total}
                           </span>
                         </div>
                         {/* Top-10 */}
                         <div className="text-center">
-                          <div className="text-[9px] text-slate-500 font-mono">T10</div>
+                          <div className="text-[10px] text-slate-500 font-mono">T10</div>
                           <span className={`text-xs font-bold font-mono ${m.top10Perfect ? "text-emerald-300" : m.top10Hits >= m.top10Total * 0.8 ? "text-amber-300" : "text-rose-300"}`}>
                             {m.top10Hits}/{m.top10Total}
                           </span>
@@ -2100,7 +2100,7 @@ function PerformanceDashboard() {
       )}
 
       {data.top1.total > 0 && (
-        <div className="grid grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
           <div className="bg-slate-900 rounded-lg p-4">
             <div className="text-xs text-slate-400 font-mono mb-1">TOP 1 PICK ACCURACY</div>
             <div className={`text-2xl font-extrabold font-mono ${data.top1.accuracy >= 0.8 ? "text-emerald-300" : data.top1.accuracy >= 0.6 ? "text-amber-300" : "text-rose-300"}`}>
@@ -2139,7 +2139,7 @@ function PerformanceDashboard() {
           <div className="mb-2 inline-block bg-slate-900 rounded-lg px-3 py-1.5">
             <h3 className="text-sm font-bold text-white">Accuracy by League</h3>
           </div>
-          <div className="bg-slate-900 rounded-lg overflow-hidden">
+          <div className="bg-slate-900 rounded-lg overflow-x-auto">
             <table className="w-full text-sm font-mono">
               <thead className="bg-slate-800 text-[11px] uppercase text-slate-400">
                 <tr>
@@ -2296,7 +2296,7 @@ function PerformanceDashboard() {
                                 await refreshPerformance();
                               } catch { /* ignore network failures */ }
                             }}
-                            className={`${ACTION_EMERALD} px-2 py-0.5 text-[10px]`}
+                            className={`${ACTION_EMERALD} min-w-[44px] px-2 py-0.5 text-[10px]`}
                           >
                             HIT
                           </button>
@@ -2311,7 +2311,7 @@ function PerformanceDashboard() {
                                 await refreshPerformance();
                               } catch { /* ignore network failures */ }
                             }}
-                            className={`${ACTION_ROSE} px-2 py-0.5 text-[10px]`}
+                            className={`${ACTION_ROSE} min-w-[44px] px-2 py-0.5 text-[10px]`}
                           >
                             MISS
                           </button>
@@ -2743,8 +2743,8 @@ function SavedSlipCard({
               <input value={stakeVal} onChange={e => setStakeVal(e.target.value)} type="number" min="1"
                 className="w-16 rounded bg-slate-900 border border-slate-700 px-2 py-0.5 text-xs text-white outline-none font-mono" />
               <button onClick={() => { onUpdateStake(slip.id, parseFloat(stakeVal) || 10); setEditingStake(false); }}
-                className={`${ACTION_AMBER} px-2 py-0.5 text-[10px]`}>Save</button>
-              <button onClick={() => setEditingStake(false)} className={`${OUTLINE_ROSE} px-1.5 py-0.5 text-[10px]`}>✕</button>
+                className={`${ACTION_AMBER} min-w-[44px] px-2 py-0.5 text-[10px]`}>Save</button>
+              <button onClick={() => setEditingStake(false)} className={`${OUTLINE_ROSE} min-w-[44px] px-1.5 py-0.5 text-[10px]`}>✕</button>
             </div>
           ) : (
             <button onClick={() => setEditingStake(true)} className="cursor-pointer select-none text-[10px] text-amber-300 font-mono transition-all duration-200 hover:text-amber-200 active:scale-95">
@@ -2778,8 +2778,8 @@ function SavedSlipCard({
             </div>
           ))}
           <div className="flex gap-2 px-3 py-2 bg-slate-800">
-            <button onClick={onVerify} className={`${ACTION_EMERALD} px-3 py-1 text-[10px]`}>⚡ Re-verify</button>
-            <button onClick={() => onDelete(slip.id)} className={`${OUTLINE_ROSE} px-3 py-1 text-[10px]`}>🗑 Delete</button>
+            <button onClick={onVerify} className={`${ACTION_EMERALD} min-w-[44px] px-3 py-1 text-[10px]`}>⚡ Re-verify</button>
+            <button onClick={() => onDelete(slip.id)} className={`${OUTLINE_ROSE} min-w-[44px] px-3 py-1 text-[10px]`}>🗑 Delete</button>
           </div>
         </div>
       )}
@@ -3139,13 +3139,13 @@ function BankrollTracker() {
             );
           })}
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <input value={amount} onChange={e => setAmount(e.target.value)} placeholder="Amount" type="number"
             className="w-28 rounded border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white outline-none focus:border-amber-400 font-mono" />
           <input value={desc} onChange={e => setDesc(e.target.value)}
             placeholder={type === "bet" ? "e.g. Arsenal Over 2.5 Goals" : "Description"}
-            className="flex-1 rounded border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white outline-none focus:border-amber-400" />
-          <button onClick={submit} className={`${ACTION_AMBER} px-4 py-2 text-sm`}>Add</button>
+            className="flex-1 min-w-[140px] rounded border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white outline-none focus:border-amber-400" />
+          <button onClick={submit} className={`${ACTION_AMBER} px-4 py-2 text-sm w-full sm:w-auto`}>Add</button>
         </div>
       </div>
 
@@ -3358,14 +3358,14 @@ function OddsCalculator() {
           <div className="mt-3">
             <div className="space-y-1 mb-2">
               {dutchResult.selections.map((s, i) => (
-                <div key={i} className="flex items-center justify-between bg-slate-800 rounded px-3 py-1.5 text-xs font-mono">
+                <div key={i} className="flex flex-wrap items-center justify-between gap-y-1 bg-slate-800 rounded px-3 py-1.5 text-xs font-mono">
                   <span className="text-white">Selection {i+1}: <span className="text-amber-300">{s.odds.toFixed(2)}</span></span>
                   <span className="text-slate-300">Stake: <span className="text-emerald-300">${s.stake.toFixed(2)}</span></span>
                   <span className="text-slate-400">{s.impliedProb}</span>
                 </div>
               ))}
             </div>
-            <div className="flex justify-between text-xs font-mono bg-emerald-500/10 border border-emerald-500/20 rounded px-3 py-2">
+            <div className="flex flex-col sm:flex-row sm:justify-between gap-1 text-xs font-mono bg-emerald-500/10 border border-emerald-500/20 rounded px-3 py-2">
               <span className="text-slate-300">Total stake: ${dutchResult.totalStake}</span>
               <span className="text-emerald-300 font-bold">Guaranteed return: ${dutchResult.guaranteedReturn.toFixed(2)}</span>
               <span className="text-slate-400">Margin: {dutchResult.margin}</span>
