@@ -80,7 +80,7 @@ function RankingFactorsToggle({ market }: { market: Market }) {
       </button>
 
       {open && (
-        <div className="mt-3 rounded-lg border border-slate-700 bg-slate-950 p-3">
+        <div className="mt-3 rounded-lg border border-slate-700 bg-[#0F1117] p-3">
           <div className="mb-2 flex items-center justify-between font-mono text-[11px] uppercase tracking-wider text-slate-400">
             <span>{Object.keys(factors).length === 11 ? '11-Factor Classic Breakdown' : '12-Factor Ranking Breakdown'}</span>
             {composite !== undefined && (
@@ -288,13 +288,13 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center overflow-hidden bg-slate-950/95 p-0 md:p-6">
-      <div className="max-h-[95vh] w-full overflow-y-auto overscroll-contain rounded-lg bg-slate-950 p-4 md:max-h-[90vh] md:w-11/12 md:max-w-3xl md:rounded-xl md:p-6 lg:w-3/4 lg:max-w-5xl lg:rounded-2xl lg:p-8">
+    <div className="fixed inset-0 z-50 overflow-y-auto bg-[#0F1117] ">
+      <div className="mx-auto my-6 max-w-6xl px-4">
         {/* Modal Top Bar */}
-        <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex min-w-0 items-center gap-3">
+        <div className="mb-4 flex items-center justify-between">
+          <div className="flex items-center gap-3">
             <span className="inline-block h-2.5 w-2.5 rounded-full bg-emerald-400 animate-pulse" />
-            <h2 className="truncate font-mono text-sm font-bold text-amber-300 sm:text-base">ĞIGI GIVØ · DEEP STATISTICAL ORACLE</h2>
+            <h2 className="font-mono text-sm font-bold text-amber-300">ĞIGI GIVØ · DEEP STATISTICAL ORACLE</h2>
           </div>
           <button
             onClick={onClose}
@@ -306,10 +306,10 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
 
         {/* Four ranking-mode pill chips (always visible, instant switching) */}
         <div
-          className="mb-4 flex flex-wrap items-center gap-2 rounded-lg border border-slate-800 bg-slate-900 p-3 sm:gap-3"
+          className="mb-4 flex items-center gap-2 rounded-lg border border-slate-800 bg-slate-900/60 p-2"
           title="Choose ranking system"
         >
-          <span className="w-full font-mono text-xs uppercase tracking-wider text-slate-400 lg:w-auto lg:px-2">
+          <span className="hidden sm:inline-block font-mono text-[10px] uppercase tracking-wider text-slate-500 px-2">
             Choose ranking system
           </span>
           <RankingChip
@@ -344,31 +344,31 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
             type="button"
             onClick={() => loadRankings(fixture, true)}
             title="Force a fresh ?ranking=all request and update the cache"
-            className={`${IX_BASE} inline-flex min-h-11 w-full items-center justify-center gap-1 rounded-full border border-slate-600 bg-slate-800 px-3 py-2 text-xs font-bold uppercase tracking-wider text-slate-200 hover:bg-slate-700 sm:ml-auto sm:w-auto`}
+            className={`${IX_BASE} ml-auto inline-flex items-center gap-1 rounded-full border border-slate-600 bg-slate-800 px-3 py-2 text-[11px] font-bold uppercase tracking-wider text-slate-200 hover:bg-slate-700`}
           >
             🔄 Refresh All
           </button>
         </div>
 
         {/* Match Score & Teams Header */}
-        <div className="responsive-card mb-4 rounded-lg bg-slate-900 p-4">
+        <div className="mb-4 rounded-lg bg-slate-900 p-4">
           <div className="mb-2 text-center text-xs text-slate-400 font-mono">
             {fixture.leagueName} · {new Date(fixture.date).toLocaleString()}
           </div>
-          <div className="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-2 sm:gap-4 lg:gap-6">
-            <div className="flex min-w-0 flex-col-reverse items-center justify-end gap-2 sm:flex-row sm:gap-3">
-              <span className="w-full truncate text-center text-sm font-bold text-slate-100 sm:text-right sm:text-base lg:text-lg">{fixture.home.name}</span>
+          <div className="flex items-center justify-center gap-6">
+            <div className="flex flex-1 items-center justify-end gap-3">
+              <span className="text-right text-lg font-bold text-slate-100">{fixture.home.name}</span>
               <TeamBadge logo={fixture.home.logo} name={fixture.home.name} size={48} />
             </div>
-            <div className="min-w-[64px] text-center sm:min-w-[100px]">
-              <div className="whitespace-nowrap font-mono text-2xl font-extrabold text-amber-300 sm:text-3xl">
+            <div className="text-center min-w-[100px]">
+              <div className="font-mono text-3xl font-extrabold text-amber-300">
                 {fixture.state === "pre" ? "VS" : `${fixture.home.score ?? 0} - ${fixture.away.score ?? 0}`}
               </div>
-              <div className="mt-1 max-w-[100px] truncate font-mono text-xs text-emerald-400">{fixture.statusDetail}</div>
+              <div className="text-[11px] font-mono text-emerald-400 mt-1">{fixture.statusDetail}</div>
             </div>
-            <div className="flex min-w-0 flex-col items-center gap-2 sm:flex-row sm:gap-3">
+            <div className="flex flex-1 items-center gap-3">
               <TeamBadge logo={fixture.away.logo} name={fixture.away.name} size={48} />
-              <span className="w-full truncate text-center text-sm font-bold text-slate-100 sm:text-left sm:text-base lg:text-lg">{fixture.away.name}</span>
+              <span className="text-lg font-bold text-slate-100">{fixture.away.name}</span>
             </div>
           </div>
           {fixture.venue ? (
@@ -424,7 +424,7 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
         </div>
 
         {loading ? (
-          <div className="responsive-card rounded-lg bg-slate-900 p-10 text-center text-slate-200">
+          <div className="rounded-lg bg-slate-900 p-10 text-center text-slate-200">
             <div className="mb-3 animate-pulse font-mono text-lg text-amber-300">
               Running Deep Statistical Analysis…
             </div>
@@ -435,7 +435,7 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
         ) : error ? (
           <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 p-6 text-rose-300">{error}</div>
         ) : result ? (
-          <div className="space-y-4 sm:space-y-6 lg:space-y-8">
+          <div className="space-y-6">
             {/* POST MATCH VERIFICATION ACCURACY BANNER */}
             {result.evaluatedCount && result.evaluatedCount > 0 ? (
               <div className="rounded-xl border border-emerald-500/40 bg-gradient-to-r from-emerald-950/60 via-slate-900 to-emerald-950/60 p-5 shadow-2xl">
@@ -475,7 +475,7 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
 
             {/* MATCH INTELLIGENCE CONTEXT */}
             {result.deepStats?.matchContext ? (
-              <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-4 lg:gap-6">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <div className="rounded-lg border border-slate-700 p-3">
                   <div className="text-xs font-bold text-amber-300 font-mono mb-2">TACTICAL ANALYSIS</div>
                   <p className="text-sm text-slate-200 leading-relaxed">{result.deepStats.matchContext.tactics}</p>
@@ -544,7 +544,7 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
 
             {/* Lambda Vector */}
             <Section title="CONDITIONAL λ VALUES (EXPECTED EVENT RATES)" subtitle="Grounded strictly in deep statistics & de-vigged market odds">
-              <div className="grid grid-cols-1 gap-3 font-mono text-sm md:grid-cols-2 md:gap-4 lg:grid-cols-4">
+              <div className="grid grid-cols-2 gap-2 text-sm sm:grid-cols-4 font-mono">
                 {Object.entries(result.lambdas).map(([k, v]) => (
                   <div key={k} className="rounded-md border border-slate-700 px-3 py-2">
                     <div className="text-[11px] text-slate-400">{k}</div>
@@ -597,20 +597,20 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
                           <div className="text-[10px] text-slate-400">value edge</div>
                         </div>
                       </div>
-                      <div className="grid grid-cols-1 gap-3 text-center text-xs md:grid-cols-2 lg:grid-cols-4">
-                        <div className="responsive-card bg-slate-800 rounded p-2">
+                      <div className="grid grid-cols-4 gap-2 text-center text-xs">
+                        <div className="bg-slate-800 rounded p-2">
                           <div className="text-[10px] text-slate-400 font-mono">ORACLE</div>
                           <div className="font-mono font-bold text-amber-300">{(v.oracleProbability * 100).toFixed(1)}%</div>
                         </div>
-                        <div className="responsive-card bg-slate-800 rounded p-2">
+                        <div className="bg-slate-800 rounded p-2">
                           <div className="text-[10px] text-slate-400 font-mono">BOOK IMPLIED</div>
                           <div className="font-mono font-bold text-slate-300">{(v.bookImpliedProbability * 100).toFixed(1)}%</div>
                         </div>
-                        <div className="responsive-card bg-slate-800 rounded p-2">
+                        <div className="bg-slate-800 rounded p-2">
                           <div className="text-[10px] text-slate-400 font-mono">BOOK ODDS</div>
                           <div className="font-mono font-bold text-white">{v.bookDecimalOdds.toFixed(2)}</div>
                         </div>
-                        <div className="responsive-card bg-slate-800 rounded p-2">
+                        <div className="bg-slate-800 rounded p-2">
                           <div className="text-[10px] text-slate-400 font-mono">KELLY STAKE</div>
                           <div className="font-mono font-bold text-cyan-300">{(v.kellyStake * 100).toFixed(1)}%</div>
                         </div>
@@ -683,7 +683,7 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
                 title="POST-MATCH TOP 10 VERIFICATION"
                 subtitle={`Oracle predictions verified against real ESPN boxscore · Final Score: ${fixture.home.name} ${fixture.home.score} - ${fixture.away.score} ${fixture.away.name}`}
               >
-                <div className="responsive-card bg-slate-800 rounded-lg p-4 mb-4">
+                <div className="bg-slate-800 rounded-lg p-4 mb-4">
                   <div className="flex items-center justify-between">
                     <div>
                       <div className="text-sm text-slate-300 font-mono">Accuracy Score</div>
@@ -726,17 +726,17 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
                           </span>
                         </div>
                         <div className="mt-3 grid grid-cols-3 gap-2 text-center">
-                          <div className="responsive-card bg-slate-800 rounded-md p-2">
+                          <div className="bg-slate-800 rounded-md p-2">
                             <div className="text-[10px] text-slate-500 font-mono uppercase">Predicted</div>
                             <div className="font-mono font-bold text-amber-300 text-sm">{m.selection}</div>
                             <div className="text-[10px] text-slate-500">Hit Rate: {(m.hitRate * 100).toFixed(1)}%</div>
                           </div>
-                          <div className="responsive-card bg-slate-800 rounded-md p-2">
+                          <div className="bg-slate-800 rounded-md p-2">
                             <div className="text-[10px] text-slate-500 font-mono uppercase">Line</div>
                             <div className="font-mono font-bold text-white text-sm">{!isNaN(line) ? line.toFixed(1) : "—"}</div>
                             <div className="text-[10px] text-slate-500">Threshold</div>
                           </div>
-                          <div className="responsive-card bg-slate-800 rounded-md p-2">
+                          <div className="bg-slate-800 rounded-md p-2">
                             <div className="text-[10px] text-slate-500 font-mono uppercase">Actual</div>
                             <div className={`font-mono font-bold text-sm ${
                               m.outcome === "HIT" ? "text-emerald-300" : m.outcome === "MISS" ? "text-rose-300" : "text-slate-300"
@@ -798,7 +798,7 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
               </div>
 
               {showJson && (
-                <pre className="mb-4 max-h-80 overflow-auto rounded-lg border border-slate-700 bg-slate-950 p-3 text-[11px] text-emerald-300 font-mono">
+                <pre className="mb-4 max-h-80 overflow-auto rounded-lg border border-slate-700 bg-[#0F1117] p-3 text-[11px] text-emerald-300 font-mono">
                   {JSON.stringify({ match: result.input.match, date: result.input.date, markets: registry.slice(0, 30) }, null, 2)}
                 </pre>
               )}
@@ -875,22 +875,16 @@ function RankingDebugPanel({
 
   const colClass: Record<RankingMode, string> = {
     A: "bg-amber-500/20 border-amber-400/40",
-    B: "bg-teal-500/20 border-teal-400/40",
-    C: "bg-purple-500/20 border-purple-400/40",
-    D: "bg-gradient-to-br from-yellow-200/20 via-amber-400/15 to-white/10 border-yellow-300/50",
-  };
-  const headingClass: Record<RankingMode, string> = {
-    A: "text-amber-300",
-    B: "text-teal-300",
-    C: "text-purple-300",
-    D: "text-yellow-300",
+    B: "bg-teal-500/20 border-cyan-400/40",
+    C: "bg-purple-500/20 border-indigo-400/40",
+    D: "bg-gradient-to-br from-yellow-200/20 via-amber-400/15 to-white/10 border-yellow-200/50",
   };
 
   const top3 = (mode: RankingMode): string[] =>
     (cached?.rankings[mode]?.prediction.top10 ?? []).slice(0, 3).map(pickLabel);
 
   return (
-    <div className="responsive-card space-y-3 rounded-lg border border-slate-700 bg-slate-900 p-3 font-mono text-xs sm:text-sm">
+    <div className="rounded-lg border border-slate-700 bg-slate-900/80 p-3 font-mono text-xs space-y-3">
       <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
         <span className="font-bold text-slate-100">
           Ranking: {MODE_LABEL[selectedMode]}
@@ -904,23 +898,21 @@ function RankingDebugPanel({
         <span className="text-slate-400">{sourceLabel}</span>
       </div>
 
-      <div className="table-scroll w-full">
-        <div className="grid min-w-max grid-cols-4 gap-2 sm:min-w-0">
-          {(["A", "B", "C", "D"] as RankingMode[]).map((mode) => (
-            <div key={mode} className={`min-w-[120px] rounded-md border p-2 sm:min-w-[150px] ${colClass[mode]}`}>
-              <div className={`mb-1 font-bold ${headingClass[mode]}`}>{MODE_LABEL[mode]}</div>
-              <ol className="list-inside list-decimal space-y-0.5 text-slate-200">
-                {top3(mode).map((name, i) => (
-                  <li key={`${mode}-${i}`} className="truncate" title={name}>{name}</li>
-                ))}
-                {top3(mode).length === 0 ? <li>—</li> : null}
-              </ol>
-            </div>
-          ))}
-        </div>
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4">
+        {(["A", "B", "C", "D"] as RankingMode[]).map((mode) => (
+          <div key={mode} className={`rounded-md border p-2 ${colClass[mode]}`}>
+            <div className="mb-1 font-bold text-slate-100">{MODE_LABEL[mode]}</div>
+            <ol className="list-decimal list-inside space-y-0.5 text-slate-200">
+              {top3(mode).map((name, i) => (
+                <li key={`${mode}-${i}`} className="truncate" title={name}>{name}</li>
+              ))}
+              {top3(mode).length === 0 ? <li>—</li> : null}
+            </ol>
+          </div>
+        ))}
       </div>
 
-      <div className="space-y-0.5 text-xs text-slate-400">
+      <div className="space-y-0.5 text-[10px] text-slate-400">
         {(["A", "B", "C", "D"] as RankingMode[]).map((mode) => (
           <div key={`fp-${mode}`}>
             Fingerprint {mode}: {fingerprintOf(cached?.rankings[mode]?.prediction.top10)}
@@ -954,12 +946,13 @@ function RankingChip({
   // Color per mode — exactly matches the task spec:
   //   A = amber/gold   B = teal/blue   C = purple/indigo   D = gold/white consensus
   const ACTIVE_STYLE: Record<RankingMode, string> = {
-    A: "bg-amber-500 text-white shadow-lg shadow-amber-500/30 scale-105",
-    B: "bg-teal-500 text-white shadow-lg shadow-teal-500/30 scale-105",
-    C: "bg-purple-500 text-white shadow-lg shadow-purple-500/30 scale-105",
-    D: "bg-gradient-to-r from-yellow-400 to-amber-500 text-white shadow-lg shadow-amber-500/30 scale-105",
+    A: "bg-gradient-to-r from-amber-500 to-yellow-500 text-white shadow-lg shadow-amber-500/40 ring-2 ring-amber-300/60",
+    B: "bg-gradient-to-r from-teal-500 to-cyan-600 text-white shadow-lg shadow-teal-500/40 ring-2 ring-cyan-300/60",
+    C: "bg-gradient-to-r from-purple-600 to-indigo-600 text-white shadow-lg shadow-purple-600/40 ring-2 ring-purple-300/60",
+    D: "bg-gradient-to-r from-yellow-200 via-amber-300 to-white text-slate-950 shadow-lg shadow-yellow-300/40 ring-2 ring-white/70",
   };
-  const INACTIVE_STYLE = "bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-white";
+  const INACTIVE_STYLE =
+    "bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-white border border-slate-700 hover:border-slate-500";
 
   return (
     <button
@@ -967,8 +960,8 @@ function RankingChip({
       onClick={() => onSelect(mode)}
       title={`Choose ranking system — ${description}`}
       aria-pressed={active}
-      className={`${IX_BASE} chip-responsive inline-flex min-h-11 items-center justify-center gap-1.5 whitespace-nowrap rounded-full px-3 py-1.5 text-xs font-medium transition-all duration-200 sm:px-4 sm:py-2 sm:text-sm ${
-        active ? ACTIVE_STYLE[mode] : INACTIVE_STYLE
+      className={`${IX_BASE} flex-1 sm:flex-none inline-flex items-center justify-center gap-1.5 whitespace-nowrap rounded-full px-4 py-2 text-xs font-bold tracking-wider transition-all duration-200 ${
+        active ? `${ACTIVE_STYLE[mode]} scale-105` : `${INACTIVE_STYLE} hover:scale-105`
       }`}
     >
       {label}
@@ -978,13 +971,13 @@ function RankingChip({
 
 /** Shared interaction baseline (matches the project's `IX` design token). */
 const IX_BASE =
-  "cursor-pointer select-none transition-all duration-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/60";
+  "cursor-pointer select-none focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/60 active:scale-95";
 
 function DeepStatsDashboard({ stats, homeName, awayName }: { stats: DeepStatsVector; homeName: string; awayName: string }) {
   return (
     <div className="space-y-4">
-      <div className="table-scroll rounded-lg border border-slate-700 bg-slate-800">
-        <table className="responsive-table w-full min-w-[500px] text-center text-xs font-mono sm:min-w-full sm:text-sm">
+      <div className="overflow-x-auto rounded-lg border border-slate-700 bg-slate-800 p-4">
+        <table className="w-full text-center text-xs font-mono">
           <thead>
             <tr className="border-b border-slate-700 text-slate-400 text-[11px] uppercase">
               <th className="py-2 text-left font-sans text-amber-300">{homeName}</th>
@@ -1022,7 +1015,7 @@ function DeepStatsDashboard({ stats, homeName, awayName }: { stats: DeepStatsVec
         <div className="mb-2 text-xs font-semibold text-slate-300 uppercase tracking-wider">
           Autonomous Multi-Source Data Mesh (100% Fetched — Zero Simulation)
         </div>
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-4 lg:grid-cols-3 text-xs font-mono">
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 text-xs font-mono">
           {stats.sources.map((src) => (
             <div key={src.name} className="rounded-md border border-slate-700 p-2">
               <div className="flex items-center justify-between">
@@ -1115,7 +1108,7 @@ function LineupPanel({ title, players }: { title: string; players: MatchSummary[
   const starters = players.filter((p) => p.starter);
   return (
     <Section title={title} subtitle={`${starters.length} starters`}>
-      <div className="grid grid-cols-1 gap-3 text-xs md:grid-cols-2">
+      <div className="grid grid-cols-2 gap-2 text-xs">
         {starters.map((p, i) => (
           <div key={i} className="flex items-center gap-2 rounded border border-slate-700 px-2 py-1">
             <span className="w-5 font-mono text-slate-400 font-bold">{p.jersey ?? "-"}</span>

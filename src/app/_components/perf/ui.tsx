@@ -137,11 +137,11 @@ export function Section({
   className?: string;
 }) {
   return (
-    <section className={cn("scroll-mt-28 space-y-4 sm:space-y-6 lg:space-y-8", className)}>
-      <div className="flex flex-wrap items-end justify-between gap-2">
+    <section className={cn("scroll-mt-28", className)}>
+      <div className="mb-3 flex flex-wrap items-end justify-between gap-2">
         <div className="inline-block rounded-lg bg-slate-900 px-4 py-2">
-          <h2 className="text-base font-semibold text-white md:text-lg lg:text-xl">{title}</h2>
-          {subtitle ? <p className="mt-1 text-xs text-slate-300/80 md:text-sm">{subtitle}</p> : null}
+          <h2 className="text-sm font-bold text-white">{title}</h2>
+          {subtitle ? <p className="text-[11px] text-slate-300/80">{subtitle}</p> : null}
         </div>
         {right}
       </div>
@@ -170,7 +170,7 @@ export function Card({
             ? "border-cyan-500/30"
             : "border-slate-700";
   return (
-    <div className={cn("responsive-card rounded-lg border bg-slate-800 transition-all duration-200 hover:-translate-y-2 hover:shadow-2xl", border, className)}>{children}</div>
+    <div className={cn("rounded-xl border bg-slate-900 p-4", border, className)}>{children}</div>
   );
 }
 
@@ -193,7 +193,7 @@ export function StatCard({
 }) {
   return (
     <div
-      className="responsive-card group relative overflow-hidden rounded-lg border border-slate-700 bg-slate-800 transition-all duration-200 hover:-translate-y-2 hover:border-slate-600 hover:shadow-2xl"
+      className="group relative overflow-hidden rounded-xl border border-slate-700 bg-slate-900 p-4 transition hover:border-slate-600"
       title={hint}
     >
       <div className="flex items-start justify-between gap-2">
@@ -323,9 +323,9 @@ export function LoadingState({ label }: { label: string }) {
         </span>
         <span className="animate-pulse font-mono text-sm text-amber-300">{label}</span>
       </div>
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-4 lg:grid-cols-3 lg:gap-6 xl:grid-cols-4">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         {Array.from({ length: 4 }).map((_, i) => (
-          <div key={i} className="responsive-card h-24 animate-pulse rounded-lg border border-slate-700 bg-slate-800" />
+          <div key={i} className="h-24 animate-pulse rounded-xl border border-slate-700 bg-slate-900" />
         ))}
       </div>
       <div className="h-64 animate-pulse rounded-xl border border-slate-700 bg-slate-900" />
@@ -335,14 +335,14 @@ export function LoadingState({ label }: { label: string }) {
 
 export function ErrorState({ message, onRetry }: { message: string; onRetry?: () => void }) {
   return (
-    <div className="responsive-card rounded-lg border border-rose-500/30 bg-rose-500/5 text-center">
+    <div className="rounded-xl border border-rose-500/30 bg-rose-500/5 p-8 text-center">
       <div className="mb-3 text-3xl">⚠️</div>
       <div className="mb-1 text-base font-bold text-rose-200">Couldn&apos;t load performance data</div>
       <p className="mx-auto mb-4 max-w-md break-words font-mono text-xs text-rose-300/70">{message}</p>
       {onRetry ? (
         <button
           onClick={onRetry}
-          className={ACTION_BLUE}
+          className={`${ACTION_BLUE} px-4 py-2 text-xs`}
         >
           ↻ Retry
         </button>
@@ -361,7 +361,7 @@ export function EmptyState({
   message: string;
 }) {
   return (
-    <div className="responsive-card rounded-lg border border-slate-700 bg-slate-800 text-center">
+    <div className="rounded-xl border border-slate-700 bg-slate-900 p-10 text-center">
       <div className="mb-3 text-3xl">{icon}</div>
       <div className="mb-2 text-base font-bold text-slate-300">{title}</div>
       <p className="mx-auto max-w-sm font-mono text-xs text-slate-400">{message}</p>
@@ -391,11 +391,11 @@ export function SortHeader({
   const alignCls = align === "right" ? "text-right" : align === "center" ? "text-center" : "text-left";
   const arrow = active ? (dir === "desc" ? " ▼" : " ▲") : "";
   return (
-    <th className={cn("select-none px-3 py-2 md:px-4 md:py-2.5 lg:px-6 lg:py-3", alignCls, className)}>
+    <th className={cn("select-none px-3 py-2.5", alignCls, className)}>
       <button
         onClick={onClick}
         className={cn(
-          "inline-flex min-h-11 cursor-pointer select-none items-center gap-0.5 rounded text-xs font-semibold uppercase tracking-wider transition-all duration-200 hover:scale-105 active:scale-95",
+          "inline-flex cursor-pointer select-none items-center gap-0.5 rounded text-[11px] font-semibold uppercase tracking-wider transition-all duration-200 hover:scale-105 active:scale-95",
           active ? "text-amber-300" : "text-slate-400 hover:text-white",
         )}
       >

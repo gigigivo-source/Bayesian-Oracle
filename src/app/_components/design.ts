@@ -18,13 +18,13 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** Shared interaction baseline required by every clickable element. */
-const IX = "cursor-pointer select-none transition-all duration-200 tap-target";
+const IX = "cursor-pointer select-none transition-all duration-200";
 const GOLD_GRADIENT = "bg-gradient-to-r from-[#F59E0B] to-[#FF8C00]";
 
 /* ═══ TYPE 1 · PRIMARY NAVIGATION — solid slate pills ══════════════════════ */
 
 export const NAV_PILL =
-  `${IX} chip-responsive inline-flex items-center justify-center gap-1.5 whitespace-nowrap rounded-full ` +
+  `${IX} inline-flex items-center gap-1.5 whitespace-nowrap rounded-full ` +
   "hover:scale-105 active:scale-95 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/70";
 
 /** Inactive pill: solid slate, muted text, slight elevation. */
@@ -41,7 +41,7 @@ export const NAV_PILL_ON_VIOLET = NAV_PILL_ON_AMBER;
 /* ═══ TYPE 2 · PRIMARY ACTION BUTTONS — gold/amber CTAs ═══════════════════ */
 
 const ACTION =
-  `${IX} btn-responsive rounded-lg font-bold shadow-lg hover:scale-105 active:scale-95 ` +
+  `${IX} rounded-xl font-bold shadow-2xl hover:scale-105 hover:shadow-2xl active:scale-95 ` +
   "hover:brightness-110 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-[#0F1117] " +
   "disabled:pointer-events-none disabled:opacity-50";
 
@@ -63,7 +63,7 @@ export const ACTION_ROSE = ACTION_GOLD;
 /* ═══ TYPE 3 · SECONDARY / OUTLINE BUTTONS — cyan on slate ════════════════ */
 
 const OUTLINE =
-  `${IX} btn-responsive rounded-lg border bg-transparent font-bold ` +
+  `${IX} rounded-lg border-2 bg-transparent font-bold ` +
   "hover:scale-105 active:scale-95 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-[#0F1117]";
 
 /** Default secondary: Back / Cancel / Reset / Refresh. */
@@ -90,13 +90,13 @@ export const OUTLINE_NEUTRAL =
  * shift when it appears.
  */
 export const CARD_CLICK =
-  `${IX} responsive-card block w-full rounded-lg border border-slate-700 border-t-2 border-t-transparent bg-slate-800 ` +
+  `${IX} block w-full rounded-2xl border border-slate-700 border-t-2 border-t-transparent bg-slate-800 ` +
   "hover:-translate-y-2 hover:border-t-amber-400 hover:bg-slate-700 hover:shadow-2xl hover:shadow-amber-500/20 " +
   "focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/60";
 
 /** Same physical lift for live fixtures — glow burns rose instead of amber. */
 export const CARD_CLICK_LIVE =
-  `${IX} responsive-card block w-full rounded-lg border border-slate-700 border-t-2 border-t-transparent bg-slate-800 ` +
+  `${IX} block w-full rounded-2xl border border-slate-700 border-t-2 border-t-transparent bg-slate-800 ` +
   "hover:-translate-y-2 hover:border-t-rose-400 hover:bg-slate-700 hover:shadow-2xl hover:shadow-rose-500/20 " +
   "focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-400/60";
 
@@ -106,7 +106,7 @@ export const CARD_CLICK_LIVE =
  * no global cursor-pointer, gentler lift.
  */
 export const CARD_SURFACE =
-  "responsive-card rounded-lg border border-slate-700 bg-slate-800 transition-all duration-200 " +
+  "rounded-2xl border border-slate-700 bg-slate-800 transition-all duration-200 " +
   "hover:-translate-y-1 hover:border-t-2 hover:border-t-amber-400/70 hover:shadow-2xl hover:shadow-amber-500/10";
 
 /* ═══ TYPE 5 · FILTER CHIPS / LEAGUE PILLS — solid slate tags ═════════════ */
@@ -116,7 +116,7 @@ export const CARD_SURFACE =
  * off) so activating a chip never shifts layout — the accent bar just ignites.
  */
 export const CHIP =
-  `${IX} chip-responsive inline-flex items-center justify-center gap-1.5 whitespace-nowrap rounded-full border-l-4 border-l-transparent ` +
+  `${IX} inline-flex items-center gap-1.5 whitespace-nowrap rounded-full border-l-4 border-l-transparent ` +
   "active:scale-90 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/60";
 
 /** Inactive chip: solid slate tag. */

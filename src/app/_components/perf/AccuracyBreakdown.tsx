@@ -34,7 +34,7 @@ export function AccuracyBreakdown({
   const settled = factors.filter((f) => f.total > 0);
   if (settled.length === 0) {
     return (
-      <div className="responsive-card rounded-lg border border-slate-700 bg-slate-800 text-center font-mono text-sm text-slate-400">
+      <div className="rounded-xl border border-slate-700 bg-slate-900 p-8 text-center font-mono text-xs text-slate-400">
         {emptyLabel}
       </div>
     );
@@ -48,7 +48,7 @@ export function AccuracyBreakdown({
   });
 
   return (
-    <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-4 lg:gap-6">
+    <div className="space-y-2">
       {ranked.map((f) => {
         const rate = f.total > 0 ? f.hits / f.total : 0;
         const tone = toneForRate(rate);
@@ -63,12 +63,12 @@ export function AccuracyBreakdown({
         return (
           <div
             key={f.label}
-            className="responsive-card rounded-lg border border-slate-700 bg-slate-800 transition-all duration-200 hover:-translate-y-2 hover:shadow-2xl"
+            className="rounded-lg border border-slate-700 bg-slate-800 p-3"
           >
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="min-w-0">
                 <div className="flex items-center gap-2">
-                  <span className="responsive-card-title truncate text-slate-100">{f.label}</span>
+                  <span className="truncate text-sm font-semibold text-slate-100">{f.label}</span>
                   {f.expected !== undefined ? (
                     <span
                       className="rounded border border-slate-700 bg-slate-800 px-1.5 py-0.5 font-mono text-[10px] text-slate-400"

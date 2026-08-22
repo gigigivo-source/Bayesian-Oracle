@@ -148,7 +148,7 @@ export function LeagueCard({
     <>
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
-          <div className="responsive-card-title truncate text-white">{m.competitionName}</div>
+          <div className="truncate text-sm font-bold text-white">{m.competitionName}</div>
           <div className="truncate font-mono text-[10px] text-slate-500">
             {m.region ?? "—"} · {m.leagueSlug}
           </div>
@@ -206,7 +206,7 @@ export function LeagueCard({
   );
 
   const cls = cn(
-    "group relative text-left",
+    "group relative p-4 text-left",
     CARD_CLICK,
     // Selected league stays pinned with a lit ring + resting amber glow.
     selected && "ring-2 ring-amber-400/60 shadow-lg shadow-amber-500/20",
@@ -228,9 +228,9 @@ export function LeagueCard({
 
 export function LeagueSkeletonGrid({ count = 8 }: { count?: number }) {
   return (
-    <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-4 lg:grid-cols-3 lg:gap-6 xl:grid-cols-4">
+    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
       {Array.from({ length: count }).map((_, i) => (
-        <div key={i} className="responsive-card h-44 animate-pulse rounded-lg border border-slate-700 bg-slate-800" />
+        <div key={i} className="h-44 animate-pulse rounded-xl border border-slate-700 bg-slate-900" />
       ))}
     </div>
   );
@@ -241,15 +241,15 @@ export function LeagueSkeletonGrid({ count = 8 }: { count?: number }) {
 export function FactorAccuracyTable({ factors }: { factors: FactorStat[] }) {
   if (factors.length === 0) {
     return (
-      <div className="responsive-card rounded-lg border border-slate-700 bg-slate-800 text-center font-mono text-xs text-slate-400">
+      <div className="rounded-xl border border-slate-700 bg-slate-900 p-8 text-center font-mono text-xs text-slate-400">
         No settled picks for this league yet — factor accuracy appears once bets resolve.
       </div>
     );
   }
   return (
-    <div className="table-scroll rounded-xl border border-slate-700 bg-slate-900">
-      <table className="responsive-table w-full min-w-[600px] text-left text-xs sm:min-w-full sm:text-sm">
-        <thead className="sticky top-0 z-10 border-b border-slate-700 bg-slate-800">
+    <div className="overflow-x-auto rounded-xl border border-slate-700 bg-slate-900">
+      <table className="w-full text-left text-sm">
+        <thead className="border-b border-slate-700 bg-slate-800">
           <tr>
             <th className="px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-400">Factor Name</th>
             <th className="px-3 py-2.5 text-right text-[11px] font-semibold uppercase tracking-wider text-slate-400">Hit Rate %</th>
@@ -321,16 +321,16 @@ export function LeagueBetsTable({ bets }: { bets: BetRow[] }) {
 
   if (bets.length === 0) {
     return (
-      <div className="responsive-card rounded-lg border border-slate-700 bg-slate-800 text-center font-mono text-xs text-slate-400">
+      <div className="rounded-xl border border-slate-700 bg-slate-900 p-8 text-center font-mono text-xs text-slate-400">
         No individual bets recorded for this league yet.
       </div>
     );
   }
 
   return (
-    <div className="table-scroll max-h-[560px] rounded-xl border border-slate-700 bg-slate-900">
-      <table className="responsive-table w-full min-w-[600px] text-left text-xs sm:min-w-full sm:text-sm">
-        <thead className="sticky top-0 z-10 border-b border-slate-700 bg-slate-800">
+    <div className="max-h-[560px] overflow-auto rounded-xl border border-slate-700 bg-slate-900">
+      <table className="w-full text-left text-sm">
+        <thead className="sticky top-0 z-10 border-b border-slate-700 bg-[#0b0f1a]">
           <tr>
             <SortHeader label="Date" active={sortKey === "date"} dir={sortDir} onClick={() => toggle("date")} />
             <th className="px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-400">Match</th>
@@ -455,9 +455,9 @@ export function LeagueSummaryCards({ m }: { m: LeagueMetrics }) {
   } as const;
 
   return (
-    <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-4 lg:grid-cols-3 lg:gap-6 xl:grid-cols-4">
+    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
       {cards.map((c) => (
-        <div key={c.label} className="responsive-card rounded-lg border border-slate-700 bg-slate-800 transition-all duration-200 hover:-translate-y-2 hover:shadow-2xl">
+        <div key={c.label} className="rounded-xl border border-slate-700 bg-slate-900 p-4">
           <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">{c.label}</div>
           <div className={cn("mt-1.5 font-mono text-xl font-extrabold tabular-nums", toneText[c.tone])}>{c.value}</div>
           <div className="mt-1 text-[11px] text-slate-400">{c.sub}</div>
