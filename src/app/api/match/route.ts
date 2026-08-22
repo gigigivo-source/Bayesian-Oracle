@@ -1,6 +1,8 @@
 import { db } from "@/db";
 import { predictions, performanceLog } from "@/db/schema";
 import { fetchSummary, type FixtureLite } from "@/lib/espn";
+import type { RankingMode } from "@/lib/engine/selector";
+import { resolveRankingMode } from "@/lib/engine/selector";
 import { runEngineFromRealWithProfiles, evaluateFinishedMatch } from "@/lib/engine";
 import { findValueBets, type BookmakerOdds, type ValueBet } from "@/lib/engine/value";
 import { searchFixture, getMultiBookOdds } from "@/lib/apiFootball";
@@ -96,6 +98,20 @@ async function fetchBoxscore(
 // ─── Main handler ─────────────────────────────────────────────────────────────
 
 async function handlePost(req: Request): Promise<Response> {
+  // Ranking mode: query param ?ranking=A|B overrides env var RANKING_MODE (default B)
+  let rankingMode: RankingMode = 'B';
+  try {
+    const url = new URL(req.url);
+    const q = url.searchParams.get('ranking');
+    if (q && (q.toUpperCase() === 'A' || q.toUpperCase() === 'B')) {
+      rankingMode = q.toUpperCase() as RankingMode;
+    } else {
+      rankingMode = resolveRankingMode(undefined);
+    }
+  } catch {
+    rankingMode = resolveRankingMode(undefined);
+  }
+
   let fixture: FixtureLite;
   try {
     const body = await req.json() as { fixture?: FixtureLite };
@@ -120,7 +136,16 @@ async function handlePost(req: Request): Promise<Response> {
     liveStats = await fetchBoxscore(fixture.leagueSlug, fixture.id);
   }
 
-  const prediction = await runEngineFromRealWithProfiles(fixture, summary, liveStats);
+  // Override env var for this request so selector picks up the query param
+  const prevRankingEnv = process.env.RANKING_MODE;
+  process.env.RANKING_MODE = rankingMode;
+  let prediction;
+  try {
+    prediction = await runEngineFromRealWithProfiles(fixture, summary, liveStats);
+  } finally {
+    if (prevRankingEnv === undefined) delete process.env.RANKING_MODE;
+    else process.env.RANKING_MODE = prevRankingEnv;
+  }
 
   // ── Post-match: fetch real boxscore, verify Top-10, log performance ──────────
   let boxscore: Record<string, number> | null = null;
@@ -283,6 +308,7 @@ async function handlePost(req: Request): Promise<Response> {
     bookOdds,
     valueBets,
     multiBookOdds,
+    rankingMode,
   });
 }
 
