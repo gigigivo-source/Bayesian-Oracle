@@ -1,4 +1,5 @@
 import { fetchScoreboard, type FixtureLite } from "@/lib/espn";
+import { compareLeaguePriority, leagueTier } from "@/lib/leaguePriority";
 
 export const dynamic = "force-dynamic";
 
@@ -156,18 +157,33 @@ export async function GET() {
       if (f.state !== "in" || seen.has(f.id)) return false;
       seen.add(f.id);
       return true;
-    });
+    })
+    // Live feed ordered by league importance (biggest leagues first),
+    // then by kickoff time within the same tier.
+    .sort(
+      (a, b) =>
+        compareLeaguePriority(a, b) ||
+        new Date(a.date).getTime() - new Date(b.date).getTime(),
+    );
 
-  // Sort featured: leagues with live/active matches first
-  const sortedResults = [...results].sort((a, b) => {
-    const aScore = a.upcoming.length * 2 + a.results.length;
-    const bScore = b.upcoming.length * 2 + b.results.length;
-    return bScore - aScore;
-  });
+  // Sort featured leagues by importance tier (Champions League, Premier League,
+  // … at the top), keeping leagues with live/active matches ahead of quiet ones
+  // within the same tier.
+  const activityScore = (r: { upcoming: FixtureLite[]; results: FixtureLite[] }) =>
+    r.upcoming.length * 2 + r.results.length;
+  const byLeaguePriority = (
+    a: { slug: string; upcoming: FixtureLite[]; results: FixtureLite[] },
+    b: { slug: string; upcoming: FixtureLite[]; results: FixtureLite[] },
+  ) =>
+    leagueTier({ leagueSlug: a.slug }) - leagueTier({ leagueSlug: b.slug }) ||
+    activityScore(b) - activityScore(a);
+
+  const sortedResults = [...results].sort(byLeaguePriority);
+  const sortedExtra = [...extraResults].sort(byLeaguePriority);
 
   return Response.json({
     featured:  sortedResults,
-    extra:     extraResults,
+    extra:     sortedExtra,
     live,
     liveCount: live.length,
   });

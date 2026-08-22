@@ -6,6 +6,17 @@ import type { Market } from "@/lib/engine/types";
 import type { FixtureLite } from "@/lib/espn";
 import { OutcomeBadge, IconLive } from "./Icons";
 import { CARD_CLICK, CARD_CLICK_LIVE } from "./design";
+import { leagueTier, tierLabel, LOWEST_TIER } from "@/lib/leaguePriority";
+
+// Tailwind classes per tier so the badge colour reflects competition size.
+const TIER_BADGE_CLASS: Record<number, string> = {
+  1: "bg-amber-500/15 text-amber-300 ring-1 ring-amber-500/30",
+  2: "bg-sky-500/15 text-sky-300 ring-1 ring-sky-500/30",
+  3: "bg-emerald-500/15 text-emerald-300 ring-1 ring-emerald-500/30",
+  4: "bg-violet-500/15 text-violet-300 ring-1 ring-violet-500/30",
+  5: "bg-slate-500/15 text-slate-300 ring-1 ring-slate-500/30",
+  6: "bg-slate-700/40 text-slate-400 ring-1 ring-slate-600/40",
+};
 
 export function pct(x: number): string {
   return `${(x * 100).toFixed(1)}%`;
@@ -327,6 +338,10 @@ export function FixtureCard({
     fx.home.score !== null &&
     fx.away.score !== null;
 
+  // Small league-importance badge (T1 = biggest competitions … T6 = smallest).
+  const tier = leagueTier({ leagueSlug: fx.leagueSlug, leagueName: fx.leagueName });
+  const tierClass = TIER_BADGE_CLASS[tier] ?? TIER_BADGE_CLASS[LOWEST_TIER];
+
   return (
     <button
       onClick={() => onSelect(fx)}
@@ -334,12 +349,18 @@ export function FixtureCard({
     >
       <div className="mb-2 flex items-center justify-between text-[11px]">
         <span
-          className={`truncate ${isLive ? "text-rose-300 font-bold" : "text-slate-500"}`}
+          className={`flex min-w-0 items-center gap-1.5 truncate ${isLive ? "text-rose-300 font-bold" : "text-slate-500"}`}
         >
           {isLive && (
-            <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-rose-500 mr-1.5" />
+            <span className="inline-block h-2 w-2 shrink-0 animate-pulse rounded-full bg-rose-500" />
           )}
-          {fx.leagueName}
+          <span
+            className={`shrink-0 rounded px-1 py-0.5 text-[9px] font-bold leading-none tracking-wide ${tierClass}`}
+            title={`League priority tier ${tier}`}
+          >
+            {tierLabel(tier)}
+          </span>
+          <span className="truncate">{fx.leagueName}</span>
         </span>
         <span className={`font-mono font-bold flex items-center gap-1 ${stateColor}`}>
           {isLive && <IconLive size={8} />}
