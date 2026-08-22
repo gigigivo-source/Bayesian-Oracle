@@ -208,6 +208,9 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
   const [cached, setCached] = useState<CachedRankings | null>(() => getCachedRankings(fixture.id));
   const [loading, setLoading] = useState<boolean>(() => !getCachedRankings(fixture.id));
   const [error, setError] = useState<string | null>(null);
+  const [dataSource, setDataSource] = useState<"cache" | "api">(
+    getCachedRankings(fixture.id) ? "cache" : "api",
+  );
 
   const [familyFilter, setFamilyFilter] = useState("ALL");
   const [showJson, setShowJson] = useState(false);
@@ -217,12 +220,13 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
    * in-memory cache if it is fresh; otherwise issues a single `?ranking=all`
    * request and stores the result.
    */
-  const loadRankings = useCallback((fx: FixtureLite) => {
-    const existing = getCachedRankings(fx.id);
+  const loadRankings = useCallback((fx: FixtureLite, forceRefresh = false) => {
+    const existing = forceRefresh ? null : getCachedRankings(fx.id);
     if (existing) {
       setCached(existing);
       setLoading(false);
       setError(null);
+      setDataSource("cache");
       return;
     }
 
@@ -250,6 +254,7 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
         };
         setCachedRankings(entry);
         setCached(entry);
+        setDataSource("api");
         setLoading(false);
       })
       .catch(() => {
@@ -328,6 +333,14 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
             active={selectedMode === 'C'}
             onSelect={setSelectedMode}
           />
+          <button
+            type="button"
+            onClick={() => loadRankings(fixture, true)}
+            title="Force a fresh ?ranking=all request and update the cache"
+            className={`${IX_BASE} ml-auto inline-flex items-center gap-1 rounded-full border border-slate-600 bg-slate-800 px-3 py-2 text-[11px] font-bold uppercase tracking-wider text-slate-200 hover:bg-slate-700`}
+          >
+            🔄 Refresh All
+          </button>
         </div>
 
         {/* Match Score & Teams Header */}
@@ -533,6 +546,14 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
                 ))}
               </div>
             </Section>
+
+            {/* Ranking debug panel — always visible so modes can be compared without switching */}
+            <RankingDebugPanel
+              selectedMode={selectedMode}
+              result={result}
+              cached={cached}
+              dataSource={dataSource}
+            />
 
             {/* Top 10 */}
             <Section
@@ -807,6 +828,91 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
 }
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
+
+const MODE_LABEL: Record<RankingMode, string> = {
+  A: "A (Classic)",
+  B: "B (12-Factor)",
+  C: "C (Hybrid)",
+};
+
+function pickLabel(m: Market | undefined): string {
+  if (!m) return "—";
+  return m.name;
+}
+
+function fingerprintOf(picks: Market[] | undefined): string {
+  const names = (picks ?? []).slice(0, 3).map((p) => p.name);
+  return names.length ? `[${names.join(", ")}]` : "[empty]";
+}
+
+function RankingDebugPanel({
+  selectedMode,
+  result,
+  cached,
+  dataSource,
+}: {
+  selectedMode: RankingMode;
+  result: EngineResult;
+  cached: CachedRankings | null;
+  dataSource: "cache" | "api";
+}) {
+  const top1 = result.top1[0];
+  const cachedAt = cached
+    ? new Date(cached.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+    : null;
+  const sourceLabel =
+    dataSource === "cache" && cachedAt
+      ? `Source: cache (cached at ${cachedAt})`
+      : "Source: API (fresh)";
+
+  const colClass: Record<RankingMode, string> = {
+    A: "bg-amber-500/20 border-amber-400/40",
+    B: "bg-teal-500/20 border-cyan-400/40",
+    C: "bg-purple-500/20 border-indigo-400/40",
+  };
+
+  const top3 = (mode: RankingMode): string[] =>
+    (cached?.rankings[mode]?.prediction.top10 ?? []).slice(0, 3).map(pickLabel);
+
+  return (
+    <div className="rounded-lg border border-slate-700 bg-slate-900/80 p-3 font-mono text-xs space-y-3">
+      <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
+        <span className="font-bold text-slate-100">
+          Ranking: {MODE_LABEL[selectedMode]}
+        </span>
+        <span className="text-amber-200">
+          Top 1: {top1 ? pickLabel(top1) : "—"}
+        </span>
+        <span className="text-slate-300">
+          Score: {top1?.compositeScore != null ? top1.compositeScore.toFixed(3) : "—"}
+        </span>
+        <span className="text-slate-400">{sourceLabel}</span>
+      </div>
+
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+        {(["A", "B", "C"] as RankingMode[]).map((mode) => (
+          <div key={mode} className={`rounded-md border p-2 ${colClass[mode]}`}>
+            <div className="mb-1 font-bold text-slate-100">{MODE_LABEL[mode]}</div>
+            <ol className="list-decimal list-inside space-y-0.5 text-slate-200">
+              {top3(mode).map((name, i) => (
+                <li key={`${mode}-${i}`} className="truncate" title={name}>{name}</li>
+              ))}
+              {top3(mode).length === 0 ? <li>—</li> : null}
+            </ol>
+          </div>
+        ))}
+      </div>
+
+      <div className="space-y-0.5 text-[10px] text-slate-400">
+        {(["A", "B", "C"] as RankingMode[]).map((mode) => (
+          <div key={`fp-${mode}`}>
+            Fingerprint {mode}: {fingerprintOf(cached?.rankings[mode]?.prediction.top10)}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 /**
  * One pill-shaped ranking-mode button. Three of these are always visible at
