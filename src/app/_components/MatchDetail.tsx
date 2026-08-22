@@ -131,16 +131,16 @@ interface MatchResponse {
   prediction: EngineResult;
   boxscore?: Record<string, number> | null;
   valueBets?: ValueBetData[];
-  rankingMode?: 'A' | 'B';
+  rankingMode?: 'A' | 'B' | 'C';
 }
 
 export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClose: () => void }) {
-  // Ranking mode toggle (A = Classic 11-factor, B = 12-factor)
-  type RankingMode = 'A' | 'B';
+  // Ranking mode toggle (A = Classic 11-factor, B = 12-factor, C = Hybrid)
+  type RankingMode = 'A' | 'B' | 'C';
   const [rankingMode, setRankingMode] = useState<RankingMode>(() => {
     if (typeof window !== 'undefined') {
       const stored = localStorage.getItem('rankingMode');
-      if (stored === 'A' || stored === 'B') return stored as RankingMode;
+      if (stored === 'A' || stored === 'B' || stored === 'C') return stored as RankingMode;
     }
     return 'B';
   });
@@ -182,7 +182,8 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
   }, [fixture, rankingMode, fetchWithRanking]);
 
   const toggleRanking = () => {
-    const next: RankingMode = rankingMode === 'A' ? 'B' : 'A';
+    // Cycle A → B → C → A
+    const next: RankingMode = rankingMode === 'A' ? 'B' : rankingMode === 'B' ? 'C' : 'A';
     setRankingMode(next);
     // fetch will be triggered by useEffect, but also update immediately for visual feedback
   };
@@ -217,10 +218,16 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
             <h2 className="font-mono text-sm font-bold text-amber-300">ĞIGI GIVØ · DEEP STATISTICAL ORACLE</h2>
             <button
               onClick={toggleRanking}
-              title="Switch between Classic calibration-heavy and 12-Factor balanced ranking"
-              className={`ml-2 inline-flex items-center justify-center rounded-full px-4 py-1.5 text-xs font-bold tracking-wider text-white shadow-md transition-all duration-200 hover:scale-105 hover:shadow-lg ${rankingMode === 'A' ? 'bg-amber-500 hover:bg-amber-400 shadow-amber-500/20' : 'bg-teal-600 hover:bg-teal-500 shadow-teal-600/20'}`}
+              title="Switch between Classic calibration-heavy, 12-Factor balanced, and Hybrid combined ranking"
+              className={`ml-2 inline-flex items-center justify-center rounded-full px-4 py-1.5 text-xs font-bold tracking-wider text-white shadow-md transition-all duration-200 hover:scale-105 hover:shadow-lg ${
+                rankingMode === 'A'
+                  ? 'bg-amber-500 hover:bg-amber-400 shadow-amber-500/20'
+                  : rankingMode === 'B'
+                    ? 'bg-teal-600 hover:bg-teal-500 shadow-teal-600/20'
+                    : 'bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 shadow-purple-600/30'
+              }`}
             >
-              {isSwitching ? '...' : rankingMode === 'A' ? 'Classic A' : '12-Factor B'}
+              {isSwitching ? '...' : rankingMode === 'A' ? 'Classic A' : rankingMode === 'B' ? '12-Factor B' : 'Hybrid C'}
             </button>
           </div>
           <button
