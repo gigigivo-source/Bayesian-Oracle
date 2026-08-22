@@ -30,6 +30,16 @@ import {
   OUTLINE_AMBER,
   OUTLINE_NEUTRAL,
   OUTLINE_ROSE,
+  NAV_PILL_PREMIUM,
+  NAV_PILL_PREMIUM_OFF,
+  NAV_PILL_PREMIUM_ON,
+  GLASS_PANEL,
+  GLASS_PILL_CONTAINER,
+  GLASS_DROPDOWN,
+  GOLD_GLOW_LINE,
+  CHIP_PREMIUM,
+  CHIP_PREMIUM_ON_AMBER,
+  CHIP_PREMIUM_ON_EMERALD,
 } from "./_components/design";
 
 type Tab = "top" | "live" | "accumulators" | "performance" | "leagues" | "standings" | "oracle" | "chat" | "bankroll" | "slipbuilder" | "dailypicks" | "oddscalc" | "verified" | "results" | "backtest" | "valuebets";
@@ -146,37 +156,41 @@ export default function Home() {
 
   return (
     <div className={`min-h-screen text-slate-100 ${tab !== "top" ? "bg-[#0F1117]" : ""}`}>
+      {/* Premium ambient top glow — behind header and slideshow */}
+      <div className="fixed top-0 left-0 right-0 h-[420px] z-[-1] pointer-events-none bg-gradient-to-b from-amber-400/10 via-amber-400/5 to-transparent top-ambient-glow" aria-hidden="true" />
       {tab === "top" && <BackgroundSlideshow />}
       <div className="relative z-10">
         <Header tab={tab} setTab={setTab} />
 
         {/* LEAGUE CHIPS — only on Top Matches tab */}
         {tab === "top" && (
-          <div className="sticky top-[56px] z-30 bg-[#0F1117] py-2 px-4 overflow-x-auto scrollbar-none">
-            <div className="mx-auto flex max-w-7xl items-center gap-3">
+          <div className="sticky top-[76px] z-30 bg-gradient-to-b from-[#05070d]/90 via-[#0a0c12]/95 to-[#05070d]/90 backdrop-blur-xl border-b border-white/[0.05] py-3 px-4 overflow-x-auto scrollbar-none shadow-[0_4px_30px_-10px_rgba(0,0,0,0.8)]">
+            <div className="mx-auto flex max-w-7xl items-center gap-2">
+              {/* All filter */}
               <button
                 onClick={() => { setSelectedLeagueSlug(null); setShowTodayOnly(false); }}
-                className={`${CHIP} px-4 py-2 text-sm font-medium tracking-wide ${
-                  selectedLeagueSlug === null && !showTodayOnly ? CHIP_ON_AMBER : CHIP_OFF
+                className={`${CHIP_PREMIUM} px-3.5 py-2 text-sm font-medium tracking-wide ${
+                  selectedLeagueSlug === null && !showTodayOnly ? CHIP_PREMIUM_ON_AMBER : "bg-white/[0.05] text-slate-300 hover:bg-white/[0.1] hover:text-white border-white/[0.08]"
                 }`}
               >
                 All
               </button>
-              {/* TODAY chip */}
+              {/* Today filter */}
               <button
                 onClick={() => { setShowTodayOnly(true); setSelectedLeagueSlug(null); }}
-                className={`${CHIP} px-4 py-2 text-sm font-medium tracking-wide ${
-                  showTodayOnly ? CHIP_ON_EMERALD : "bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-white"
+                className={`${CHIP_PREMIUM} px-3.5 py-2 text-sm font-medium tracking-wide ${
+                  showTodayOnly ? CHIP_PREMIUM_ON_EMERALD : "bg-white/[0.05] text-slate-300 hover:bg-white/[0.1] hover:text-white border-white/[0.08]"
                 }`}
               >
-                <span className="relative flex h-2 w-2">
+                <span className="relative flex h-2 w-2 mr-1.5">
                   <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
                   <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500" />
                 </span>
                 Today
               </button>
-              {/* separator */}
-              <span className="h-4 w-px bg-slate-800 mx-1 shrink-0" />
+              {/* Elegant separator */}
+              <div className="h-5 w-px bg-gradient-to-b from-transparent via-white/10 to-transparent mx-0.5 shrink-0" />
+              {/* League pills */}
               {TOP_LEAGUE_PILLS.map((lg) => (
                 <button
                   key={lg.slug}
@@ -185,12 +199,12 @@ export default function Home() {
                     const el = document.getElementById(`league-sec-${lg.slug}`);
                     if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
                   }}
-                  className={`${CHIP} px-4 py-2 text-sm font-medium tracking-wide ${
-                    selectedLeagueSlug === lg.slug ? CHIP_ON_AMBER : CHIP_OFF
+                  className={`${CHIP_PREMIUM} px-3 py-1.5 text-sm font-medium tracking-wide ${
+                    selectedLeagueSlug === lg.slug ? CHIP_PREMIUM_ON_AMBER : "bg-white/[0.05] text-slate-300 hover:bg-white/[0.1] hover:text-white border-white/[0.08]"
                   }`}
                 >
-                  <Image src={lg.logo} alt={lg.name} width={16} height={16} className="object-contain" unoptimized />
-                  <span>{lg.name}</span>
+                  <Image src={lg.logo} alt={lg.name} width={16} height={16} className="object-contain opacity-90" unoptimized />
+                  <span className="ml-1.5">{lg.name}</span>
                 </button>
               ))}
             </div>
@@ -340,27 +354,50 @@ function Header({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
 
   return (
     <>
-      <header className="sticky top-0 z-40 bg-slate-900 shadow-lg ">
-        <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3 px-4 py-2 pr-16 sm:pr-28">
-          <div className="flex items-center gap-3">
-            <div className="h-[38px] w-[38px] rounded-lg bg-[#F59E0B] border border-[#FF8C00] flex items-center justify-center">
-              <span className="text-xl">⚽</span>
+      <header className="sticky top-0 z-40 backdrop-blur-2xl bg-[#0a0c12]/70 border-b border-white/[0.06] shadow-[0_12px_40px_-12px_rgba(245,158,11,0.12)]">
+        {/* Premium top glow line */}
+        <div className={GOLD_GLOW_LINE} />
+
+        <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3 px-4 py-3 sm:py-3.5">
+          {/* Brand mark */}
+          <a href="#" onClick={(e) => { e.preventDefault(); setTab("top"); }} className="flex items-center gap-3 group focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/60 rounded-xl">
+            <div className="relative h-[42px] w-[42px] shrink-0">
+              <svg width="42" height="42" viewBox="0 0 42 42" fill="none" aria-label="Bayesian Oracle logo" className="drop-shadow-[0_0_12px_rgba(245,158,11,0.35)] group-hover:drop-shadow-[0_0_18px_rgba(245,158,11,0.55)] transition-all duration-300">
+                <defs>
+                  <linearGradient id="logoGrad" x1="0" y1="0" x2="42" y2="42">
+                    <stop stopColor="#F59E0B" />
+                    <stop offset="1" stopColor="#FF8C00" />
+                  </linearGradient>
+                </defs>
+                <rect width="42" height="42" rx="11" fill="url(#logoGrad)" />
+                <path d="M11 21 L21 9 L31 21 L21 33 Z" fill="#0a0c12" />
+                <circle cx="21" cy="21" r="3.5" fill="#F59E0B" />
+              </svg>
+              {/* Subtle ring */}
+              <div className="absolute inset-0 rounded-[11px] ring-1 ring-inset ring-amber-300/20 group-hover:ring-amber-300/50 transition-all" />
             </div>
-            <div>
-              <h1 className="bg-gradient-to-r from-[#F59E0B] to-[#FF8C00] bg-clip-text font-mono text-lg font-extrabold tracking-tight text-transparent">
+            <div className="leading-none">
+              <h1 className="bg-gradient-to-r from-[#F59E0B] via-[#FFB84D] to-[#FF8C00] bg-clip-text font-mono text-[1.15rem] font-extrabold tracking-tight text-transparent leading-snug">
                 ĞIGI GIVØ
               </h1>
-              <p className="text-[10px] text-slate-400 font-mono">Bayesian Oracle · Deep Statistical Engine</p>
+              <div className="flex items-center gap-2 mt-1">
+                <span className="relative flex h-1.5 w-1.5">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-60" />
+                  <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-amber-400" />
+                </span>
+                <p className="text-[10px] text-slate-400 font-mono tracking-wide">Bayesian Oracle · Deep Statistical Engine</p>
+              </div>
             </div>
-          </div>
-          <nav className="flex gap-2 rounded-full border border-slate-700 bg-slate-800 p-1.5 items-center max-w-full flex-nowrap overflow-x-auto scrollbar-none shadow-inner shadow-slate-950/40">
+          </a>
+
+          {/* Main nav — premium glass pill container */}
+          <nav className={GLASS_PILL_CONTAINER + " max-w-full flex-nowrap overflow-x-auto scrollbar-none"} aria-label="Main navigation">
             {mainTabs.map((t) => (
               <button
                 key={t.id}
                 onClick={() => { setTab(t.id); setMenuOpen(false); }}
-                className={`${NAV_PILL} px-4 py-2 text-sm font-medium tracking-wide ${
-                  tab === t.id ? NAV_PILL_ON_AMBER : NAV_PILL_OFF
-                }`}
+                className={`${NAV_PILL_PREMIUM} ${tab === t.id ? NAV_PILL_PREMIUM_ON : NAV_PILL_PREMIUM_OFF} px-3 py-2 text-[13px] sm:text-sm`}
+                aria-current={tab === t.id ? "page" : undefined}
               >
                 {t.label}
               </button>
@@ -369,33 +406,38 @@ function Header({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
         </div>
       </header>
 
-      {/* Menu button — fixed to the top-right corner of the viewport */}
-      <div className="fixed top-4 right-4 z-50">
+      {/* Menu button — refined glass pill */}
+      <div className="fixed top-3.5 right-3.5 z-50">
         <button
           onClick={() => setMenuOpen((o) => !o)}
           aria-expanded={menuOpen}
           aria-haspopup="menu"
           aria-label="Menu"
-          className={`${NAV_PILL} px-4 py-2.5 text-sm font-semibold ${
-            activeInMenu ? NAV_PILL_ON_AMBER : NAV_PILL_OFF
+          className={`${NAV_PILL_PREMIUM} px-3.5 py-2.5 text-sm font-semibold ${
+            activeInMenu ? "bg-gradient-to-br from-[#F59E0B] to-[#FF8C00] text-white shadow-[0_0_20px_-5px_rgba(245,158,11,0.5)] scale-105" : "bg-white/[0.06] text-slate-300 border border-transparent hover:bg-white/[0.1] hover:text-white hover:border-white/[0.08]"
           }`}
         >
-          <span aria-hidden="true" className="text-base leading-none">
+          <span aria-hidden="true" className={`${menuOpen ? "text-lg leading-none" : "text-base leading-none"}`}>
             {menuOpen ? "✕" : "☰"}
           </span>
-          <span className="hidden sm:inline">Menu</span>
+          <span className="hidden sm:inline ml-1.5">Menu</span>
         </button>
 
         {menuOpen && (
-          <div className="absolute right-0 top-full mt-2 w-56 max-h-[calc(100vh-5rem)] overflow-y-auto rounded-xl bg-[#0F1117] border border-slate-700 shadow-2xl shadow-slate-950/60 p-1.5 space-y-0.5 ">
+          <div className={`absolute right-0 top-full mt-3 w-64 max-h-[calc(100vh-6rem)] overflow-y-auto rounded-2xl ${GLASS_DROPDOWN} p-2 space-y-0.5`} role="menu">
+            <div className="px-3 py-2 mb-1 text-[10px] font-mono text-slate-500 uppercase tracking-widest">Tools & Analytics</div>
             {menuTabs.map((t) => (
               <button
                 key={t.id}
+                role="menuitem"
                 onClick={() => { setTab(t.id); setMenuOpen(false); }}
-                className={`${MENU_ITEM} w-full px-4 py-3 text-left ${tab === t.id ? MENU_ITEM_ON : ""}`}
+                className={`${MENU_ITEM} w-full px-4 py-3 text-left rounded-xl ${tab === t.id ? MENU_ITEM_ON : ""}`}
               >
-                <div className="text-sm font-medium">{t.label}</div>
-                <div className={`text-[10px] ${tab === t.id ? "text-slate-300" : "text-slate-400"}`}>{t.desc}</div>
+                <div className="flex items-center justify-between">
+                  <div className="text-sm font-medium leading-tight">{t.label}</div>
+                  {tab === t.id && <span className="h-1.5 w-1.5 rounded-full bg-amber-400 shadow-[0_0_6px_rgba(245,158,11,0.6)]" />}
+                </div>
+                <div className={`text-[11px] mt-0.5 leading-snug ${tab === t.id ? "text-slate-300" : "text-slate-500"}`}>{t.desc}</div>
               </button>
             ))}
           </div>

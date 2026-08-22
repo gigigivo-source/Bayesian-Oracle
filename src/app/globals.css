@@ -18,5 +18,14 @@
   }
 }
 
+/* Premium top ambient glow — behind header / slideshow */
+@keyframes ambient-pulse {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 0.6; }
+}
+.top-ambient-glow {
+  animation: ambient-pulse 8s ease-in-out infinite;
+}
+
 /* Smooth page transitions */
 main { transition: opacity 0.15s ease; }
