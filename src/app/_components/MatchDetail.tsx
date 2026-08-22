@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useCallback } from "react";
 import type { EngineResult, Market, DeepStatsVector } from "@/lib/engine/types";
 import type { FixtureLite, MatchSummary, TeamForm } from "@/lib/espn";
 import { ConfidenceBar, GradeBadge, MarketTable, Section, TeamBadge } from "./ui";
@@ -81,7 +81,7 @@ function RankingFactorsToggle({ market }: { market: Market }) {
       {open && (
         <div className="mt-3 rounded-lg border border-slate-700 bg-[#0F1117] p-3">
           <div className="mb-2 flex items-center justify-between font-mono text-[11px] uppercase tracking-wider text-slate-400">
-            <span>12-Factor Ranking Breakdown</span>
+            <span>{Object.keys(factors).length === 11 ? '11-Factor Classic Breakdown' : '12-Factor Ranking Breakdown'}</span>
             {composite !== undefined && (
               <span className="text-amber-300 font-bold">
                 Composite: {(composite * 100).toFixed(0)}%
@@ -131,34 +131,64 @@ interface MatchResponse {
   prediction: EngineResult;
   boxscore?: Record<string, number> | null;
   valueBets?: ValueBetData[];
+  rankingMode?: 'A' | 'B';
 }
 
 export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClose: () => void }) {
+  // Ranking mode toggle (A = Classic 11-factor, B = 12-factor)
+  type RankingMode = 'A' | 'B';
+  const [rankingMode, setRankingMode] = useState<RankingMode>(() => {
+    if (typeof window !== 'undefined') {
+      const stored = localStorage.getItem('rankingMode');
+      if (stored === 'A' || stored === 'B') return stored as RankingMode;
+    }
+    return 'B';
+  });
+  const [isSwitching, setIsSwitching] = useState(false);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('rankingMode', rankingMode);
+    }
+  }, [rankingMode]);
+
   // Response is keyed by the fixture it was fetched for, so loading/error states
   // are derived and never need to be reset synchronously inside the effect.
-  const [response, setResponse] = useState<{ fixture: FixtureLite; data: MatchResponse | null; error: string | null } | null>(null);
+  const [response, setResponse] = useState<{ fixture: FixtureLite; data: MatchResponse | null; error: string | null; rankingMode: RankingMode } | null>(null);
   const [familyFilter, setFamilyFilter] = useState("ALL");
   const [showJson, setShowJson] = useState(false);
 
-  useEffect(() => {
-    let active = true;
-    fetch("/api/match", {
+  const fetchWithRanking = useCallback((mode: RankingMode) => {
+    setIsSwitching(true);
+    // Clear previous response for this fixture to show loading state immediately
+    setResponse(null);
+    fetch(`/api/match?ranking=${mode}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ fixture }),
     })
       .then((r) => r.json())
-      .then((d: MatchResponse & { error?: string }) => {
-        if (!active) return;
-        if (d.error) setResponse({ fixture, data: null, error: d.error });
-        else setResponse({ fixture, data: d, error: null });
+      .then((d: MatchResponse & { error?: string; rankingMode?: RankingMode }) => {
+        if (d.error) setResponse({ fixture, data: null, error: d.error, rankingMode: mode });
+        else setResponse({ fixture, data: d, error: null, rankingMode: mode });
       })
-      .catch(() => { if (active) setResponse({ fixture, data: null, error: "Failed to reach oracle." }); });
-    return () => { active = false; };
+      .catch(() => { setResponse({ fixture, data: null, error: "Failed to reach oracle.", rankingMode: mode }); })
+      .finally(() => setIsSwitching(false));
   }, [fixture]);
 
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    fetchWithRanking(rankingMode);
+  }, [fixture, rankingMode, fetchWithRanking]);
+
+  const toggleRanking = () => {
+    const next: RankingMode = rankingMode === 'A' ? 'B' : 'A';
+    setRankingMode(next);
+    // fetch will be triggered by useEffect, but also update immediately for visual feedback
+  };
+
   const current = response && response.fixture === fixture ? response : null;
-  const loading = !current;
+  const loading = !current || isSwitching;
   const data = current?.data ?? null;
   const error = current?.error ?? null;
 
@@ -182,9 +212,16 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
       <div className="mx-auto my-6 max-w-6xl px-4">
         {/* Modal Top Bar */}
         <div className="mb-4 flex items-center justify-between">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-3">
             <span className="inline-block h-2.5 w-2.5 rounded-full bg-emerald-400 animate-pulse" />
             <h2 className="font-mono text-sm font-bold text-amber-300">ĞIGI GIVØ · DEEP STATISTICAL ORACLE</h2>
+            <button
+              onClick={toggleRanking}
+              title="Switch between Classic calibration-heavy and 12-Factor balanced ranking"
+              className={`ml-2 inline-flex items-center justify-center rounded-full px-4 py-1.5 text-xs font-bold tracking-wider text-white shadow-md transition-all duration-200 hover:scale-105 hover:shadow-lg ${rankingMode === 'A' ? 'bg-amber-500 hover:bg-amber-400 shadow-amber-500/20' : 'bg-teal-600 hover:bg-teal-500 shadow-teal-600/20'}`}
+            >
+              {isSwitching ? '...' : rankingMode === 'A' ? 'Classic A' : '12-Factor B'}
+            </button>
           </div>
           <button
             onClick={onClose}

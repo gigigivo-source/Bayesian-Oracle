@@ -23,6 +23,7 @@ import {
   type ConfidencePolicy,
   type MatchConfidence,
 } from "./selector";
+import type { RankingMode } from "./selector";
 import { getStandings } from "../footballData";
 import { statsAggregator } from "../data/aggregator";
 import type { CanonicalMatchStats } from "../data/types";
@@ -1612,11 +1613,16 @@ function buildSourceQuality(enrichment?: EnrichmentOutcome | null): SourceQualit
 }
 
 // ─── Main oracle ─────────────────────────────────────────────────────────────────
+export interface OracleRunOptions {
+  rankingMode?: RankingMode;
+}
+
 export function runOracle(
   fixture: FixtureLite,
   tables?: TableContext,
   enrichment?: EnrichmentOutcome | null,
   stats?: CanonicalMatchStats | null,
+  runOpts?: OracleRunOptions,
 ): OracleResult {
   _mktIdx = 0;
   const prior = getPrior(fixture.leagueSlug);
@@ -2031,6 +2037,7 @@ export function runOracle(
     goalKicks: expGoalKicks, throwIns: expThrowIns,
   });
   const selection = selectTopPicks(qualified, lam, hn, an, undefined, {
+
     homeTable: tables?.home ??
       (enrichment?.data.leagueTablePositionHome != null
         ? { position: enrichment.data.leagueTablePositionHome } : undefined),
@@ -2055,6 +2062,7 @@ export function runOracle(
     // the policy decides what happens to a low-confidence match.
     sourceQuality: buildSourceQuality(enrichment),
     confidence:    confidenceOptionsFromEnv(),
+    rankingMode: runOpts?.rankingMode ?? (process.env.RANKING_MODE as RankingMode) ?? 'B',
   });
   const confidence = selection.confidence;
   const top1  = selection.top1;
@@ -2323,6 +2331,7 @@ export interface OracleStatsOptions {
    * schochastics/football-data) FIRST, since live APIs rarely serve old matches.
    */
   statsPriority?: string[];
+  rankingMode?: RankingMode;
 }
 
 export async function runOracleWithStandings(
@@ -2371,6 +2380,6 @@ export async function runOracleWithStandings(
     .catch(() => null);
 
   // ── Step 4: rank all markets and fill the Top 10 with real data only ─────
-  return runOracle(fixture, tables, enrichment, stats);
+  return runOracle(fixture, tables, enrichment, stats, { rankingMode: opts?.rankingMode });
 }
 

@@ -117,6 +117,58 @@ import {
   type StatKey,
 } from "../data/types";
 
+
+// ─── Ranking mode (A = Classic 11-factor, B = 12-factor) ─────────────────────
+export type RankingMode = 'A' | 'B';
+
+export function resolveRankingMode(opts?: SelectOptions): RankingMode {
+  const fromOpts = opts?.rankingMode ? String(opts.rankingMode).toUpperCase() : null;
+  if (fromOpts === 'A' || fromOpts === 'B') return fromOpts as RankingMode;
+  const envRaw = (typeof process !== 'undefined' && process.env && process.env.RANKING_MODE) ? String(process.env.RANKING_MODE).toUpperCase() : '';
+  if (envRaw === 'A' || envRaw === 'B') return envRaw as RankingMode;
+  return 'B';
+}
+
+export function rankingModeLogLine(mode: RankingMode): string {
+  return mode === 'A' ? 'Selector Ranking mode: A Classic' : 'Selector Ranking mode: B 12-Factor';
+}
+
+// ─── Classic 11-factor weights (Rank A) ─────────────────────────────────────
+export const RANKING_WEIGHTS_CLASSIC = {
+  calibration:      0.30, // Calibration / hit rate
+  poisson:          0.20, // Poisson lambda
+  form:             0.10, // Player / team form
+  injury:           0.10, // Injury impact
+  volatility:       0.10, // Market volatility
+  tactical:         0.05, // Tactical matchup
+  importance:       0.05, // Match importance
+  leagueDepth:      0.05, // League depth
+  marketConfidence: 0.05, // Market confidence / liquidity
+  zeroBias:         0.05, // Zero bias
+  weather:          0.05, // Weather / pitch
+} as const;
+
+export type ClassicFactorKey = keyof typeof RANKING_WEIGHTS_CLASSIC;
+
+export const FACTOR_LABELS_CLASSIC: Record<ClassicFactorKey, string> = {
+  calibration:      "Calibration",
+  poisson:          "Poisson lambda",
+  form:             "Player / team form",
+  injury:           "Injury impact",
+  volatility:       "Market volatility",
+  tactical:         "Tactical matchup",
+  importance:       "Match importance",
+  leagueDepth:      "League depth",
+  marketConfidence: "Market confidence",
+  zeroBias:         "Zero bias",
+  weather:          "Weather / pitch",
+};
+
+const ALL_CLASSIC_KEYS: ClassicFactorKey[] = Object.keys(RANKING_WEIGHTS_CLASSIC) as ClassicFactorKey[];
+
+const TOTAL_CLASSIC_WEIGHT = ALL_CLASSIC_KEYS.reduce((s, k) => s + RANKING_WEIGHTS_CLASSIC[k], 0);
+
+
 // ─── Factor weights (balanced 12-factor profile, Σ = 100%) ──────────────────
 
 export const RANKING_WEIGHTS = {
@@ -845,6 +897,9 @@ export interface SelectOptions {
   sourceQuality?: SourceQualityContext;
   /** Confidence-gate configuration (threshold / policy). */
   confidence?:    ConfidenceOptions;
+  /** Ranking mode: A = Classic 11-factor, B = 12-factor (default B). */
+  rankingMode?:  RankingMode;
+
 }
 
 // ─── Factor scorers (each returns a 0..1 score + optional gap log) ────────────
@@ -1484,6 +1539,643 @@ function scorePlayerVsPlayerForms(
   return { score: clamp(score, 0, 1), gap: gaps.length ? gaps.join("; ") : undefined };
 }
 
+
+// ─── Classic 11-factor scorers (Rank A) ───────────────────────────────────────
+// Each scorer returns {score, available, gap}. Unavailable factors are excluded
+// and weight redistributed. No neutral 0.5 stand-ins.
+
+function scoreCalibrationClassic(
+  m: Market,
+  effLam: LambdaSet,
+  _homeName: string,
+  _awayName: string,
+  stats: CanonicalMatchStats | null | undefined,
+): FactorResult {
+  const totalGoals = effLam.homeGoals + effLam.awayGoals;
+  const evenness = 1 - Math.min(1, Math.abs(effLam.homeGoals - effLam.awayGoals) / Math.max(0.5, totalGoals));
+  const ctx: MatchVolatility = { totalGoals, evenness };
+  let raw = marketReliability(m, ctx);
+  // Under-4.5 penalty: Goals market, Under, line >=4.5, raw >0.93
+  if (isUnderSelection(m)) {
+    const line = lineOf(m);
+    const isGoals = /Goals/.test(m.name) || /goals/i.test(m.family);
+    if (line !== null && line >= 4.5 && isGoals && raw > 0.93) {
+      raw = raw - (raw - 0.93) * 0.4;
+    }
+  }
+  return { score: clamp(raw, 0, 1) };
+}
+
+function scorePoissonClassic(
+  m: Market,
+  effLam: LambdaSet,
+  homeName: string,
+  awayName: string,
+): FactorResult {
+  const lambda = lambdaFor(m, effLam, homeName, awayName);
+  if (lambda === null) {
+    return {
+      score: 0.5,
+      available: false,
+      gap: "no direct λ→selection mapping — Poisson factor excluded, weight redistributed",
+    };
+  }
+  const winProb = 1 - tailRisk(m, lambda);
+  return { score: clamp(winProb, 0, 1) };
+}
+
+function scoreVolatilityClassic(
+  m: Market,
+  context: RankingContext | null,
+): FactorResult {
+  const vol = context?.marketVolatility ?? null;
+  if (!vol || vol.dataAvailable === false) {
+    return {
+      score: 0.5,
+      available: false,
+      gap: "market volatility data missing — volatility factor excluded, weight redistributed",
+    };
+  }
+  let movePct: number | null | undefined = null;
+  const map = vol.marketMovePctLast6h ?? {};
+  // Try direct id, then name, then lowercased variants
+  if (map[m.id] != null) movePct = map[m.id];
+  else if (map[m.name] != null) movePct = map[m.name];
+  else {
+    // case-insensitive search
+    const lowerId = m.id.toLowerCase();
+    const lowerName = m.name.toLowerCase();
+    for (const [k, v] of Object.entries(map)) {
+      if (k.toLowerCase() === lowerId || k.toLowerCase() === lowerName) {
+        movePct = v as number;
+        break;
+      }
+    }
+  }
+  if (movePct == null) movePct = vol.maxMovePctLast6h ?? null;
+  if (movePct == null || !Number.isFinite(movePct)) {
+    return {
+      score: 0.5,
+      available: false,
+      gap: "six-hour odds move missing — volatility factor excluded, weight redistributed",
+    };
+  }
+  const mv = Math.abs(movePct);
+  let score: number;
+  if (mv <= 5) score = 1.0;
+  else if (mv >= 20) score = 0.0;
+  else score = 1 - (mv - 5) / 15;
+  return { score: clamp(score, 0, 1) };
+}
+
+function scoreLeagueDepthClassic(
+  context: RankingContext | null,
+): FactorResult {
+  const slug = context?.leagueSlug ?? null;
+  if (!slug) {
+    return {
+      score: 0.5,
+      available: false,
+      gap: "league slug missing — league depth factor excluded, weight redistributed",
+    };
+  }
+  if (LEAGUE_ANCHORS[slug]) {
+    return { score: 1.0 };
+  }
+  // Proxy or default anchors → 0.65 per spec (getAnchors always returns fallback)
+  // If no dedicated entry, treat as proxy/default
+  return { score: 0.65 };
+}
+
+function scoreMarketConfidenceClassic(
+  m: Market,
+  confidenceMap: Record<string, number> | undefined,
+  context: RankingContext | null,
+): FactorResult {
+  if (confidenceMap && confidenceMap[m.id] !== undefined) {
+    const v = confidenceMap[m.id];
+    if (Number.isFinite(v)) {
+      return { score: clamp(v, 0, 1) };
+    }
+  }
+  const odds = context?.odds ?? null;
+  if (!odds) {
+    return {
+      score: 0.5,
+      available: false,
+      gap: "bookmaker odds missing — market confidence factor excluded, weight redistributed",
+    };
+  }
+  // Determine if odds matched the market type
+  let matched = false;
+  const name = m.name;
+  if (isResultMarket(m)) {
+    if (odds.homeML != null || odds.drawML != null || odds.awayML != null) matched = true;
+  }
+  if (/Goals O\/U/i.test(name) || /Total Goals/i.test(name)) {
+    if ((odds as any).overUnder != null) matched = true;
+  }
+  // If odds exist at all, we have at least a mismatch signal
+  const score = matched ? 0.8 : 0.55;
+  return { score };
+}
+
+function scoreWeatherClassic(
+  context: RankingContext | null,
+): FactorResult {
+  const w = context?.weather ?? null;
+  if (!w || w.dataAvailable === false) {
+    return {
+      score: 0.5,
+      available: false,
+      gap: "weather/pitch data missing — weather factor excluded, weight redistributed",
+    };
+  }
+  if (typeof w.score === 'number' && Number.isFinite(w.score)) {
+    return { score: clamp(w.score, 0, 1) };
+  }
+  const rawText = `${w.condition ?? ''} ${w.pitch ?? ''}`.toLowerCase();
+  if (!rawText.trim()) {
+    return {
+      score: 0.5,
+      available: false,
+      gap: "weather/pitch data missing — weather factor excluded, weight redistributed",
+    };
+  }
+  if (rawText.includes('heavy rain') || rawText.includes('storm') || rawText.includes('snow') || rawText.includes('waterlogged')) {
+    return { score: 0.2 };
+  }
+  if (rawText.includes('perfect')) {
+    return { score: 1.0 };
+  }
+  if (rawText.includes('clear') || rawText.includes('dry')) {
+    return { score: 0.8 };
+  }
+  if (rawText.includes('rain') || rawText.includes('wind')) {
+    return { score: 0.5 };
+  }
+  return {
+    score: 0.5,
+    available: false,
+    gap: `weather condition "${rawText.trim()}" unrecognized — weather factor excluded, weight redistributed`,
+  };
+}
+
+// ─── Classic market score ────────────────────────────────────────────────────
+export type ClassicFactorBreakdown = Record<ClassicFactorKey, number>;
+
+export interface ClassicMarketScore {
+  market:      Market;
+  composite:   number;
+  wrongProb:   number;
+  marginUnits: number;
+  verifiable:  boolean;
+  breakdown:   ClassicFactorBreakdown;
+  gaps:        string[];
+  notes:       string;
+  effectiveHitRate: number;
+  excludedFactors: ClassicFactorKey[];
+  appliedWeights: Partial<Record<ClassicFactorKey, number>>;
+  statConfidence: number;
+  statField:      StatKey | null;
+  statFallback:   boolean;
+  weightMultiplier: Partial<Record<ClassicFactorKey, number>>;
+}
+
+export function scoreMarketClassic(
+  m:             Market,
+  lam:           LambdaSet,
+  homeName:      string,
+  awayName:      string,
+  confidenceMap?: Record<string, number>,
+  opts?:         SelectOptions,
+): ClassicMarketScore {
+  const context = opts?.context ?? null;
+  const stats   = opts?.stats ?? null;
+
+  const effLam = effectiveLambdas(lam, stats);
+  const statConfidence = statConfidenceFor(m, stats);
+  const statField = statFieldFor(m);
+  const statFallback = statFellBack(m, stats);
+
+  const totalGoals = effLam.homeGoals + effLam.awayGoals;
+  const evenness = 1 - Math.min(1, Math.abs(effLam.homeGoals - effLam.awayGoals) / Math.max(0.5, totalGoals));
+
+  // 11-factor scorecard
+  const calibration      = scoreCalibrationClassic(m, effLam, homeName, awayName, stats);
+  const poisson          = scorePoissonClassic(m, effLam, homeName, awayName);
+  const form             = scoreForm(m, homeName, awayName, context);
+  const injury           = scoreInjuryComponent(m, homeName, awayName, context);
+  const volatility       = scoreVolatilityClassic(m, context);
+  const tactical         = scoreTactical(m, effLam, homeName, awayName, context);
+  const importance       = scoreImportance(context, opts);
+  const leagueDepth      = scoreLeagueDepthClassic(context);
+  const marketConfidence = scoreMarketConfidenceClassic(m, confidenceMap, context);
+  const zeroBias         = scoreBias(m, effLam, homeName, awayName, context);
+  const weather          = scoreWeatherClassic(context);
+
+  const factorResults: Record<ClassicFactorKey, FactorResult> = {
+    calibration,
+    poisson,
+    form,
+    injury,
+    volatility,
+    tactical,
+    importance,
+    leagueDepth,
+    marketConfidence,
+    zeroBias,
+    weather,
+  };
+
+  const breakdown: ClassicFactorBreakdown = ALL_CLASSIC_KEYS.reduce((acc, k) => {
+    acc[k] = factorResults[k].score;
+    return acc;
+  }, {} as ClassicFactorBreakdown);
+
+  // Weight multiplier for Poisson (stat-confidence)
+  const weightMultiplier: Partial<Record<ClassicFactorKey, number>> = {};
+  for (const k of ALL_CLASSIC_KEYS) weightMultiplier[k] = 1;
+  weightMultiplier['poisson'] = statConfidence; // 1.0 if real, 0.5 if fallback
+
+  const excludedFactors = ALL_CLASSIC_KEYS.filter((k) => factorResults[k].available === false);
+  const activeKeys = ALL_CLASSIC_KEYS.filter((k) => factorResults[k].available !== false);
+
+  const activeWeightTotal = activeKeys.reduce((sum, k) => sum + RANKING_WEIGHTS_CLASSIC[k] * (weightMultiplier[k] ?? 1), 0) || RANKING_WEIGHTS_CLASSIC.calibration || 1;
+
+  const weightedTotal = activeKeys.reduce(
+    (sum, k) => sum + RANKING_WEIGHTS_CLASSIC[k] * (weightMultiplier[k] ?? 1) * breakdown[k],
+    0,
+  );
+  const composite = weightedTotal / activeWeightTotal;
+
+  const appliedWeights: Partial<Record<ClassicFactorKey, number>> = {};
+  for (const k of activeKeys) {
+    appliedWeights[k] = (RANKING_WEIGHTS_CLASSIC[k] * (weightMultiplier[k] ?? 1)) / activeWeightTotal;
+  }
+
+  // Effective hit rate for tiering & loss-prob tiebreak = calibration score
+  const effectiveHitRate = calibration.score;
+  const wrongProb = clamp(1 - effectiveHitRate, 0, 1);
+
+  const lamVal = lambdaFor(m, effLam, homeName, awayName);
+  const line = lineOf(m);
+  const marginUnits = lamVal !== null && line !== null ? sigmaCushion(lamVal, line) : 0;
+
+  const gaps = ALL_CLASSIC_KEYS.map((k) => factorResults[k].gap).filter((g): g is string => !!g);
+
+  const notes =
+    ALL_CLASSIC_KEYS.map((k) => `${FACTOR_LABELS_CLASSIC[k].split(' ').map((w) => w[0]).join('')}=${breakdown[k].toFixed(2)}`).join(' ') +
+    ` → composite=${composite.toFixed(3)} loss=${(wrongProb * 100).toFixed(1)}% ` +
+    `w[${activeKeys.map((k) => `${FACTOR_LABELS_CLASSIC[k]}=${((appliedWeights[k] ?? 0) * 100).toFixed(1)}%`).join(' ')}]` +
+    (excludedFactors.length ? ` excluded[${excludedFactors.map((k) => FACTOR_LABELS_CLASSIC[k]).join(',')}]` : '') +
+    (statField ? ` stat=${statField}@${(statConfidence * 100).toFixed(0)}%${statFallback ? '(fallback)' : ''}` : '') +
+    (gaps.length ? ` [gaps: ${gaps.join('; ')}]` : '');
+
+  return {
+    market: m,
+    composite: clamp(composite, 0, 1),
+    wrongProb,
+    marginUnits,
+    verifiable: isVerifiable(m),
+    breakdown,
+    gaps,
+    notes,
+    effectiveHitRate,
+    excludedFactors,
+    appliedWeights,
+    statConfidence,
+    statField,
+    statFallback,
+    weightMultiplier,
+  };
+}
+
+export function labelledFactorsClassic(s: ClassicMarketScore): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const k of ALL_CLASSIC_KEYS) {
+    if (s.excludedFactors.includes(k)) continue;
+    out[FACTOR_LABELS_CLASSIC[k]] = Math.round(s.breakdown[k] * 100) / 100;
+  }
+  return out;
+}
+
+export function computeMatchConfidenceClassic(
+  picks: ClassicMarketScore[],
+  opts?: SelectOptions,
+  meta?: { backfillPicks?: number },
+): MatchConfidence {
+  const cfg = resolveConfidenceOptions(opts?.confidence);
+  const pickCount = picks.length;
+  const backfillPicks = meta?.backfillPicks ?? picks.filter((s) => s.effectiveHitRate < MIN_CALIBRATION_HIT_RATE).length;
+
+  const avgCalibration = pickCount ? picks.reduce((sum, s) => sum + s.effectiveHitRate, 0) / pickCount : 0;
+
+  const coveragePerPick = picks.map((s) => {
+    const excludedMass = s.excludedFactors.reduce((sum, k) => sum + RANKING_WEIGHTS_CLASSIC[k] * (s.weightMultiplier[k] ?? 1), 0);
+    // active mass / total mass (total is 1, but with multipliers)
+    const activeMass = ALL_CLASSIC_KEYS.reduce((sum, k) => sum + RANKING_WEIGHTS_CLASSIC[k] * (s.weightMultiplier[k] ?? 1), 0) - excludedMass;
+    const totalMass = ALL_CLASSIC_KEYS.reduce((sum, k) => sum + RANKING_WEIGHTS_CLASSIC[k] * (s.weightMultiplier[k] ?? 1), 0) || 1;
+    return activeMass / totalMass;
+  });
+  const factorCoverage = coveragePerPick.length ? coveragePerPick.reduce((a, b) => a + b, 0) / coveragePerPick.length : 0;
+  const avgFactorsAvailable = pickCount ? picks.reduce((sum, s) => sum + (ALL_CLASSIC_KEYS.length - s.excludedFactors.length), 0) / pickCount : 0;
+  const missingUnion = new Set<ClassicFactorKey>();
+  for (const s of picks) s.excludedFactors.forEach((k) => missingUnion.add(k));
+  const missingFactorsClassic = ALL_CLASSIC_KEYS.filter((k) => missingUnion.has(k));
+
+  const src = scoreSourceQuality(opts?.sourceQuality, backfillPicks, pickCount);
+
+  const raw: Record<ConfidenceComponentKey, FactorResult> = {
+    calibration:    { score: clamp(avgCalibration, 0, 1) },
+    factorCoverage: { score: clamp(factorCoverage, 0, 1) },
+    sourceQuality:  src.result,
+  };
+
+  const componentKeys = Object.keys(CONFIDENCE_WEIGHTS) as ConfidenceComponentKey[];
+  const activeKeys = componentKeys.filter((k) => raw[k].available !== false);
+  const activeWeight = activeKeys.reduce((sum, k) => sum + CONFIDENCE_WEIGHTS[k], 0) || CONFIDENCE_WEIGHTS.calibration;
+
+  const blended = activeKeys.reduce((sum, k) => sum + (CONFIDENCE_WEIGHTS[k] / activeWeight) * raw[k].score, 0);
+
+  const depthFactor = pickCount >= TARGET_PICK_COUNT ? 1 : 0.85 + 0.15 * (pickCount / TARGET_PICK_COUNT);
+  const score = clamp(blended * depthFactor, 0, 1);
+
+  const components = componentKeys.reduce((acc, k) => {
+    acc[k] = {
+      score:     clamp(raw[k].score, 0, 1),
+      weight:    CONFIDENCE_WEIGHTS[k],
+      applied:   raw[k].available === false ? 0 : CONFIDENCE_WEIGHTS[k] / activeWeight,
+      available: raw[k].available !== false,
+      detail:    "",
+    };
+    return acc;
+  }, {} as Record<ConfidenceComponentKey, ConfidenceComponent>);
+
+  components.calibration.detail = `mean calibration of ${pickCount} pick(s) = ${(avgCalibration * 100).toFixed(1)}%`;
+  components.factorCoverage.detail =
+    `${(factorCoverage * 100).toFixed(1)}% of ranking weight backed by real data ` +
+    `(${avgFactorsAvailable.toFixed(1)}/${ALL_CLASSIC_KEYS.length} factors` +
+    `${missingFactorsClassic.length ? `, missing: ${missingFactorsClassic.join(', ')}` : ''})`;
+  components.sourceQuality.detail = src.result.available === false
+    ? (src.result.gap ?? "source provenance unavailable — component excluded")
+    : `${src.tier} tier (${src.sources.join(" + ") || "unknown"})` +
+      (backfillPicks ? ` · ${backfillPicks}/${pickCount} picks from the calibration backfill tier` : "");
+
+  const lowConfidence = cfg.enabled && score < cfg.threshold;
+  const level: MatchConfidence["level"] =
+    score < cfg.skipThreshold ? "VERY_LOW" : score < cfg.threshold ? "LOW" : "HIGH";
+
+  const reasons: string[] = componentKeys.map(
+    (k) => `${k}: ${(components[k].score * 100).toFixed(1)}% × ${(components[k].applied * 100).toFixed(0)}% — ${components[k].detail}`,
+  );
+  if (depthFactor < 1) {
+    reasons.push(`pick depth: only ${pickCount}/${TARGET_PICK_COUNT} qualified verifiable picks — score × ${depthFactor.toFixed(3)}`);
+  }
+  if (!cfg.enabled) reasons.push("confidence gate disabled — score reported only, no action taken");
+
+  return {
+    score,
+    scorePct: Math.round(score * 1000) / 10,
+    level,
+    lowConfidence,
+    action: "full",
+    picksReturned: pickCount,
+    threshold:     cfg.threshold,
+    skipThreshold: cfg.skipThreshold,
+    policy:        cfg.policy,
+    components,
+    avgCalibration,
+    avgFactorsAvailable,
+    totalFactors: ALL_CLASSIC_KEYS.length,
+    // Cast to FactorKey[] for compatibility — classic keys are reported as strings
+    missingFactors: missingFactorsClassic as unknown as FactorKey[],
+    sourceTier: src.tier,
+    sources:    src.sources,
+    backfillPicks,
+    reasons,
+    summary: "",
+  };
+}
+
+// ─── Classic selection (Rank A) ──────────────────────────────────────────────
+function hardSafetyRejectReasonClassic(
+  s: ClassicMarketScore,
+  context: RankingContext | null,
+  homeName: string,
+  awayName: string,
+): string | null {
+  if (injurySeverityBlocksMarket(s.market, context, homeName, awayName)) {
+    return "team-specific market blocked by injury severity filter";
+  }
+  return null;
+}
+
+export function selectTopPicksClassic(
+  markets:        Market[],
+  lam:            LambdaSet,
+  homeName:       string,
+  awayName:       string,
+  confidenceMap?: Record<string, number>,
+  opts?:          SelectOptions,
+): SelectionResult {
+
+  const gapLog = new Set<string>();
+
+  const scored = markets
+    .filter((m) => !m.rejected)
+    .map((m) => {
+      const s = scoreMarketClassic(m, lam, homeName, awayName, confidenceMap, opts);
+      s.gaps.forEach((g) => gapLog.add(g));
+      return s;
+    });
+
+  if (scored.length === 0) {
+    return EMPTY_SELECTION("No qualified markets to rank.", [...gapLog]);
+  }
+
+  const ranked = [...scored].sort((a, b) => {
+    const dc = b.composite - a.composite;
+    if (Math.abs(dc) > 1e-6) return dc;
+    const dw = a.wrongProb - b.wrongProb;
+    if (Math.abs(dw) > 1e-6) return dw;
+    const dm = b.marginUnits - a.marginUnits;
+    if (Math.abs(dm) > 1e-6) return dm;
+    return a.market.id.localeCompare(b.market.id);
+  });
+
+  const context = opts?.context ?? null;
+  const hardQualified = ranked.filter((s) => {
+    const reason = hardSafetyRejectReasonClassic(s, context, homeName, awayName);
+    if (reason) {
+      gapLog.add(`hard filter skipped ${s.market.id}: ${reason}`);
+      return false;
+    }
+    return true;
+  });
+  if (hardQualified.length === 0) {
+    return EMPTY_SELECTION("No market remains after hard safety filters (injury severity).", [...gapLog]);
+  }
+
+  const topNQualified = hardQualified.filter((s) => {
+    const blocked = isBlockedTeamSpecificUnder35Goals(s.market, homeName, awayName);
+    if (blocked) gapLog.add(`safety net skipped ${s.market.id}: non-giant team-specific Under 3.5 Goals`);
+    return !blocked;
+  });
+  if (topNQualified.length === 0) {
+    return EMPTY_SELECTION("No Top-N-eligible market remains after applying the team-goals safety net.", [...gapLog]);
+  }
+
+  const verifiableRanked = topNQualified.filter((s) => s.verifiable);
+  if (verifiableRanked.length === 0) {
+    return EMPTY_SELECTION("No verifiable market remains after scoring and hard safety filters — match skipped.", [...gapLog]);
+  }
+
+  const comparator = (a: ClassicMarketScore, b: ClassicMarketScore) => {
+    const dc = b.composite - a.composite;
+    if (Math.abs(dc) > 1e-6) return dc;
+    const dw = a.wrongProb - b.wrongProb;
+    if (Math.abs(dw) > 1e-6) return dw;
+    const dm = b.marginUnits - a.marginUnits;
+    if (Math.abs(dm) > 1e-6) return dm;
+    return a.market.id.localeCompare(b.market.id);
+  };
+  const trustedTier = verifiableRanked.filter((s) => s.effectiveHitRate >= MIN_CALIBRATION_HIT_RATE).sort(comparator);
+  const backfillTier = verifiableRanked.filter((s) => s.effectiveHitRate < MIN_CALIBRATION_HIT_RATE && s.effectiveHitRate >= MIN_BACKFILL_CALIBRATION_HIT_RATE).sort(comparator);
+
+  const seen = new Set<string>();
+  const deduped: ClassicMarketScore[] = [];
+  const extrasPool: ClassicMarketScore[] = [];
+  for (const s of [...trustedTier, ...backfillTier]) {
+    const key = statKey(s.market);
+    if (seen.has(key)) { extrasPool.push(s); continue; }
+    seen.add(key);
+    deduped.push(s);
+  }
+  const extras = extrasPool.sort(comparator);
+  const top10Scores = [...deduped, ...extras].slice(0, 10);
+  const top10 = top10Scores.map((s) => s.market);
+
+  const backfilledCount = top10Scores.filter((s) => s.effectiveHitRate < MIN_CALIBRATION_HIT_RATE).length;
+  if (backfilledCount > 0) {
+    gapLog.add(`Top-10 backfill tier used for ${backfilledCount}/10 slots (trusted ≥85% calibration pool exhausted; backfill picks still qualified, safety-net-checked and verifiable)`);
+  }
+
+  const excludedUnion = new Set<ClassicFactorKey>();
+  for (const s of top10Scores) s.excludedFactors.forEach((f) => excludedUnion.add(f));
+  const lead = top10Scores[0];
+  const weightLog: string[] = [];
+  if (lead) {
+    weightLog.push(
+      `final weights: ${ALL_CLASSIC_KEYS.filter((k) => lead.appliedWeights[k] !== undefined).map((k) => `${k} ${((lead.appliedWeights[k] ?? 0) * 100).toFixed(1)}%`).join(', ')} (Σ = ${(ALL_CLASSIC_KEYS.reduce((sum, k) => sum + (lead.appliedWeights[k] ?? 0), 0) * 100).toFixed(0)}%)`,
+    );
+  }
+  if (excludedUnion.size) {
+    weightLog.push(`missing factors (weight redistributed): ${[...excludedUnion].join(', ')}`);
+  }
+  if (backfilledCount > 0) {
+    weightLog.push(`top-10 fill: ${10 - backfilledCount}/10 from the trusted tier (calibration ≥ 85%), ${backfilledCount}/10 backfilled from the 0.55–0.85 tier — all fully filtered`);
+  }
+  console.log(
+    `[selector] ${homeName} vs ${awayName} — top10: ${top10.length}/10` +
+    (backfilledCount ? ` (backfill: ${backfilledCount})` : "") +
+    (excludedUnion.size ? ` | missing: ${[...excludedUnion].join(',')}` : " | all factors available") +
+    (lead ? ` | ${weightLog[0]}` : ""),
+  );
+
+  const cfg = resolveConfidenceOptions(opts?.confidence);
+  const confidence = computeMatchConfidenceClassic(top10Scores, opts, { backfillPicks: backfilledCount });
+
+  const shouldSkip = cfg.enabled && cfg.policy === "skip" && confidence.score < cfg.threshold;
+  const belowSkipFloor = cfg.enabled && cfg.policy !== "flag" && confidence.score < cfg.skipThreshold;
+  const shouldTrim = cfg.enabled && cfg.policy === "trim" && confidence.lowConfidence;
+
+  let finalPicks = top10;
+  if (shouldSkip || belowSkipFloor) {
+    confidence.action = "skipped";
+    confidence.picksReturned = 0;
+    finalPicks = [];
+  } else if (shouldTrim) {
+    confidence.action = "reduced";
+    finalPicks = top10.slice(0, cfg.lowConfidencePickCount);
+    confidence.picksReturned = finalPicks.length;
+  } else {
+    confidence.action = "full";
+    confidence.picksReturned = finalPicks.length;
+  }
+
+  confidence.summary =
+    `confidence ${confidence.scorePct.toFixed(1)}% (${confidence.level}) ` +
+    `vs threshold ${(confidence.threshold * 100).toFixed(0)}% → ` +
+    (confidence.action === "skipped"
+      ? "match SKIPPED (no picks returned)"
+      : confidence.action === "reduced"
+        ? `reduced to Top-${confidence.picksReturned}`
+        : `full Top-${confidence.picksReturned}`);
+
+  const confidenceLog = [
+    confidence.summary,
+    ...confidence.reasons.map((r) => `· ${r}`),
+  ];
+
+  console.log(
+    `[selector][confidence] ${homeName} vs ${awayName} — score ${confidence.scorePct.toFixed(1)}% ` +
+    `(${confidence.level}) | cal ${(confidence.components.calibration.score * 100).toFixed(1)}% ` +
+    `| factors ${(confidence.components.factorCoverage.score * 100).toFixed(1)}% ` +
+    `(${confidence.avgFactorsAvailable.toFixed(1)}/${confidence.totalFactors}) ` +
+    `| source ${confidence.components.sourceQuality.available ? `${(confidence.components.sourceQuality.score * 100).toFixed(1)}% [${confidence.sourceTier}: ${confidence.sources.join("+") || "n/a"}]` : "unavailable (weight redistributed)"} ` +
+    `| backfill ${confidence.backfillPicks}/${top10.length} ` +
+    `| threshold ${(confidence.threshold * 100).toFixed(0)}% | policy ${confidence.policy} ` +
+    `→ ${confidence.action.toUpperCase()} (${confidence.picksReturned} picks)`,
+  );
+
+  if (confidence.action === "skipped") {
+    return {
+      ...EMPTY_SELECTION(
+        `Low confidence (${confidence.scorePct.toFixed(1)}% < ${(confidence.threshold * 100).toFixed(0)}%) — match skipped by the confidence gate.`,
+        [...gapLog],
+      ),
+      rankingNotes: top10.map((m) => {
+        const s = scored.find((x) => x.market === m);
+        return s ? s.notes : `${m.name} · ${m.selection}`;
+      }),
+      weightLog,
+      missingFactors: [...excludedUnion] as unknown as FactorKey[],
+      confidence,
+      confidenceLog,
+    };
+  }
+
+  const orderedPicks = applyTop1ExplosionBan(finalPicks, homeName, awayName, opts);
+
+  for (const m of orderedPicks) {
+    const s = scored.find((x) => x.market === m);
+    if (!s) continue;
+    m.factors = labelledFactorsClassic(s);
+    m.compositeScore = Math.round(s.composite * 100) / 100;
+  }
+
+  return {
+    top1:  orderedPicks.slice(0, 1),
+    top3:  orderedPicks.slice(0, 3),
+    top5:  orderedPicks.slice(0, 5),
+    top10: orderedPicks,
+    gaps:         [...gapLog],
+    rankingNotes: orderedPicks.map((m) => {
+      const s = scored.find((x) => x.market === m);
+      return s ? s.notes : `${m.name} · ${m.selection}`;
+    }),
+    weightLog,
+    missingFactors: [...excludedUnion] as unknown as FactorKey[],
+    confidence,
+    confidenceLog,
+  };
+}
+
+// Alias required by task: rankClassic
+export const rankClassic = selectTopPicksClassic;
+
+
 // ─── Market score ─────────────────────────────────────────────────────────────
 
 /** Per-factor sub-scores for a market (all 0..1), keyed by FactorKey. */
@@ -2046,7 +2738,7 @@ export interface SelectionResult {
    */
   weightLog?:      string[];
   /** Union of factors excluded across the Top-10 (missing data signals). */
-  missingFactors?: FactorKey[];
+  missingFactors?: (FactorKey | ClassicFactorKey)[];
   /**
    * Match-level confidence verdict (see computeMatchConfidence). Always set
    * once markets were ranked, so the UI can show a warning — or the caller can
@@ -2104,6 +2796,12 @@ export function selectTopPicks(
   confidenceMap?: Record<string, number>,
   opts?:          SelectOptions,
 ): SelectionResult {
+
+  const rankingMode = resolveRankingMode(opts);
+  console.log(rankingModeLogLine(rankingMode));
+  if (rankingMode === 'A') {
+    return selectTopPicksClassic(markets, lam, homeName, awayName, confidenceMap, opts);
+  }
 
   const gapLog = new Set<string>();
 
