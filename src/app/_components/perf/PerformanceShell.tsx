@@ -7,7 +7,7 @@ import { cn } from "./ui";
 import { NAV_PILL, NAV_PILL_OFF, NAV_PILL_ON_VIOLET, OUTLINE_CYAN } from "../design";
 
 const NAV = [
-  { href: "/performance", label: "Ranking Modes", short: "Modes", match: "modes" as const },
+  { href: "/performance/modes", label: "Ranking Modes", short: "Modes", match: "modes" as const },
   { href: "/performance/leagues", label: "Leagues", short: "Leagues", match: "leagues" as const },
   { href: "/performance/value-bets", label: "Value Bets", short: "Value Bets", match: "exact" as const },
   { href: "/performance/accumulators", label: "Accumulators", short: "Accas", match: "exact" as const },

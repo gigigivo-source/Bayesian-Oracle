@@ -1,7 +1,3 @@
-import { redirect } from "next/navigation";
-
-// /performance/modes is now the default /performance page. Keep this route
-// so existing bookmarks and in-app links land on the multi-mode dashboard.
-export default function RankingModePerformanceRedirect() {
-  redirect("/performance");
-}
+// Keep the ranking mode dashboard available at its explicit menu URL.
+// The implementation is shared with the performance landing page.
+export { default } from "../page";
