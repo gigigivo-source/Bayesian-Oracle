@@ -84,35 +84,113 @@ function fmt(d: Date): string {
   return d.toISOString().slice(0, 10).replace(/-/g, "");
 }
 
-export async function GET() {
-  const now  = new Date();
+/** UTC day key ("YYYYMMDD") for a fixture's ISO kickoff time. */
+function dayKey(iso: string): string {
+  const t = Date.parse(iso);
+  return Number.isNaN(t) ? "" : fmt(new Date(t));
+}
+
+interface LeagueBlock {
+  slug:     string;
+  label:    string;
+  fixtures: FixtureLite[];
+  upcoming: FixtureLite[];
+  results:  FixtureLite[];
+}
+
+interface TopPayload {
+  featured:  LeagueBlock[];
+  extra:     LeagueBlock[];
+  live:      FixtureLite[];
+  liveCount: number;
+}
+
+// ─── Snapshot cache ───────────────────────────────────────────────────────────
+// The home feed fans out to ~70 upstream league scoreboards. Rebuilding that on
+// every request (the page loads it on mount and the Live tab polls it) is what
+// made the app feel frozen. We keep one shared snapshot per server instance:
+//   • fresh  (< FRESH_MS)  → served immediately
+//   • stale  (< MAX_AGE)   → served immediately, refreshed in the background
+//   • absent               → built once; concurrent callers await the same build
+const FRESH_MS   = Number(process.env.TOP_FEED_FRESH_MS ?? 30_000);
+const MAX_AGE_MS = Number(process.env.TOP_FEED_MAX_AGE_MS ?? 5 * 60_000);
+
+interface Snapshot { at: number; payload: TopPayload }
+
+const globalForTop = globalThis as typeof globalThis & {
+  __gigiTopSnapshot?: Snapshot | null;
+  __gigiTopInFlight?: Promise<TopPayload> | null;
+};
+
+function getSnapshot(): Promise<TopPayload> {
+  const snap = globalForTop.__gigiTopSnapshot ?? null;
+  const age  = snap ? Date.now() - snap.at : Infinity;
+
+  if (snap && age < FRESH_MS) return Promise.resolve(snap.payload);
+
+  // Single-flight: only one rebuild runs at a time, however many requests land.
+  if (!globalForTop.__gigiTopInFlight) {
+    globalForTop.__gigiTopInFlight = buildTopFeed()
+      .then((payload) => {
+        globalForTop.__gigiTopSnapshot = { at: Date.now(), payload };
+        return payload;
+      })
+      .catch((err) => {
+        // Keep serving the last good snapshot if a rebuild fails.
+        if (snap) return snap.payload;
+        throw err;
+      })
+      .finally(() => { globalForTop.__gigiTopInFlight = null; });
+  }
+
+  // Stale-while-revalidate: return the old payload now, let the rebuild finish.
+  if (snap && age < MAX_AGE_MS) {
+    void globalForTop.__gigiTopInFlight;
+    return Promise.resolve(snap.payload);
+  }
+
+  return globalForTop.__gigiTopInFlight;
+}
+
+// ─── Feed builder ─────────────────────────────────────────────────────────────
+
+async function buildTopFeed(): Promise<TopPayload> {
+  const now = new Date();
 
   // TOP FEED: professional sportsbook window = yesterday, today, tomorrow only.
   // Do NOT show matches 7, 14, or 60 days away on the home feed.
   const yesterday = new Date(now); yesterday.setDate(now.getDate() - 1);
   const tomorrow  = new Date(now); tomorrow.setDate(now.getDate() + 1);
-  const todayWindow = `${fmt(yesterday)}-${fmt(tomorrow)}`;
 
   // Recent results: last 7 days (for the results section below each league)
   const from7 = new Date(now); from7.setDate(now.getDate() - 7);
-  const recentRange = `${fmt(from7)}-${fmt(now)}`;
 
-  // Fetch featured leagues — TODAY window for live/upcoming + recent for results
-  const results = await Promise.all(
-    FEATURED.map(async (l) => {
-      const [todayFx, recentFx] = await Promise.all([
-        fetchScoreboard(l.slug, todayWindow).catch(() => [] as FixtureLite[]),
-        fetchScoreboard(l.slug, recentRange).catch(() => [] as FixtureLite[]),
-      ]);
+  const yKey = fmt(yesterday);
+  const tKey = fmt(tomorrow);
+  const nKey = fmt(now);
+  const rKey = fmt(from7);
 
-      // Dedup
-      const seen = new Set<string>();
-      const all: FixtureLite[] = [];
-      for (const fx of [...todayFx, ...recentFx]) {
-        if (!seen.has(fx.id)) { seen.add(fx.id); all.push(fx); }
-      }
+  // One upstream call per featured league covering BOTH windows (-7d → +1d).
+  // Previously this issued two overlapping requests per league; the union range
+  // returns a superset, so today's window and the 7-day results window are just
+  // filtered out of the same response. Halves featured-league traffic.
+  const fullRange   = `${rKey}-${tKey}`;
+  const todayWindow = `${yKey}-${tKey}`;
 
-      const upcoming = todayFx.filter((f) => f.state === "pre" || f.state === "in")
+  const inWindow = (f: FixtureLite, from: string, to: string) => {
+    const k = dayKey(f.date);
+    return k !== "" && k >= from && k <= to;
+  };
+
+  const featuredSettled = await Promise.allSettled(
+    FEATURED.map(async (l): Promise<LeagueBlock> => {
+      const all = await fetchScoreboard(l.slug, fullRange).catch(() => [] as FixtureLite[]);
+
+      const todayFx  = all.filter((f) => inWindow(f, yKey, tKey));
+      const recentFx = all.filter((f) => inWindow(f, rKey, nKey));
+
+      const upcoming = todayFx
+        .filter((f) => f.state === "pre" || f.state === "in")
         .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
 
       const finished = recentFx
@@ -120,34 +198,41 @@ export async function GET() {
         .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
         .slice(0, 8);
 
-      return { slug: l.slug, label: l.label, fixtures: all, upcoming, results: finished };
+      // Dedup (fetchScoreboard already dedupes, kept for shape parity)
+      const seen = new Set<string>();
+      const fixtures: FixtureLite[] = [];
+      for (const fx of [...todayFx, ...recentFx]) {
+        if (!seen.has(fx.id)) { seen.add(fx.id); fixtures.push(fx); }
+      }
+
+      return { slug: l.slug, label: l.label, fixtures, upcoming, results: finished };
     }),
   );
 
-  // Extra leagues — today window only
-  const BATCH = 8;
-  const extraResults: typeof results = [];
+  const results: LeagueBlock[] = featuredSettled
+    .filter((r): r is PromiseFulfilledResult<LeagueBlock> => r.status === "fulfilled")
+    .map((r) => r.value);
 
-  for (let i = 0; i < EXTRA.length; i += BATCH) {
-    const batch = EXTRA.slice(i, i + BATCH);
-    const batchData = await Promise.allSettled(
-      batch.map(async (l) => {
-        const fixtures = await fetchScoreboard(l.slug, todayWindow).catch(() => [] as FixtureLite[]);
-        return {
-          slug:     l.slug,
-          label:    l.label,
-          fixtures,
-          upcoming: fixtures.filter((f) => f.state === "pre" || f.state === "in"),
-          results:  fixtures.filter((f) => f.state === "post").slice(0, 5),
-        };
-      }),
-    );
-    for (const r of batchData) {
-      if (r.status === "fulfilled" && r.value.fixtures.length > 0) {
-        extraResults.push(r.value);
-      }
-    }
-  }
+  // Extra leagues — today window only. Fired in one parallel wave; the shared
+  // HTTP client's concurrency limiter throttles them, so the previous manual
+  // sequential batching only added dead time between batches.
+  const extraSettled = await Promise.allSettled(
+    EXTRA.map(async (l): Promise<LeagueBlock> => {
+      const fixtures = await fetchScoreboard(l.slug, todayWindow).catch(() => [] as FixtureLite[]);
+      return {
+        slug:     l.slug,
+        label:    l.label,
+        fixtures,
+        upcoming: fixtures.filter((f) => f.state === "pre" || f.state === "in"),
+        results:  fixtures.filter((f) => f.state === "post").slice(0, 5),
+      };
+    }),
+  );
+
+  const extraResults: LeagueBlock[] = extraSettled
+    .filter((r): r is PromiseFulfilledResult<LeagueBlock> => r.status === "fulfilled")
+    .map((r) => r.value)
+    .filter((r) => r.fixtures.length > 0);
 
   // Live matches across everything
   const seen = new Set<string>();
@@ -169,22 +254,25 @@ export async function GET() {
   // Sort featured leagues by importance tier (Champions League, Premier League,
   // … at the top), keeping leagues with live/active matches ahead of quiet ones
   // within the same tier.
-  const activityScore = (r: { upcoming: FixtureLite[]; results: FixtureLite[] }) =>
-    r.upcoming.length * 2 + r.results.length;
-  const byLeaguePriority = (
-    a: { slug: string; upcoming: FixtureLite[]; results: FixtureLite[] },
-    b: { slug: string; upcoming: FixtureLite[]; results: FixtureLite[] },
-  ) =>
+  const activityScore = (r: LeagueBlock) => r.upcoming.length * 2 + r.results.length;
+  const byLeaguePriority = (a: LeagueBlock, b: LeagueBlock) =>
     leagueTier({ leagueSlug: a.slug }) - leagueTier({ leagueSlug: b.slug }) ||
     activityScore(b) - activityScore(a);
 
-  const sortedResults = [...results].sort(byLeaguePriority);
-  const sortedExtra = [...extraResults].sort(byLeaguePriority);
-
-  return Response.json({
-    featured:  sortedResults,
-    extra:     sortedExtra,
+  return {
+    featured:  [...results].sort(byLeaguePriority),
+    extra:     [...extraResults].sort(byLeaguePriority),
     live,
     liveCount: live.length,
+  };
+}
+
+export async function GET() {
+  const payload = await getSnapshot();
+  return Response.json(payload, {
+    headers: {
+      // Let any CDN/proxy in front of the app absorb the polling traffic too.
+      "Cache-Control": "public, max-age=0, s-maxage=30, stale-while-revalidate=300",
+    },
   });
 }

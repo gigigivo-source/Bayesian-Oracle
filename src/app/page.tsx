@@ -1,15 +1,31 @@
 "use client";
 
 import Image from "next/image";
+import dynamic from "next/dynamic";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { FixtureLite } from "@/lib/espn";
 import type { LeagueDef } from "@/lib/leagues";
 import { compareLeaguePriority, leagueTier } from "@/lib/leaguePriority";
 
 import { FixtureCard } from "./_components/ui";
-import { MatchDetail } from "./_components/MatchDetail";
 import { BackgroundSlideshow } from "./_components/BackgroundSlideshow";
 import { ErrorBoundary } from "./_components/ErrorBoundary";
+
+// The match modal is ~1,300 lines of markup + the whole engine type surface and
+// is only ever rendered after the user taps a fixture. Loading it lazily keeps
+// it out of the initial page bundle so first paint isn't waiting on it.
+const MatchDetail = dynamic(
+  () => import("./_components/MatchDetail").then((m) => m.MatchDetail),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
+        <div className="font-mono text-sm text-amber-300 animate-pulse">Loading match…</div>
+      </div>
+    ),
+  },
+);
+
 import {
   ACTION_AMBER,
   ACTION_BLUE,
@@ -76,6 +92,36 @@ const TOP_LEAGUE_PILLS = [
 ];
 
 const ALL_TABS: readonly Tab[] = ["top", "live", "accumulators", "performance", "leagues", "standings", "oracle", "chat", "bankroll", "slipbuilder", "dailypicks", "oddscalc", "verified", "results", "backtest", "valuebets"];
+
+// ─── Shared /api/top client cache ─────────────────────────────────────────────
+// Both the Top Matches feed and the Live tab read the same endpoint, and the
+// Live tab polls it. Without coordination, switching tabs or a slow response
+// stacked overlapping requests on top of each other. One in-flight request is
+// shared by every caller, and a short TTL serves tab switches from memory.
+const TOP_TTL_MS = 20_000;
+let topCache: { at: number; data: TopData } | null = null;
+let topInFlight: Promise<TopData> | null = null;
+
+function fetchTop(force = false): Promise<TopData> {
+  if (!force && topCache && Date.now() - topCache.at < TOP_TTL_MS) {
+    return Promise.resolve(topCache.data);
+  }
+  if (topInFlight) return topInFlight;
+
+  topInFlight = fetch("/api/top")
+    .then((r) => {
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.json() as Promise<TopData>;
+    })
+    .then((d) => {
+      topCache = { at: Date.now(), data: d };
+      return d;
+    })
+    .finally(() => { topInFlight = null; });
+
+  return topInFlight;
+}
+
 
 export default function Home() {
   const [tab, setTab] = useState<Tab>("top");
@@ -260,29 +306,43 @@ function LivePage({ onSelect }: { onSelect: (fx: FixtureLite) => void }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    function load() {
-      fetch("/api/top")
-        .then((r) => r.json())
-        .then((d: TopData) => {
-          // Live feed: biggest leagues at the top, smallest at the bottom;
-          // within a tier, order by kickoff time.
-          const liveSorted = [...(d.live ?? [])].sort(
-            (a, b) =>
-              compareLeaguePriority(a, b) ||
-              new Date(a.date).getTime() - new Date(b.date).getTime(),
-          );
-          setLive(liveSorted);
-          const finished = (d.featured ?? []).flatMap((b: FeaturedBlock) => b.fixtures.filter((f: FixtureLite) => f.state === "post")).slice(0, 8);
-          const upcoming = (d.featured ?? []).flatMap((b: FeaturedBlock) => b.upcoming ?? []).slice(0, 8);
-          const recentSorted = [...finished, ...upcoming].sort(compareLeaguePriority);
-          setRecent(recentSorted);
-          setLoading(false);
-        })
-        .catch(() => setLoading(false));
+    let cancelled = false;
+
+    function apply(d: TopData) {
+      if (cancelled) return;
+      // Live feed: biggest leagues at the top, smallest at the bottom;
+      // within a tier, order by kickoff time.
+      const liveSorted = [...(d.live ?? [])].sort(
+        (a, b) =>
+          compareLeaguePriority(a, b) ||
+          new Date(a.date).getTime() - new Date(b.date).getTime(),
+      );
+      setLive(liveSorted);
+      const finished = (d.featured ?? []).flatMap((b: FeaturedBlock) => b.fixtures.filter((f: FixtureLite) => f.state === "post")).slice(0, 8);
+      const upcoming = (d.featured ?? []).flatMap((b: FeaturedBlock) => b.upcoming ?? []).slice(0, 8);
+      const recentSorted = [...finished, ...upcoming].sort(compareLeaguePriority);
+      setRecent(recentSorted);
+      setLoading(false);
     }
+
+    function load(force = false) {
+      // Don't poll a tab nobody is looking at — background polling was firing
+      // the heaviest endpoint in the app every 15s for hidden pages.
+      if (force === false && typeof document !== "undefined" && document.hidden) return;
+      fetchTop(force).then(apply).catch(() => { if (!cancelled) setLoading(false); });
+    }
+
     load();
-    const t = setInterval(load, 15000);
-    return () => clearInterval(t);
+    // 30s matches the server-side snapshot window; polling faster only ever
+    // returned the same cached payload.
+    const t = setInterval(() => load(true), 30000);
+    const onVisible = () => { if (!document.hidden) load(); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, []);
 
   if (loading) return <LoadingGrid label="Checking live matches worldwide…" />;
@@ -504,10 +564,11 @@ function TopFeed({
   const [chipData, setChipData] = useState<{ slug: string; upcoming: FixtureLite[]; results: FixtureLite[]; label: string } | null>(null);
 
   useEffect(() => {
-    fetch("/api/top")
-      .then((r) => r.json())
-      .then((d: TopData) => setData(d))
-      .catch(() => setData({ featured: [], extra: [], live: [], liveCount: 0 }));
+    let cancelled = false;
+    fetchTop()
+      .then((d) => { if (!cancelled) setData(d); })
+      .catch(() => { if (!cancelled) setData({ featured: [], extra: [], live: [], liveCount: 0 }); });
+    return () => { cancelled = true; };
   }, []);
 
   // When a chip is selected, check if that league has data in top feed.
