@@ -1,100 +1,175 @@
+// ĞIGI GIVØ — Ranking-mode performance API.
+//
+// Returns a complete, per-mode performance report (Rank A Classic, Rank B
+// 12-Factor, Rank C Hybrid, Rank D Consensus) built from the three tracking
+// tables: performance_log (ranked Top-10 picks), value_bet_log (staked value
+// bets) and saved_slips (accumulators). Every table carries a ranking_mode so
+// the four modes can be compared like-for-like.
+//
+// Query parameters
+//   days    7 | 30 | 90 | all | <n>     window on the bet date (default 30)
+//   from    YYYY-MM-DD                  custom range start (overrides days)
+//   to      YYYY-MM-DD                  custom range end
+//   mode    A | B | C | D | all         restrict the returned reports
+//   league  free text                   matches competition name or slug
+//   result  WIN|LOSS|PUSH|VOID|PENDING  result filter
+//   source  pick | valueBet | slip      product filter
+//   search  free text                   match / market / selection search
+//   limit   max bet rows per mode (default 1500, max 5000)
+//
+// All aggregation lives in `@/lib/performance/modeAnalytics` (pure + unit
+// tested); this route only loads rows, normalises them and applies filters.
+
 import { db } from "@/db";
-import { performanceLog, valueBetLog, savedSlips } from "@/db/schema";
-import { gte } from "drizzle-orm";
+import { performanceLog, savedSlips, valueBetLog } from "@/db/schema";
+import { gte, sql } from "drizzle-orm";
+import {
+  RANKING_MODES,
+  applyFilters,
+  betFromSlipRow,
+  betFromValueBetRow,
+  betsFromPerformanceRow,
+  buildComparison,
+  buildModeReport,
+  dayOffset,
+  perfectMatch,
+  type ModeBet,
+  type RankingModeKey,
+} from "@/lib/performance/modeAnalytics";
 
 export const dynamic = "force-dynamic";
 
-const MODES = ["A", "B", "C", "D"] as const;
-type Mode = (typeof MODES)[number];
-const MODE_LABEL: Record<Mode, string> = { A: "Rank A · Classic", B: "Rank B · 12-Factor", C: "Rank C · Hybrid", D: "Rank D · Consensus" };
-type Result = "WIN" | "LOSS" | "PUSH" | "VOID" | "PENDING";
+const DEFAULT_LIMIT = 1500;
+const MAX_LIMIT = 5000;
 
-type Pick = { name?: string; selection?: string; outcome?: string; odds?: number; ev?: number; family?: string; factorBreakdown?: Record<string, number> };
-type Row = { date: string; match: string; selection: string; market: string; odds: number | null; result: Result; pnl: number | null; rankingMode: Mode; league: string; stake: number | null; ev: number | null };
+function parseWindow(url: URL): { from: string; to: string | null; days: string } {
+  const now = new Date();
+  const from = url.searchParams.get("from");
+  const to = url.searchParams.get("to");
+  const daysRaw = (url.searchParams.get("days") ?? "30").toLowerCase();
 
-function result(value?: string | null): Result {
-  const v = (value ?? "pending").toLowerCase();
-  if (v === "hit" || v === "won" || v === "win") return "WIN";
-  if (v === "miss" || v === "lost" || v === "loss") return "LOSS";
-  if (v === "push") return "PUSH";
-  if (v === "void") return "VOID";
-  return "PENDING";
+  if (from) return { from, to: to ?? null, days: "custom" };
+  if (daysRaw === "all") return { from: dayOffset(now, 3650), to: to ?? null, days: "all" };
+  const days = Math.min(Math.max(Number(daysRaw) || 30, 1), 3650);
+  return { from: dayOffset(now, days), to: to ?? null, days: String(days) };
 }
-function factor(p: Pick) {
-  const f = p.factorBreakdown;
-  if (f && typeof f === "object" && Object.keys(f).length) return Object.keys(f);
-  const s = `${p.name ?? ""} ${p.family ?? ""}`.toLowerCase();
-  if (s.includes("corner") || s.includes("card") || s.includes("goal") || s.includes("shot")) return ["Poisson"];
-  if (s.includes("result") || s.includes("draw")) return ["Tactical"];
-  return ["Calibration"];
+
+/**
+ * saved_slips gained `ranking_mode` after the Drizzle model was written; read it
+ * with a guarded raw query so deployments without the column still work (the
+ * mode then falls back to the value persisted inside the picks JSON).
+ */
+async function loadSlipModes(since: Date): Promise<Map<number, string>> {
+  try {
+    const res = await db.execute<{ id: number; ranking_mode: string | null }>(
+      sql`select id, ranking_mode from saved_slips where created_at >= ${since}`,
+    );
+    const rows = (res as unknown as { rows?: Array<{ id: number; ranking_mode: string | null }> }).rows ?? [];
+    return new Map(rows.filter((r) => r.ranking_mode).map((r) => [Number(r.id), String(r.ranking_mode)]));
+  } catch {
+    return new Map();
+  }
 }
-function pct(n: number, d: number) { return d ? (n / d) * 100 : 0; }
 
 export async function GET(req: Request) {
   try {
     const url = new URL(req.url);
-    const daysParam = url.searchParams.get("days") ?? "30";
-    const days = daysParam === "all" ? 3650 : Math.min(Math.max(Number(daysParam) || 30, 1), 3650);
-    const modeFilter = url.searchParams.get("mode");
-    const leagueFilter = url.searchParams.get("league")?.toLowerCase() ?? "";
-    const resultFilter = url.searchParams.get("result")?.toUpperCase() ?? "";
-    const since = new Date(); since.setDate(since.getDate() - days);
-    const day = since.toISOString().slice(0, 10);
-    const [performance, values, slips] = await Promise.all([
-      db.select().from(performanceLog).where(gte(performanceLog.matchDate, day)).limit(30000),
-      db.select().from(valueBetLog).where(gte(valueBetLog.matchDate, day)).limit(30000),
-      db.select().from(savedSlips).where(gte(savedSlips.createdAt, since)).limit(5000),
-    ]);
-    const byMode = new Map<Mode, Row[]>(MODES.map((m) => [m, []]));
-    const factors = new Map<Mode, Map<string, { wins: number; total: number }>>(MODES.map((m) => [m, new Map()]));
-    const perfect = new Map<Mode, number>(MODES.map((m) => [m, 0]));
-    for (const record of performance) {
-      const mode = (MODES.includes(record.rankingMode as Mode) ? record.rankingMode : "B") as Mode;
-      const picks = (record.top10Detail ?? []) as Pick[];
-      if (picks.length === 10 && picks.every((p) => result(p.outcome) === "WIN")) perfect.set(mode, (perfect.get(mode) ?? 0) + 1);
-      for (const p of picks) {
-        const r = result(p.outcome);
-        byMode.get(mode)!.push({ date: record.matchDate, match: record.matchLabel, selection: p.selection ?? p.name ?? "—", market: p.name ?? "Pick", odds: p.odds ?? null, result: r, pnl: null, rankingMode: mode, league: record.competitionName ?? record.league, stake: null, ev: p.ev ?? null });
-        for (const name of factor(p)) {
-          const b = factors.get(mode)!.get(name) ?? { wins: 0, total: 0 };
-          if (r === "WIN" || r === "LOSS") { b.total++; if (r === "WIN") b.wins++; }
-          factors.get(mode)!.set(name, b);
-        }
-      }
-    }
-    for (const bet of values) {
-      const mode = (MODES.includes(bet.rankingMode as Mode) ? bet.rankingMode : "B") as Mode;
-      byMode.get(mode)!.push({ date: bet.matchDate, match: bet.match, selection: bet.selection, market: bet.marketName, odds: bet.bookOdds, result: result(bet.outcome), pnl: bet.pnl, rankingMode: mode, league: bet.competitionName ?? bet.leagueSlug, stake: bet.stake, ev: bet.oracleProb * bet.bookOdds - 1 });
-    }
-    // saved_slips currently has no ranking_mode schema column. Only attribute slips when their persisted pick JSON carries one.
-    for (const slip of slips) {
-      const stored = slip.picks as Array<{ rankingMode?: string }>;
-      const raw = stored?.[0]?.rankingMode;
-      if (!raw || !MODES.includes(raw as Mode)) continue;
-      const mode = raw as Mode, r = result(slip.status), stake = slip.stake ?? 0;
-      byMode.get(mode)!.push({ date: slip.createdAt.toISOString().slice(0, 10), match: slip.name, selection: "Accumulator", market: "Saved Slip", odds: slip.combinedOdds, result: r, pnl: r === "WIN" ? stake * (slip.combinedOdds - 1) : r === "LOSS" ? -stake : null, rankingMode: mode, league: slip.competitionName ?? slip.leagueSlug ?? "—", stake, ev: null });
-    }
-    const make = (mode: Mode) => {
-      let rows = byMode.get(mode)!;
-      if (leagueFilter) rows = rows.filter((r) => r.league.toLowerCase().includes(leagueFilter));
-      if (resultFilter) rows = rows.filter((r) => r.result === resultFilter);
-      rows.sort((a, b) => b.date.localeCompare(a.date));
-      const count = (r: Result) => rows.filter((x) => x.result === r).length;
-      const wins = count("WIN"), losses = count("LOSS"), pushes = count("PUSH"), voids = count("VOID"), pending = count("PENDING");
-      const stakeRows = rows.filter((x) => x.stake !== null);
-      const stake = stakeRows.reduce((n, x) => n + (x.stake ?? 0), 0), pnl = rows.reduce((n, x) => n + (x.pnl ?? 0), 0);
-      const oddsWeight = stakeRows.reduce((n, x) => n + (x.odds ?? 0) * (x.stake ?? 0), 0);
-      const evs = rows.flatMap((x) => x.ev === null ? [] : [x.ev]);
-      const chronological = [...rows].sort((a, b) => b.date.localeCompare(a.date));
-      let streak = 0; const first = chronological.find((x) => x.result === "WIN" || x.result === "LOSS");
-      if (first) for (const x of chronological) { if (x.result === first.result) streak++; else if (x.result === "WIN" || x.result === "LOSS") break; }
-      const daily = new Map<string, { pnl: number; wins: number; losses: number }>();
-      for (const r of rows) { const d = daily.get(r.date) ?? { pnl: 0, wins: 0, losses: 0 }; d.pnl += r.pnl ?? 0; if (r.result === "WIN") d.wins++; if (r.result === "LOSS") d.losses++; daily.set(r.date, d); }
-      let cumulative = 0;
-      const trends = [...daily.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([date, d]) => ({ date, pnl: (cumulative += d.pnl), dailyHitRate: pct(d.wins, d.wins + d.losses) }));
-      return { mode, label: MODE_LABEL[mode], totalBets: rows.length, wins, losses, pushes, voids, pending, hitRate: pct(wins, wins + losses), totalPnl: pnl, totalStake: stake, roi: pct(pnl, stake), averageOdds: stake ? oddsWeight / stake : null, averageEv: evs.length ? evs.reduce((a,b) => a+b, 0) / evs.length : null, currentStreak: first ? `${streak} ${first.result === "WIN" ? "Wins" : "Losses"}` : "—", tenOfTenHits: perfect.get(mode) ?? 0, factorAccuracy: [...factors.get(mode)!.entries()].map(([name, b]) => ({ factor: name, hits: b.wins, totalBets: b.total, hitRate: pct(b.wins, b.total) })), trends, rows };
+    const window = parseWindow(url);
+    const since = new Date(`${window.from}T00:00:00.000Z`);
+    const modeParam = (url.searchParams.get("mode") ?? "all").toUpperCase();
+    const limit = Math.min(
+      Math.max(Number(url.searchParams.get("limit")) || DEFAULT_LIMIT, 50),
+      MAX_LIMIT,
+    );
+    const filters = {
+      from: window.from,
+      to: window.to,
+      league: url.searchParams.get("league"),
+      result: url.searchParams.get("result"),
+      source: url.searchParams.get("source"),
+      search: url.searchParams.get("search"),
     };
-    const modes = MODES.filter((m) => !modeFilter || modeFilter === "all" || m === modeFilter).map(make);
-    return Response.json({ ok: true, days: daysParam, modes, generatedAt: new Date().toISOString() });
-  } catch (error) { console.error("Mode performance API error", error); return Response.json({ ok: false, error: "Unable to load ranking mode performance." }, { status: 500 }); }
+
+    const [perfRows, valueRows, slipRows, slipModes] = await Promise.all([
+      db.select().from(performanceLog).where(gte(performanceLog.matchDate, window.from)).limit(30000),
+      db.select().from(valueBetLog).where(gte(valueBetLog.matchDate, window.from)).limit(30000),
+      db.select().from(savedSlips).where(gte(savedSlips.createdAt, since)).limit(5000),
+      loadSlipModes(since),
+    ]);
+
+    // ── Normalise every product into a single bet stream ────────────────────
+    const bets: ModeBet[] = [];
+    const perfect = new Map<RankingModeKey, number>();
+    const matches = new Map<RankingModeKey, Set<string>>();
+
+    for (const row of perfRows) {
+      const rowBets = betsFromPerformanceRow(row);
+      if (rowBets.length === 0) continue;
+      const mode = rowBets[0].mode;
+      bets.push(...rowBets);
+      if (perfectMatch(row)) perfect.set(mode, (perfect.get(mode) ?? 0) + 1);
+      const set = matches.get(mode) ?? new Set<string>();
+      set.add(`${row.eventId}`);
+      matches.set(mode, set);
+    }
+    for (const row of valueRows) bets.push(betFromValueBetRow(row));
+    for (const row of slipRows) {
+      const bet = betFromSlipRow({ ...row, rankingMode: slipModes.get(row.id) ?? null });
+      if (bet) bets.push(bet);
+    }
+
+    const filtered = applyFilters(bets, filters);
+    const now = new Date();
+    const reports = RANKING_MODES.map((mode) =>
+      buildModeReport(
+        mode,
+        filtered.filter((b) => b.mode === mode),
+        {
+          tenOfTenHits: perfect.get(mode) ?? 0,
+          matchesTracked: matches.get(mode)?.size ?? 0,
+          now,
+        },
+      ),
+    );
+
+    const comparison = buildComparison(reports);
+    const selected = RANKING_MODES.includes(modeParam as RankingModeKey)
+      ? reports.filter((r) => r.mode === modeParam)
+      : reports;
+
+    // Trim the raw bet log (charts/aggregates already used the full stream).
+    const modes = selected.map((report) => ({
+      ...report,
+      betsTotal: report.bets.length,
+      betsTruncated: report.bets.length > limit,
+      bets: report.bets.slice(0, limit),
+    }));
+
+    return Response.json({
+      ok: true,
+      generatedAt: now.toISOString(),
+      window: { days: window.days, from: window.from, to: window.to },
+      filters: {
+        mode: modeParam,
+        league: filters.league ?? "",
+        result: filters.result ?? "",
+        source: filters.source ?? "",
+        search: filters.search ?? "",
+      },
+      totals: {
+        performanceRows: perfRows.length,
+        valueBetRows: valueRows.length,
+        slipRows: slipRows.length,
+        bets: filtered.length,
+      },
+      comparison,
+      modes,
+    });
+  } catch (error) {
+    console.error("Ranking mode performance API error", error);
+    return Response.json(
+      { ok: false, error: "Unable to load ranking mode performance." },
+      { status: 500 },
+    );
+  }
 }

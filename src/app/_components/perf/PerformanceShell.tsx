@@ -10,6 +10,7 @@ const NAV = [
   { href: "/performance", label: "Leagues", short: "Leagues" },
   { href: "/performance/value-bets", label: "Value Bets", short: "Value Bets" },
   { href: "/performance/accumulators", label: "Accumulators", short: "Accas" },
+  { href: "/performance/modes", label: "Ranking Modes", short: "Modes" },
 ] as const;
 
 export function PerformanceShell({
