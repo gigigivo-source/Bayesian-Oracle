@@ -7,10 +7,10 @@ import { cn } from "./ui";
 import { NAV_PILL, NAV_PILL_OFF, NAV_PILL_ON_VIOLET, OUTLINE_CYAN } from "../design";
 
 const NAV = [
-  { href: "/performance", label: "Leagues", short: "Leagues" },
-  { href: "/performance/value-bets", label: "Value Bets", short: "Value Bets" },
-  { href: "/performance/accumulators", label: "Accumulators", short: "Accas" },
-  { href: "/performance/modes", label: "Ranking Modes", short: "Modes" },
+  { href: "/performance", label: "Ranking Modes", short: "Modes", match: "modes" as const },
+  { href: "/performance/leagues", label: "Leagues", short: "Leagues", match: "leagues" as const },
+  { href: "/performance/value-bets", label: "Value Bets", short: "Value Bets", match: "exact" as const },
+  { href: "/performance/accumulators", label: "Accumulators", short: "Accas", match: "exact" as const },
 ] as const;
 
 export function PerformanceShell({
@@ -45,9 +45,12 @@ export function PerformanceShell({
               <nav className="flex items-center gap-2 rounded-full border border-slate-700 bg-slate-800 p-1.5 shadow-inner shadow-slate-950/40 ">
                 {NAV.map((n) => {
                   const active =
-                    n.href === "/performance"
-                      ? pathname === "/performance"
-                      : pathname === n.href;
+                    n.match === "modes"
+                      ? pathname === "/performance" || pathname === "/performance/modes"
+                      : n.match === "leagues"
+                        ? pathname.startsWith("/performance/leagues") ||
+                          pathname.startsWith("/performance/league/")
+                        : pathname === n.href;
                   return (
                     <Link
                       key={n.href}
