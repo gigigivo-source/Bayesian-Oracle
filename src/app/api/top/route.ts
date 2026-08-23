@@ -1,5 +1,8 @@
 import { fetchScoreboard, type FixtureLite } from "@/lib/espn";
-import { compareLeaguePriority, leagueTier } from "@/lib/leaguePriority";
+import {
+  compareLeagueBlockPriority,
+  compareLeaguePriority,
+} from "@/lib/leaguePriority";
 
 export const dynamic = "force-dynamic";
 
@@ -256,8 +259,7 @@ async function buildTopFeed(): Promise<TopPayload> {
   // within the same tier.
   const activityScore = (r: LeagueBlock) => r.upcoming.length * 2 + r.results.length;
   const byLeaguePriority = (a: LeagueBlock, b: LeagueBlock) =>
-    leagueTier({ leagueSlug: a.slug }) - leagueTier({ leagueSlug: b.slug }) ||
-    activityScore(b) - activityScore(a);
+    compareLeagueBlockPriority(a, b) || activityScore(b) - activityScore(a);
 
   return {
     featured:  [...results].sort(byLeaguePriority),

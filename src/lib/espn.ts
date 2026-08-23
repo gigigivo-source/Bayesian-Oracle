@@ -4,8 +4,11 @@ import { resilientJson } from "./httpClient";
 
 const BASE = "https://site.api.espn.com/apis/site/v2/sports/soccer";
 
-async function espnFetch<T>(url: string): Promise<T | null> {
-  return resilientJson<T>(url, { revalidate: 60 });
+async function espnFetch<T>(url: string, cacheTtlMs = 60_000): Promise<T | null> {
+  return resilientJson<T>(url, {
+    revalidate: Math.max(1, Math.ceil(cacheTtlMs / 1000)),
+    cacheTtlMs,
+  });
 }
 
 // ─── Core types ───────────────────────────────────────────────────────────────
@@ -61,11 +64,14 @@ interface EspnEvent {
   id:           string;
   date:         string;
   name:         string;
-  status?:      {
-    type?:         { state?: string; detail?: string; shortDetail?: string };
-    displayClock?: string;
-  };
+  season?:      { slug?: string };
+  status?:      EspnStatus;
   competitions?: EspnCompetition[];
+}
+
+interface EspnStatus {
+  type?:         { state?: string; detail?: string; shortDetail?: string };
+  displayClock?: string;
 }
 
 interface EspnCompetition {
@@ -73,6 +79,9 @@ interface EspnCompetition {
   neutralSite?: boolean;
   competitors?: EspnCompetitor[];
   odds?:        EspnOdds[];
+  status?:      EspnStatus;
+  /** Competition display name supplied per event by the `soccer/all` feed. */
+  altGameNote?: string;
 }
 
 interface EspnCompetitor {
@@ -131,6 +140,16 @@ function normalizeOdds(o: EspnOdds): OddsInfo {
   };
 }
 
+function seasonCompetitionName(seasonSlug: string | undefined): string {
+  if (!seasonSlug) return "Other Competition";
+  return seasonSlug
+    .replace(/^\d{4}(?:-\d{2,4})?-/, "")
+    .split("-")
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(" ") || "Other Competition";
+}
+
 function normalizeEvent(ev: EspnEvent, slug: string, leagueName: string): FixtureLite | null {
   const comp = ev.competitions?.[0];
   if (!comp?.competitors || comp.competitors.length < 2) return null;
@@ -143,15 +162,25 @@ function normalizeEvent(ev: EspnEvent, slug: string, leagueName: string): Fixtur
   const venue       = comp.venue?.fullName
     ? `${comp.venue.fullName}${venueCity ? `, ${venueCity}` : ""}`
     : null;
+  // The global scoreboard has no top-level league name. It supplies the real
+  // competition name on each event instead, while the special `all` slug
+  // remains valid for ESPN summary/boxscore requests for that event.
+  const eventLeagueName = slug === "all"
+    ? comp.altGameNote?.trim() || seasonCompetitionName(ev.season?.slug)
+    : leagueName;
+  // Some global-scoreboard payloads only put the current status on the first
+  // competition. Prefer the event status, but use that competition status as
+  // a fallback so in-play scores are never normalised as pre-match.
+  const status = ev.status ?? comp.status;
 
   return {
     id:          ev.id,
     leagueSlug:  slug,
-    leagueName,
+    leagueName:  eventLeagueName,
     date:        ev.date,
-    state:       (ev.status?.type?.state as FixtureLite["state"]) ?? "pre",
-    statusDetail: ev.status?.type?.shortDetail ?? ev.status?.type?.detail ?? "",
-    clock:       ev.status?.displayClock,
+    state:       (status?.type?.state as FixtureLite["state"]) ?? "pre",
+    statusDetail: status?.type?.shortDetail ?? status?.type?.detail ?? "",
+    clock:       status?.displayClock,
     venue,
     neutralSite: comp.neutralSite ?? false,
     home:        normalizeTeam(home),
@@ -161,6 +190,39 @@ function normalizeEvent(ev: EspnEvent, slug: string, leagueName: string): Fixtur
 }
 
 // ─── Public: scoreboard ───────────────────────────────────────────────────────
+
+function normalizeScoreboard(
+  data: EspnScoreboard,
+  slug: string,
+  fallbackLeagueName: string,
+): FixtureLite[] {
+  const name = data.leagues?.[0]?.name ?? fallbackLeagueName;
+  const seen = new Set<string>();
+  return (data.events ?? [])
+    .map((event) => normalizeEvent(event, slug, name))
+    .filter((fixture): fixture is FixtureLite => {
+      if (!fixture || seen.has(fixture.id)) return false;
+      seen.add(fixture.id);
+      return true;
+    });
+}
+
+/**
+ * Fetch ESPN's global soccer scoreboard in one request. Unlike the curated
+ * home feed, this endpoint contains every competition ESPN is covering on the
+ * requested day, so the Live tab cannot silently omit a match just because its
+ * league is absent from one of our local lists.
+ *
+ * `null` means the upstream feed was unavailable; an empty array is a valid
+ * successful scoreboard with no events. The shorter internal cache keeps live
+ * clocks and scores fresh without restoring the old 70-request polling fanout.
+ */
+export async function fetchAllScoreboard(dates: string): Promise<FixtureLite[] | null> {
+  const url = `${BASE}/all/scoreboard?dates=${dates}&limit=1000`;
+  const data = await espnFetch<EspnScoreboard>(url, 12_000);
+  if (!data?.events) return null;
+  return normalizeScoreboard(data, "all", "Other Competition");
+}
 
 /**
  * Fetch fixtures for a league slug.
@@ -186,21 +248,12 @@ export async function fetchScoreboard(
     dates = `${fmt(yesterday)}-${fmt(tomorrow)}`;
   }
 
+  if (slug === "all") return (await fetchAllScoreboard(dates)) ?? [];
+
   const url  = `${BASE}/${slug}/scoreboard?dates=${dates}&limit=50`;
   const data = await espnFetch<EspnScoreboard>(url);
   if (!data?.events) return [];
-  const name = data.leagues?.[0]?.name ?? leagueName;
-
-  // Deduplicate by event ID (range queries can return the same event twice)
-  const seen = new Set<string>();
-  return data.events
-    .map((e) => normalizeEvent(e, slug, name))
-    .filter((x): x is FixtureLite => {
-      if (!x) return false;
-      if (seen.has(x.id)) return false;
-      seen.add(x.id);
-      return true;
-    });
+  return normalizeScoreboard(data, slug, leagueName);
 }
 
 // ─── Match summary ────────────────────────────────────────────────────────────
