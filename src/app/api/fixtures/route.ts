@@ -21,17 +21,21 @@ export async function GET(req: Request) {
   const from7 = new Date(now); from7.setDate(now.getDate() - 7);
   const to60  = new Date(now); to60.setDate(now.getDate() + 60);  // 60-day lookahead
 
-  // Fetch all windows in parallel for maximum coverage
-  const [current, recent, ahead] = await Promise.all([
-    fetchScoreboard(league, dates),                               // provided dates or 3-day default
-    fetchScoreboard(league, `${fmt(from7)}-${fmt(now)}`),         // last 7 days (results)
-    fetchScoreboard(league, `${fmt(now)}-${fmt(to60)}`),          // next 60 days (upcoming)
-  ]);
+  // A single -7d → +60d range is a superset of the three overlapping windows
+  // this route used to request (recent results, the 3-day default and the
+  // 60-day lookahead), so one upstream call replaces three. An explicit
+  // ?dates= is still honoured and fetched alongside it.
+  const windows = [`${fmt(from7)}-${fmt(to60)}`];
+  if (dates) windows.push(dates);
+
+  const pages = await Promise.all(
+    windows.map((w) => fetchScoreboard(league, w).catch(() => [] as FixtureLite[])),
+  );
 
   // Merge and deduplicate by fixture ID
   const seen = new Set<string>();
   const all: FixtureLite[] = [];
-  for (const fx of [...current, ...recent, ...ahead]) {
+  for (const fx of pages.flat()) {
     if (!seen.has(fx.id)) { seen.add(fx.id); all.push(fx); }
   }
 
@@ -64,5 +68,9 @@ export async function GET(req: Request) {
     results:       finished,
     upcomingCount: allUpcoming.length,
     resultsCount:  finished.length,
+  }, {
+    headers: {
+      "Cache-Control": "public, max-age=0, s-maxage=60, stale-while-revalidate=300",
+    },
   });
 }

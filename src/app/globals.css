@@ -29,3 +29,24 @@
 
 /* Smooth page transitions */
 main { transition: opacity 0.15s ease; }
+
+/* Background slideshow Ken Burns zoom.
+   Scoped to the active slide only — this used to be an inline <style> with an
+   unscoped `[aria-hidden] > div > img` selector, which animated every image
+   inside any aria-hidden container in the app, forever. */
+@keyframes kenburns {
+  0%   { transform: scale(1) translate(0, 0); }
+  50%  { transform: scale(1.08) translate(-1%, -1%); }
+  100% { transform: scale(1) translate(0, 0); }
+}
+.slideshow-kenburns {
+  animation: kenburns 20s ease-in-out infinite;
+  will-change: transform;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .slideshow-kenburns,
+  .top-ambient-glow {
+    animation: none;
+  }
+}

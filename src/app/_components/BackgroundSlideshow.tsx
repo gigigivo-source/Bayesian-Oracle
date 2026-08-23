@@ -33,71 +33,85 @@ const SLIDES = [
   { url: "https://images.pexels.com/photos/34691108/pexels-photo-34691108.jpeg?auto=compress&cs=tinysrgb&fit=crop&h=1080&w=1920" },
 ];
 
+const SLIDE_MS = 5000;
+
 export function BackgroundSlideshow() {
   const [current, setCurrent] = useState(0);
-  // Pre-load the first two slides; further slides are marked as the rotation advances.
-  const [loaded, setLoaded] = useState<Set<number>>(() => new Set([0, 1]));
+  const [previous, setPrevious] = useState<number | null>(null);
   // Slides whose image failed to load (e.g. missing file) are skipped in the rotation.
   const [failed, setFailed] = useState<Set<number>>(() => new Set());
 
   useEffect(() => {
+    // Respect the OS "reduce motion" setting — and don't burn CPU animating a
+    // background nobody asked for.
+    if (typeof window !== "undefined" &&
+        window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
+      return;
+    }
+
     const timer = setInterval(() => {
+      // A hidden tab still runs timers in some browsers; skip the work entirely.
+      if (typeof document !== "undefined" && document.hidden) return;
+
       setCurrent((prev) => {
         // Advance to the next slide that hasn't failed to load
         let next = (prev + 1) % SLIDES.length;
         for (let hops = 0; hops < SLIDES.length && failed.has(next); hops++) {
           next = (next + 1) % SLIDES.length;
         }
-        setLoaded((s) => {
-          const ns = new Set(s);
-          ns.add(next);
-          ns.add((next + 1) % SLIDES.length);
-          return ns;
-        });
+        if (next === prev) return prev;
+        setPrevious(prev);
         return next;
       });
-    }, 5000);
+    }, SLIDE_MS);
     return () => clearInterval(timer);
   }, [failed]);
 
-  return (
-    <div className="fixed inset-0 z-0 overflow-hidden" aria-hidden>
-      {SLIDES.map((s, i) => (
-        <div
-          key={i}
-          className="absolute inset-0 transition-opacity duration-[2000ms] ease-in-out"
-          style={{ opacity: current === i ? 1 : 0 }}
-        >
-          {loaded.has(i) && !failed.has(i) && (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
-              src={s.url}
-              alt="Football"
-              className="h-full w-full object-cover brightness-[0.35]"
-              loading={i < 2 ? "eager" : "lazy"}
-              onError={() => {
-                setFailed((f) => {
-                  const nf = new Set(f);
-                  nf.add(i);
-                  return nf;
-                });
-              }}
-            />
-          )}
-        </div>
-      ))}
+  // Only the outgoing, current and next slides are ever in the DOM. The old
+  // implementation kept every slide it had visited mounted, so after a few
+  // minutes ~25 full-HD images were decoded, layered and Ken Burns-animated
+  // simultaneously — which pegged the compositor and made the whole UI janky.
+  const nextIndex = (current + 1) % SLIDES.length;
+  const window_: number[] = [];
+  for (const i of [previous, current, nextIndex]) {
+    if (i !== null && i !== undefined && !failed.has(i) && !window_.includes(i)) {
+      window_.push(i);
+    }
+  }
 
-      {/* Ken Burns zoom */}
-      <style>{`
-        @keyframes kenburns {
-          0% { transform: scale(1) translate(0, 0); }
-          50% { transform: scale(1.08) translate(-1%, -1%); }
-          100% { transform: scale(1) translate(0, 0); }
-        }
-        [aria-hidden] > div > img {
-          animation: kenburns 20s ease-in-out infinite;
-        }
-      `}</style>
+  const markFailed = (i: number) =>
+    setFailed((f) => {
+      if (f.has(i)) return f;
+      const nf = new Set(f);
+      nf.add(i);
+      return nf;
+    });
+
+  return (
+    <div className="slideshow-root fixed inset-0 z-0 overflow-hidden" aria-hidden>
+      {window_.map((i) => {
+        const isCurrent = i === current;
+        return (
+          <div
+            key={i}
+            className="absolute inset-0 transition-opacity duration-[2000ms] ease-in-out"
+            style={{ opacity: isCurrent ? 1 : 0 }}
+          >
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={SLIDES[i].url}
+              alt=""
+              // Only the visible slide gets the Ken Burns animation; the
+              // preloaded neighbour is decoded but never animated.
+              className={`h-full w-full object-cover brightness-[0.35]${isCurrent ? " slideshow-kenburns" : ""}`}
+              loading={isCurrent ? "eager" : "lazy"}
+              decoding="async"
+              fetchPriority={isCurrent ? "high" : "low"}
+              onError={() => markFailed(i)}
+            />
+          </div>
+        );
+      })}
     </div>
   );
 }
