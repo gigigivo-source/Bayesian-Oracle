@@ -1,33 +1,415 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+// ĞIGI GIVØ — Ranking Mode Performance Dashboard.
+//
+// One page, four modes. The chips at the top (Classic A, 12-Factor B, Hybrid C,
+// Consensus D) filter the ENTIRE page — summary cards, factor accuracy, trends,
+// breakdowns and the bet-by-bet log all show only the selected mode. The
+// side-by-side comparison stays visible so the four modes can be judged
+// against each other at a glance.
+
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { PerformanceShell } from "@/app/_components/perf/PerformanceShell";
-import { PnLTrendChart } from "@/app/_components/perf/charts";
-import { ErrorState, LoadingState, ResultBadge, SortHeader, cn, type SortDir } from "@/app/_components/perf/ui";
+import { Card, ErrorState, Section, cn } from "@/app/_components/perf/ui";
+import {
+  BetsTable,
+  BreakdownTable,
+  DashboardSkeleton,
+  FactorAccuracyPanel,
+  MODE_STYLES,
+  ModeChips,
+  ModeComparison,
+  SummaryCards,
+  TrendPanels,
+  betsToCsv,
+  money,
+  num,
+  pctNum,
+  type ModesApiResponse,
+} from "@/app/_components/perf/modes";
+import type { RankingModeKey } from "@/lib/performance/modeAnalytics";
 
-const modeNames: Record<string, string> = { A: "Rank A · Classic", B: "Rank B · 12-Factor", C: "Rank C · Hybrid", D: "Rank D · Consensus" };
-type Row = { date: string; match: string; selection: string; market: string; odds: number | null; result: "WIN" | "LOSS" | "PUSH" | "VOID" | "PENDING"; pnl: number | null; rankingMode: string; league: string };
-type Mode = { mode: string; label: string; totalBets: number; wins: number; losses: number; pushes: number; voids: number; pending: number; hitRate: number; totalPnl: number; totalStake: number; roi: number; averageOdds: number | null; averageEv: number | null; currentStreak: string; tenOfTenHits: number; factorAccuracy: { factor: string; hits: number; totalBets: number; hitRate: number }[]; trends: { date: string; pnl: number; dailyHitRate: number }[]; rows: Row[] };
-type Api = { modes: Mode[] };
-const fmt = (n: number | null, suffix = "") => n === null ? "—" : `${n.toFixed(1)}${suffix}`;
-const cash = (n: number) => `${n >= 0 ? "+" : "-"}$${Math.abs(n).toFixed(2)}`;
+const RANGES = [
+  { key: "7", label: "Last 7 days" },
+  { key: "30", label: "Last 30 days" },
+  { key: "90", label: "Last 90 days" },
+  { key: "all", label: "All time" },
+  { key: "custom", label: "Custom" },
+] as const;
+
+const RESULTS = ["WIN", "LOSS", "PUSH", "VOID", "PENDING"] as const;
+const SOURCES = [
+  { key: "pick", label: "Ranked picks" },
+  { key: "valueBet", label: "Value bets" },
+  { key: "slip", label: "Accumulators" },
+] as const;
 
 export default function RankingModePerformancePage() {
-  const [data, setData] = useState<Api | null>(null), [loading, setLoading] = useState(true), [error, setError] = useState<string | null>(null);
-  const [days, setDays] = useState("30"), [selected, setSelected] = useState("A"), [league, setLeague] = useState(""), [result, setResult] = useState(""), [sort, setSort] = useState<keyof Row>("date"), [dir, setDir] = useState<SortDir>("desc");
-  const load = useCallback(() => { setLoading(true); setError(null); const q = new URLSearchParams({ days, league, result }); fetch(`/api/performance/modes?${q}`).then(r => r.ok ? r.json() : Promise.reject(new Error(`Request failed (${r.status})`))).then(setData).catch(e => setError(e.message)).finally(() => setLoading(false)); }, [days, league, result]);
-  useEffect(() => { const timer = window.setTimeout(load, 0); return () => window.clearTimeout(timer); }, [load]);
-  const active = data?.modes.find(m => m.mode === selected) ?? data?.modes[0];
-  const rows = useMemo(() => !active ? [] : [...active.rows].sort((a, b) => { const x = a[sort] ?? "", y = b[sort] ?? ""; const c = typeof x === "number" && typeof y === "number" ? x - y : String(x).localeCompare(String(y)); return dir === "asc" ? c : -c; }), [active, sort, dir]);
-  const toggle = (key: keyof Row) => { if (sort === key) setDir(d => d === "asc" ? "desc" : "asc"); else { setSort(key); setDir("desc"); } };
-  const exportCsv = () => { if (!active) return; const head = ["Date", "Match", "Selection", "Market", "Odds", "Result", "Profit/Loss", "Ranking Mode", "League"]; const esc = (v: unknown) => `"${String(v ?? "").replaceAll('"', '""')}"`; const csv = [head, ...active.rows.map(r => [r.date,r.match,r.selection,r.market,r.odds,r.result,r.pnl,modeNames[r.rankingMode],r.league])].map(r => r.map(esc).join(",")).join("\n"); const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" })); a.download = `performance-${active.mode}-${days}d.csv`; a.click(); URL.revokeObjectURL(a.href); };
-  return <PerformanceShell title="Ranking Mode Performance" subtitle="Auditable, real-data performance for Classic, 12-Factor, Hybrid and Consensus rankings.">
-    <div className="mb-5 flex flex-wrap items-center gap-2"><Link className="text-xs text-amber-300 hover:underline" href="/performance">← League performance</Link><span className="text-slate-600">/</span><span className="text-xs text-slate-400">Ranking-mode analysis</span></div>
-    <div className="mb-5 flex flex-wrap gap-3 rounded-xl border border-slate-700 bg-slate-900 p-3"><div className="flex gap-1">{["7","30","90","all"].map(d => <button key={d} onClick={() => setDays(d)} className={cn("rounded px-3 py-1.5 font-mono text-xs", days === d ? "bg-amber-400 text-slate-950" : "bg-slate-800 text-slate-300")}>{d === "all" ? "All time" : `${d}d`}</button>)}</div><input value={league} onChange={e => setLeague(e.target.value)} placeholder="Filter league / competition" className="min-w-48 flex-1 rounded border border-slate-700 bg-slate-800 px-3 py-1.5 text-sm text-white"/><select value={result} onChange={e => setResult(e.target.value)} className="rounded border border-slate-700 bg-slate-800 px-2 text-sm text-white"><option value="">All results</option>{["WIN","LOSS","PUSH","VOID","PENDING"].map(x => <option key={x}>{x}</option>)}</select><button onClick={exportCsv} disabled={!active} className="rounded bg-emerald-500/15 px-3 py-1.5 text-xs font-bold text-emerald-300 disabled:opacity-40">Export CSV</button></div>
-    {loading && !data ? <LoadingState label="Computing mode performance from performance logs…" /> : error && !data ? <ErrorState message={error} onRetry={load} /> : <>{loading && <div className="mb-3 text-xs text-amber-300">Refreshing performance data…</div>}<div className="mb-5 grid grid-cols-2 gap-3 lg:grid-cols-4">{data?.modes.map(m => <button key={m.mode} onClick={() => setSelected(m.mode)} className={cn("rounded-xl border p-4 text-left", selected === m.mode ? "border-amber-400 bg-amber-400/10" : "border-slate-700 bg-slate-900")}><div className="text-xs text-slate-400">{m.label}</div><div className="mt-2 font-mono text-2xl font-bold text-white">{fmt(m.hitRate,"%")}</div><div className="mt-1 text-xs text-slate-400">{m.totalBets} bets · ROI {fmt(m.roi,"%")}</div></button>)}</div><ComparisonTable modes={data?.modes ?? []} />
-    {active ? <ModeDetail mode={active} rows={rows} sort={sort} dir={dir} toggle={toggle} /> : <div className="rounded border border-slate-700 p-8 text-center text-slate-400">No ranking mode data matches these filters.</div>}</>}</PerformanceShell>;
+  return (
+    <Suspense
+      fallback={
+        <PerformanceShell title="Ranking Mode Performance" subtitle="Loading…">
+          <DashboardSkeleton />
+        </PerformanceShell>
+      }
+    >
+      <ModesDashboard />
+    </Suspense>
+  );
 }
-function ModeDetail({ mode, rows, sort, dir, toggle }: { mode: Mode; rows: Row[]; sort: keyof Row; dir: SortDir; toggle: (k: keyof Row) => void }) { const best = (key: keyof Pick<Mode,"hitRate"|"roi"|"totalPnl"|"tenOfTenHits"|"averageOdds">) => false; void best; const stats = [["Total Bets",String(mode.totalBets),""],["Wins / Losses",`${mode.wins} / ${mode.losses}`,`${fmt(mode.wins / Math.max(mode.totalBets,1)*100,"%")} / ${fmt(mode.losses / Math.max(mode.totalBets,1)*100,"%")}`],["Pushes / Voids",`${mode.pushes} / ${mode.voids}`,`${fmt(mode.pushes / Math.max(mode.totalBets,1)*100,"%")} / ${fmt(mode.voids / Math.max(mode.totalBets,1)*100,"%")}`],["Hit Rate",fmt(mode.hitRate,"%"),"wins ÷ wins + losses"],["Total P&L",cash(mode.totalPnl),`stake ${cash(mode.totalStake)}`],["ROI",fmt(mode.roi,"%"),"P&L ÷ total stake"],["Avg Odds",fmt(mode.averageOdds),"stake-weighted"],["Average EV",fmt(mode.averageEv === null ? null : mode.averageEv * 100,"%"),"expected value"],["Current Streak",mode.currentStreak,"settled bets"],["10/10 Hits",String(mode.tenOfTenHits),"all Top 10 won"]]; return <div className="space-y-5"><h2 className="text-xl font-bold text-white">{mode.label}</h2><div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">{stats.map(([l,v,s]) => <div key={l} className="rounded-xl border border-slate-700 bg-slate-900 p-3"><div className="text-[10px] uppercase tracking-wider text-slate-500">{l}</div><div className={cn("mt-1 font-mono text-lg font-bold", l === "Total P&L" ? mode.totalPnl >= 0 ? "text-emerald-300" : "text-rose-300" : "text-white")}>{v}</div><div className="mt-1 text-[10px] text-slate-500">{s}</div></div>)}</div><div className="grid gap-4 xl:grid-cols-2"><Panel title="Cumulative P&L"><PnLTrendChart points={mode.trends.map(x => ({ label: x.date, value: x.pnl, delta: 0 }))}/></Panel><Panel title="Daily Hit Rate"><div className="space-y-2">{mode.trends.slice(-14).map(x => <div key={x.date} className="flex items-center gap-2 text-xs"><span className="w-20 font-mono text-slate-500">{x.date}</span><div className="h-2 flex-1 overflow-hidden rounded bg-slate-700"><div className="h-full bg-amber-400" style={{width:`${x.dailyHitRate}%`}}/></div><span className="w-12 text-right font-mono text-slate-300">{fmt(x.dailyHitRate,"%")}</span></div>)}{!mode.trends.length && <Empty />}</div></Panel><Panel title="Accuracy Breakdown by Factor"><div className="overflow-auto"><table className="w-full text-left text-xs"><thead className="text-slate-500"><tr><th>Factor</th><th>Hit rate</th><th>Hits</th><th>Total bets</th></tr></thead><tbody>{mode.factorAccuracy.map(f=><tr key={f.factor} className="border-t border-slate-700"><td className="py-2 text-slate-200">{f.factor}</td><td className="font-mono text-emerald-300">{fmt(f.hitRate,"%")}</td><td>{f.hits}</td><td>{f.totalBets}</td></tr>)}{!mode.factorAccuracy.length&&<tr><td colSpan={4}><Empty/></td></tr>}</tbody></table></div></Panel><Comparison /></div><Panel title="Detailed Bet Log" subtitle={`${rows.length} records · click headers to sort`}><div className="overflow-x-auto"><table className="w-full min-w-[850px] text-left text-xs"><thead className="sticky top-0 bg-slate-900 text-slate-400"><tr>{(["date","match","selection","market","odds","result","pnl","rankingMode"] as (keyof Row)[]).map(k=><SortHeader key={k} label={k === "pnl" ? "Profit / Loss" : k === "rankingMode" ? "Ranking Mode" : k[0].toUpperCase()+k.slice(1)} active={sort===k} dir={dir} onClick={()=>toggle(k)}/>)}</tr></thead><tbody>{rows.map((r,i)=><tr key={`${r.date}-${i}`} className={cn("border-t border-slate-800",r.result==="WIN"?"bg-emerald-500/10":r.result==="LOSS"?"bg-rose-500/10":r.result==="PENDING"?"bg-amber-500/10":"bg-slate-500/10")}><td className="p-2 font-mono">{r.date}</td><td className="p-2 text-white">{r.match}</td><td className="p-2">{r.selection}</td><td className="p-2">{r.market}</td><td className="p-2 font-mono">{r.odds?.toFixed(2)??"—"}</td><td className="p-2"><ResultBadge result={r.result === "WIN" ? "win" : r.result === "LOSS" ? "loss" : r.result.toLowerCase() as "push" | "void" | "pending"}/></td><td className="p-2 font-mono">{r.pnl===null?"—":cash(r.pnl)}</td><td className="p-2">{modeNames[r.rankingMode]}</td></tr>)}{!rows.length&&<tr><td colSpan={8}><Empty/></td></tr>}</tbody></table></div></Panel></div> }
-function ComparisonTable({ modes }: { modes: Mode[] }) { const high = (key: "hitRate" | "roi" | "totalPnl" | "tenOfTenHits" | "averageOdds") => Math.max(...modes.map(m => m[key] ?? -Infinity)); const cells: Array<[string, "hitRate" | "roi" | "totalPnl" | "tenOfTenHits" | "averageOdds", (m: Mode) => string]> = [["Hit Rate","hitRate",m=>fmt(m.hitRate,"%")],["ROI","roi",m=>fmt(m.roi,"%")],["Total P&L","totalPnl",m=>cash(m.totalPnl)],["10/10 Hits","tenOfTenHits",m=>String(m.tenOfTenHits)],["Avg Odds","averageOdds",m=>fmt(m.averageOdds)]]; return <section className="mb-5 overflow-x-auto rounded-xl border border-slate-700 bg-slate-900 p-4"><h3 className="mb-3 font-bold text-white">Mode Comparison <span className="text-xs font-normal text-slate-500">best available metric highlighted</span></h3><table className="w-full min-w-[650px] text-center text-xs"><thead className="text-slate-500"><tr><th className="text-left">Metric</th>{modes.map(m=><th key={m.mode}>{m.mode}</th>)}</tr></thead><tbody>{cells.map(([label,key,format])=><tr key={key} className="border-t border-slate-700"><td className="py-2 text-left text-slate-300">{label}</td>{modes.map(m=><td key={m.mode} className={cn("font-mono", m[key] !== null && m[key] === high(key) ? "bg-amber-400/15 font-bold text-amber-200" : "text-slate-300")}>{m[key] !== null && m[key] === high(key) ? "★ " : ""}{format(m)}</td>)}</tr>)}</tbody></table></section> }
-function Panel({title,subtitle,children}:{title:string;subtitle?:string;children:React.ReactNode}) {return <section className="rounded-xl border border-slate-700 bg-slate-900 p-4"><h3 className="font-bold text-white">{title}</h3>{subtitle&&<p className="mb-3 text-xs text-slate-500">{subtitle}</p>}<div className="mt-3">{children}</div></section>}; function Empty(){return <div className="p-5 text-center text-xs text-slate-500">No settled data is available for this view.</div>}; function Comparison(){return <Panel title="Mode Comparison"><p className="text-xs text-slate-500">Comparison cards above show every mode side-by-side. Metric leaders are highlighted when data is available.</p></Panel>}
+
+function ModesDashboard() {
+  const [data, setData] = useState<ModesApiResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const [mode, setMode] = useState<RankingModeKey>("A");
+  const [range, setRange] = useState<string>("30");
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  const [league, setLeague] = useState("");
+  const [result, setResult] = useState("");
+  const [source, setSource] = useState("");
+  const [search, setSearch] = useState("");
+
+  const query = useMemo(() => {
+    const params = new URLSearchParams();
+    if (range === "custom") {
+      if (from) params.set("from", from);
+      if (to) params.set("to", to);
+      if (!from) params.set("days", "90");
+    } else {
+      params.set("days", range);
+    }
+    if (league.trim()) params.set("league", league.trim());
+    if (result) params.set("result", result);
+    if (source) params.set("source", source);
+    if (search.trim()) params.set("search", search.trim());
+    return params.toString();
+  }, [range, from, to, league, result, source, search]);
+
+  const load = useCallback(
+    (q: string) => {
+      setLoading(true);
+      setError(null);
+      fetch(`/api/performance/modes?${q}`)
+        .then(async (res) => {
+          if (!res.ok) throw new Error(`Ranking mode API returned ${res.status}`);
+          const json = (await res.json()) as ModesApiResponse & { error?: string };
+          if (!json.ok) throw new Error(json.error ?? "The performance service returned an error.");
+          return json;
+        })
+        .then(setData)
+        .catch((e: unknown) =>
+          setError(e instanceof Error ? e.message : "Failed to load ranking mode performance"),
+        )
+        .finally(() => setLoading(false));
+    },
+    [],
+  );
+
+  // Debounced reload whenever a filter changes (typing in the league/search box
+  // must not fire a request per keystroke).
+  useEffect(() => {
+    const timer = window.setTimeout(() => load(query), 250);
+    return () => window.clearTimeout(timer);
+  }, [query, load]);
+
+  const active = data?.modes.find((m) => m.mode === mode) ?? data?.modes[0] ?? null;
+
+  const exportCsv = useCallback(() => {
+    if (!active) return;
+    const csv = betsToCsv(active.bets);
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `gigi-givo-performance-mode-${active.mode}-${data?.window.days ?? "30"}d.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [active, data]);
+
+  const resetFilters = useCallback(() => {
+    setRange("30");
+    setFrom("");
+    setTo("");
+    setLeague("");
+    setResult("");
+    setSource("");
+    setSearch("");
+  }, []);
+
+  return (
+    <PerformanceShell
+      title="Ranking Mode Performance"
+      subtitle="Full-detail, auditable track record for every ranking mode — Classic A, 12-Factor B, Hybrid C and Consensus D. Every number is a plain sum over the settled bets behind it."
+    >
+      {/* Breadcrumb */}
+      <div className="flex flex-wrap items-center gap-2 text-xs">
+        <Link className="cursor-pointer text-amber-300 hover:underline" href="/performance">
+          ← League performance
+        </Link>
+        <span className="text-slate-600">/</span>
+        <span className="text-slate-400">Ranking-mode analysis</span>
+        {data ? (
+          <span className="ml-auto font-mono text-[10px] text-slate-500">
+            {data.totals.performanceRows} match rows · {data.totals.valueBetRows} value bets ·{" "}
+            {data.totals.slipRows} slips · updated {new Date(data.generatedAt).toLocaleTimeString()}
+          </span>
+        ) : null}
+      </div>
+
+      {/* Filters */}
+      <div className="rounded-2xl border border-slate-700 bg-slate-900 p-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex flex-wrap gap-1">
+            {RANGES.map((r) => (
+              <button
+                key={r.key}
+                onClick={() => setRange(r.key)}
+                className={cn(
+                  "cursor-pointer rounded-full px-3 py-1.5 font-mono text-[11px] transition",
+                  range === r.key
+                    ? "bg-amber-400 font-bold text-slate-950"
+                    : "bg-slate-800 text-slate-400 hover:text-white",
+                )}
+              >
+                {r.label}
+              </button>
+            ))}
+          </div>
+          {range === "custom" ? (
+            <div className="flex items-center gap-2">
+              <input
+                type="date"
+                value={from}
+                onChange={(e) => setFrom(e.target.value)}
+                className="cursor-pointer rounded border border-slate-700 bg-slate-800 px-2 py-1.5 font-mono text-xs text-white"
+                aria-label="From date"
+              />
+              <span className="text-slate-500">→</span>
+              <input
+                type="date"
+                value={to}
+                onChange={(e) => setTo(e.target.value)}
+                className="cursor-pointer rounded border border-slate-700 bg-slate-800 px-2 py-1.5 font-mono text-xs text-white"
+                aria-label="To date"
+              />
+            </div>
+          ) : null}
+          <input
+            value={league}
+            onChange={(e) => setLeague(e.target.value)}
+            placeholder="League / competition"
+            className="min-w-[160px] flex-1 rounded border border-slate-700 bg-slate-800 px-3 py-1.5 text-sm text-white placeholder:text-slate-500"
+            aria-label="Filter by league"
+          />
+          <input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search match / market"
+            className="min-w-[160px] flex-1 rounded border border-slate-700 bg-slate-800 px-3 py-1.5 text-sm text-white placeholder:text-slate-500"
+            aria-label="Search matches and markets"
+          />
+          <select
+            value={result}
+            onChange={(e) => setResult(e.target.value)}
+            className="cursor-pointer rounded border border-slate-700 bg-slate-800 px-2 py-1.5 text-sm text-white"
+            aria-label="Filter by result"
+          >
+            <option value="">All results</option>
+            {RESULTS.map((r) => (
+              <option key={r} value={r}>
+                {r}
+              </option>
+            ))}
+          </select>
+          <select
+            value={source}
+            onChange={(e) => setSource(e.target.value)}
+            className="cursor-pointer rounded border border-slate-700 bg-slate-800 px-2 py-1.5 text-sm text-white"
+            aria-label="Filter by product"
+          >
+            <option value="">All products</option>
+            {SOURCES.map((s) => (
+              <option key={s.key} value={s.key}>
+                {s.label}
+              </option>
+            ))}
+          </select>
+          <button
+            onClick={resetFilters}
+            className="cursor-pointer rounded border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs text-slate-300 hover:text-white"
+          >
+            Reset
+          </button>
+          <button
+            onClick={exportCsv}
+            disabled={!active || active.bets.length === 0}
+            className="cursor-pointer rounded bg-emerald-500/15 px-3 py-1.5 text-xs font-bold text-emerald-300 transition hover:bg-emerald-500/25 disabled:opacity-40"
+          >
+            ⇩ Export CSV
+          </button>
+        </div>
+      </div>
+
+      {loading && !data ? (
+        <DashboardSkeleton />
+      ) : error && !data ? (
+        <ErrorState message={error} onRetry={() => load(query)} />
+      ) : data && active ? (
+        <>
+          {error ? (
+            <div className="flex flex-wrap items-center gap-3 rounded-xl border border-rose-500/30 bg-rose-500/5 px-4 py-2 text-xs text-rose-200">
+              <span>Last refresh failed: {error}</span>
+              <button
+                onClick={() => load(query)}
+                className="cursor-pointer rounded bg-rose-500/20 px-2 py-1 font-bold text-rose-100"
+              >
+                Retry
+              </button>
+            </div>
+          ) : null}
+          {loading ? (
+            <div className="font-mono text-[11px] text-amber-300">Refreshing performance data…</div>
+          ) : null}
+
+          {/* Mode chips — filter the whole page */}
+          <ModeChips comparison={data.comparison} selected={active.mode} onSelect={setMode} />
+
+          {/* Selected mode header */}
+          <div
+            className={cn(
+              "rounded-2xl border bg-slate-900 p-4",
+              MODE_STYLES[active.mode].border,
+              MODE_STYLES[active.mode].glow,
+            )}
+          >
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h3 className={cn("text-lg font-extrabold", MODE_STYLES[active.mode].text)}>
+                  {active.label}
+                </h3>
+                <p className="mt-0.5 max-w-2xl text-xs text-slate-400">{active.description}</p>
+              </div>
+              <div className="flex flex-wrap gap-4 font-mono text-[11px] text-slate-400">
+                <span>
+                  Window <span className="text-slate-200">{data.window.from}</span> →{" "}
+                  <span className="text-slate-200">{data.window.to ?? "today"}</span>
+                </span>
+                <span>
+                  Tracked <span className="text-slate-200">{active.summary.totalBets}</span> bets
+                </span>
+                <span>
+                  First seen <span className="text-slate-200">{active.summary.firstBetDate ?? "—"}</span>
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <Section
+            title="Summary"
+            subtitle={`Headline metrics for ${active.label} in the selected window`}
+          >
+            <SummaryCards summary={active.summary} mode={active.mode} />
+          </Section>
+
+          <Section
+            title="Mode Comparison"
+            subtitle="All four ranking modes side by side — ★ marks the best value in each metric"
+          >
+            <ModeComparison rows={data.comparison} selected={active.mode} onSelect={setMode} />
+          </Section>
+
+          <Section title="Trends" subtitle="Cumulative P&L, daily hit rate and daily P&L">
+            <TrendPanels windows={active.windows} />
+          </Section>
+
+          <div className="grid gap-6 xl:grid-cols-2">
+            <Section
+              title="Factor Accuracy"
+              subtitle="How each ranking factor performed when it was active in this mode"
+            >
+              <FactorAccuracyPanel factors={active.factorAccuracy} />
+            </Section>
+
+            <div className="space-y-6">
+              <Section title="Rank Tier" subtitle="Does the Top 1 really beat the Top 10?">
+                <BreakdownTable
+                  rows={active.rankBuckets}
+                  keyLabel="Tier"
+                  emptyLabel="No ranked picks in this window."
+                  limit={6}
+                />
+              </Section>
+              <Section title="Product" subtitle="Ranked picks vs value bets vs accumulators">
+                <BreakdownTable
+                  rows={active.sources}
+                  keyLabel="Product"
+                  emptyLabel="No tracked products in this window."
+                  limit={5}
+                />
+              </Section>
+            </div>
+          </div>
+
+          <div className="grid gap-6 xl:grid-cols-2">
+            <Section title="Markets" subtitle="Most-tracked markets for this mode">
+              <BreakdownTable rows={active.markets} keyLabel="Market" emptyLabel="No markets yet." />
+            </Section>
+            <Section title="Leagues" subtitle="Where this mode makes (or loses) its money">
+              <BreakdownTable rows={active.leagues} keyLabel="Competition" emptyLabel="No leagues yet." />
+            </Section>
+          </div>
+
+          <div className="grid gap-6 xl:grid-cols-2">
+            <Section title="Odds Bands" subtitle="Hit rate and ROI by price bracket">
+              <BreakdownTable rows={active.oddsBands} keyLabel="Odds" emptyLabel="No priced bets yet." limit={8} />
+            </Section>
+            <Section
+              title="Model Confidence Bands"
+              subtitle="Predicted probability vs what actually happened"
+            >
+              <BreakdownTable
+                rows={active.confidenceBands}
+                keyLabel="Model probability"
+                emptyLabel="No probability data yet."
+                limit={8}
+              />
+            </Section>
+          </div>
+
+          <Section
+            title="Detailed Performance"
+            subtitle={`${active.betsTotal} bet${active.betsTotal === 1 ? "" : "s"} · click a row arrow for the factor breakdown · sortable, paginated, exportable`}
+            right={
+              <div className="flex flex-wrap gap-3 font-mono text-[11px] text-slate-400">
+                <span>Hit {pctNum(active.summary.hitRate)}</span>
+                <span className={active.summary.totalPnl >= 0 ? "text-emerald-300" : "text-rose-300"}>
+                  P&L {money(active.summary.totalPnl)}
+                </span>
+                <span>Avg odds {num(active.summary.averageOdds)}</span>
+              </div>
+            }
+          >
+            <BetsTable bets={active.bets} truncated={active.betsTruncated} />
+          </Section>
+
+          <Card>
+            <p className="font-mono text-[10px] leading-relaxed text-slate-500">
+              Methodology · Hit rate = wins ÷ (wins + losses); pushes and voids are excluded from the
+              hit rate but shown in the counts. ROI = P&L ÷ total stake, so it is only defined for
+              staked products (value bets and accumulators). Average odds are stake-weighted where
+              stakes exist. 10/10 hits count matches where all ten ranked picks won. Calibration
+              compares realised hit rate against the model probability the engine published before
+              kick-off. No metric is smoothed, simulated or back-filled.
+            </p>
+          </Card>
+        </>
+      ) : (
+        <ErrorState message="No ranking mode data available." onRetry={() => load(query)} />
+      )}
+    </PerformanceShell>
+  );
+}
