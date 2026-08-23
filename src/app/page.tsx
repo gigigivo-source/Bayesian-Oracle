@@ -541,6 +541,7 @@ function Header({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
             <div className="px-3 py-2 mb-1 text-[10px] font-mono text-slate-500 uppercase tracking-widest">Tools & Analytics</div>
             <Link
               href="/performance/modes"
+              prefetch
               role="menuitem"
               onClick={() => setMenuOpen(false)}
               className={`${MENU_ITEM} block w-full px-4 py-3 text-left rounded-xl`}
