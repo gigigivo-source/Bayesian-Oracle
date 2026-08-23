@@ -273,7 +273,7 @@ async function persistAndEvaluate(
 }
 
 /**
- * Layer 1 + 2 + 3 bookmaker-odds enrichment. Shared across all three ranking
+ * Layer 1 + 2 + 3 bookmaker-odds enrichment. Shared across all four ranking
  * modes for a given fixture (the odds do not depend on which ranking engine
  * was used). Returns { bookOdds, multiBookOdds }.
  */

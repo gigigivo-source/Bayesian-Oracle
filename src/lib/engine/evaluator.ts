@@ -30,7 +30,7 @@ export function evaluateFinishedMatch(
     return (va >= 0 && vb >= 0) ? va + vb : -1;
   };
 
-  for (const m of res.markets) {
+  const settleMarket = (m: Market): void => {
     let outcome: "HIT" | "MISS" | "PENDING" = "PENDING";
     const n    = m.name;
     const sel  = m.selection;
@@ -124,6 +124,15 @@ export function evaluateFinishedMatch(
     }
 
     m.outcome = outcome;
+  };
+
+  // Evaluate every market object, including Rank D consensus clones in
+  // top10 / top5 / top3 / top1 that are not the same references as `markets`.
+  const seen = new Set<Market>();
+  for (const m of [...res.markets, ...res.top10, ...res.top5, ...res.top3, ...res.top1]) {
+    if (seen.has(m)) continue;
+    seen.add(m);
+    settleMarket(m);
   }
 
   // Tally Top-10 outcomes
