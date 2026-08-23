@@ -400,7 +400,10 @@ async function handlePost(req: Request): Promise<Response> {
   if (!fixture?.id || !fixture?.leagueSlug || !fixture?.home || !fixture?.away) {
     return Response.json({ error: "Missing fixture data." }, { status: 400 });
   }
-  if (!LEAGUE_MAP[fixture.leagueSlug]) {
+  // Fixtures discovered through ESPN's comprehensive global scoreboard carry
+  // the special `all` slug. ESPN supports it for summary/boxscore requests, so
+  // accept it even though it is not a browsable league in our local catalog.
+  if (fixture.leagueSlug !== "all" && !LEAGUE_MAP[fixture.leagueSlug]) {
     return Response.json({ error: "Unknown league." }, { status: 400 });
   }
 

@@ -3,6 +3,7 @@ import {
   leagueTier,
   compareLeaguePriority,
   compareFixturesByPriority,
+  compareLeagueBlockPriority,
   tierLabel,
   LOWEST_TIER,
 } from "./leaguePriority";
@@ -67,6 +68,38 @@ describe("compareLeaguePriority", () => {
     ];
     const sorted = [...fixtures].sort(compareLeaguePriority).map((f) => f.leagueSlug);
     expect(sorted).toEqual(["uefa.champions", "eng.1", "usa.1", "xyz.99"]);
+  });
+});
+
+describe("compareLeagueBlockPriority", () => {
+  it("orders Today blocks globally across featured and extra groups", () => {
+    const featured = [
+      { slug: "eng.1", label: "Premier League" },
+      { slug: "xyz.99", label: "Regional Cup" },
+    ];
+    const extra = [
+      { slug: "uefa.champions", label: "UEFA Champions League" },
+      { slug: "usa.1", label: "MLS" },
+    ];
+
+    expect([...featured, ...extra].sort(compareLeagueBlockPriority).map((b) => b.slug)).toEqual([
+      "uefa.champions",
+      "eng.1",
+      "usa.1",
+      "xyz.99",
+    ]);
+  });
+
+  it("uses a block label when a global-scoreboard slug is unavailable", () => {
+    const blocks = [
+      { slug: "all", label: "Regional Cup" },
+      { slug: "all", label: "UEFA Europa League" },
+    ];
+
+    expect([...blocks].sort(compareLeagueBlockPriority).map((b) => b.label)).toEqual([
+      "UEFA Europa League",
+      "Regional Cup",
+    ]);
   });
 });
 

@@ -170,6 +170,24 @@ export function compareLeaguePriority(
 }
 
 /**
+ * Comparator for the league blocks used by the home feed. Blocks carry their
+ * ESPN slug as `slug` rather than `leagueSlug`; `label` is also supplied as a
+ * fallback for fixtures discovered through ESPN's global scoreboard.
+ *
+ * Keeping this here means All Matches, Today and the API use the exact same
+ * T1 → T6 ordering instead of each view implementing a subtly different sort.
+ */
+export function compareLeagueBlockPriority(
+  a: { slug?: string | null; label?: string | null },
+  b: { slug?: string | null; label?: string | null },
+): number {
+  return compareLeaguePriority(
+    { leagueSlug: a.slug, leagueName: a.label },
+    { leagueSlug: b.slug, leagueName: b.label },
+  );
+}
+
+/**
  * Full fixture comparator: league priority first, then earliest date within
  * the same tier. `dateOf` extracts an ISO date string from each item.
  */

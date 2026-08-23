@@ -50,7 +50,7 @@ export async function GET(req: Request) {
   const league  = searchParams.get("league");
   const eventId = searchParams.get("event");
 
-  if (!league || !eventId || !LEAGUE_MAP[league]) {
+  if (!league || !eventId || (league !== "all" && !LEAGUE_MAP[league])) {
     return Response.json({ error: "Missing league or event." }, { status: 400 });
   }
 

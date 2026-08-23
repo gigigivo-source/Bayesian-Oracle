@@ -5,7 +5,11 @@ import dynamic from "next/dynamic";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { FixtureLite } from "@/lib/espn";
 import type { LeagueDef } from "@/lib/leagues";
-import { compareLeaguePriority, leagueTier } from "@/lib/leaguePriority";
+import {
+  compareFixturesByPriority,
+  compareLeagueBlockPriority,
+  compareLeaguePriority,
+} from "@/lib/leaguePriority";
 
 import { FixtureCard } from "./_components/ui";
 import { BackgroundSlideshow } from "./_components/BackgroundSlideshow";
@@ -75,6 +79,12 @@ interface TopData {
   liveCount: number;
 }
 
+interface LiveData {
+  live: FixtureLite[];
+  liveCount: number;
+  updatedAt: string;
+}
+
 const TOP_LEAGUE_PILLS = [
   { slug: "fifa.world", name: "World Cup", logo: "https://a.espncdn.com/i/leaguelogos/soccer/500/4.png" },
   { slug: "eng.1", name: "Premier League", logo: "https://a.espncdn.com/i/leaguelogos/soccer/500/23.png" },
@@ -102,8 +112,8 @@ const TOP_TTL_MS = 20_000;
 let topCache: { at: number; data: TopData } | null = null;
 let topInFlight: Promise<TopData> | null = null;
 
-function fetchTop(force = false): Promise<TopData> {
-  if (!force && topCache && Date.now() - topCache.at < TOP_TTL_MS) {
+function fetchTop(): Promise<TopData> {
+  if (topCache && Date.now() - topCache.at < TOP_TTL_MS) {
     return Promise.resolve(topCache.data);
   }
   if (topInFlight) return topInFlight;
@@ -120,6 +130,23 @@ function fetchTop(force = false): Promise<TopData> {
     .finally(() => { topInFlight = null; });
 
   return topInFlight;
+}
+
+// The live endpoint is deliberately separate from the much heavier Top feed.
+// Share an in-flight poll so a visibility event cannot overlap the timer tick.
+let liveInFlight: Promise<LiveData> | null = null;
+
+function fetchLive(): Promise<LiveData> {
+  if (liveInFlight) return liveInFlight;
+
+  liveInFlight = fetch("/api/live", { cache: "no-store" })
+    .then((response) => {
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response.json() as Promise<LiveData>;
+    })
+    .finally(() => { liveInFlight = null; });
+
+  return liveInFlight;
 }
 
 
@@ -304,43 +331,57 @@ function LivePage({ onSelect }: { onSelect: (fx: FixtureLite) => void }) {
   const [live, setLive] = useState<FixtureLite[]>([]);
   const [recent, setRecent] = useState<FixtureLite[]>([]);
   const [loading, setLoading] = useState(true);
+  const [liveError, setLiveError] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
 
-    function apply(d: TopData) {
-      if (cancelled) return;
-      // Live feed: biggest leagues at the top, smallest at the bottom;
-      // within a tier, order by kickoff time.
-      const liveSorted = [...(d.live ?? [])].sort(
-        (a, b) =>
-          compareLeaguePriority(a, b) ||
-          new Date(a.date).getTime() - new Date(b.date).getTime(),
-      );
-      setLive(liveSorted);
-      const finished = (d.featured ?? []).flatMap((b: FeaturedBlock) => b.fixtures.filter((f: FixtureLite) => f.state === "post")).slice(0, 8);
-      const upcoming = (d.featured ?? []).flatMap((b: FeaturedBlock) => b.upcoming ?? []).slice(0, 8);
-      const recentSorted = [...finished, ...upcoming].sort(compareLeaguePriority);
-      setRecent(recentSorted);
-      setLoading(false);
+    function loadLive() {
+      if (typeof document !== "undefined" && document.hidden) return;
+      fetchLive()
+        .then((data) => {
+          if (cancelled) return;
+          // The API already applies this comparator. Sorting again is a cheap
+          // client-side safety net and keeps the contract explicit here too.
+          setLive(
+            [...(data.live ?? [])].sort((a, b) =>
+              compareFixturesByPriority(a, b, (fixture) => fixture.date),
+            ),
+          );
+          setLiveError(false);
+          setLoading(false);
+        })
+        .catch(() => {
+          if (cancelled) return;
+          // Preserve the previous successful scores during a transient outage;
+          // never turn a provider error into a false "No live matches" result.
+          setLiveError(true);
+          setLoading(false);
+        });
     }
 
-    function load(force = false) {
-      // Don't poll a tab nobody is looking at — background polling was firing
-      // the heaviest endpoint in the app every 15s for hidden pages.
-      if (force === false && typeof document !== "undefined" && document.hidden) return;
-      fetchTop(force).then(apply).catch(() => { if (!cancelled) setLoading(false); });
-    }
+    // The secondary schedule is not live data, so load it once from the cached
+    // Top feed rather than rebuilding that expensive feed on every poll.
+    fetchTop()
+      .then((data) => {
+        if (cancelled) return;
+        const finished = (data.featured ?? [])
+          .flatMap((block) => block.fixtures.filter((fixture) => fixture.state === "post"))
+          .slice(0, 8);
+        const upcoming = (data.featured ?? [])
+          .flatMap((block) => block.upcoming ?? [])
+          .slice(0, 8);
+        setRecent([...finished, ...upcoming].sort(compareLeaguePriority));
+      })
+      .catch(() => undefined);
 
-    load();
-    // 30s matches the server-side snapshot window; polling faster only ever
-    // returned the same cached payload.
-    const t = setInterval(() => load(true), 30000);
-    const onVisible = () => { if (!document.hidden) load(); };
+    loadLive();
+    const timer = setInterval(loadLive, 15_000);
+    const onVisible = () => { if (!document.hidden) loadLive(); };
     document.addEventListener("visibilitychange", onVisible);
     return () => {
       cancelled = true;
-      clearInterval(t);
+      clearInterval(timer);
       document.removeEventListener("visibilitychange", onVisible);
     };
   }, []);
@@ -364,10 +405,21 @@ function LivePage({ onSelect }: { onSelect: (fx: FixtureLite) => void }) {
             ))}
           </div>
         </div>
+      ) : liveError ? (
+        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-10 text-center">
+          <div className="mb-2 text-lg font-bold text-amber-200">Live scores are temporarily unavailable</div>
+          <p className="text-sm text-amber-100/70 font-mono">Keeping the last good result and retrying automatically every 15 seconds.</p>
+        </div>
       ) : (
         <div className="bg-slate-900 rounded-lg p-10 text-center">
           <div className="text-lg font-bold text-slate-300 mb-2">No matches are live right now</div>
           <p className="text-sm text-slate-400 font-mono">Live scores auto-refresh every 15 seconds. Check back during match hours.</p>
+        </div>
+      )}
+
+      {liveError && live.length > 0 && (
+        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-xs text-amber-200 font-mono">
+          Live refresh is temporarily unavailable. Showing the last successful scores and retrying automatically.
         </div>
       )}
 
@@ -627,18 +679,25 @@ function TopFeed({
         results:  (b.results  ?? []).filter(showTodayOnly ? (f) => filterToday(f) : () => true),
       }))
       .filter((b) => b.upcoming.length > 0 || b.results.length > 0)
-      .sort((a, b) => leagueTier({ leagueSlug: a.slug }) - leagueTier({ leagueSlug: b.slug }));
+      .sort(compareLeagueBlockPriority);
 
+  // Today must be one globally sorted list. Rendering `extra` before
+  // `featured` meant a T4/T5 league could appear above Champions League even
+  // though each array was individually sorted. Combine first, filter second,
+  // then run the shared T1 → T6 comparator once across the whole tab.
   const filteredBlocks = filterBlocks(
-    filterSlug ? data.featured.filter((b) => b.slug === filterSlug) : data.featured
+    showTodayOnly
+      ? [...data.featured, ...data.extra]
+      : filterSlug
+        ? data.featured.filter((b) => b.slug === filterSlug)
+        : data.featured,
   );
 
-  // Count today's total matches across all leagues
   const todayMatchCount = showTodayOnly
-    ? [...data.featured, ...data.extra].flatMap((b) => [
-        ...(b.upcoming ?? []).filter(filterToday),
-        ...(b.results  ?? []).filter(filterToday),
-      ]).length
+    ? filteredBlocks.reduce(
+        (count, block) => count + block.upcoming.length + block.results.length,
+        0,
+      )
     : 0;
 
   return (
@@ -712,38 +771,6 @@ function TopFeed({
       )}
 
       {!filterSlug && !showTodayOnly && <ValueAlerts />}
-
-      {/* Today mode: also show extra leagues with today's matches */}
-      {showTodayOnly && data.extra.length > 0 && (() => {
-        const extraToday = filterBlocks(data.extra);
-        if (extraToday.length === 0) return null;
-        return (
-          <div className="space-y-4">
-            {extraToday.map((block) => (
-              <section id={`league-sec-${block.slug}`} key={`today-extra-${block.slug}`} className="scroll-mt-36 space-y-3">
-                <div className="inline-flex items-center gap-2 bg-slate-900 rounded-lg px-3 py-1.5">
-                  <h2 className="text-sm font-bold text-white">{block.label}</h2>
-                  {block.upcoming.length > 0 && (
-                    <span className="rounded bg-emerald-500/20 px-2 py-0.5 text-[10px] text-emerald-300 font-mono">
-                      {block.upcoming.length} upcoming
-                    </span>
-                  )}
-                  {block.results.length > 0 && (
-                    <span className="rounded bg-slate-800 px-2 py-0.5 text-[10px] text-slate-300 font-mono">
-                      {block.results.length} results
-                    </span>
-                  )}
-                </div>
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-                  {[...block.upcoming, ...block.results].map((fx, i) => (
-                    <FixtureCard key={`today-extra-fx-${fx.id}`} fx={fx} onSelect={onSelect} accentIndex={i} />
-                  ))}
-                </div>
-              </section>
-            ))}
-          </div>
-        );
-      })()}
 
       {filteredBlocks.length === 0 && showTodayOnly && (
         <div className="bg-slate-900 rounded-lg p-10 text-center">
