@@ -2,9 +2,10 @@
 
 // ĞIGI GIVØ — Ranking-mode performance dashboard components.
 //
-// Presentational layer for /performance/modes. Everything here is driven by the
-// `/api/performance/modes` payload — no client-side derivation of headline
-// numbers, so what you read is exactly what the API computed from the logs.
+// Presentational layer for /performance (ranking-mode dashboard). Everything
+// here is driven by the `/api/performance/modes` payload — no client-side
+// derivation of headline numbers, so what you read is exactly what the API
+// computed from the logs.
 
 import { useMemo, useState, type ReactNode } from "react";
 import { AccuracyBars, PnLTrendChart, Sparkline } from "./charts";
@@ -25,16 +26,18 @@ import {
   type Tone,
 } from "./ui";
 import { CHIP_PREMIUM } from "../design";
-import type {
-  BreakdownRow,
-  ComparisonMetricKey,
-  ComparisonRow,
-  FactorAccuracyRow,
-  ModeBet,
-  ModeReport,
-  ModeSummary,
-  RankingModeKey,
-  WindowSummary,
+import {
+  MODE_META,
+  RANKING_MODES,
+  type BreakdownRow,
+  type ComparisonMetricKey,
+  type ComparisonRow,
+  type FactorAccuracyRow,
+  type ModeBet,
+  type ModeReport,
+  type ModeSummary,
+  type RankingModeKey,
+  type WindowSummary,
 } from "@/lib/performance/modeAnalytics";
 
 // ─── API payload ──────────────────────────────────────────────────────────────
@@ -118,17 +121,29 @@ export function ModeChips({
   selected,
   onSelect,
 }: {
-  comparison: ComparisonRow[];
+  comparison?: ComparisonRow[];
   selected: RankingModeKey;
   onSelect: (mode: RankingModeKey) => void;
 }) {
+  const rows =
+    comparison && comparison.length > 0
+      ? comparison
+      : RANKING_MODES.map((mode) => ({
+          mode,
+          short: MODE_META[mode].short,
+          totalBets: 0,
+          hitRate: 0,
+          bestIn: [] as ComparisonMetricKey[],
+        }));
+  const hasStats = Boolean(comparison && comparison.length > 0);
+
   return (
     <div
       className="flex flex-wrap gap-2 rounded-2xl border border-white/[0.08] bg-white/[0.04] p-2 backdrop-blur-xl"
       role="tablist"
       aria-label="Ranking mode"
     >
-      {comparison.map((row) => {
+      {rows.map((row) => {
         const style = MODE_STYLES[row.mode];
         const active = row.mode === selected;
         return (
@@ -145,14 +160,16 @@ export function ModeChips({
           >
             <span className={cn("h-2 w-2 rounded-full", active ? "bg-white/80" : style.dot)} />
             <span className="whitespace-nowrap">{row.short}</span>
-            <span
-              className={cn(
-                "hidden rounded px-1.5 py-0.5 font-mono text-[10px] sm:inline",
-                active ? "bg-black/20" : "bg-slate-900/60 text-slate-400",
-              )}
-            >
-              {row.totalBets} · {pctNum(row.hitRate, 0)}
-            </span>
+            {hasStats ? (
+              <span
+                className={cn(
+                  "hidden rounded px-1.5 py-0.5 font-mono text-[10px] sm:inline",
+                  active ? "bg-black/20" : "bg-slate-900/60 text-slate-400",
+                )}
+              >
+                {row.totalBets} · {pctNum(row.hitRate, 0)}
+              </span>
+            ) : null}
             {row.bestIn.length > 0 ? <span title="Best-in-class metrics">⭐</span> : null}
           </button>
         );

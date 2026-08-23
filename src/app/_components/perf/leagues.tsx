@@ -1,7 +1,7 @@
 "use client";
 
 // ĞIGI GIVØ — League performance dashboard primitives.
-// Shared by /performance (overview + inline detail) and /performance/league/[slug].
+// Shared by /performance/leagues (overview + inline detail) and /performance/league/[slug].
 
 import Link from "next/link";
 import { useMemo, useState } from "react";

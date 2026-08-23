@@ -74,7 +74,7 @@ function LeaguePageInner() {
     >
       <div className="flex flex-wrap items-center gap-2">
         <Link
-          href="/performance"
+          href="/performance/leagues"
           className={cn(OUTLINE_CYAN, "px-3 py-1.5 text-xs")}
         >
           ← All leagues
