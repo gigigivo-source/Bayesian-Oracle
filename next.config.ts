@@ -1,9 +1,6 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  async redirects() {
-    return [{ source: "/performance/modes", destination: "/performance", permanent: false }];
-  },
   images: {
     remotePatterns: [
       { protocol: "https", hostname: "a.espncdn.com" },
