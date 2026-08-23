@@ -149,6 +149,11 @@ function LeaguePerformanceInner() {
       title="League Performance"
       subtitle="Every league, cup and competition — hit rate, ROI, P&L, 10/10 hits, factor accuracy and the raw bets behind every number. Filter by name, sort, and drill into any competition."
     >
+      <div className="flex justify-end">
+        <Link href="/performance/modes" className={cn(OUTLINE_AMBER, "px-3 py-1.5 text-xs")}>
+          Ranking mode dashboard →
+        </Link>
+      </div>
       {loading && !data ? (
         <>
           <LoadingState label="Aggregating league performance from the database…" />
