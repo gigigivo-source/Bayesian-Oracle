@@ -12,7 +12,7 @@ import { useSearchParams } from "next/navigation";
 import { PerformanceShell } from "@/app/_components/perf/PerformanceShell";
 import { PnLTrendChart, type TrendPoint as ChartPoint } from "@/app/_components/perf/charts";
 import { ErrorState, LoadingState, Section, cn } from "@/app/_components/perf/ui";
-import { CHIP, CHIP_OFF, CHIP_ON_AMBER, OUTLINE_AMBER } from "@/app/_components/design";
+import { ACTION_AMBER, CHIP, CHIP_OFF, CHIP_ON_AMBER, OUTLINE_AMBER } from "@/app/_components/design";
 import {
   FactorAccuracyTable,
   LeagueBetsTable,
@@ -149,11 +149,25 @@ function LeaguePerformanceInner() {
       title="League Performance"
       subtitle="Every league, cup and competition — hit rate, ROI, P&L, 10/10 hits, factor accuracy and the raw bets behind every number. Filter by name, sort, and drill into any competition."
     >
-      <div className="flex justify-end">
-        <Link href="/performance/modes" className={cn(OUTLINE_AMBER, "px-3 py-1.5 text-xs")}>
-          Ranking mode dashboard →
-        </Link>
-      </div>
+      <Link
+        href="/performance/modes"
+        className="flex cursor-pointer flex-wrap items-center justify-between gap-4 rounded-2xl border border-amber-400/35 bg-gradient-to-r from-amber-400/15 via-slate-900 to-slate-900 p-4 shadow-lg shadow-amber-500/10 transition hover:border-amber-400/70 hover:from-amber-400/25 hover:shadow-amber-500/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/70 sm:p-5"
+      >
+        <div className="min-w-0">
+          <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-amber-300/80">
+            Compare Modes
+          </div>
+          <div className="mt-0.5 text-base font-extrabold tracking-tight text-white sm:text-lg">
+            Ranking Mode Performance
+          </div>
+          <p className="mt-1 max-w-2xl text-xs text-slate-400">
+            Side-by-side track record for Classic A, 12-Factor B, Hybrid C and Consensus D — hit rate, ROI, factor accuracy and the bets behind every number.
+          </p>
+        </div>
+        <span className={cn(ACTION_AMBER, "shrink-0 px-4 py-2.5 text-sm")}>
+          Compare Modes →
+        </span>
+      </Link>
       {loading && !data ? (
         <>
           <LoadingState label="Aggregating league performance from the database…" />
