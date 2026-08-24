@@ -9,6 +9,7 @@ import type { LambdaSet } from "./lambdas";
 import { calibratedWinProb, type MatchVolatility } from "./calibration";
 import {
   selectTopPicks,
+  isRankingExcluded,
   ALL_RANKING_MODES,
   DEFAULT_CONFIDENCE_THRESHOLD,
   DEFAULT_CONFIDENCE_SKIP_THRESHOLD,
@@ -25,6 +26,7 @@ import {
   type MatchConfidence,
   resolveRankingMode,
 } from "./selector";
+import { probRunOfAtLeast, probRunOfEither } from "./markets";
 import type { RankingMode } from "./selector";
 import { getStandings } from "../footballData";
 import { statsAggregator } from "../data/aggregator";
@@ -1995,6 +1997,34 @@ export function runOracle(
     `Most likely HT-FT combination from Poisson model`, "PENDING"
   ));
 
+  // ── FAMILY 19: Consecutive Goals (chip-only, never ranked) ─────────────────
+  // "Team scores 3 goals in a row without the opponent scoring in between".
+  // Uses the same exact run-length model as the MarketEngine registry (each
+  // goal belongs to the home side with share λH/(λH+λA), Poisson-weighted
+  // total). These markets are scored by the selector exactly like every other
+  // market, but the selector excludes the "Consecutive Goals" family from ALL
+  // ranked output arrays — they are only reachable via the dedicated UI chip.
+  const consecTotal   = Math.max(0.01, expHG + expAG);
+  const consecShare   = clampNum(expHG / consecTotal, 0.02, 0.98);
+  const consecPHome   = probRunOfAtLeast(consecShare, consecTotal, 3);
+  const consecPAway   = probRunOfAtLeast(1 - consecShare, consecTotal, 3);
+  const consecPEither = probRunOfEither(consecShare, consecTotal, 3);
+  markets.push(mkMarket(
+    `${hn} Consecutive Goals (3 in a row)`, "No", 1 - consecPHome, "Consecutive Goals",
+    `Run-length model: P(3 in a row by ${hn}) = ${(consecPHome * 100).toFixed(1)}% under λ(H)=${expHG.toFixed(2)} / λ(A)=${expAG.toFixed(2)} — NO is selected unless a real run occurs`,
+    "PENDING"
+  ));
+  markets.push(mkMarket(
+    `${an} Consecutive Goals (3 in a row)`, "No", 1 - consecPAway, "Consecutive Goals",
+    `Run-length model: P(3 in a row by ${an}) = ${(consecPAway * 100).toFixed(1)}% under λ(H)=${expHG.toFixed(2)} / λ(A)=${expAG.toFixed(2)} — NO is selected unless a real run occurs`,
+    "PENDING"
+  ));
+  markets.push(mkMarket(
+    "Either Team Consecutive Goals (3 in a row)", "No", 1 - consecPEither, "Consecutive Goals",
+    `Run-length model: P(3 in a row by either team) = ${(consecPEither * 100).toFixed(1)}% under λ(H)=${expHG.toFixed(2)} / λ(A)=${expAG.toFixed(2)} — NO is selected unless a real run occurs`,
+    "PENDING"
+  ));
+
   // ── Apply empirical reliability calibration (L6) ──────────────────────────
   // Shrinks each market's hitRate toward 0.5 in proportion to how un-reliable
   // that market TYPE has historically been — grounding rankings in honest
@@ -2073,8 +2103,10 @@ export function runOracle(
   const top3  = selection.top3;
   const top5  = selection.top5;
   const top10 = selection.top10;
-  const safeMode = qualified.filter((m) => m.hitRate >= 0.80 && m.disagreementIndex < 0.08);
-  const ultraSafe = qualified.filter((m) => m.hitRate >= 0.88 && m.ciLower >= 0.82);
+  // Chip-only families (Consecutive Goals) are excluded from every ranked
+  // output — including the safe-mode tiers and the value-pick list.
+  const safeMode = qualified.filter((m) => !isRankingExcluded(m) && m.hitRate >= 0.80 && m.disagreementIndex < 0.08);
+  const ultraSafe = qualified.filter((m) => !isRankingExcluded(m) && m.hitRate >= 0.88 && m.ciLower >= 0.82);
 
   // Family counts
   const familyCounts: Record<string, number> = {};
@@ -2083,7 +2115,7 @@ export function runOracle(
   }
 
   // Value picks
-  const valuePicks = qualified.filter((m) => (m.valueEdge ?? 0) > 0.02);
+  const valuePicks = qualified.filter((m) => !isRankingExcluded(m) && (m.valueEdge ?? 0) > 0.02);
 
   // Lambda vector
   const lambdas: Record<string, string> = {

@@ -2,6 +2,15 @@ import type { CanonicalMatchStats } from "../data/types";
 
 export type LegOutcome = "won" | "lost" | "void" | "pending";
 
+/** One real goal event from the match feed — used to settle the Consecutive
+ *  Goals markets from actual goal timestamps. */
+export interface GoalEvent {
+  /** Which side scored the goal. */
+  team: "home" | "away";
+  /** Match minute the goal was scored (0–120+, stoppage time allowed). */
+  minute: number;
+}
+
 export interface MatchResult {
   eventId: string;
   leagueSlug: string;
@@ -10,6 +19,13 @@ export interface MatchResult {
   awayName: string;
   homeScore: number;
   awayScore: number;
+  /**
+   * Real goal events with timestamps, ordered by the provider. When present,
+   * Consecutive Goals legs are settled exactly from the goal sequence; when
+   * absent on a finished match the leg is VOID (stake returned) — never
+   * guessed from the final score alone.
+   */
+  goals?: GoalEvent[];
 }
 
 export interface SettlementLeg {
@@ -31,6 +47,83 @@ function lineFrom(market: string, selection: string): number | null {
 function compareLine(actual: number, line: number, over: boolean): LegOutcome {
   if (actual === line) return "void";
   return over ? (actual > line ? "won" : "lost") : actual < line ? "won" : "lost";
+}
+
+// ─── Consecutive Goals settlement (goal timestamps) ───────────────────────────
+//
+// The Consecutive Goals markets ("Team scores 3 goals in a row without the
+// opponent scoring in between", selection "No") are resolved from the real
+// goal-event sequence of the match: goals are sorted by minute and we look for
+// a run of ≥ 3 consecutive goals by the market's target side (home / away /
+// either). A "No" leg WINS when no such run occurred, and LOSES when it did.
+// When the match is finished but no goal-event data was supplied the leg is
+// VOID (stake returned) — the outcome is never guessed from the final score.
+
+/** True when the target side has a run of ≥ k consecutive goals. */
+function hasRunForTeam(goals: GoalEvent[], team: "home" | "away", k: number): boolean {
+  const ordered = [...goals].sort((a, b) => a.minute - b.minute);
+  let run = 0;
+  for (const g of ordered) {
+    run = g.team === team ? run + 1 : 0;
+    if (run >= k) return true;
+  }
+  return false;
+}
+
+/** True when EITHER side has a run of ≥ k consecutive goals. */
+function hasRunForEither(goals: GoalEvent[], k: number): boolean {
+  const ordered = [...goals].sort((a, b) => a.minute - b.minute);
+  let run = 0;
+  let last: GoalEvent["team"] | null = null;
+  for (const g of ordered) {
+    run = g.team === last ? run + 1 : 1;
+    last = g.team;
+    if (run >= k) return true;
+  }
+  return false;
+}
+
+/** Run length of the market: "3+ Consecutive…" / "…(3 in a row)" → 3, etc. */
+function runLengthFromMarket(rawMarket: string): number {
+  const inRow = rawMarket.match(/(\d+)\s*in a row/i);
+  if (inRow) return Math.max(2, Number(inRow[1]));
+  const plus = rawMarket.match(/(\d+)\s*\+?\s*consecutive/i);
+  if (plus) return Math.max(2, Number(plus[1]));
+  return 3;
+}
+
+/** Resolve a "… Consecutive Goals …" leg from real goal timestamps. */
+function evaluateConsecutiveGoals(
+  rawMarket: string,
+  rawSelection: string,
+  result: MatchResult,
+): LegOutcome {
+  const market = normalise(rawMarket);
+  const selection = normalise(rawSelection);
+  const home = normalise(result.homeName);
+  const away = normalise(result.awayName);
+  const k = runLengthFromMarket(rawMarket);
+
+  // No goal-event data for a finished match → stake returned (never guessed).
+  if (!result.goals) return "void";
+  if (result.goals.length === 0) {
+    // A goalless match has no run of k in a row — "No" always wins.
+    return /(^|\b)no(\b|$)/.test(selection) ? "won" : "lost";
+  }
+
+  // Which side the market is about: home name, away name, else "either".
+  let target: "home" | "away" | "either";
+  if (market.includes(home) && !market.includes(away)) target = "home";
+  else if (market.includes(away) && !market.includes(home)) target = "away";
+  else target = "either";
+
+  const happened = target === "either"
+    ? hasRunForEither(result.goals, k)
+    : hasRunForTeam(result.goals, target, k);
+
+  return /(^|\b)no(\b|$)/.test(selection)
+    ? happened ? "lost" : "won"
+    : happened ? "won" : "lost";
 }
 
 // ─── Stat-backed settlement (Part 4) ─────────────────────────────────────────
@@ -133,6 +226,13 @@ export function evaluateLeg(
   const homeScore = result.homeScore;
   const awayScore = result.awayScore;
   const total = homeScore + awayScore;
+
+  // Consecutive Goals markets — resolved from real goal timestamps (never
+  // guessed from the final score). Covers both the registry family
+  // ("Consecutive Goals") and the legacy "Goal Sequence" lines.
+  if (/consecutive goals/.test(market)) {
+    return evaluateConsecutiveGoals(rawMarket, rawSelection, result);
+  }
 
   // Stat-backed markets — resolved from canonical stats when available.
   if (/cards?|corners?|shots?|\bsot\b|offsides?|fouls?|saves?|throw|goal kick|penalt/.test(market)) {
