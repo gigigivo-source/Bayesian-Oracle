@@ -30,6 +30,7 @@
     "drizzle-kit": "0.31.10",
     "eslint": "9.39.4",
     "eslint-config-next": "16.2.6",
+    "happy-dom": "^20.11.6",
     "postcss": "8.5.8",
     "tailwindcss": "4.1.17",
     "tsx": "^4.23.12",
