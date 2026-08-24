@@ -8,6 +8,13 @@
       "when": 1787317110375,
       "tag": "0000_lively_hiroim",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1787558963348,
+      "tag": "0001_add_ranking_mode",
+      "breakpoints": true
     }
   ]
 }

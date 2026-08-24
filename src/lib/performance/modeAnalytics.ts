@@ -1945,6 +1945,75 @@ export function applyFilters(bets: ModeBet[], filters: BetFilters): ModeBet[] {
   });
 }
 
+// ─── Canonical-row dedup (mode-agnostic pages) ───────────────────────────────
+//
+// Once every write path persists one row per (eventId, rankingMode), the same
+// physical match appears up to four times in performance_log (and the same
+// value bet up to four times in value_bet_log). The modes dashboard wants the
+// full per-mode ledger, but the league / match-level pages describe what
+// happened on the pitch — they must count each match (and each physical bet)
+// once. These helpers keep one canonical row per key: the 'B' row when
+// present (the historical default mode), otherwise the most recent row.
+
+interface DedupeMatchRowLike {
+  eventId: string;
+  rankingMode?: string | null;
+  createdAt?: Date | string | null;
+}
+
+function rowTime(r: { createdAt?: Date | string | null }): number {
+  const c = r.createdAt;
+  if (c instanceof Date) return c.getTime() || 0;
+  if (typeof c === "string") return new Date(c).getTime() || 0;
+  return 0;
+}
+
+function isCanonicalMode(mode: string | null | undefined): boolean {
+  return (mode ?? "B").toUpperCase() === "B";
+}
+
+/** Keep one row per `eventId`: prefer the 'B' mode row, else the most recent. */
+export function dedupeMatchRows<T extends DedupeMatchRowLike>(rows: T[]): T[] {
+  const best = new Map<string, T>();
+  for (const r of rows) {
+    const cur = best.get(r.eventId);
+    if (!cur) {
+      best.set(r.eventId, r);
+      continue;
+    }
+    const curB = isCanonicalMode(cur.rankingMode);
+    const rB = isCanonicalMode(r.rankingMode);
+    if (rB && !curB) best.set(r.eventId, r);
+    else if (!rB && curB) { /* keep the canonical row */ }
+    else if (rowTime(r) > rowTime(cur)) best.set(r.eventId, r);
+  }
+  return [...best.values()];
+}
+
+interface DedupeValueBetRowLike {
+  eventId: string;
+  marketName: string;
+  selection: string;
+  rankingMode?: string | null;
+}
+
+/** Keep one row per (eventId, marketName, selection): prefer the 'B' mode row. */
+export function dedupeValueBetRows<T extends DedupeValueBetRowLike>(rows: T[]): T[] {
+  const best = new Map<string, T>();
+  for (const r of rows) {
+    const key = `${r.eventId}|${r.marketName}|${r.selection}`;
+    const cur = best.get(key);
+    if (!cur) {
+      best.set(key, r);
+      continue;
+    }
+    const curB = isCanonicalMode(cur.rankingMode);
+    const rB = isCanonicalMode(r.rankingMode);
+    if (rB && !curB) best.set(key, r);
+  }
+  return [...best.values()];
+}
+
 // ─── Export utilities ─────────────────────────────────────────────────────────
 
 export function betsToCsv(bets: ModeBet[]): string {

@@ -17,6 +17,7 @@ import { db } from "@/db";
 import { performanceLog, savedSlips, valueBetLog } from "@/db/schema";
 import { gte } from "drizzle-orm";
 import { LEAGUE_MAP } from "@/lib/leagues";
+import { dedupeMatchRows, dedupeValueBetRows } from "@/lib/performance/modeAnalytics";
 
 export const dynamic = "force-dynamic";
 
@@ -144,11 +145,18 @@ async function loadWindow(since: Date) {
   // windowed correctly regardless of when the row was inserted. Slips carry no
   // match date, so they window on creation.
   const sinceDay = since.toISOString().slice(0, 10);
-  const [perfRows, vbRows, slipRows] = await Promise.all([
+  const [rawPerf, rawVb, slipRows] = await Promise.all([
     db.select().from(performanceLog).where(gte(performanceLog.matchDate, sinceDay)).limit(20000),
     db.select().from(valueBetLog).where(gte(valueBetLog.matchDate, sinceDay)).limit(20000),
     db.select().from(savedSlips).where(gte(savedSlips.createdAt, since)).limit(5000),
   ]);
+  // Each finished match carries up to one performance row PER ranking mode
+  // (A/B/C/D), and each value bet is logged once per mode too. League-level
+  // aggregates describe the physical bets, so collapse to one row per
+  // match / per (match, market, selection) — canonical mode B first, else the
+  // most recent — so a match's 10 picks (and a bet's stake) count exactly once.
+  const perfRows = dedupeMatchRows(rawPerf);
+  const vbRows = dedupeValueBetRows(rawVb);
   return { perfRows, vbRows, slipRows };
 }
 

@@ -25,6 +25,8 @@ import {
   calculateSharpeRatio,
   confidenceBands,
   dayOffset,
+  dedupeMatchRows,
+  dedupeValueBetRows,
   deriveConfidenceLevel,
   deriveFactorBucket,
   deriveMarketFamily,
@@ -508,5 +510,61 @@ describe("filters, comparison, insights & exports", () => {
     const parsed = JSON.parse(json);
     expect(parsed.mode).toBe("A");
     expect(parsed.betsCount).toBe(3);
+  });
+});
+
+describe("canonical-row dedup (mode-agnostic pages)", () => {
+  it("keeps one row per eventId, preferring the B-mode row", () => {
+    const rows = [
+      { eventId: "e1", rankingMode: "A", createdAt: new Date("2026-08-02T00:00:00Z") },
+      { eventId: "e1", rankingMode: "B", createdAt: new Date("2026-08-02T00:00:00Z") },
+      { eventId: "e1", rankingMode: "C", createdAt: new Date("2026-08-03T00:00:00Z") },
+      { eventId: "e2", rankingMode: "D", createdAt: new Date("2026-08-01T00:00:00Z") },
+      { eventId: "e2", rankingMode: "A", createdAt: new Date("2026-08-05T00:00:00Z") },
+    ];
+    const out = dedupeMatchRows(rows);
+    expect(out).toHaveLength(2);
+    const e1 = out.find((r) => r.eventId === "e1")!;
+    const e2 = out.find((r) => r.eventId === "e2")!;
+    expect(e1.rankingMode).toBe("B"); // B wins even though C is newer
+    expect(e2.rankingMode).toBe("A"); // no B row → most recent
+  });
+
+  it("treats missing rankingMode as B (pre-migration rows)", () => {
+    const rows = [
+      { eventId: "e1", rankingMode: null, createdAt: new Date("2026-08-01T00:00:00Z") },
+      { eventId: "e1", rankingMode: "A", createdAt: new Date("2026-08-02T00:00:00Z") },
+    ];
+    const out = dedupeMatchRows(rows);
+    expect(out).toHaveLength(1);
+    expect(out[0].rankingMode).toBeNull();
+  });
+
+  it("keeps one row per (eventId, market, selection) for value bets", () => {
+    const rows = [
+      { eventId: "e1", marketName: "Over/Under 2.5", selection: "Over 2.5", rankingMode: "A" },
+      { eventId: "e1", marketName: "Over/Under 2.5", selection: "Over 2.5", rankingMode: "B" },
+      { eventId: "e1", marketName: "Over/Under 2.5", selection: "Over 2.5", rankingMode: "C" },
+      { eventId: "e1", marketName: "BTTS", selection: "Yes", rankingMode: "A" },
+      { eventId: "e1", marketName: "BTTS", selection: "Yes", rankingMode: "D" },
+    ];
+    const out = dedupeValueBetRows(rows);
+    expect(out).toHaveLength(2);
+    const ou = out.find((r) => r.selection === "Over 2.5")!;
+    const bt = out.find((r) => r.selection === "Yes")!;
+    expect(ou.rankingMode).toBe("B"); // B wins
+    expect(bt.rankingMode).toBe("A"); // no B row → first seen
+  });
+
+  it("leaves single-mode data untouched", () => {
+    const rows = [
+      { eventId: "e1", rankingMode: "B" },
+      { eventId: "e2", rankingMode: "B" },
+    ];
+    expect(dedupeMatchRows(rows)).toHaveLength(2);
+    const vb = [
+      { eventId: "e1", marketName: "M", selection: "S", rankingMode: "B" },
+    ];
+    expect(dedupeValueBetRows(vb)).toHaveLength(1);
   });
 });

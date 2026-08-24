@@ -1,6 +1,7 @@
 import { fetchScoreboard, fetchSummary, type FixtureLite } from "@/lib/espn";
 import { runEngineFromRealWithProfiles } from "@/lib/engine";
 import { findValueBets, type BookmakerOdds } from "@/lib/engine/value";
+import { ALL_RANKING_MODES, type RankingMode } from "@/lib/engine/selector";
 import { db } from "@/db";
 import { savedSlips } from "@/db/schema";
 import { eq } from "drizzle-orm";
@@ -43,6 +44,7 @@ interface AccaPick {
   marketName: string; selection: string; hitRate: number; fairOdds: number;
   reason: string; family: string; fixtureId: string; isElite: boolean;
   valueEdge: number; bookOdds: number;
+  rankingMode: RankingMode;
 }
 
 interface Accumulator {
@@ -54,6 +56,13 @@ interface Accumulator {
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
   const save = searchParams.get("save") === "true";
+
+  // Ranking mode: ?ranking=A|B|C|D — the engine run AND the persisted slips
+  // are stamped with this mode (defaults to B, the historical default).
+  const qMode = searchParams.get("ranking")?.toUpperCase() ?? "";
+  const rankingMode: RankingMode = (ALL_RANKING_MODES as string[]).includes(qMode)
+    ? (qMode as RankingMode)
+    : "B";
 
   // Fetch from leagues in parallel, cap at 15 for speed
   const results = await Promise.all(
@@ -74,7 +83,7 @@ export async function GET(req: Request) {
   for (const fx of upcoming.slice(0, 12)) {
     try {
       const summary = await fetchSummary(fx.leagueSlug, fx.id);
-      const prediction = await runEngineFromRealWithProfiles(fx, summary);
+      const prediction = await runEngineFromRealWithProfiles(fx, summary, null, rankingMode);
       const isElite = ELITE_SLUGS.has(fx.leagueSlug);
 
       const odds: BookmakerOdds | null = summary?.odds
@@ -115,6 +124,7 @@ export async function GET(req: Request) {
             isElite,
             valueEdge: val?.valueEdge ?? 0,
             bookOdds: val?.bookDecimalOdds ?? m.fairOddsWorst,
+            rankingMode,
           } satisfies AccaPick;
         });
 
@@ -192,6 +202,7 @@ export async function GET(req: Request) {
           combinedProb: a.combinedProbability,
           stake: 10,
           status: "pending",
+          rankingMode,
         });
       } catch {
         /* skip DB write on error */

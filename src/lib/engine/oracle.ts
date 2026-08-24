@@ -9,6 +9,7 @@ import type { LambdaSet } from "./lambdas";
 import { calibratedWinProb, type MatchVolatility } from "./calibration";
 import {
   selectTopPicks,
+  ALL_RANKING_MODES,
   DEFAULT_CONFIDENCE_THRESHOLD,
   DEFAULT_CONFIDENCE_SKIP_THRESHOLD,
   DEFAULT_LOW_CONFIDENCE_PICK_COUNT,
@@ -2384,5 +2385,60 @@ export async function runOracleWithStandings(
 
   // ── Step 4: rank all markets and fill the Top 10 with real data only ─────
   return runOracle(fixture, tables, enrichment, stats, { rankingMode: opts?.rankingMode });
+}
+
+/**
+ * Async oracle entry for write paths that persist ONE ROW PER RANKING MODE.
+ *
+ * Runs the same multi-source pipeline as `runOracleWithStandings` — but the
+ * expensive external fetches (enrichment, standings, canonical stats) happen
+ * ONCE per fixture, and the CPU-bound `runOracle` then runs once per ranking
+ * mode. Returns one OracleResult per mode (map is empty when the fixture is
+ * unplayable — same contract as the single-mode variant returning null).
+ */
+export async function runOracleAllModesWithStandings(
+  fixture: FixtureLite,
+  opts?: OracleStatsOptions,
+): Promise<Map<RankingMode, OracleResult>> {
+  const out = new Map<RankingMode, OracleResult>();
+
+  // ── Step 1+2: multi-source enrichment with the unplayable guard ──────────
+  const enrichment = await fetchExternalMatchData(fixture);
+  if (!enrichment) return out;
+
+  // ── Step 3: standings for match-importance (best-effort, fail-soft) ──────
+  let tables: TableContext | undefined;
+  try {
+    const rows = await getStandings(fixture.leagueSlug);
+    if (rows.length) {
+      tables = {
+        home: tableInfoFor(fixture.home.name, rows),
+        away: tableInfoFor(fixture.away.name, rows),
+      };
+    }
+  } catch {
+    // Standings unavailable — importance uses the aggregator's table positions
+    // or is excluded with its weight redistributed by the selector.
+  }
+
+  // ── Step 3.5: canonical match stats (multi-source aggregator, fail-soft) ─
+  const stats = await statsAggregator
+    .fetch(
+      {
+        leagueSlug: fixture.leagueSlug,
+        eventId: fixture.id,
+        homeTeam: fixture.home.name,
+        awayTeam: fixture.away.name,
+        date: fixture.date,
+      },
+      opts?.statsPriority?.length ? { priority: opts.statsPriority } : undefined,
+    )
+    .catch(() => null);
+
+  // ── Step 4: one ranking pass per mode over the shared fetch results ──────
+  for (const mode of ALL_RANKING_MODES) {
+    out.set(mode, runOracle(fixture, tables, enrichment, stats, { rankingMode: mode }));
+  }
+  return out;
 }
 

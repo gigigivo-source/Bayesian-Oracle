@@ -567,7 +567,7 @@ export function ModesDashboard() {
           {/* 5. Tier Breakdown: Top 1 vs Top 3 vs Top 10 */}
           <Section
             title="Rank Tier Performance (Top 1 vs Top 3 vs Top 10)"
-            subtitle="Comparing hit rate, P&L, EV, and confidence distributions across pick ranks"
+            subtitle="Comparing hit rate, EV, and confidence distributions across pick ranks — ranked picks are un-staked, so these cards are hit-rate only"
           >
             <TierBreakdownPanel
               top1={active.summary.top1Summary}
@@ -640,7 +640,15 @@ export function ModesDashboard() {
             </Section>
           </div>
 
-          <div className="grid gap-6 xl:grid-cols-3">
+          <div className="grid gap-6 xl:grid-cols-2">
+            <Section title="Rank Position Breakdown" subtitle="How hit rate and ROI change by rank within the Top-10">
+              <BreakdownTable
+                rows={active.rankBuckets}
+                keyLabel="Rank Position"
+                emptyLabel="No ranked picks yet."
+                limit={8}
+              />
+            </Section>
             <Section title="Kickoff Time of Day" subtitle="Afternoon vs Evening matches">
               <BreakdownTable
                 rows={active.timeOfDayBands}
@@ -649,6 +657,9 @@ export function ModesDashboard() {
                 limit={4}
               />
             </Section>
+          </div>
+
+          <div className="grid gap-6 xl:grid-cols-2">
             <Section title="Home vs Away Selections" subtitle="Home / Away / Draw / Totals">
               <BreakdownTable
                 rows={active.orientationBands}

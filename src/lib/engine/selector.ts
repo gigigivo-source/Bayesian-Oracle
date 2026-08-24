@@ -121,6 +121,9 @@ import {
 // ─── Ranking mode (A = Classic 11-factor, B = 12-factor, C = Hybrid, D = Consensus) ─
 export type RankingMode = 'A' | 'B' | 'C' | 'D';
 
+/** All four ranking modes — write paths that persist one row per mode iterate this. */
+export const ALL_RANKING_MODES: RankingMode[] = ['A', 'B', 'C', 'D'];
+
 export function resolveRankingMode(opts?: SelectOptions): RankingMode {
   const fromOpts = opts?.rankingMode ? String(opts.rankingMode).toUpperCase() : null;
   if (fromOpts === 'A' || fromOpts === 'B' || fromOpts === 'C' || fromOpts === 'D') return fromOpts as RankingMode;
