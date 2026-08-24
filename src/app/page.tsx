@@ -1,8 +1,8 @@
 "use client";
 
 import Image from "next/image";
-import Link from "next/link";
 import dynamic from "next/dynamic";
+import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { FixtureLite } from "@/lib/espn";
 import type { LeagueDef } from "@/lib/leagues";
@@ -441,6 +441,7 @@ function LivePage({ onSelect }: { onSelect: (fx: FixtureLite) => void }) {
 }
 
 function Header({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
+  const router = useRouter();
   const [menuOpen, setMenuOpen] = useState(false);
 
   const mainTabs: Array<{ id: Tab; label: string }> = [
@@ -539,16 +540,18 @@ function Header({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
         {menuOpen && (
           <div className={`absolute right-0 top-full mt-3 w-64 max-h-[calc(100vh-6rem)] overflow-y-auto rounded-2xl ${GLASS_DROPDOWN} p-2 space-y-0.5`} role="menu">
             <div className="px-3 py-2 mb-1 text-[10px] font-mono text-slate-500 uppercase tracking-widest">Tools & Analytics</div>
-            <Link
-              href="/performance/modes"
-              prefetch
+            <button
+              type="button"
               role="menuitem"
-              onClick={() => setMenuOpen(false)}
+              onClick={() => {
+                router.push("/performance/modes");
+                setMenuOpen(false);
+              }}
               className={`${MENU_ITEM} block w-full px-4 py-3 text-left rounded-xl`}
             >
               <div className="text-sm font-medium leading-tight">Ranking Mode Performance</div>
               <div className="text-[11px] mt-0.5 leading-snug text-slate-500">Compare Classic, 12-Factor, Hybrid & Consensus</div>
-            </Link>
+            </button>
             {menuTabs.map((t) => (
               <button
                 key={t.id}
