@@ -40,6 +40,22 @@ describe("leagueTier", () => {
     }
   });
 
+  it("maps major domestic cups to tier 3 rather than the tier-6 baseline", () => {
+    expect(leagueTier({ leagueSlug: "eng.fa" })).toBe(3);
+    expect(leagueTier({ leagueSlug: "eng.league_cup" })).toBe(3);
+    expect(leagueTier({ leagueSlug: "esp.copa_del_rey" })).toBe(3);
+    expect(leagueTier({ leagueSlug: "ger.dfb_pokal" })).toBe(3);
+    expect(leagueTier({ leagueSlug: "ita.coppa_italia" })).toBe(3);
+    expect(leagueTier({ leagueSlug: "fra.coupe_de_france" })).toBe(3);
+  });
+
+  it("maps international & continental club competitions to tier 1", () => {
+    expect(leagueTier({ leagueSlug: "uefa.nations" })).toBe(1);
+    expect(leagueTier({ leagueSlug: "fifa.cwc" })).toBe(1);
+    expect(leagueTier({ leagueSlug: "conmebol.libertadores" })).toBe(1);
+    expect(leagueTier({ leagueSlug: "conmebol.sudamericana" })).toBe(1);
+  });
+
   it("falls back to the lowest tier for unknown competitions", () => {
     expect(leagueTier({ leagueSlug: "xyz.99" })).toBe(LOWEST_TIER);
     expect(leagueTier({})).toBe(LOWEST_TIER);

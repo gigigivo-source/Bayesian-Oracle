@@ -33,6 +33,20 @@ export const LEAGUE_TIER: Record<string, number> = {
   "fifa.world": 1, // FIFA World Cup
   "uefa.euro": 1, // UEFA European Championship
   "conmebol.america": 1, // Copa América
+  "uefa.nations": 1, // UEFA Nations League
+  "fifa.cwc": 1, // FIFA Club World Cup
+  "conmebol.libertadores": 1, // Copa Libertadores
+  "conmebol.sudamericana": 1, // Copa Sudamericana
+
+  // ── Tier 3 — Major domestic cups ───────────────────────────────────────────
+  // These sit alongside second-tier European leagues: they regularly feature
+  // top-flight clubs, so they must not fall through to the tier-6 baseline.
+  "eng.fa": 3, // FA Cup (England)
+  "eng.league_cup": 3, // EFL Cup / Carabao Cup (England)
+  "esp.copa_del_rey": 3, // Copa del Rey (Spain)
+  "ger.dfb_pokal": 3, // DFB-Pokal (Germany)
+  "ita.coppa_italia": 3, // Coppa Italia (Italy)
+  "fra.coupe_de_france": 3, // Coupe de France (France)
 
   // ── Tier 2 — Top 5 leagues ──────────────────────────────────────────────────
   "eng.1": 2, // Premier League (England)
