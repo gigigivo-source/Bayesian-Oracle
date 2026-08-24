@@ -143,6 +143,9 @@ export function deriveMarketFamily(market: string, rawFamily?: string | null): s
   if (/card|booking|penalt|sending off|foul|discipline/.test(haystack)) return "Cards / Discipline";
   if (/shot|sot|save/.test(haystack)) return "Shots / Saves";
   if (/offside/.test(haystack)) return "Offsides";
+  // Consecutive Goals markets get their own family so the Performance
+  // Dashboard can filter/aggregate them (chip-only markets, never Top-10).
+  if (/consecutive/.test(haystack)) return "Consecutive Goals";
   if (/goal|btts|clean sheet|score|over.*goal|under.*goal/.test(haystack)) return "Goals";
   if (/result|draw|win|chance|handicap|asian/.test(haystack)) return "Match Result / Handicap";
   if (/possession|pass|tackle|attack/.test(haystack)) return "Stats / Tactical";
@@ -202,6 +205,7 @@ const DERIVED_FACTORS: Array<{ test: RegExp; factor: string }> = [
   { test: /shot|sot|save/, factor: "Poisson λ (Shots / SOT / Saves)" },
   { test: /offside/, factor: "Poisson λ (Offsides)" },
   { test: /foul|tackle/, factor: "Tactical analysis" },
+  { test: /consecutive/, factor: "Poisson λ (Consecutive Goals)" },
   { test: /goal|btts|clean sheet|score/, factor: "Poisson λ (Goals)" },
   { test: /result|chance|draw|win|handicap/, factor: "Match result / Double chance" },
   { test: /possession|pass|attack/, factor: "Deep statistical vector" },

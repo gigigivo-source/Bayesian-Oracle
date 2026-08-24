@@ -265,6 +265,21 @@ const VERIFIABLE = new Set([
   "Match Result", "Double Chance", "Draw No Bet / Asian Handicap",
 ]);
 
+// ─── Chip-only markets (never ranked) ─────────────────────────────────────────
+//
+// Markets in these families are scored EXACTLY like every other market (they
+// pass through the same 12-factor composite in `scoreMarket`) but are excluded
+// from ALL ranked output arrays — top1 / top3 / top5 / top10 in every ranking
+// mode. They are only reachable through the dedicated UI chip (🎯 Consecutive
+// Goals) in the match detail panel. The factor breakdown and composite score
+// are still attached to every scored market so the chip view can render them.
+export const RANKING_EXCLUDED_FAMILIES = ["Consecutive Goals"] as const;
+
+/** True when a market must never occupy a Top-N / ranked output slot. */
+export function isRankingExcluded(m: Market): boolean {
+  return (RANKING_EXCLUDED_FAMILIES as readonly string[]).includes(m.family);
+}
+
 const GIANT_CLUBS = new Set([
   "Real Madrid",
   "Barcelona",
@@ -1996,11 +2011,20 @@ export function selectTopPicksClassic(
       return s;
     });
 
-  if (scored.length === 0) {
+  // Chip-only families (Consecutive Goals) are scored exactly like every other
+  // market — factor breakdown + composite attached for the dedicated UI chip —
+  // then excluded from every ranked output array (top1/top3/top5/top10).
+  for (const s of scored) {
+    s.market.factors = labelledFactorsClassic(s);
+    s.market.compositeScore = Math.round(s.composite * 100) / 100;
+  }
+  const rankable = scored.filter((s) => !isRankingExcluded(s.market));
+
+  if (rankable.length === 0) {
     return EMPTY_SELECTION("No qualified markets to rank.", [...gapLog]);
   }
 
-  const ranked = [...scored].sort((a, b) => {
+  const ranked = [...rankable].sort((a, b) => {
     const dc = b.composite - a.composite;
     if (Math.abs(dc) > 1e-6) return dc;
     const dw = a.wrongProb - b.wrongProb;
@@ -2843,14 +2867,24 @@ export function rankNew(
       return s;
     });
 
-  if (scored.length === 0) {
+  // Chip-only families (Consecutive Goals) are scored EXACTLY like every other
+  // market — the full 12-factor composite + factor breakdown is attached here
+  // so the dedicated UI chip can render scores — but they are then excluded
+  // from every ranked output array below (top1/top3/top5/top10).
+  for (const s of scored) {
+    s.market.factors = labelledFactors(s);
+    s.market.compositeScore = Math.round(s.composite * 100) / 100;
+  }
+  const rankable = scored.filter((s) => !isRankingExcluded(s.market));
+
+  if (rankable.length === 0) {
     return EMPTY_SELECTION("No qualified markets to rank.", [...gapLog]);
   }
 
   // ── Step 2: Deterministic ranking (composite desc → loss prob asc → σ desc) ─
   // The composite is the primary signal; the secondary/tertiary keys only
   // resolve near-ties, so a genuinely better market always ranks higher.
-  const ranked = [...scored].sort((a, b) => {
+  const ranked = [...rankable].sort((a, b) => {
     const dc = b.composite - a.composite;
     if (Math.abs(dc) > 1e-6) return dc;
     const dw = a.wrongProb - b.wrongProb;
@@ -3227,7 +3261,17 @@ export function rankHybrid(
       };
     });
 
-  if (scored.length === 0) {
+  // Chip-only families (Consecutive Goals) are scored by BOTH engines exactly
+  // like every other market — the averaged composite + 12-factor breakdown are
+  // attached here for the dedicated UI chip — then excluded from every ranked
+  // output array (top1/top3/top5/top10).
+  for (const s of scored) {
+    s.market.factors = labelledFactors(s.balanced);
+    s.market.compositeScore = Math.round(s.composite * 100) / 100;
+  }
+  const rankable = scored.filter((s) => !isRankingExcluded(s.market));
+
+  if (rankable.length === 0) {
     return EMPTY_SELECTION("No qualified markets to rank.", [...gapLog]);
   }
 
@@ -3243,7 +3287,7 @@ export function rankHybrid(
     if (Math.abs(dm) > 1e-6) return dm;
     return a.market.id.localeCompare(b.market.id);
   };
-  const ranked = [...scored].sort(comparator);
+  const ranked = [...rankable].sort(comparator);
 
   // ── Step 3: Hard safety filters BEFORE Top-10 assembly (injury severity) ──
   const hardQualified = ranked.filter((s) => {
@@ -3599,7 +3643,9 @@ export function rankConsensus(
   });
 
   const top10Scores = orderedScores.slice(0, 10);
-  let finalPicks = top10Scores.map((s) => s.market);
+  // Chip-only families (Consecutive Goals) never enter a consensus ranked
+  // output — defence in depth: the A/B/C pipelines already exclude them.
+  let finalPicks = top10Scores.map((s) => s.market).filter((m) => !isRankingExcluded(m));
 
   const cfg = resolveConfidenceOptions(opts?.confidence);
   const confidence = averageThreeMatchConfidence(

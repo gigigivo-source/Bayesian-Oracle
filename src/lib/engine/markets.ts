@@ -1,4 +1,4 @@
-// ĞIGI GIVØ — Explicit Market Registry Engine (13 Market Families, 217 markets)
+// ĞIGI GIVØ — Explicit Market Registry Engine (14 Market Families, 220 markets)
 //
 // F1  Goals            — 50 lines (Total O/U, Team O/U, BTTS, 1X2, DC, Exact, CS, Halves)
 // F2  Corners          — 26 lines (Total O/U ×15, Team O/U ×3×2, Most, Race ×3)
@@ -13,7 +13,10 @@
 // F11 Advanced Events  —  1 line  (GBH)
 // F12 Goal Sequence    —  2 lines
 // F13 Goalkeeper       —  8 lines (CS ×2, Team Saves ×3×2)
-// TOTAL: 216 (one race-to-corners per-match adds 1 = 217)
+// F14 Consecutive Goals—  3 lines (Chip-only markets — Team A/B/Either "No",
+//                        scored by every engine factor but NEVER ranked into
+//                        top1/top3/top5/top10 — see selector.isRankingExcluded)
+// TOTAL: 219 (one race-to-corners per-match adds 1 = 220)
 
 import {
   poissonPmf,
@@ -32,6 +35,68 @@ import {
 } from "./stats";
 import type { LambdaSet } from "./lambdas";
 import type { LockedMatchObject, Market, Grade, PickExplanation } from "./types";
+
+// ─── Consecutive-goals run-length model (F14) ────────────────────────────────
+//
+// The new "Consecutive Goals" markets ask: "does a team score 3 goals in a row
+// without the opponent scoring in between?". We model the match goal sequence
+// as a Bernoulli process — each goal belongs to the home team with probability
+// p = λH / (λH + λA) — with a Poisson(λH + λA) total-goal count, and compute
+// the exact run-length probabilities:
+//
+//   · probRunOfAtLeast(p, λ, k) — P(at least one run of ≥ k consecutive goals
+//     by one side with goal share p). Feller's classic no-run recurrence.
+//   · probRunOfEither(p, λ, k) — P(at least one run of ≥ k consecutive goals
+//     by EITHER side (a same-team run), via a 2-symbol run-length DP.
+//
+// Both are weighted over the Poisson distribution of total goals, so the
+// resulting P("No") is a real statistical probability — not a guess.
+
+/** P(no run of k consecutive successes in n Bernoulli(p) trials) — Feller. */
+function probNoRunOfK(p: number, n: number, k: number): number {
+  const q = 1 - p;
+  const a: number[] = [1]; // a[i] = P(no run of k in i trials)
+  for (let i = 1; i <= n; i++) {
+    if (i < k) { a[i] = 1; continue; } // impossible to have a run of k yet
+    let acc = 0;
+    for (let j = 1; j <= k; j++) acc += p ** (j - 1) * q * a[i - j];
+    a[i] = acc;
+  }
+  return a[n];
+}
+
+/** P(at least one run of k consecutive goals by a side with goal share p). */
+export function probRunOfAtLeast(goalShare: number, lambdaTotal: number, k = 3): number {
+  const p = clamp(goalShare, 0.02, 0.98);
+  const lam = Math.max(0.05, lambdaTotal);
+  const maxN = Math.max(15, Math.ceil(lam) + 12);
+  let prob = 0;
+  for (let n = k; n <= maxN; n++) {
+    prob += poissonPmf(n, lam) * (1 - probNoRunOfK(p, n, k));
+  }
+  return clamp(prob, 0, 1);
+}
+
+/** P(at least one run of k consecutive goals by EITHER side). */
+export function probRunOfEither(goalShare: number, lambdaTotal: number, k = 3): number {
+  const p = clamp(goalShare, 0.02, 0.98);
+  const q = 1 - p;
+  const lam = Math.max(0.05, lambdaTotal);
+  const maxN = Math.max(15, Math.ceil(lam) + 12);
+  let prob = 0;
+  // Run-length DP: fA/gA = valid prefix ending with A of run length 1/2.
+  let fA = p, gA = 0, fB = q, gB = 0; // state at n = 1
+  for (let n = 1; n <= maxN; n++) {
+    const valid = fA + gA + fB + gB; // P(no same-team run of k in n goals)
+    if (n >= k) prob += poissonPmf(n, lam) * (1 - valid);
+    const nfA = p * (fB + gB);
+    const ngA = p * fA;
+    const nfB = q * (fA + gA);
+    const ngB = q * fB;
+    fA = nfA; gA = ngA; fB = nfB; gB = ngB;
+  }
+  return clamp(prob, 0, 1);
+}
 
 export class MarketEngine {
   private markets: Market[] = [];
@@ -403,6 +468,58 @@ export class MarketEngine {
     }
   }
 
+  // ─── FAMILY 14: CONSECUTIVE GOALS (3 lines — chip-only markets) ─────────────
+  // "Team scores 3 goals in a row without the opponent scoring in between."
+  // Probability = exact run-length model over the Poisson-weighted goal
+  // sequence (see probRunOfAtLeast / probRunOfEither above). The markets are
+  // scored by every engine factor exactly like all other markets (they flow
+  // through the same 12-factor composite), but the selector excludes the
+  // "Consecutive Goals" family from ALL ranked output arrays — they are only
+  // reachable through the dedicated 🎯 chip in the match detail panel.
+  private buildConsecutiveGoals() {
+    const F    = "Consecutive Goals";
+    const lamH = this.lam.homeGoals;
+    const lamA = this.lam.awayGoals;
+    const total = Math.max(0.01, lamH + lamA);
+    const homeShare = clamp(lamH / total, 0.02, 0.98);
+
+    const pHomeRun   = probRunOfAtLeast(homeShare, total, 3);
+    const pAwayRun   = probRunOfAtLeast(1 - homeShare, total, 3);
+    const pEitherRun = probRunOfEither(homeShare, total, 3);
+
+    const mk = (
+      id: string,
+      name: string,
+      runProb: number,
+    ): Market => {
+      const m = this.add(
+        id.replace(/_NO$/, ""),
+        name,
+        F,
+        "No",
+        "Yes",
+        1 - runProb, // P("No") — selection is fixed to "No" via noAutoFlip
+        true,
+        {
+          whyQualified:        `Run-length Poisson validation: P(No) = ${((1 - runProb) * 100).toFixed(1)}% under λ(H)=${lamH.toFixed(2)} / λ(A)=${lamA.toFixed(2)} with a ${(homeShare * 100).toFixed(0)}% home goal share.`,
+          whySelectedForMatch: `${this.match.homeTeam} vs ${this.match.awayTeam}: consecutive-goal run model gives P(3 in a row) = ${(runProb * 100).toFixed(1)}% — the "No" side is selected unless a real run occurs.`,
+          whyOutcomePossible:  `A run of 3+ goals without an opponent reply requires the goal sequence to align; the run-length distribution puts P(No) at ${((1 - runProb) * 100).toFixed(1)}% — settled post-match from real goal timestamps.`,
+        },
+      );
+      m.id = id; // stable registry ids: GOAL_CONSEC_A_NO / _B_NO / _EITHER_NO
+      // Chip-only markets are ALWAYS scored (the selector attaches the 12-factor
+      // composite for the dedicated UI chip) — the honest letter grade is kept
+      // for display, but the rejection gate never drops them, and the selector
+      // (isRankingExcluded) keeps them out of every ranked output array.
+      m.rejected = false;
+      return m;
+    };
+
+    mk("GOAL_CONSEC_A_NO",      `${this.match.homeTeam} Consecutive Goals (3 in a row)`, pHomeRun);
+    mk("GOAL_CONSEC_B_NO",      `${this.match.awayTeam} Consecutive Goals (3 in a row)`, pAwayRun);
+    mk("GOAL_CONSEC_EITHER_NO", "Either Team Consecutive Goals (3 in a row)",           pEitherRun);
+  }
+
   // ─── Orchestrate ──────────────────────────────────────────────────────────
   buildAll(): Market[] {
     this.buildGoals();       // F1  — 50 lines
@@ -418,6 +535,7 @@ export class MarketEngine {
     this.buildAdvanced();    // F11 —  1 line
     this.buildGoalSequence();// F12 —  2 lines
     this.buildGoalkeeper();  // F13 —  8 lines
-    return this.markets;     // TOTAL: 216 + 1 race-corner = 217
+    this.buildConsecutiveGoals(); // F14 —  3 lines (chip-only)
+    return this.markets;     // TOTAL: 219 + 1 race-corner = 220
   }
 }

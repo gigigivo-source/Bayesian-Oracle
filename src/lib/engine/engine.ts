@@ -6,6 +6,7 @@ import { getCachedMeshProfile } from "./dataMesh";
 import { MarketEngine } from "./markets";
 import {
   selectTopPicks,
+  isRankingExcluded,
   type ImportanceContext,
   type RankingContext,
   type SelectOptions,
@@ -91,13 +92,17 @@ function assemble(
   const selection = selectTopPicks(qualified, lam, match.homeTeam, match.awayTeam, confidenceMap, opts);
   const { top10, top5, top3, top1 } = selection;
 
+  // Chip-only families (Consecutive Goals) never occupy ranked/tiered output
+  // slots either — the selector already excludes them from top1/3/5/10 and
+  // this keeps the legacy safe-mode tiers aligned (Part 3: only reachable via
+  // the dedicated UI chip). Ranking logic and factor weights are untouched.
   const safeMode = qualified
-    .filter((m) => isActionablePick(m) && m.hitRate > 0.8 && m.disagreementIndex < 0.08 && m.ciWidth < 0.05 && m.mqs > 8.0)
+    .filter((m) => !isRankingExcluded(m) && isActionablePick(m) && m.hitRate > 0.8 && m.disagreementIndex < 0.08 && m.ciWidth < 0.05 && m.mqs > 8.0)
     .sort((a, b) => b.hitRate - a.hitRate)
     .slice(0, 12);
 
   const ultraSafe = qualified
-    .filter((m) => isActionablePick(m) && m.hitRate > 0.9 && m.disagreementIndex < 0.04 && m.ciLower > 0.88 && m.mqs > 8.8)
+    .filter((m) => !isRankingExcluded(m) && isActionablePick(m) && m.hitRate > 0.9 && m.disagreementIndex < 0.04 && m.ciLower > 0.88 && m.mqs > 8.8)
     .sort((a, b) => b.ciLower - a.ciLower)
     .slice(0, 8);
 

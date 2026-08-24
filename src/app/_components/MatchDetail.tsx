@@ -214,6 +214,14 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
 
   const [familyFilter, setFamilyFilter] = useState("ALL");
   const [showJson, setShowJson] = useState(false);
+  /**
+   * Chip-only view for the Consecutive Goals markets: when active, the Top-10
+   * section is replaced by the 3 Consecutive Goals markets (scores, hit rates
+   * and explanations). These markets are scored by the engine exactly like all
+   * others but are never ranked into top1/top3/top5/top10 — this chip is their
+   * dedicated access point.
+   */
+  const [consecutiveView, setConsecutiveView] = useState(false);
 
   /**
    * Load (or re-load) the rankings payload for the current fixture. Uses the
@@ -281,6 +289,12 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
     const list = familyFilter === "ALL" ? result.markets : result.markets.filter((m) => m.family === familyFilter);
     return [...list].sort((a, b) => b.hitRate - a.hitRate);
   }, [result, familyFilter]);
+
+  /** The 3 chip-only Consecutive Goals markets (scored, but never ranked). */
+  const consecutiveMarkets: Market[] = useMemo(() => {
+    if (!result) return [];
+    return result.markets.filter((m) => m.family === "Consecutive Goals");
+  }, [result]);
 
   const scrollToSection = (id: string) => {
     const el = document.getElementById(id);
@@ -395,6 +409,23 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
                   {s.label}
                 </button>
               ))}
+              {/* Dedicated chip for the chip-only Consecutive Goals markets —
+                  scored by every engine factor but never ranked into the Top 10. */}
+              <button
+                onClick={() => {
+                  setConsecutiveView((v) => !v);
+                  scrollToSection("sec-top-10");
+                }}
+                title="Consecutive Goals markets (3 in a row without opponent scoring)"
+                aria-pressed={consecutiveView}
+                className={`${CHIP} px-3 py-1 text-xs font-medium ${
+                  consecutiveView
+                    ? "border-l-purple-400 bg-purple-600 font-bold text-white hover:bg-purple-500"
+                    : CHIP_OFF
+                }`}
+              >
+                🎯 Consecutive Goals
+              </button>
               {fixture.state === "pre" && (
                 <button
                   onClick={() => scrollToSection("sec-value")}
@@ -562,14 +593,18 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
               dataSource={dataSource}
             />
 
-            {/* Top 10 */}
+            {/* Top 10 — or the chip-only Consecutive Goals view (never ranked) */}
             <Section
               id="sec-top-10"
-              title="TOP 10 HIGHEST HIT RATE MARKETS"
-              subtitle="Every pick contains rationale: Why Qualified · Why Selected · Why Outcome is Possible"
+              title={consecutiveView ? "🎯 CONSECUTIVE GOALS MARKETS" : "TOP 10 HIGHEST HIT RATE MARKETS"}
+              subtitle={
+                consecutiveView
+                  ? "3 goals in a row without opponent scoring in between — scored by every engine factor, but never ranked into the Top 10"
+                  : "Every pick contains rationale: Why Qualified · Why Selected · Why Outcome is Possible"
+              }
             >
               <MarketTable
-                markets={result.top10}
+                markets={consecutiveView ? consecutiveMarkets : result.top10}
                 showDeepExplanation={true}
                 renderPickFooter={(m) => <RankingFactorsToggle market={m} />}
               />
