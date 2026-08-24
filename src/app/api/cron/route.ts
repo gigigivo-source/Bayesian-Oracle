@@ -3,6 +3,7 @@ import { performanceLog, savedSlips, dailyPicks } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { fetchScoreboard, fetchSummary, type FixtureLite } from "@/lib/espn";
 import { runEngineFromReal, evaluateFinishedMatch } from "@/lib/engine";
+import { ALL_RANKING_MODES } from "@/lib/engine/selector";
 import { TOP_FEED_SLUGS } from "@/lib/leagues";
 
 export const dynamic = "force-dynamic";
@@ -129,48 +130,63 @@ async function runVerification() {
 
   for (const fx of finished) {
     try {
-      // Idempotency: skip if this match is already logged
+      // Idempotency is per (eventId, rankingMode) — one verification row per mode.
       const existing = await db
-        .select({ id: performanceLog.id })
+        .select({ rankingMode: performanceLog.rankingMode })
         .from(performanceLog)
-        .where(eq(performanceLog.eventId, fx.id))
-        .limit(1);
-      if (existing[0]) continue;
+        .where(eq(performanceLog.eventId, fx.id));
+      const haveModes = new Set(
+        existing.map((r) => (r.rankingMode ?? "B").toUpperCase() as string),
+      );
+      const missingModes = ALL_RANKING_MODES.filter((m) => !haveModes.has(m));
+      if (missingModes.length === 0) continue;
 
       const summary  = await fetchSummary(fx.leagueSlug, fx.id);
-      const prediction = runEngineFromReal(fx, summary);
       const boxscore = await fetchBoxscore(fx.leagueSlug, fx.id);
-      evaluateFinishedMatch(fx, prediction, boxscore);
 
-      const hits    = prediction.hitCount ?? 0;
-      const misses  = prediction.top10.filter((m) => m.outcome === "MISS").length;
-      const pending = prediction.top10.filter((m) => m.outcome === "PENDING" || !m.outcome).length;
-      const evalC   = prediction.evaluatedCount ?? 0;
+      for (const mode of missingModes) {
+        const prediction = runEngineFromReal(fx, summary, undefined, { rankingMode: mode });
+        evaluateFinishedMatch(fx, prediction, boxscore);
 
-      await db.insert(performanceLog).values({
-        eventId:    fx.id,
-        matchLabel: `${fx.home.name} vs ${fx.away.name}`,
-        homeTeam:   fx.home.name,
-        awayTeam:   fx.away.name,
-        league:     fx.leagueName,
-        leagueSlug: fx.leagueSlug,
-        matchDate:  fx.date.slice(0, 10),
-        homeScore:  Number(fx.home.score) || 0,
-        awayScore:  Number(fx.away.score) || 0,
-        totalPicks: prediction.top10.length,
-        hits,
-        misses,
-        pending,
-        accuracy: evalC > 0 ? hits / evalC : 0,
-        top10Detail: prediction.top10.map((m) => ({
-          name:      m.name,
-          selection: m.selection,
-          hitRate:   m.hitRate,
-          outcome:   m.outcome,
-          family:    m.family,
-        })),
-      });
-      matchesLogged++;
+        const hits    = prediction.hitCount ?? 0;
+        const misses  = prediction.top10.filter((m) => m.outcome === "MISS").length;
+        const pending = prediction.top10.filter((m) => m.outcome === "PENDING" || !m.outcome).length;
+        const evalC   = prediction.evaluatedCount ?? 0;
+
+        await db.insert(performanceLog).values({
+          eventId:    fx.id,
+          matchLabel: `${fx.home.name} vs ${fx.away.name}`,
+          homeTeam:   fx.home.name,
+          awayTeam:   fx.away.name,
+          league:     fx.leagueName,
+          leagueSlug: fx.leagueSlug,
+          competitionName: fx.leagueName,
+          matchDate:  fx.date.slice(0, 10),
+          homeScore:  Number(fx.home.score) || 0,
+          awayScore:  Number(fx.away.score) || 0,
+          totalPicks: prediction.top10.length,
+          hits,
+          misses,
+          pending,
+          accuracy: evalC > 0 ? hits / evalC : 0,
+          top10Detail: prediction.top10.map((m) => {
+            const odds = m.marketOdds ?? m.fairOdds ?? null;
+            return {
+              name:      m.name,
+              selection: m.selection,
+              hitRate:   m.hitRate,
+              outcome:   m.outcome,
+              family:    m.family,
+              reason:    m.reason,
+              odds,
+              ev:        odds !== null ? Math.round((m.hitRate * odds - 1) * 1000) / 1000 : null,
+              factors:   m.factors ?? null,
+            };
+          }),
+          rankingMode: mode,
+        });
+        matchesLogged++;
+      }
     } catch {
       // skip individual failed match — keep the job running
     }

@@ -811,9 +811,9 @@ export function TierBreakdownPanel({
                 <span className="text-white font-bold">{t.wins} / {t.losses} / {t.pushes} / {t.voids}</span>
               </div>
               <div>
-                <span className="text-[10px] text-slate-500 block">P&L (ROI)</span>
-                <span className={t.pnl >= 0 ? "text-emerald-300 font-bold" : "text-rose-300 font-bold"}>
-                  {money(t.pnl)} ({pctNum(t.roi)})
+                <span className="text-[10px] text-slate-500 block">Stake / P&L (ROI)</span>
+                <span className="text-slate-400" title="Ranked picks are verification rows — they carry no stake, so P&L / ROI / Sharpe are not meaningful here. Money metrics come from value bets and accumulators.">
+                  un-staked
                 </span>
               </div>
               <div>
@@ -821,8 +821,8 @@ export function TierBreakdownPanel({
                 <span className="text-slate-200">{num(t.averageOdds)} ({t.averageEv !== null ? pctNum(t.averageEv * 100) : "—"})</span>
               </div>
               <div>
-                <span className="text-[10px] text-slate-500 block">Sharpe / Consistency</span>
-                <span className="text-amber-300">{num(t.sharpeRatio)} / {t.consistencyScore.toFixed(0)}</span>
+                <span className="text-[10px] text-slate-500 block">Consistency</span>
+                <span className="text-amber-300">{t.consistencyScore.toFixed(0)}/100</span>
               </div>
             </div>
 
@@ -837,6 +837,12 @@ export function TierBreakdownPanel({
           </div>
         ))}
       </div>
+
+      <p className="font-mono text-[10px] leading-relaxed text-slate-500">
+        Ranked picks are un-staked verification rows — these cards are hit-rate only.
+        Money metrics (P&L, ROI, Sharpe) are reported by value bets and accumulators,
+        which carry real stakes.
+      </p>
     </div>
   );
 }
@@ -1522,6 +1528,57 @@ export function AutomatedInsightsPanel({ insights }: { insights: AutomatedInsigh
             </div>
           ) : (
             <p className="text-xs text-slate-500">Collect more settled markets to unlock specialists.</p>
+          )}
+        </Card>
+      </div>
+
+      {/* Confidence Leaders: which mode converts each confidence tier best */}
+      <div className="grid gap-4 md:grid-cols-2">
+        <Card>
+          <div className="mb-2 font-mono text-xs font-bold text-white flex items-center gap-2">
+            <span>💎</span> HIGH-CONFIDENCE LEADER (≥85%)
+          </div>
+          {insights.highConfidenceLeader ? (
+            <div className="flex items-center justify-between rounded border border-emerald-500/30 bg-emerald-500/5 px-3 py-2.5 font-mono text-xs">
+              <div>
+                <span className={cn("text-sm font-black", MODE_STYLES[insights.highConfidenceLeader.mode].text)}>
+                  {MODE_META[insights.highConfidenceLeader.mode].short}
+                </span>
+                <p className="text-[11px] text-slate-400 mt-0.5">
+                  {insights.highConfidenceLeader.bets} high-confidence bets tracked
+                </p>
+              </div>
+              <div className="text-right">
+                <div className="text-lg font-black text-emerald-300">{pctNum(insights.highConfidenceLeader.hitRate)}</div>
+                <div className="text-[10px] text-slate-500">hit rate on high-confidence picks</div>
+              </div>
+            </div>
+          ) : (
+            <p className="text-xs text-slate-500">Not enough settled high-confidence bets (need ≥2 per mode) yet.</p>
+          )}
+        </Card>
+
+        <Card>
+          <div className="mb-2 font-mono text-xs font-bold text-white flex items-center gap-2">
+            <span>🔍</span> LOW-CONFIDENCE LEADER (&lt;70%)
+          </div>
+          {insights.lowConfidenceLeader ? (
+            <div className="flex items-center justify-between rounded border border-cyan-500/30 bg-cyan-500/5 px-3 py-2.5 font-mono text-xs">
+              <div>
+                <span className={cn("text-sm font-black", MODE_STYLES[insights.lowConfidenceLeader.mode].text)}>
+                  {MODE_META[insights.lowConfidenceLeader.mode].short}
+                </span>
+                <p className="text-[11px] text-slate-400 mt-0.5">
+                  {insights.lowConfidenceLeader.bets} low-confidence bets tracked
+                </p>
+              </div>
+              <div className="text-right">
+                <div className="text-lg font-black text-cyan-300">{pctNum(insights.lowConfidenceLeader.hitRate)}</div>
+                <div className="text-[10px] text-slate-500">hit rate on low-confidence picks</div>
+              </div>
+            </div>
+          ) : (
+            <p className="text-xs text-slate-500">Not enough settled low-confidence bets (need ≥2 per mode) yet.</p>
           )}
         </Card>
       </div>

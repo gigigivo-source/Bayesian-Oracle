@@ -29,7 +29,8 @@ import {
 import { and, eq } from "drizzle-orm";
 import { fetchScoreboard, type FixtureLite } from "@/lib/espn";
 import { evaluateFinishedMatch } from "@/lib/engine";
-import { runOracleWithStandings, type OracleResult } from "@/lib/engine/oracle";
+import { runOracleAllModesWithStandings, type OracleResult } from "@/lib/engine/oracle";
+import { ALL_RANKING_MODES, type RankingMode } from "@/lib/engine/selector";
 import { findValueBets, type BookmakerOdds } from "@/lib/engine/value";
 import { evaluateLeg, type MatchResult } from "@/lib/settlement/evaluate";
 import { LEAGUES, LEAGUE_MAP } from "@/lib/leagues";
@@ -623,21 +624,34 @@ export function buildTop10Detail(pred: OracleResult) {
       reason:    m.reason,
       odds,
       ev:        odds !== null ? Math.round((m.hitRate * odds - 1) * 1000) / 1000 : null,
+      // Per-pick ranking-factor breakdown (factor label → 0..1 contribution)
+      // so the performance dashboard's factor analysis uses REAL weights
+      // instead of derived market-family buckets. Absent when the engine
+      // never ranked the pick (e.g. registry markets).
+      factors:   m.factors ?? null,
     };
   });
 }
 
-/** Idempotently persist a finished match's verification into performance_log. */
+/**
+ * Idempotently persist a finished match's verification into performance_log.
+ * One row per (eventId, rankingMode) — the idempotency check is scoped to the
+ * mode, so the four ranking modes each get their own verified row.
+ */
 export async function savePerformanceLog(
   fx: FixtureLite,
   competitionName: string,
   pred: OracleResult,
   boxscore: Record<string, number> | null,
+  rankingMode: RankingMode = "B",
 ): Promise<boolean> {
   const existing = await db
     .select({ id: performanceLog.id })
     .from(performanceLog)
-    .where(eq(performanceLog.eventId, fx.id))
+    .where(and(
+      eq(performanceLog.eventId, fx.id),
+      eq(performanceLog.rankingMode, rankingMode),
+    ))
     .limit(1);
   if (existing[0]) return false;
 
@@ -666,16 +680,23 @@ export async function savePerformanceLog(
     accuracy:        decided > 0 ? hits / decided : 0,
     top10Detail:     detail,
     lowConfidence:   pred.lowConfidence ?? false,
+    rankingMode,
   });
   return true;
 }
 
-/** Log value bets for a match (settled immediately when the fixture is finished). */
+/**
+ * Log value bets for a match (settled immediately when the fixture is
+ * finished). One row per (eventId, market, selection, rankingMode) — the
+ * existence check is scoped to the mode so each ranking mode keeps its own
+ * tracked value bets.
+ */
 export async function saveValueBets(
   fx: FixtureLite,
   competitionName: string,
   pred: OracleResult,
   odds: BookmakerOdds | null,
+  rankingMode: RankingMode = "B",
 ): Promise<number> {
   if (!odds) return 0;
   const valueBets = findValueBets(pred.markets, odds, fx.home.name, fx.away.name)
@@ -691,6 +712,7 @@ export async function saveValueBets(
         eq(valueBetLog.eventId, fx.id),
         eq(valueBetLog.marketName, vb.market.name),
         eq(valueBetLog.selection, vb.market.selection),
+        eq(valueBetLog.rankingMode, rankingMode),
       ))
       .limit(1);
     if (exists[0]) continue;
@@ -720,6 +742,7 @@ export async function saveValueBets(
       actualReturn,
       pnl:             actualReturn !== null ? actualReturn - stake : null,
       lowConfidence:   pred.lowConfidence ?? false,
+      rankingMode,
     });
     saved++;
   }
@@ -775,7 +798,12 @@ export function oddsFromFixture(fx: FixtureLite): BookmakerOdds | null {
   };
 }
 
-/** Auto-save a daily value slip for a competition (idempotent per day+competition). */
+/**
+ * Auto-save a daily value slip for a competition (idempotent per day+competition).
+ * `rankingMode` is stamped on the row AND embedded in each leg's JSON so the
+ * ranking-mode dashboard can attribute the slip even on deployments where the
+ * saved_slips.ranking_mode column is still absent.
+ */
 export async function saveAutoSlip(
   competitionName: string,
   leagueSlug: string,
@@ -787,6 +815,7 @@ export async function saveAutoSlip(
     odds: number;
     prob: number;
   }>,
+  rankingMode: RankingMode = "B",
 ): Promise<boolean> {
   if (legs.length < 3) return false;
   const name = `Auto ${new Date().toISOString().slice(0, 10)} · ${competitionName}`;
@@ -809,11 +838,13 @@ export async function saveAutoSlip(
       marketName: l.marketName,
       selection:  l.selection,
       odds:       l.odds,
+      rankingMode,
     })),
     combinedOdds:    legs.reduce((acc, l) => acc * l.odds, 1),
     combinedProb:    legs.reduce((acc, l) => acc * l.prob, 1),
     stake:           10,
     status:          "pending",
+    rankingMode,
   });
   return true;
 }
@@ -901,10 +932,15 @@ export async function processCompetition(
     if (Date.now() > deadline) break;
     out.matches++;
     try {
-      const pred = await runOracleWithStandings(fx);
-      if (!pred) { out.skipped++; continue; } // unplayable — integrity over volume
+      // One external-data fetch, one ranking pass per mode — every write path
+      // persists one row per ranking mode so A/B/C/D all get populated.
+      const preds = await runOracleAllModesWithStandings(fx);
+      if (preds.size === 0) { out.skipped++; continue; } // unplayable — integrity over volume
 
-      const lowConfidence = pred.lowConfidence ?? false;
+      // Mode B is the canonical run for slip legs + daily picks (single
+      // mode-agnostic products keep their historical single-mode semantics).
+      const canonical = preds.get("B") ?? preds.values().next().value!;
+      const lowConfidence = canonical.lowConfidence ?? false;
       if (lowConfidence) out.lowConfidence++;
 
       const finished = fx.state === "post" && fx.home.score !== null && fx.away.score !== null;
@@ -914,27 +950,30 @@ export async function processCompetition(
       const canonicalStats = await prefetchStats(fx);
 
       if (finished) {
-        // Verify + write the settled result into performance_log.
+        // Verify + write the settled result into performance_log (one row per mode).
         if (verifyFinished) {
           // ESPN boxscore first; fall back to the canonical aggregator's stats
           // so non-ESPN matches can still settle corners/cards/shots honestly.
           const boxscore = (await fetchEspnBoxscore(fx.leagueSlug, fx.id))
             ?? statsToBoxscore(canonicalStats);
-          if (await savePerformanceLog(fx, comp.competitionName, pred, boxscore)) out.verified++;
+          for (const [mode, pred] of preds) {
+            if (await savePerformanceLog(fx, comp.competitionName, pred, boxscore, mode)) out.verified++;
+          }
         }
       } else {
         // Upcoming/live match — record the prediction for later settlement.
-        if (await saveDailyPickRow(fx, comp.competitionName, pred)) out.tracked++;
+        if (await saveDailyPickRow(fx, comp.competitionName, canonical)) out.tracked++;
       }
 
-      // Value bets — recorded (and, when finished, settled) either way.
+      // Value bets — recorded per mode (and, when finished, settled) either way.
       const odds = oddsFromFixture(fx);
-      const saved = await saveValueBets(fx, comp.competitionName, pred, odds);
-      out.valueBets += saved;
+      for (const [mode, pred] of preds) {
+        out.valueBets += await saveValueBets(fx, comp.competitionName, pred, odds, mode);
+      }
 
       // High-confidence value legs feed the competition's auto slip.
       if (!lowConfidence && odds) {
-        const vbs = findValueBets(pred.markets, odds, fx.home.name, fx.away.name)
+        const vbs = findValueBets(canonical.markets, odds, fx.home.name, fx.away.name)
           .filter((v) => v.valueEdge > 0.02 && v.bookDecimalOdds > 1.01);
         for (const vb of vbs.slice(0, 2)) {
           slipLegs.push({
@@ -954,7 +993,8 @@ export async function processCompetition(
 
   if (slipLegs.length >= 3) {
     try {
-      await saveAutoSlip(comp.competitionName, comp.leagueSlug, slipLegs.slice(0, 8));
+      // Legs come from the canonical (mode B) run — stamp B explicitly.
+      await saveAutoSlip(comp.competitionName, comp.leagueSlug, slipLegs.slice(0, 8), "B");
     } catch {
       // slip saving is best-effort
     }

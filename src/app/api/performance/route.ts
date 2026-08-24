@@ -1,16 +1,22 @@
 import { db } from "@/db";
 import { performanceLog, savedSlips, dailyPicks } from "@/db/schema";
 import { desc } from "drizzle-orm";
+import { dedupeMatchRows } from "@/lib/performance/modeAnalytics";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
   try {
-    const records = await db
+    // Every finished match can carry up to one row PER RANKING MODE (A/B/C/D).
+    // Fetch enough rows to recover 100 distinct matches, then keep one row per
+    // match (canonical mode B first, else most recent) so match-level metrics
+    // count each physical match exactly once.
+    const rawRecords = await db
       .select()
       .from(performanceLog)
       .orderBy(desc(performanceLog.createdAt))
-      .limit(100);
+      .limit(400);
+    const records = dedupeMatchRows(rawRecords).slice(0, 100);
 
     let totalHits    = 0;
     let totalMisses  = 0;

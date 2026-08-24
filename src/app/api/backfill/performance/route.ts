@@ -27,7 +27,8 @@ import { db } from "@/db";
 import { performanceLog } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { LEAGUES } from "@/lib/leagues";
-import { runOracleWithStandings } from "@/lib/engine/oracle";
+import { runOracleAllModesWithStandings } from "@/lib/engine/oracle";
+import { ALL_RANKING_MODES, type RankingMode } from "@/lib/engine/selector";
 import { evaluateFinishedMatch } from "@/lib/engine";
 import {
   fetchApiFootballFixtures,
@@ -208,24 +209,44 @@ async function runBackfill(body: {
         summary.totalProcessed++;
 
         try {
-          // Already processed in a previous run? (idempotent)
+          // Idempotency is per (eventId, rankingMode) — one performance row per
+          // mode. Existing rows may pre-date late provider/boxscore data, so
+          // pending rows are re-evaluated (using THEIR mode) instead of being
+          // left with individual bets stuck at PENDING.
           const existing = await db
-            .select({ id: performanceLog.id, pending: performanceLog.pending })
+            .select({
+              id: performanceLog.id,
+              pending: performanceLog.pending,
+              rankingMode: performanceLog.rankingMode,
+            })
             .from(performanceLog)
-            .where(eq(performanceLog.eventId, fx.id))
-            .limit(1);
-          if (existing[0]) {
-            // Existing rows may pre-date late provider/boxscore data. Re-evaluate
-            // them during backfill instead of leaving their individual bets pending.
-            if (existing[0].pending > 0) {
-              const pred = await runOracleWithStandings(fx, { statsPriority: GITHUB_FIRST_PRIORITY });
-              if (!pred) {
-                summary.totalFailed++;
-                summary.failures.push({ leagueSlug: slug, eventId: fx.id, error: "pending row could not be re-evaluated" });
-                continue;
-              }
-              const boxscore = (await fetchEspnBoxscore(fx.leagueSlug, fx.id))
-                ?? statsToBoxscore(peekStats(fx));
+            .where(eq(performanceLog.eventId, fx.id));
+
+          const haveModes = new Set(
+            existing.map((r) => (r.rankingMode ?? "B").toUpperCase() as string),
+          );
+          const missingModes = ALL_RANKING_MODES.filter((m) => !haveModes.has(m));
+          const pendingRows = existing.filter((r) => r.pending > 0);
+          const needWork = existing.length === 0 || missingModes.length > 0 || pendingRows.length > 0;
+
+          if (needWork) {
+            const preds = await runOracleAllModesWithStandings(fx, { statsPriority: GITHUB_FIRST_PRIORITY });
+            if (preds.size === 0) {
+              // Unplayable by the engine — integrity over volume.
+              summary.totalFailed++;
+              summary.failures.push({ leagueSlug: slug, eventId: fx.id, error: "unplayable (no real data sources)" });
+              continue;
+            }
+            const boxscore = (await fetchEspnBoxscore(fx.leagueSlug, fx.id))
+              ?? statsToBoxscore(peekStats(fx));
+
+            // 1) Re-settle rows that still carry PENDING picks, in their own mode.
+            for (const row of pendingRows) {
+              const rowMode: RankingMode = ALL_RANKING_MODES.includes(
+                (row.rankingMode ?? "B").toUpperCase() as RankingMode,
+              ) ? ((row.rankingMode ?? "B").toUpperCase() as RankingMode) : "B";
+              const pred = preds.get(rowMode) ?? preds.get("B") ?? null;
+              if (!pred) continue;
               evaluateFinishedMatch(fx, pred, boxscore);
               const detail = buildTop10Detail(pred);
               const hits = detail.filter((pick) => pick.outcome === "HIT").length;
@@ -238,30 +259,24 @@ async function runBackfill(body: {
                 misses,
                 pending,
                 accuracy: decided > 0 ? hits / decided : 0,
-              }).where(eq(performanceLog.id, existing[0].id));
+              }).where(eq(performanceLog.id, row.id));
             }
-            summary.totalSucceeded++;
-            continue;
-          }
 
-          const pred = await runOracleWithStandings(fx, { statsPriority: GITHUB_FIRST_PRIORITY });
-          if (!pred) {
-            // Unplayable by the engine — integrity over volume.
-            summary.totalFailed++;
-            summary.failures.push({ leagueSlug: slug, eventId: fx.id, error: "unplayable (no real data sources)" });
-            continue;
-          }
-
-          const saved = await savePerformanceLog(
-            fx,
-            comp.competitionName,
-            pred,
-            (await fetchEspnBoxscore(fx.leagueSlug, fx.id)) ?? statsToBoxscore(peekStats(fx)),
-          );
-          if (saved) {
+            // 2) Save every mode this match does not have a row for yet.
+            let saved = false;
+            for (const mode of missingModes) {
+              const pred = preds.get(mode) ?? null;
+              if (!pred) continue;
+              if (await savePerformanceLog(fx, comp.competitionName, pred, boxscore, mode)) {
+                saved = true;
+                const vbs = await saveValueBets(fx, comp.competitionName, pred, oddsFromFixture(fx), mode);
+                summary.valueBetsLogged += vbs;
+              }
+            }
+            if (saved || pendingRows.length > 0) summary.totalSucceeded++;
+          } else {
+            // Fully covered in a previous run — count as succeeded (idempotent no-op).
             summary.totalSucceeded++;
-            const vbs = await saveValueBets(fx, comp.competitionName, pred, oddsFromFixture(fx));
-            summary.valueBetsLogged += vbs;
           }
         } catch (err) {
           summary.totalFailed++;

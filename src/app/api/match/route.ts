@@ -186,13 +186,24 @@ async function persistAndEvaluate(
         misses:          miss,
         pending:         pend,
         accuracy:        evalC > 0 ? h / evalC : 0,
-        top10Detail:     prediction.top10.map((m) => ({
-          name:      m.name,
-          selection: m.selection,
-          hitRate:   m.hitRate,
-          outcome:   m.outcome,
-          family:    m.family,
-        })),
+        top10Detail:     prediction.top10.map((m) => {
+          const odds = m.marketOdds ?? m.fairOdds ?? null;
+          return {
+            name:      m.name,
+            selection: m.selection,
+            hitRate:   m.hitRate,
+            outcome:   m.outcome,
+            family:    m.family,
+            reason:    m.reason,
+            odds,
+            // Edge vs market (hitRate × odds − 1); null when no market price.
+            ev:        odds !== null ? Math.round((m.hitRate * odds - 1) * 1000) / 1000 : null,
+            // Per-pick ranking-factor breakdown (factor label → 0..1
+            // contribution) so the dashboard's factor analysis uses the REAL
+            // weights the selector applied, not derived family buckets.
+            factors:   m.factors ?? null,
+          };
+        }),
         rankingMode,
       });
     } catch (e) {

@@ -178,6 +178,9 @@ export const savedSlips = pgTable("saved_slips", {
   combinedProb:    real("combined_prob").notNull(),
   stake:           real("stake"),
   status:          text("status").notNull(),     // pending | won | lost
+  /** Ranking mode the slip was generated from. Nullable for slips saved before
+   *  the column existed — the modes API falls back to `picks[0].rankingMode`. */
+  rankingMode:     text("ranking_mode"),
   createdAt:       timestamp("created_at").defaultNow().notNull(),
 });
 
