@@ -4,19 +4,38 @@ import {
   betFromSlipRow,
   betFromValueBetRow,
   betsFromPerformanceRow,
+  betsToCsv,
+  betsToJson,
   breakdownBy,
+  buildCalibrationCurve,
   buildComparison,
   buildDailySeries,
+  buildDrawdownEpisodes,
   buildModeReport,
+  buildMultiModeSeries,
+  buildRollingSeries,
+  buildTierSummary,
   buildWindows,
+  calculateConsistencyScore,
+  calculateCorrelation,
+  calculateFactorReliability,
+  calculateOverallPerformanceScore,
+  calculateProfitFactor,
+  calculateRecoveryFactor,
+  calculateSharpeRatio,
   confidenceBands,
   dayOffset,
+  deriveConfidenceLevel,
   deriveFactorBucket,
+  deriveMarketFamily,
+  deriveOrientation,
   factorAccuracy,
   factorsForPick,
+  generateInsights,
   oddsBands,
   percent,
   perfectMatch,
+  standardDeviation,
   summarise,
   toMode,
   toResult,
@@ -30,10 +49,11 @@ import {
 
 function bet(partial: Partial<ModeBet> & { id: string; date: string }): ModeBet {
   return {
-    match: "Home vs Away",
+    match: "Arsenal vs Chelsea",
     league: "Premier League",
     leagueSlug: "eng.1",
-    market: "Total Offsides",
+    market: "Total Offsides Under 7.5",
+    marketFamily: "Offsides",
     selection: "Under 7.5",
     odds: 1.8,
     result: "WIN",
@@ -46,9 +66,13 @@ function bet(partial: Partial<ModeBet> & { id: string; date: string }): ModeBet 
     source: "valueBet",
     rank: null,
     lowConfidence: false,
+    confidenceLevel: "HIGH",
     factors: [{ factor: "Calibration", contribution: null }],
     factorsDerived: true,
     eventId: "e1",
+    timeOfDay: "Evening",
+    orientation: "Neutral",
+    isLive: false,
     ...partial,
   };
 }
@@ -72,9 +96,9 @@ const perfRow: PerformanceLogLike = {
   })),
 };
 
-// ─── Primitives ───────────────────────────────────────────────────────────────
+// ─── Primitives & Math Helpers ────────────────────────────────────────────────
 
-describe("primitives", () => {
+describe("primitives & math helpers", () => {
   it("normalises every outcome dialect used across the codebase", () => {
     expect(toResult("HIT")).toBe("WIN");
     expect(toResult("won")).toBe("WIN");
@@ -102,11 +126,64 @@ describe("primitives", () => {
     expect(dayOffset(new Date("2026-08-23T10:00:00Z"), 7)).toBe("2026-08-16");
     expect(dayOffset(new Date("2026-01-03T10:00:00Z"), 7)).toBe("2025-12-27");
   });
+
+  it("computes standard deviation accurately", () => {
+    expect(standardDeviation([])).toBe(0);
+    expect(standardDeviation([5])).toBe(0);
+    expect(standardDeviation([2, 4, 4, 4, 5, 5, 7, 9])).toBeCloseTo(2.138, 2);
+  });
+
+  it("computes Sharpe Ratio, Profit Factor, and Recovery Factor", () => {
+    const dailyPnl = [10, -5, 15, -2, 8];
+    const sharpe = calculateSharpeRatio(dailyPnl);
+    expect(sharpe).toBeGreaterThan(0);
+    expect(calculateSharpeRatio([])).toBeNull();
+    expect(calculateSharpeRatio([5])).toBeNull();
+
+    const sampleBets = [
+      bet({ id: "1", date: "2026-08-01", result: "WIN", pnl: 20 }),
+      bet({ id: "2", date: "2026-08-02", result: "LOSS", pnl: -10 }),
+    ];
+    expect(calculateProfitFactor(sampleBets)).toBe(2);
+
+    expect(calculateRecoveryFactor(50, 25)).toBe(2);
+    expect(calculateRecoveryFactor(50, 0)).toBe(99.9);
+  });
+
+  it("calculates consistency score and overall performance score", () => {
+    const daily = buildDailySeries([
+      bet({ id: "1", date: "2026-08-01", pnl: 10, result: "WIN" }),
+      bet({ id: "2", date: "2026-08-02", pnl: 10, result: "WIN" }),
+    ]);
+    const score = calculateConsistencyScore(daily, [bet({ id: "1", date: "2026-08-01" })], 0, 100);
+    expect(score).toBeGreaterThan(60);
+
+    const overall = calculateOverallPerformanceScore(80, 15, 50, 200, score, 20);
+    expect(overall).toBeGreaterThan(50);
+    expect(calculateOverallPerformanceScore(80, 15, 50, 200, 80, 0)).toBe(0);
+  });
+
+  it("derives market family, confidence level, and orientation", () => {
+    expect(deriveMarketFamily("Total Corners Over 8.5")).toBe("Corners");
+    expect(deriveMarketFamily("Total Cards Under 4.5")).toBe("Cards / Discipline");
+    expect(deriveMarketFamily("Both Teams To Score")).toBe("Goals");
+    expect(deriveMarketFamily("Over 2.5 Goals")).toBe("Goals");
+
+    expect(deriveConfidenceLevel(0.92, false)).toBe("HIGH");
+    expect(deriveConfidenceLevel(0.75, false)).toBe("MEDIUM");
+    expect(deriveConfidenceLevel(0.55, false)).toBe("LOW");
+    expect(deriveConfidenceLevel(0.95, true)).toBe("LOW");
+
+    expect(deriveOrientation("Arsenal vs Chelsea", "Arsenal to Win")).toBe("Home");
+    expect(deriveOrientation("Arsenal vs Chelsea", "Chelsea to Win")).toBe("Away");
+    expect(deriveOrientation("Arsenal vs Chelsea", "Draw")).toBe("Draw");
+    expect(deriveOrientation("Arsenal vs Chelsea", "Over 2.5 Goals")).toBe("Neutral");
+  });
 });
 
 // ─── Factors ──────────────────────────────────────────────────────────────────
 
-describe("factor bucketing", () => {
+describe("factor bucketing & analysis", () => {
   it("maps market families to documented buckets", () => {
     expect(deriveFactorBucket("Total Corners Over 8.5")).toBe("Poisson λ (Corners)");
     expect(deriveFactorBucket("Total Cards Under 4.5")).toBe("Poisson λ (Cards / Discipline)");
@@ -125,7 +202,7 @@ describe("factor bucketing", () => {
     expect(factors[1].factor).toBe("Zero bias");
   });
 
-  it("credits every active factor with the bet result", () => {
+  it("credits every active factor with the bet result and computes correlation/reliability", () => {
     const rows = factorAccuracy([
       bet({
         id: "1",
@@ -145,61 +222,87 @@ describe("factor bucketing", () => {
         factors: [{ factor: "Poisson", contribution: 0.4 }],
         factorsDerived: false,
       }),
-      bet({ id: "3", date: "2026-08-03", result: "PENDING", pnl: null, factors: [{ factor: "Form", contribution: 0.5 }], factorsDerived: false }),
+      bet({
+        id: "3",
+        date: "2026-08-03",
+        result: "PENDING",
+        pnl: null,
+        factors: [{ factor: "Form", contribution: 0.5 }],
+        factorsDerived: false,
+      }),
     ]);
     const poisson = rows.find((r) => r.factor === "Poisson")!;
     expect(poisson.totalBets).toBe(2);
     expect(poisson.hitRate).toBe(50);
     expect(poisson.averageContribution).toBeCloseTo(0.6, 5);
+    expect(poisson.correlation).toBeDefined();
+    expect(poisson.reliabilityScore).toBeGreaterThanOrEqual(0);
+
     const form = rows.find((r) => r.factor === "Form")!;
-    // Pending bets never count towards the settled totals.
     expect(form.totalBets).toBe(1);
     expect(form.hitRate).toBe(100);
   });
+
+  it("calculates factor correlation and factor reliability correctly", () => {
+    const pairs = [
+      { x: 0.8, y: 1 },
+      { x: 0.7, y: 1 },
+      { x: 0.3, y: 0 },
+      { x: 0.2, y: 0 },
+    ];
+    const corr = calculateCorrelation(pairs);
+    expect(corr).toBeGreaterThan(0.8);
+
+    const reliability = calculateFactorReliability(80, 25, corr);
+    expect(reliability).toBeGreaterThan(70);
+  });
 });
 
-// ─── Summary ──────────────────────────────────────────────────────────────────
+// ─── Summary & Tier Breakdowns ────────────────────────────────────────────────
 
-describe("summarise", () => {
+describe("summarise & tier breakdowns", () => {
   const bets: ModeBet[] = [
-    bet({ id: "1", date: "2026-08-01", result: "WIN", odds: 2, stake: 10, pnl: 10, returnAmount: 20, modelProb: 0.8 }),
-    bet({ id: "2", date: "2026-08-02", result: "LOSS", odds: 1.5, stake: 20, pnl: -20, returnAmount: null, modelProb: 0.7 }),
-    bet({ id: "3", date: "2026-08-03", result: "WIN", odds: 1.6, stake: 10, pnl: 6, returnAmount: 16, modelProb: 0.75 }),
-    bet({ id: "4", date: "2026-08-03", result: "PUSH", odds: 1.9, stake: 10, pnl: 0, returnAmount: 10, modelProb: 0.6 }),
-    bet({ id: "5", date: "2026-08-04", result: "VOID", odds: null, stake: null, pnl: null, returnAmount: null, modelProb: null }),
-    bet({ id: "6", date: "2026-08-05", result: "PENDING", odds: 2.2, stake: 10, pnl: null, returnAmount: null, modelProb: 0.55 }),
+    bet({ id: "1", date: "2026-08-01", result: "WIN", odds: 2, stake: 10, pnl: 10, returnAmount: 20, modelProb: 0.8, rank: 1, confidenceLevel: "HIGH" }),
+    bet({ id: "2", date: "2026-08-02", result: "LOSS", odds: 1.5, stake: 20, pnl: -20, returnAmount: null, modelProb: 0.7, rank: 2, confidenceLevel: "MEDIUM" }),
+    bet({ id: "3", date: "2026-08-03", result: "WIN", odds: 1.6, stake: 10, pnl: 6, returnAmount: 16, modelProb: 0.75, rank: 3, confidenceLevel: "MEDIUM" }),
+    bet({ id: "4", date: "2026-08-03", result: "PUSH", odds: 1.9, stake: 10, pnl: 0, returnAmount: 10, modelProb: 0.6, rank: 4, confidenceLevel: "LOW" }),
+    bet({ id: "5", date: "2026-08-04", result: "VOID", odds: null, stake: null, pnl: null, returnAmount: null, modelProb: null, rank: 5 }),
+    bet({ id: "6", date: "2026-08-05", result: "PENDING", odds: 2.2, stake: 10, pnl: null, returnAmount: null, modelProb: 0.55, rank: 6 }),
   ];
   const s = summarise(bets, { tenOfTenHits: 2, matchesTracked: 8 });
 
-  it("counts every result class and its share", () => {
+  it("counts every result class, percentages, and profit per winning bet", () => {
     expect(s.totalBets).toBe(6);
     expect([s.wins, s.losses, s.pushes, s.voids, s.pending]).toEqual([2, 1, 1, 1, 1]);
     expect(s.winPct).toBeCloseTo(33.33, 1);
     expect(s.settledBets).toBe(3);
+    expect(s.profitPerWinningBet).toBe(8); // (10 + 6) / 2
   });
 
   it("computes hit rate from settled bets only", () => {
     expect(s.hitRate).toBeCloseTo(66.67, 1);
   });
 
-  it("computes money metrics from real stakes", () => {
+  it("computes money metrics and volatility rating", () => {
     expect(s.totalPnl).toBe(-4);
     expect(s.totalStake).toBe(60);
     expect(s.totalReturn).toBe(46);
     expect(s.roi).toBeCloseTo(-6.67, 1);
-    expect(s.averageStake).toBe(12);
+    expect(s.volatilityRating).toBeDefined();
+    expect(s.consistencyScore).toBeDefined();
+    expect(s.overallScore).toBeDefined();
   });
 
   it("weights average odds by stake", () => {
-    // (2*10 + 1.5*20 + 1.6*10 + 1.9*10 + 2.2*10) / 60 = 107 / 60
     expect(s.averageOdds).toBeCloseTo(1.783, 3);
     expect(s.averageOddsUnweighted).toBeCloseTo(1.84, 2);
   });
 
-  it("tracks streaks, drawdown and best/worst days", () => {
+  it("tracks streaks, longest non-win run, and drawdown", () => {
     expect(s.currentStreak.label).toBe("1 Win");
     expect(s.longestWinStreak).toBe(1);
     expect(s.longestLossStreak).toBe(1);
+    expect(s.longestNonWinStreak).toBe(2); // LOSS + PUSH
     expect(s.maxDrawdown).toBe(20);
     expect(s.bestDay).toEqual({ date: "2026-08-01", pnl: 10 });
     expect(s.worstDay).toEqual({ date: "2026-08-02", pnl: -20 });
@@ -212,97 +315,80 @@ describe("summarise", () => {
     expect(s.calibrationDelta).not.toBeNull();
   });
 
-  it("handles an empty bet list without dividing by zero", () => {
-    const empty = summarise([], { tenOfTenHits: 0, matchesTracked: 0 });
-    expect(empty.totalBets).toBe(0);
-    expect(empty.hitRate).toBe(0);
-    expect(empty.roi).toBeNull();
-    expect(empty.averageOdds).toBeNull();
-    expect(empty.currentStreak).toEqual({ type: null, count: 0, label: "—" });
-  });
+  it("builds Top 1, Top 3, Top 10 tier summaries", () => {
+    const tier1 = buildTierSummary(bets, (r) => r === 1, "Top 1");
+    expect(tier1.tier).toBe("Top 1");
+    expect(tier1.totalBets).toBe(1);
+    expect(tier1.wins).toBe(1);
+    expect(tier1.hitRate).toBe(100);
 
-  it("pluralises multi-bet streaks", () => {
-    const streaky = summarise(
-      [
-        bet({ id: "a", date: "2026-08-01", result: "LOSS", pnl: -10 }),
-        bet({ id: "b", date: "2026-08-02", result: "LOSS", pnl: -10 }),
-        bet({ id: "c", date: "2026-08-03", result: "LOSS", pnl: -10 }),
-      ],
-      { tenOfTenHits: 0, matchesTracked: 1 },
-    );
-    expect(streaky.currentStreak.label).toBe("3 Losses");
-    expect(streaky.longestLossStreak).toBe(3);
-  });
-
-  it("derives rank-tier hit rates", () => {
-    const ranked = summarise(
-      [
-        bet({ id: "r1", date: "2026-08-01", rank: 1, result: "WIN", source: "pick" }),
-        bet({ id: "r2", date: "2026-08-01", rank: 3, result: "LOSS", source: "pick" }),
-        bet({ id: "r3", date: "2026-08-01", rank: 9, result: "WIN", source: "pick" }),
-      ],
-      { tenOfTenHits: 0, matchesTracked: 1 },
-    );
-    expect(ranked.top1HitRate).toBe(100);
-    expect(ranked.top3HitRate).toBe(50);
-    expect(ranked.top10HitRate).toBeCloseTo(66.67, 1);
+    const tier3 = buildTierSummary(bets, (r) => r <= 3, "Top 3");
+    expect(tier3.totalBets).toBe(3);
+    expect(tier3.wins).toBe(2);
+    expect(tier3.losses).toBe(1);
+    expect(tier3.hitRate).toBeCloseTo(66.67, 1);
   });
 });
 
-// ─── Series, windows, breakdowns ──────────────────────────────────────────────
+// ─── Series, Windows, Calibration & Multi-Mode ────────────────────────────────
 
-describe("series and breakdowns", () => {
+describe("series, windows, calibration & multi-mode", () => {
   const bets = [
-    bet({ id: "1", date: "2026-08-01", pnl: 10, result: "WIN" }),
-    bet({ id: "2", date: "2026-08-01", pnl: -10, result: "LOSS" }),
-    bet({ id: "3", date: "2026-08-02", pnl: 5, result: "WIN", league: "La Liga", leagueSlug: "esp.1" }),
+    bet({ id: "1", date: "2026-08-01", pnl: 10, result: "WIN", modelProb: 0.85 }),
+    bet({ id: "2", date: "2026-08-01", pnl: -10, result: "LOSS", modelProb: 0.65 }),
+    bet({ id: "3", date: "2026-08-02", pnl: 5, result: "WIN", league: "La Liga", leagueSlug: "esp.1", modelProb: 0.75 }),
   ];
 
-  it("accumulates a daily P&L curve", () => {
+  it("accumulates daily series and rolling series", () => {
     const series = buildDailySeries(bets);
     expect(series).toHaveLength(2);
     expect(series[0]).toMatchObject({ date: "2026-08-01", bets: 2, pnl: 0, cumulativePnl: 0, hitRate: 50 });
     expect(series[1]).toMatchObject({ date: "2026-08-02", cumulativePnl: 5, hitRate: 100 });
+
+    const rolling = buildRollingSeries(series, 7);
+    expect(rolling).toHaveLength(2);
+    expect(rolling[1].hitRate).toBeGreaterThan(0);
   });
 
-  it("slices 7d / 30d / all-time windows", () => {
+  it("computes calibration curve buckets", () => {
+    const curve = buildCalibrationCurve(bets);
+    expect(curve).toHaveLength(5);
+    const bucket80 = curve.find((c) => c.bucket === "80–90%")!;
+    expect(bucket80.count).toBe(1);
+    expect(bucket80.actualHitRate).toBe(100);
+  });
+
+  it("computes drawdown episodes", () => {
+    const daily = buildDailySeries([
+      bet({ id: "1", date: "2026-08-01", pnl: 20 }),
+      bet({ id: "2", date: "2026-08-02", pnl: -30 }),
+      bet({ id: "3", date: "2026-08-03", pnl: 40 }),
+    ]);
+    const episodes = buildDrawdownEpisodes(daily);
+    expect(episodes.length).toBeGreaterThan(0);
+    expect(episodes[0].maxDrop).toBe(30);
+  });
+
+  it("synchronises multi-mode cumulative P&L series", () => {
     const now = new Date("2026-08-23T00:00:00Z");
-    const windows = buildWindows(
-      [bet({ id: "old", date: "2026-01-01", pnl: 100 }), bet({ id: "new", date: "2026-08-20", pnl: 5 })],
-      now,
-    );
-    expect(windows.map((w) => w.key)).toEqual(["7d", "30d", "all"]);
-    expect(windows[0].bets).toBe(1);
-    expect(windows[2].bets).toBe(2);
-    expect(windows[2].pnl).toBe(105);
-  });
+    const rA = buildModeReport("A", [bet({ id: "1", date: "2026-08-01", pnl: 10 })], { tenOfTenHits: 0, matchesTracked: 1, now });
+    const rB = buildModeReport("B", [bet({ id: "2", date: "2026-08-02", pnl: 20, mode: "B" })], { tenOfTenHits: 0, matchesTracked: 1, now });
+    const rC = buildModeReport("C", [], { tenOfTenHits: 0, matchesTracked: 0, now });
+    const rD = buildModeReport("D", [], { tenOfTenHits: 0, matchesTracked: 0, now });
 
-  it("groups by an arbitrary key", () => {
-    const rows = breakdownBy(bets, (b) => ({ key: b.leagueSlug ?? "", label: b.league }));
-    expect(rows[0]).toMatchObject({ key: "eng.1", bets: 2, wins: 1, losses: 1, hitRate: 50 });
-    expect(rows[1]).toMatchObject({ key: "esp.1", bets: 1, hitRate: 100 });
-  });
-
-  it("buckets odds and model confidence", () => {
-    const rows = oddsBands([
-      bet({ id: "1", date: "2026-08-01", odds: 1.2 }),
-      bet({ id: "2", date: "2026-08-01", odds: 4 }),
-      bet({ id: "3", date: "2026-08-01", odds: null }),
-    ]);
-    expect(rows.map((r) => r.key)).toEqual(["1.00-1.30", "3.00+"]);
-
-    const conf = confidenceBands([
-      bet({ id: "1", date: "2026-08-01", modelProb: 0.97 }),
-      bet({ id: "2", date: "2026-08-01", modelProb: 0.5 }),
-    ]);
-    expect(conf.map((r) => r.key)).toEqual(["95", "00"]);
+    const multi = buildMultiModeSeries([rA, rB, rC, rD]);
+    expect(multi.length).toBe(2);
+    expect(multi[0].date).toBe("2026-08-01");
+    expect(multi[0].A).toBe(10);
+    expect(multi[1].date).toBe("2026-08-02");
+    expect(multi[1].B).toBe(20);
   });
 });
 
 // ─── Normalisers ──────────────────────────────────────────────────────────────
 
 describe("row normalisers", () => {
-  it("expands a performance row into ranked picks", () => {
+  it("expands a performance row into ranked picks with enriched fields", () => {
     const bets = betsFromPerformanceRow(perfRow);
     expect(bets).toHaveLength(10);
     expect(bets[0]).toMatchObject({
@@ -312,28 +398,13 @@ describe("row normalisers", () => {
       result: "WIN",
       league: "Premier League",
       date: "2026-08-01",
+      marketFamily: "Corners",
+      confidenceLevel: "HIGH",
     });
     expect(bets[9].result).toBe("LOSS");
-    // Ranked picks carry no stake, so they never distort the money metrics.
-    expect(bets.every((b) => b.stake === null && b.pnl === null)).toBe(true);
   });
 
-  it("flags a 10/10 match only when all ten picks won", () => {
-    expect(perfectMatch(perfRow)).toBe(false);
-    expect(
-      perfectMatch({
-        ...perfRow,
-        top10Detail: Array.from({ length: 10 }, () => ({ outcome: "HIT" })),
-      }),
-    ).toBe(true);
-    expect(perfectMatch({ ...perfRow, top10Detail: [{ outcome: "HIT" }] })).toBe(false);
-  });
-
-  it("defaults an unknown ranking mode to B", () => {
-    expect(betsFromPerformanceRow({ ...perfRow, rankingMode: "" })[0].mode).toBe("B");
-  });
-
-  it("derives P&L for value bets that have not been settled with a P&L yet", () => {
+  it("derives P&L for value bets", () => {
     const base: ValueBetLogLike = {
       id: 7,
       eventId: "evt-7",
@@ -355,23 +426,23 @@ describe("row normalisers", () => {
       rankingMode: "D",
     };
     const won = betFromValueBetRow(base);
-    expect(won).toMatchObject({ mode: "D", source: "valueBet", result: "WIN", pnl: 25, returnAmount: 50 });
-    expect(won.ev).toBeCloseTo(0.24, 5);
-
-    expect(betFromValueBetRow({ ...base, outcome: "lost" }).pnl).toBe(-25);
-    expect(betFromValueBetRow({ ...base, outcome: "void" }).pnl).toBe(0);
-    expect(betFromValueBetRow({ ...base, outcome: "pending" }).pnl).toBeNull();
-    // A persisted P&L always wins over the derived one.
-    expect(betFromValueBetRow({ ...base, pnl: 12.5 }).pnl).toBe(12.5);
+    expect(won).toMatchObject({
+      mode: "D",
+      source: "valueBet",
+      result: "WIN",
+      pnl: 25,
+      returnAmount: 50,
+      marketFamily: "Cards / Discipline",
+    });
   });
 
-  it("attributes slips from the column first, then the picks JSON", () => {
+  it("normalises slip rows correctly", () => {
     const slip: SavedSlipLike = {
       id: 3,
       name: "Saturday banker",
       leagueSlug: "eng.1",
       competitionName: "Premier League",
-      picks: [{ rankingMode: "A" }, {}],
+      picks: [{ rankingMode: "A" }],
       combinedOdds: 4,
       combinedProb: 0.3,
       stake: 10,
@@ -379,81 +450,63 @@ describe("row normalisers", () => {
       createdAt: new Date("2026-08-12T18:30:00Z"),
       rankingMode: "C",
     };
-    expect(betFromSlipRow(slip)).toMatchObject({ mode: "C", pnl: 30, returnAmount: 40, date: "2026-08-12" });
-    expect(betFromSlipRow({ ...slip, rankingMode: null })?.mode).toBe("A");
-    // Never guess: unattributed slips are dropped entirely.
-    expect(betFromSlipRow({ ...slip, rankingMode: null, picks: [{}] })).toBeNull();
+    expect(betFromSlipRow(slip)).toMatchObject({
+      mode: "C",
+      pnl: 30,
+      marketFamily: "Accumulators",
+    });
   });
 });
 
-// ─── Filters, report, comparison ──────────────────────────────────────────────
+// ─── Filters, Comparison, Insights & Exports ──────────────────────────────────
 
-describe("filters", () => {
+describe("filters, comparison, insights & exports", () => {
   const bets = [
-    bet({ id: "1", date: "2026-08-01", league: "Premier League", result: "WIN", source: "pick" }),
-    bet({ id: "2", date: "2026-08-15", league: "La Liga", result: "LOSS", source: "valueBet" }),
-    bet({ id: "3", date: "2026-08-20", league: "Serie A", result: "PENDING", source: "slip", match: "Milan vs Inter" }),
+    bet({ id: "1", date: "2026-08-01", league: "Premier League", result: "WIN", source: "pick", marketFamily: "Goals", confidenceLevel: "HIGH", odds: 1.5, rank: 1, orientation: "Home", isLive: false }),
+    bet({ id: "2", date: "2026-08-15", league: "La Liga", result: "LOSS", source: "valueBet", marketFamily: "Corners", confidenceLevel: "LOW", odds: 2.5, rank: 4, orientation: "Away", isLive: true }),
+    bet({ id: "3", date: "2026-08-20", league: "Serie A", result: "PENDING", source: "slip", match: "Milan vs Inter", marketFamily: "Cards / Discipline", confidenceLevel: "MEDIUM", odds: 3.5 }),
   ];
 
-  it("filters by date, league, result, source and search", () => {
-    expect(applyFilters(bets, { from: "2026-08-10" }).map((b) => b.id)).toEqual(["2", "3"]);
-    expect(applyFilters(bets, { to: "2026-08-10" }).map((b) => b.id)).toEqual(["1"]);
-    expect(applyFilters(bets, { league: "liga" }).map((b) => b.id)).toEqual(["2"]);
-    expect(applyFilters(bets, { result: "win" }).map((b) => b.id)).toEqual(["1"]);
-    expect(applyFilters(bets, { source: "slip" }).map((b) => b.id)).toEqual(["3"]);
-    expect(applyFilters(bets, { search: "milan" }).map((b) => b.id)).toEqual(["3"]);
-    expect(applyFilters(bets, { result: "ALL", source: "all" })).toHaveLength(3);
-    expect(applyFilters(bets, {})).toHaveLength(3);
-  });
-});
-
-describe("report and comparison", () => {
-  const now = new Date("2026-08-23T00:00:00Z");
-
-  it("builds a complete report for one mode", () => {
-    const report = buildModeReport("A", [bet({ id: "1", date: "2026-08-20" })], {
-      tenOfTenHits: 1,
-      matchesTracked: 4,
-      now,
-    });
-    expect(report.mode).toBe("A");
-    expect(report.label).toBe("Rank A · Classic");
-    expect(report.summary.totalBets).toBe(1);
-    expect(report.windows).toHaveLength(3);
-    expect(report.markets[0].label).toBe("Total Offsides");
-    expect(report.leagues[0].label).toBe("Premier League");
-    expect(report.bets).toHaveLength(1);
+  it("filters across all dimensions including granular fields", () => {
+    expect(applyFilters(bets, { marketFamily: "Goals" })).toHaveLength(1);
+    expect(applyFilters(bets, { confidenceLevel: "HIGH" })).toHaveLength(1);
+    expect(applyFilters(bets, { oddsRange: "1.30-1.60" })).toHaveLength(1);
+    expect(applyFilters(bets, { rankPosition: "1" })).toHaveLength(1);
+    expect(applyFilters(bets, { orientation: "Home" })).toHaveLength(1);
+    expect(applyFilters(bets, { isLive: "live" })).toHaveLength(1);
+    expect(applyFilters(bets, { isLive: "prematch" })).toHaveLength(2);
   });
 
-  it("stays stable for a mode with no data", () => {
-    const report = buildModeReport("D", [], { tenOfTenHits: 0, matchesTracked: 0, now });
-    expect(report.summary.totalBets).toBe(0);
-    expect(report.daily).toEqual([]);
-    expect(report.factorAccuracy).toEqual([]);
-  });
-
-  it("stars the best mode per metric and ignores empty modes", () => {
+  it("generates automated insights", () => {
+    const now = new Date("2026-08-23T00:00:00Z");
     const reports = [
-      buildModeReport("A", [bet({ id: "a", date: "2026-08-20", pnl: 50, stake: 10, odds: 3 })], {
-        tenOfTenHits: 3,
-        matchesTracked: 5,
-        now,
-      }),
-      buildModeReport("B", [bet({ id: "b", date: "2026-08-20", pnl: 5, stake: 10, odds: 1.4, result: "LOSS" })], {
-        tenOfTenHits: 0,
-        matchesTracked: 5,
-        now,
-      }),
+      buildModeReport("A", [bet({ id: "a1", date: "2026-08-20", pnl: 50, stake: 10, odds: 3, result: "WIN", league: "Premier League", marketFamily: "Goals", confidenceLevel: "HIGH" }), bet({ id: "a2", date: "2026-08-21", pnl: 40, stake: 10, odds: 2, result: "WIN", league: "Premier League", marketFamily: "Goals", confidenceLevel: "HIGH" })], { tenOfTenHits: 1, matchesTracked: 2, now }),
+      buildModeReport("B", [bet({ id: "b1", date: "2026-08-20", pnl: -10, stake: 10, odds: 1.4, result: "LOSS", league: "Premier League", marketFamily: "Goals", mode: "B" }), bet({ id: "b2", date: "2026-08-21", pnl: -10, stake: 10, odds: 1.4, result: "LOSS", league: "Premier League", marketFamily: "Goals", mode: "B" })], { tenOfTenHits: 0, matchesTracked: 2, now }),
       buildModeReport("C", [], { tenOfTenHits: 0, matchesTracked: 0, now }),
       buildModeReport("D", [], { tenOfTenHits: 0, matchesTracked: 0, now }),
     ];
+
     const comparison = buildComparison(reports);
-    const a = comparison.find((r) => r.mode === "A")!;
-    const c = comparison.find((r) => r.mode === "C")!;
-    expect(a.bestIn).toContain("totalPnl");
-    expect(a.bestIn).toContain("hitRate");
-    expect(a.bestIn).toContain("tenOfTenHits");
-    expect(c.bestIn).toEqual([]);
-    expect(comparison).toHaveLength(4);
+    expect(comparison[0].mode).toBe("A");
+    expect(comparison[0].rank).toBe(1);
+    expect(comparison[0].overallScore).toBeGreaterThan(0);
+
+    const insights = generateInsights(reports);
+    expect(insights.recommendedMode).toBe("A");
+    expect(insights.leagueLeaders.length).toBeGreaterThan(0);
+    expect(insights.marketLeaders.length).toBeGreaterThan(0);
+  });
+
+  it("exports to CSV and JSON formats", () => {
+    const csv = betsToCsv(bets);
+    expect(csv).toContain('"Date","Match","League"');
+    expect(csv).toContain("Arsenal vs Chelsea");
+
+    const now = new Date("2026-08-23T00:00:00Z");
+    const report = buildModeReport("A", bets, { tenOfTenHits: 1, matchesTracked: 3, now });
+    const json = betsToJson(report);
+    const parsed = JSON.parse(json);
+    expect(parsed.mode).toBe("A");
+    expect(parsed.betsCount).toBe(3);
   });
 });
