@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useState, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { TeamBadge } from "../_components/ui";
 import {
   CARD_SURFACE,
@@ -116,14 +116,20 @@ export default function SureCornersPage() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /**
+   * Tracks the latest loaded payload without making `load` depend on state.
+   * A data-dependent `load` callback used to re-arm the mount effect on every
+   * fetch, causing the page to auto-refresh continuously.
+   */
+  const dataRef = useRef<SureCornersData | null>(null);
+  const initialFetchDone = useRef(false);
 
   const load = useCallback(async (forceRefresh = false) => {
-    if (forceRefresh) {
+    if (forceRefresh || dataRef.current) {
       setRefreshing(true);
     } else {
       // Only show full loading skeleton if we have no data yet
-      if (!data) setLoading(true);
-      else setRefreshing(true);
+      setLoading(true);
     }
     setError(null);
     try {
@@ -131,6 +137,7 @@ export default function SureCornersPage() {
       const response = await fetch(url, { cache: "no-store" });
       const payload = (await response.json()) as SureCornersData & { error?: string };
       if (!response.ok) throw new Error(payload.error ?? `HTTP ${response.status}`);
+      dataRef.current = payload;
       setData(payload);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Unable to load Sure Bet Corners.");
@@ -138,15 +145,21 @@ export default function SureCornersPage() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [data]);
+  }, []);
 
   useEffect(() => {
-    // Render immediately, then fetch in background - page opens instantly with skeleton
-    const initialLoad = window.setTimeout(() => {
-      void load(false);
-    }, 0);
-    return () => window.clearTimeout(initialLoad);
+    // Fetch exactly once on mount. `load` is stable (empty dependency array),
+    // so this effect never re-fires when data arrives; the API is only called
+    // again when the user explicitly clicks Refresh or Retry.
+    if (initialFetchDone.current) return;
+    initialFetchDone.current = true;
+    void load(false);
   }, [load]);
+
+  // Mirrors the API gate (filters.minimumHitRate) so this copy never drifts
+  // from the route's calibration threshold.
+  const minHitRate = data?.filters.minimumHitRate ?? 0.95;
+  const minHitRateLabel = (minHitRate * 100).toFixed(0);
 
   // Group matches by date for 7-day display
   const groupedMatches = useMemo(() => {
@@ -201,8 +214,8 @@ export default function SureCornersPage() {
 
         <div className={`${GLASS_PANEL} grid grid-cols-1 gap-3 p-4 text-xs sm:grid-cols-3`}>
           <div>
-            <div className="font-mono uppercase tracking-wider text-amber-300">98%+ hit-rate gate</div>
-            <p className="mt-1 text-slate-400">A market is shown only when the engine predicts at least 98.0%.</p>
+            <div className="font-mono uppercase tracking-wider text-amber-300">{minHitRateLabel}%+ hit-rate gate</div>
+            <p className="mt-1 text-slate-400">A market is shown only when the engine predicts at least {(minHitRate * 100).toFixed(1)}%.</p>
           </div>
           <div>
             <div className="font-mono uppercase tracking-wider text-cyan-300">Real stats only</div>
@@ -265,7 +278,7 @@ export default function SureCornersPage() {
             </div>
           </>
         ) : !error ? (
-          <EmptyState onRetry={() => void load(false)} />
+          <EmptyState onRetry={() => void load(false)} hitRatePercent={minHitRateLabel} />
         ) : null}
 
         <p className="border-t border-white/[0.06] pt-4 text-center text-[11px] leading-relaxed text-slate-500">
@@ -357,13 +370,13 @@ function MarketCard({ market }: { market: SureCornerMarket }) {
   );
 }
 
-function EmptyState({ onRetry }: { onRetry: () => void }) {
+function EmptyState({ onRetry, hitRatePercent }: { onRetry: () => void; hitRatePercent: string }) {
   return (
     <div className={`${GLASS_PANEL} p-10 text-center sm:p-14`}>
       <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl border border-amber-400/20 bg-amber-400/10 text-2xl">🎯</div>
       <h2 className="text-xl font-bold text-slate-200">no sure bet corners available right now</h2>
       <p className="mx-auto mt-3 max-w-2xl text-sm leading-relaxed text-slate-400">
-        Only corner bets with a predicted hit rate above 98 percent, real stats, and top-tier leagues are shown. If every market does not pass every strict filter, nothing is listed. Checked next 7 days.
+        Only corner bets with a predicted hit rate above {hitRatePercent} percent, real stats, and top-tier leagues are shown. If every market does not pass every strict filter, nothing is listed. Checked next 7 days.
       </p>
       <button
         type="button"

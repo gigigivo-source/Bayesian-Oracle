@@ -10,15 +10,14 @@ import { LEAGUE_TIER, leagueTier } from "@/lib/leaguePriority";
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
-const MIN_HIT_RATE = 0.98;
-const MIN_CORNER_WINNER_PROBABILITY = 0.80;
+const MIN_HIT_RATE = 0.95;
 const MIN_HANDICAP_PROBABILITY = 0.85;
 const MIN_WEIGHTED_FIELDS_PER_TEAM = 3;
 const MIN_EMPIRICAL_CALIBRATION_SAMPLES = 8;
 const LOOKAHEAD_DAYS = 7;
 const PREMATCH_STATS_TIMEOUT_MS = 20_000;
 const PROFILE_TIMEOUT_MS = 25_000;
-const TEAM_CORNER_LINES = [3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5, 10.5] as const;
+const TEAM_CORNER_LINES = [5.5, 6.5, 7.5, 8.5] as const;
 const TOTAL_CORNER_LINES = [6.5, 7.5, 8.5, 9.5, 10.5, 11.5, 12.5, 13.5, 14.5] as const;
 const HANDICAP_LINES = [3.5, 2.5, 1.5, 0.5] as const;
 const CACHE_TTL_MS = 60 * 60 * 1000;
@@ -68,7 +67,6 @@ export type SureCornerMarketType =
   | "Total Corners"
   | "Team 1 Corners"
   | "Team 2 Corners"
-  | "Corner Winner"
   | "Corner Handicap";
 
 export interface SureCornerMarket {
@@ -105,7 +103,6 @@ export interface SureCornerMatch {
     /** Signed as requested: homeExpectedCorners - awayExpectedCorners. */
     difference: number;
     strongerTeam: string | null;
-    cornerWinProbability: number | null;
   };
   markets: SureCornerMarket[];
 }
@@ -979,19 +976,6 @@ function bestMarket(markets: EvaluatedMarket[]): EvaluatedMarket | null {
   return [...accepted].sort((left, right) => right.hitRate - left.hitRate)[0] ?? null;
 }
 
-function cornerWinnerProbability(favoured: number, other: number): number {
-  const limit = Math.min(60, Math.max(25, Math.ceil(Math.max(favoured, other)) + 18));
-  let probability = 0;
-  for (let favouredCorners = 0; favouredCorners <= limit; favouredCorners++) {
-    for (let otherCorners = 0; otherCorners <= limit; otherCorners++) {
-      if (favouredCorners > otherCorners) {
-        probability += poissonPmf(favouredCorners, favoured) * poissonPmf(otherCorners, other);
-      }
-    }
-  }
-  return clamp(probability, 0, 1);
-}
-
 function handicapCoverProbability(favoured: number, other: number, handicap: number): number {
   const limit = Math.min(60, Math.max(25, Math.ceil(Math.max(favoured, other)) + 18));
   const requiredDifference = Math.ceil(handicap);
@@ -1010,7 +994,7 @@ function empiricalDirectionalRate(
   input: PreparedPrematchStats,
   expectations: CornerExpectations,
   stronger: Side,
-  handicap: number | null,
+  handicap: number,
 ): { rate: number; samples: number } | null {
   const samples = similarHistoricalSamples(
     input.match.history,
@@ -1022,40 +1006,9 @@ function empiricalDirectionalRate(
   for (const sample of samples) {
     const favoured = stronger === "home" ? sample.home : sample.away;
     const other = stronger === "home" ? sample.away : sample.home;
-    if (handicap === null ? favoured > other : favoured - other >= Math.ceil(handicap)) hits++;
+    if (favoured - other >= Math.ceil(handicap)) hits++;
   }
   return { rate: hits / samples.length, samples: samples.length };
-}
-
-function buildWinnerMarket(
-  stronger: Side,
-  fx: FixtureLite,
-  expectations: CornerExpectations,
-  input: PreparedPrematchStats,
-  quality: DataQuality,
-): EvaluatedMarket {
-  const favouredName = stronger === "home" ? fx.home.name : fx.away.name;
-  const otherName = stronger === "home" ? fx.away.name : fx.home.name;
-  const favouredCorners = stronger === "home" ? expectations.home : expectations.away;
-  const otherCorners = stronger === "home" ? expectations.away : expectations.home;
-  const empirical = empiricalDirectionalRate(input, expectations, stronger, null);
-  const probability = empirical?.rate ?? cornerWinnerProbability(favouredCorners, otherCorners);
-  const reliable = empirical
-    ? empirical.samples >= MIN_EMPIRICAL_CALIBRATION_SAMPLES
-    : quality.hasCornerAnchorPair && quality.confidence !== "LOW";
-  const calibration = empirical
-    ? `${empirical.samples} similar historical expected-difference matches`
-    : "Poisson corner-difference distribution grounded in the weighted pre-match expectations";
-  return makeEvaluatedMarket(
-    "Corner Winner",
-    "Corner Winner",
-    `${favouredName} to win corners`,
-    null,
-    probability,
-    `${expectationReason(expectations, input, calibration)} Expected corner difference is ${expectations.absoluteDifference.toFixed(1)}; ${favouredName} has a ${(probability * 100).toFixed(1)}% corner-count win probability over ${otherName}.`,
-    quality,
-    reliable,
-  );
 }
 
 function buildHandicapMarkets(
@@ -1091,6 +1044,58 @@ function buildHandicapMarkets(
   });
 }
 
+/**
+ * Team 1 / Team 2 corner line selection. When the pre-match statistics point
+ * to a stronger side, the two lines are differentiated by team strength: the
+ * stronger side's line is at least 1.0 higher than the weaker side's, and
+ * among equally calibrated pairs the line gap mirrors the expected corner
+ * gap. If no accepted pair can express that gap, each side keeps its own best
+ * qualifying line instead of both team markets being dropped.
+ */
+function selectTeamPair(
+  homeOptions: EvaluatedMarket[],
+  awayOptions: EvaluatedMarket[],
+  expectations: CornerExpectations,
+  strength: StrengthProfile,
+): { home: EvaluatedMarket | null; away: EvaluatedMarket | null } {
+  const bestHome = bestMarket(homeOptions);
+  const bestAway = bestMarket(awayOptions);
+  if (!bestHome || !bestAway || !strength.stronger) {
+    return { home: bestHome, away: bestAway };
+  }
+
+  const orderedPairs = homeOptions
+    .filter((home) => home.accepted && home.line !== null)
+    .flatMap((home) =>
+      awayOptions
+        .filter((away) =>
+          away.accepted &&
+          away.line !== null &&
+          (strength.stronger === "home"
+            ? (home.line ?? 0) >= away.line + 1
+            : away.line >= (home.line ?? 0) + 1),
+        )
+        .map((away) => ({ home, away })),
+    )
+    .sort((left, right) => {
+      const rateGap =
+        right.home.hitRate + right.away.hitRate - (left.home.hitRate + left.away.hitRate);
+      if (rateGap !== 0) return rateGap;
+      // Tie-break: prefer the pair whose line gap best mirrors the expected
+      // corner gap from the pre-match statistics.
+      const leftGap = Math.abs(
+        Math.abs((left.home.line ?? 0) - (left.away.line ?? 0)) - expectations.absoluteDifference,
+      );
+      const rightGap = Math.abs(
+        Math.abs((right.home.line ?? 0) - (right.away.line ?? 0)) - expectations.absoluteDifference,
+      );
+      return leftGap - rightGap;
+    });
+
+  const pair = orderedPairs[0];
+  return pair ? { home: pair.home, away: pair.away } : { home: bestHome, away: bestAway };
+}
+
 function missingWeightedStatistics(
   fx: FixtureLite,
   expectations: CornerExpectations,
@@ -1101,10 +1106,7 @@ function missingWeightedStatistics(
   ];
 }
 
-function diagnosticForNoMarkets(
-  candidates: EvaluatedMarket[],
-  lineReason: string | null,
-): string {
+function diagnosticForNoMarkets(candidates: EvaluatedMarket[]): string {
   const best = [...candidates].sort((left, right) => right.hitRate - left.hitRate)[0];
   const reasons: string[] = [];
   if (best && best.hitRate < MIN_HIT_RATE) {
@@ -1112,7 +1114,6 @@ function diagnosticForNoMarkets(
   } else if (best?.rejectionReason) {
     reasons.push(`${best.rejectionReason} (best line: ${best.name} ${best.selection})`);
   }
-  if (lineReason) reasons.push(lineReason);
   return reasons.join("; ") || `no corner market passed the ${MIN_HIT_RATE.toFixed(2)} hit-rate and HIGH-confidence gates`;
 }
 
@@ -1199,47 +1200,11 @@ function evaluateFixture(
   );
   candidates.push(...homeOptions, ...awayOptions);
 
-  let lineReason: string | null = null;
+  const teamPair = selectTeamPair(homeOptions, awayOptions, expectations, strength);
+  if (teamPair.home) markets.push(teamPair.home);
+  if (teamPair.away) markets.push(teamPair.away);
+
   if (strength.stronger) {
-    const pairs = homeOptions.flatMap((home) => awayOptions.map((away) => ({ home, away })));
-    const differentiated = pairs.filter(({ home, away }) =>
-      home.accepted &&
-      away.accepted &&
-      home.line !== null &&
-      away.line !== null &&
-      (strength.stronger === "home"
-        ? home.line >= away.line + 1
-        : away.line >= home.line + 1),
-    );
-    const pair = [...differentiated].sort((left, right) =>
-      (right.home.hitRate + right.away.hitRate) - (left.home.hitRate + left.away.hitRate),
-    )[0];
-    if (pair) {
-      markets.push(pair.home, pair.away);
-    } else {
-      const bestHome = bestMarket(homeOptions);
-      const bestAway = bestMarket(awayOptions);
-      if (bestHome && bestAway) {
-        lineReason = `corner lines not differentiated (Team1 ${bestHome.line?.toFixed(1)}, Team2 ${bestAway.line?.toFixed(1)}; big-team line must be at least 1.0 higher)`;
-      }
-    }
-  } else {
-    const home = bestMarket(homeOptions);
-    const away = bestMarket(awayOptions);
-    if (home) markets.push(home);
-    if (away) markets.push(away);
-  }
-
-  let winnerProbability: number | null = null;
-  if (strength.stronger && strength.gap > 2.0) {
-    const winner = buildWinnerMarket(strength.stronger, fx, expectations, input, quality);
-    winnerProbability = winner.hitRate;
-    candidates.push(winner);
-    // Team-strength rule (>=80%) is applied before the global 98%/HIGH gate.
-    if (winner.hitRate >= MIN_CORNER_WINNER_PROBABILITY && winner.accepted) markets.push(winner);
-  }
-
-  if (strength.stronger && strength.gap > 2.5) {
     const handicapOptions = buildHandicapMarkets(strength.stronger, fx, expectations, input, quality);
     candidates.push(...handicapOptions);
     const handicap = bestMarket(
@@ -1263,8 +1228,8 @@ function evaluateFixture(
   if (!differentiatedMarkets.length) {
     return {
       match: null,
-      rejectionCode: lineReason ? "lineDifferentiation" : "marketGate",
-      reason: diagnosticForNoMarkets(candidates, lineReason),
+      rejectionCode: "marketGate",
+      reason: diagnosticForNoMarkets(candidates),
       missingStatistics: missingWeightedStatistics(fx, expectations),
     };
   }
@@ -1297,7 +1262,6 @@ function evaluateFixture(
         strongerTeam: strength.stronger === "home"
           ? fx.home.name
           : strength.stronger === "away" ? fx.away.name : null,
-        cornerWinProbability: winnerProbability,
       },
       markets: differentiatedMarkets.map(({ accepted: _accepted, calibrationReliable: _calibration, rejectionReason: _rejection, ...market }) => market),
     },
@@ -1491,7 +1455,7 @@ export async function GET(req: Request): Promise<Response> {
         allowedLeagueTiers: [1, 2],
         totalCornerLines: TOTAL_CORNER_LINES,
         teamCornerLines: TEAM_CORNER_LINES,
-        marketTypes: ["Total Corners", "Team 1 Corners", "Team 2 Corners", "Corner Winner", "Corner Handicap"],
+        marketTypes: ["Total Corners", "Team 1 Corners", "Team 2 Corners", "Corner Handicap"],
       },
     };
 
