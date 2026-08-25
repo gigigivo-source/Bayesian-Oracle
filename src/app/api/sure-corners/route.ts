@@ -1636,6 +1636,89 @@ async function fetchProfiles(fx: FixtureLite): Promise<{ home: MeshProfile | nul
   ]);
 }
 
+/**
+ * Persist every accepted sure-bet corner pick to performance_log
+ * (rankingMode = 'S', outcome = 'pending') so the post-match verification
+ * endpoint (/api/sure-corners/verify) can settle each market once the match
+ * finishes. Idempotent: one row per (eventId, market, selection).
+ *
+ * Fail-soft by design: a missing or unreachable database must never break
+ * the public feed, so the whole persistence step is wrapped in try/catch.
+ * The db module is imported dynamically — the same pattern this route uses
+ * for the optional persistent profile cache — so deployments without a
+ * DATABASE_URL keep working.
+ */
+async function persistSureCornerPicks(matches: SureCornerMatch[]): Promise<void> {
+  try {
+    const { db } = await import("@/db");
+    const { performanceLog } = await import("@/db/schema");
+    const { and, eq } = await import("drizzle-orm");
+
+    let saved = 0;
+    for (const match of matches) {
+      for (const market of match.markets) {
+        const existing = await db
+          .select({ id: performanceLog.id })
+          .from(performanceLog)
+          .where(and(
+            eq(performanceLog.eventId, match.fixtureId),
+            eq(performanceLog.rankingMode, "S"),
+            eq(performanceLog.market, market.name),
+            eq(performanceLog.selection, market.selection),
+          ))
+          .limit(1);
+        if (existing[0]) continue;
+
+        await db.insert(performanceLog).values({
+          eventId: match.fixtureId,
+          matchLabel: `${match.homeTeam} vs ${match.awayTeam}`,
+          homeTeam: match.homeTeam,
+          awayTeam: match.awayTeam,
+          league: match.league,
+          leagueSlug: match.leagueSlug,
+          competitionName: match.league,
+          matchDate: match.date.slice(0, 10),
+          // Pre-match row: the verify route stamps the final score, outcome
+          // and settledAt once the match has finished.
+          homeScore: 0,
+          awayScore: 0,
+          totalPicks: 1,
+          hits: 0,
+          misses: 0,
+          // Kept at 0 on purpose: 'S' rows settle through the `outcome`
+          // column, so the settle cron's pending-performance refresh (which
+          // sweeps rows with pending > 0) must never adopt them.
+          pending: 0,
+          accuracy: 0,
+          top10Detail: [{
+            name: market.name,
+            selection: market.selection,
+            hitRate: market.hitRate,
+            outcome: "PENDING",
+            family: "Corners",
+          }],
+          lowConfidence: false,
+          rankingMode: "S",
+          market: market.name,
+          selection: market.selection,
+          outcome: "pending",
+          hitRate: market.hitRate,
+          // Every sure-bet pick passes the strict filters by construction.
+          confidence: "HIGH",
+        });
+        saved++;
+      }
+    }
+    console.info(
+      `[SureCorners] Persisted ${saved} new sure-bet corner pick(s) to performance_log (rankingMode S)`,
+    );
+  } catch (error) {
+    console.warn(
+      `[SureCorners] Could not persist sure-bet corner picks: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
 async function mapWithConcurrency<T, R>(
   items: T[],
   concurrency: number,
@@ -1762,6 +1845,9 @@ export async function GET(req: Request): Promise<Response> {
     const matches = evaluated
       .filter((match): match is SureCornerMatch => match !== null)
       .sort((left, right) => new Date(left.date).getTime() - new Date(right.date).getTime());
+
+    // Record every accepted pick so it can be verified after the match.
+    await persistSureCornerPicks(matches);
 
     const body: SureCornersResponse = {
       generatedAt: new Date().toISOString(),

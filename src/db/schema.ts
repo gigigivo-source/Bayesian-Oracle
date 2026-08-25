@@ -112,6 +112,18 @@ export const performanceLog = pgTable("performance_log", {
   top10Detail:     jsonb("top10_detail").notNull(),  // full top10 with outcomes
   lowConfidence:   boolean("low_confidence").notNull().default(false), // confidence gate flag
   rankingMode:     text("ranking_mode").notNull().default("B"),
+  // ── Sure Bet Corners (rankingMode = 'S') verification fields ──────────────
+  // One row per sure-bet corner pick. `outcome` drives the post-match
+  // verification chip (/api/sure-corners/verify): 'pending' rows are
+  // evaluated once the match finishes and stamped with WIN | LOSS | PUSH |
+  // VOID plus `settledAt`. The remaining columns are nullable so rows
+  // written by the other writers (modes A–D) are unaffected.
+  market:          text("market"),                    // e.g. "Total Corners O/U 9.5"
+  selection:       text("selection"),                 // e.g. "Over 9.5"
+  outcome:         text("outcome").default("pending"),// pending | WIN | LOSS | PUSH | VOID
+  hitRate:         real("hit_rate"),                  // predicted hit rate at pick time
+  confidence:      text("confidence"),                // "HIGH" for sure-bet picks
+  settledAt:       timestamp("settled_at"),           // set when the pick is verified
   createdAt:       timestamp("created_at").defaultNow().notNull(),
 });
 
