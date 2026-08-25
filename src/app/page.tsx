@@ -552,6 +552,22 @@ function Header({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
               <div className="text-sm font-medium leading-tight">Ranking Mode Performance</div>
               <div className="text-[11px] mt-0.5 leading-snug text-slate-500">Compare Classic, 12-Factor, Hybrid & Consensus</div>
             </button>
+            <button
+              type="button"
+              role="menuitem"
+              title="corner bets with 98 percent plus predicted hit rate"
+              aria-label="Sure Bet Corners — corner bets with 98 percent plus predicted hit rate"
+              onClick={() => {
+                router.push("/sure-corners");
+                setMenuOpen(false);
+              }}
+              className={`${MENU_ITEM} w-full px-4 py-3 text-left rounded-xl`}
+            >
+              <div className="flex items-center justify-between">
+                <div className="text-sm font-medium leading-tight">🎯 Sure Bet Corners</div>
+              </div>
+              <div className="text-[11px] mt-0.5 leading-snug text-slate-500">corner bets with 98 percent plus predicted hit rate</div>
+            </button>
             {menuTabs.map((t) => (
               <button
                 key={t.id}
