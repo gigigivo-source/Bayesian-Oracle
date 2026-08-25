@@ -16,6 +16,7 @@
 //   source  pick | valueBet | slip      product filter
 //   search  free text                   match / market / selection search
 //   limit   max bet rows per mode (default 1500, max 5000)
+//   refresh true                        bypass cache and force fresh calculation
 //
 // All aggregation lives in `@/lib/performance/modeAnalytics` (pure + unit
 // tested); this route only loads rows, normalises them and applies filters.
@@ -41,6 +42,29 @@ export const dynamic = "force-dynamic";
 
 const DEFAULT_LIMIT = 1500;
 const MAX_LIMIT = 5000;
+const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+type CacheEntry = {
+  data: unknown;
+  timestamp: number;
+};
+
+// In-memory cache at module level for 1-hour TTL
+const cache = new Map<string, CacheEntry>();
+
+function getCacheKey(url: URL): string {
+  const days = url.searchParams.get("days") ?? "30";
+  const from = url.searchParams.get("from") ?? "";
+  const to = url.searchParams.get("to") ?? "";
+  const mode = (url.searchParams.get("mode") ?? "all").toUpperCase();
+  const league = url.searchParams.get("league") ?? "";
+  const result = url.searchParams.get("result") ?? "";
+  const source = url.searchParams.get("source") ?? "";
+  const search = url.searchParams.get("search") ?? "";
+  const limit = url.searchParams.get("limit") ?? "";
+  // Key includes date range and all relevant filters
+  return `modes:${days}:${from}:${to}:${mode}:${league}:${result}:${source}:${search}:${limit}`;
+}
 
 function parseWindow(url: URL): { from: string; to: string | null; days: string } {
   const now = new Date();
@@ -74,6 +98,30 @@ async function loadSlipModes(since: Date): Promise<Map<number, string>> {
 export async function GET(req: Request) {
   try {
     const url = new URL(req.url);
+    const isRefresh = url.searchParams.get("refresh") === "true";
+    const cacheKey = getCacheKey(url);
+
+    // If refresh is requested, delete the cached entry for this request to force fresh calculation
+    if (isRefresh) {
+      cache.delete(cacheKey);
+      // Also clear any other entries if user wants a full fresh refresh - to ensure no stale data
+      // But per spec we only need to ignore this key; we still bypass cache check below
+    }
+
+    // Check cache if not a refresh request
+    if (!isRefresh) {
+      const cached = cache.get(cacheKey);
+      if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
+        return Response.json(cached.data, {
+          headers: { "Cache-Control": "no-store", "X-Cache": "HIT" },
+        });
+      }
+      // Auto-clear expired entry
+      if (cached) {
+        cache.delete(cacheKey);
+      }
+    }
+
     const window = parseWindow(url);
     const since = new Date(`${window.from}T00:00:00.000Z`);
     const modeParam = (url.searchParams.get("mode") ?? "all").toUpperCase();
@@ -145,7 +193,7 @@ export async function GET(req: Request) {
       bets: report.bets.slice(0, limit),
     }));
 
-    return Response.json({
+    const responseData = {
       ok: true,
       generatedAt: now.toISOString(),
       window: { days: window.days, from: window.from, to: window.to },
@@ -164,6 +212,13 @@ export async function GET(req: Request) {
       },
       comparison,
       modes,
+    };
+
+    // Store in cache with fresh timestamp
+    cache.set(cacheKey, { data: responseData, timestamp: Date.now() });
+
+    return Response.json(responseData, {
+      headers: { "Cache-Control": "no-store", "X-Cache": isRefresh ? "REFRESH" : "MISS" },
     });
   } catch (error) {
     console.error("Ranking mode performance API error", error);

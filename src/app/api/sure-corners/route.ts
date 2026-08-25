@@ -11,11 +11,31 @@ export const maxDuration = 300;
 const MIN_HIT_RATE = 0.98;
 const MIN_CORNER_WINNER_PROBABILITY = 0.80;
 const MIN_HANDICAP_PROBABILITY = 0.85;
-const LOOKAHEAD_DAYS = 14;
+const LOOKAHEAD_DAYS = 7; // Changed from 14 to 7 per requirement: fetch next 7 days
 const REAL_STATS_TIMEOUT_MS = 20_000;
 const TEAM_CORNER_LINES = [5.5, 6.5, 7.5, 8.5] as const;
 const TOTAL_CORNER_LINES = [6.5, 7.5, 8.5, 9.5, 10.5, 11.5, 12.5, 13.5, 14.5] as const;
 const HANDICAP_LINES = [3.5, 2.5, 1.5, 0.5] as const;
+const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour TTL
+
+type CacheEntry = {
+  data: SureCornersResponse;
+  timestamp: number;
+};
+
+// In-memory cache at module level for 1-hour TTL
+const cache = new Map<string, CacheEntry>();
+
+function getCacheKey(url: URL): string {
+  // Key includes date range (7 days) and any other filters
+  // For sure-corners, we include all search params except refresh
+  const params = new URLSearchParams(url.searchParams);
+  params.delete("refresh");
+  const sortedKeys = Array.from(params.keys()).sort();
+  const paramString = sortedKeys.map((k) => `${k}=${params.get(k)}`).join("&");
+  // Include the 7-day range identifier so cache is tied to that window
+  return `sure-corners:${LOOKAHEAD_DAYS}d:${paramString}`;
+}
 
 /** The only competition tiers that are eligible for this intentionally narrow feed. */
 const SURE_CORNERS_LEAGUES = Object.entries(LEAGUE_TIER)
@@ -493,7 +513,27 @@ async function mapWithConcurrency<T, R>(items: T[], concurrency: number, fn: (it
   return output as R[];
 }
 
-export async function GET(): Promise<Response> {
+export async function GET(req: Request): Promise<Response> {
+  const url = new URL(req.url);
+  const isRefresh = url.searchParams.get("refresh") === "true";
+  const cacheKey = getCacheKey(url);
+
+  // Handle cache for non-refresh requests
+  if (!isRefresh) {
+    const cached = cache.get(cacheKey);
+    if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
+      return Response.json(cached.data, {
+        headers: { "Cache-Control": "no-store", "X-Cache": "HIT" },
+      });
+    }
+    if (cached) {
+      cache.delete(cacheKey);
+    }
+  } else {
+    // Refresh requested: delete existing cache entry to force fresh calculation
+    cache.delete(cacheKey);
+  }
+
   const rejectionReasons: Record<string, number> = {};
   let rejectedMatches = 0;
   const reject = (fx: FixtureLite, key: string, detail: string) => {
@@ -503,6 +543,7 @@ export async function GET(): Promise<Response> {
   };
 
   try {
+    // Fetch fixtures for the next 7 days (inclusive) per requirement
     const range = dateRange(LOOKAHEAD_DAYS);
     const boards = await Promise.all(
       SURE_CORNERS_LEAGUES.map(async (slug) => {
@@ -572,8 +613,17 @@ export async function GET(): Promise<Response> {
       },
     };
 
-    console.info(`SureCorners checked ${fixtures.length} fixtures, accepted ${matches.length}, rejected ${rejectedMatches}.`);
-    return Response.json(body, { headers: { "Cache-Control": "no-store" } });
+    console.info(`SureCorners checked ${fixtures.length} fixtures (7-day window), accepted ${matches.length}, rejected ${rejectedMatches}.`);
+
+    // Store in cache with fresh timestamp
+    cache.set(cacheKey, { data: body, timestamp: Date.now() });
+
+    return Response.json(body, {
+      headers: {
+        "Cache-Control": "no-store",
+        "X-Cache": isRefresh ? "REFRESH" : "MISS",
+      },
+    });
   } catch (error) {
     console.error(`SureCorners route failed: ${error instanceof Error ? error.message : String(error)}`);
     return Response.json(

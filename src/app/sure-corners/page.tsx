@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, useMemo } from "react";
 import { TeamBadge } from "../_components/ui";
 import {
   CARD_SURFACE,
@@ -88,6 +88,25 @@ function formatDate(value: string): string {
   }).format(date);
 }
 
+function formatDateGroup(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  const today = new Date();
+  const tomorrow = new Date();
+  tomorrow.setDate(today.getDate() + 1);
+  const isToday = date.toDateString() === today.toDateString();
+  const isTomorrow = date.toDateString() === tomorrow.toDateString();
+  const base = new Intl.DateTimeFormat("en", {
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+  }).format(date);
+  if (isToday) return `Today · ${base}`;
+  if (isTomorrow) return `Tomorrow · ${base}`;
+  return base;
+}
+
 function percentage(value: number): string {
   return `${(value * 100).toFixed(1)}%`;
 }
@@ -95,27 +114,54 @@ function percentage(value: number): string {
 export default function SureCornersPage() {
   const [data, setData] = useState<SureCornersData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  const load = useCallback(async (forceRefresh = false) => {
+    if (forceRefresh) {
+      setRefreshing(true);
+    } else {
+      // Only show full loading skeleton if we have no data yet
+      if (!data) setLoading(true);
+      else setRefreshing(true);
+    }
     setError(null);
     try {
-      const response = await fetch("/api/sure-corners", { cache: "no-store" });
-      const payload = await response.json() as SureCornersData & { error?: string };
+      const url = forceRefresh ? "/api/sure-corners?refresh=true" : "/api/sure-corners";
+      const response = await fetch(url, { cache: "no-store" });
+      const payload = (await response.json()) as SureCornersData & { error?: string };
       if (!response.ok) throw new Error(payload.error ?? `HTTP ${response.status}`);
       setData(payload);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Unable to load Sure Bet Corners.");
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
-  }, []);
+  }, [data]);
 
   useEffect(() => {
-    const initialLoad = window.setTimeout(() => { void load(); }, 0);
+    // Render immediately, then fetch in background - page opens instantly with skeleton
+    const initialLoad = window.setTimeout(() => {
+      void load(false);
+    }, 0);
     return () => window.clearTimeout(initialLoad);
   }, [load]);
+
+  // Group matches by date for 7-day display
+  const groupedMatches = useMemo(() => {
+    if (!data?.matches) return [];
+    const groups = new Map<string, SureCornerMatch[]>();
+    for (const match of data.matches) {
+      const dateKey = new Date(match.date).toISOString().slice(0, 10);
+      const existing = groups.get(dateKey) ?? [];
+      existing.push(match);
+      groups.set(dateKey, existing);
+    }
+    return Array.from(groups.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([dateKey, matches]) => ({ dateKey, matches }));
+  }, [data]);
 
   return (
     <main className="min-h-screen bg-[#05070d] px-4 py-6 text-slate-100 sm:px-6 lg:px-8">
@@ -123,11 +169,11 @@ export default function SureCornersPage() {
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
             <div className={`${CHIP} ${CHIP_ON_AMBER} mb-3 inline-flex px-3 py-1.5 text-[11px] font-bold uppercase tracking-wider`}>
-              🎯 Strict corner filter
+              🎯 Strict corner filter · 7-day window
             </div>
             <h1 className="text-3xl font-extrabold tracking-tight text-white sm:text-4xl">Sure Bet Corners</h1>
             <p className="mt-2 max-w-3xl text-sm text-slate-400 sm:text-base">
-              matches with the highest-confidence corner bets with strict filters applied.
+              matches with the highest-confidence corner bets with strict filters applied. Now showing the next 7 days.
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -136,11 +182,19 @@ export default function SureCornersPage() {
             </Link>
             <button
               type="button"
-              onClick={() => void load()}
-              disabled={loading}
-              className={`${OUTLINE_NEUTRAL} px-3 py-2 text-xs`}
+              onClick={() => void load(true)}
+              disabled={loading || refreshing}
+              className={`${OUTLINE_NEUTRAL} inline-flex items-center gap-1.5 rounded-full border px-4 py-2 text-xs font-semibold transition hover:bg-white/10 disabled:opacity-60`}
+              aria-label="Refresh sure corners"
             >
-              {loading ? "Checking…" : "Refresh"}
+              {refreshing ? (
+                <>
+                  <span className="h-3 w-3 animate-spin rounded-full border-2 border-slate-400 border-t-white" />
+                  Refreshing…
+                </>
+              ) : (
+                <>🔄 Refresh</>
+              )}
             </button>
           </div>
         </div>
@@ -155,8 +209,8 @@ export default function SureCornersPage() {
             <p className="mt-1 text-slate-400">Both teams must have per-match corner data from the stats aggregator.</p>
           </div>
           <div>
-            <div className="font-mono uppercase tracking-wider text-emerald-300">Top tiers only</div>
-            <p className="mt-1 text-slate-400">Only Tier 1 elite competitions and Tier 2 top-five leagues are eligible.</p>
+            <div className="font-mono uppercase tracking-wider text-emerald-300">Top tiers only · 7 days</div>
+            <p className="mt-1 text-slate-400">Only Tier 1 and Tier 2 leagues, fixtures from today to 7 days ahead.</p>
           </div>
         </div>
 
@@ -165,23 +219,53 @@ export default function SureCornersPage() {
             <div className="font-bold">Sure Bet Corners is temporarily unavailable</div>
             <p className="mt-1 text-rose-200/70">{error}</p>
             <p className="mt-2 font-mono text-xs text-rose-200/60">No match is shown without passing every gate.</p>
+            <button
+              type="button"
+              onClick={() => void load(false)}
+              className="mt-3 inline-flex items-center gap-1.5 rounded-full border border-rose-400/30 bg-rose-400/10 px-4 py-2 text-xs font-semibold text-rose-200 transition hover:bg-rose-400/20"
+            >
+              🔄 Retry
+            </button>
           </div>
         )}
 
         {loading && !data ? (
-          <LoadingState />
+          <LoadingSkeleton />
         ) : data && data.matches.length > 0 ? (
           <>
             <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
-              <span>{data.matches.length} qualifying match{data.matches.length === 1 ? "" : "es"} · {data.totalFixturesChecked} fixtures checked</span>
+              <span>
+                {data.matches.length} qualifying match{data.matches.length === 1 ? "" : "es"} · {data.totalFixturesChecked} fixtures checked · 7-day window
+              </span>
               <span className="font-mono">Updated {formatDate(data.generatedAt)}</span>
             </div>
-            <div className="space-y-5">
-              {data.matches.map((match) => <MatchCard key={match.fixtureId} match={match} />)}
+            {refreshing && (
+              <div className="flex items-center gap-2 rounded-xl border border-amber-400/20 bg-amber-400/10 px-3 py-2 text-xs text-amber-200">
+                <span className="h-3 w-3 animate-spin rounded-full border-2 border-amber-400/30 border-t-amber-300" />
+                Refreshing with fresh calculation…
+              </div>
+            )}
+            <div className="space-y-8">
+              {groupedMatches.map((group) => (
+                <div key={group.dateKey} className="space-y-3">
+                  <div className="flex items-center gap-2">
+                    <div className="h-px flex-1 bg-white/[0.06]" />
+                    <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 font-mono text-[11px] uppercase tracking-wider text-slate-300">
+                      {formatDateGroup(group.matches[0].date)}
+                    </span>
+                    <div className="h-px flex-1 bg-white/[0.06]" />
+                  </div>
+                  <div className="space-y-5">
+                    {group.matches.map((match) => (
+                      <MatchCard key={match.fixtureId} match={match} />
+                    ))}
+                  </div>
+                </div>
+              ))}
             </div>
           </>
         ) : !error ? (
-          <EmptyState />
+          <EmptyState onRetry={() => void load(false)} />
         ) : null}
 
         <p className="border-t border-white/[0.06] pt-4 text-center text-[11px] leading-relaxed text-slate-500">
@@ -273,24 +357,78 @@ function MarketCard({ market }: { market: SureCornerMarket }) {
   );
 }
 
-function EmptyState() {
+function EmptyState({ onRetry }: { onRetry: () => void }) {
   return (
     <div className={`${GLASS_PANEL} p-10 text-center sm:p-14`}>
       <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl border border-amber-400/20 bg-amber-400/10 text-2xl">🎯</div>
       <h2 className="text-xl font-bold text-slate-200">no sure bet corners available right now</h2>
       <p className="mx-auto mt-3 max-w-2xl text-sm leading-relaxed text-slate-400">
-        Only corner bets with a predicted hit rate above 98 percent, real stats, and top-tier leagues are shown. If every market does not pass every strict filter, nothing is listed.
+        Only corner bets with a predicted hit rate above 98 percent, real stats, and top-tier leagues are shown. If every market does not pass every strict filter, nothing is listed. Checked next 7 days.
       </p>
+      <button
+        type="button"
+        onClick={onRetry}
+        className="mt-6 inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/[0.06] px-4 py-2 text-xs font-semibold text-slate-200 transition hover:bg-white/[0.10]"
+      >
+        🔄 Retry
+      </button>
     </div>
   );
 }
 
-function LoadingState() {
+function LoadingSkeleton() {
   return (
-    <div className={`${GLASS_PANEL} p-10 text-center sm:p-14`}>
-      <div className="mx-auto mb-4 h-10 w-10 animate-spin rounded-full border-2 border-slate-700 border-t-amber-400" />
-      <div className="font-mono text-sm text-amber-200">Checking real corner stats and strict engine gates…</div>
-      <p className="mt-2 text-xs text-slate-500">Matches are withheld until every filter passes.</p>
+    <div className="space-y-5" aria-busy="true" aria-live="polite">
+      <div className="flex items-center gap-2 text-xs text-slate-500">
+        <span className="h-3 w-3 animate-spin rounded-full border-2 border-slate-700 border-t-amber-400" />
+        <span className="font-mono text-amber-200">Checking real corner stats and strict engine gates across next 7 days…</span>
+      </div>
+      {/* Skeleton cards matching MatchCard layout */}
+      {[1, 2, 3].map((i) => (
+        <div key={i} className={`${CARD_SURFACE} overflow-hidden p-4 sm:p-5`}>
+          <div className="flex flex-wrap items-start justify-between gap-4 border-b border-white/[0.07] pb-4">
+            <div className="space-y-3">
+              <div className="flex gap-2">
+                <div className="h-5 w-14 animate-pulse rounded-full bg-white/[0.06]" />
+                <div className="h-5 w-32 animate-pulse rounded-full bg-white/[0.06]" />
+                <div className="h-5 w-40 animate-pulse rounded-full bg-white/[0.06]" />
+              </div>
+              <div className="flex items-center gap-3">
+                <div className="h-6 w-24 animate-pulse rounded bg-white/[0.06]" />
+                <div className="h-7 w-7 animate-pulse rounded-full bg-white/[0.08]" />
+                <div className="h-4 w-6 animate-pulse rounded bg-white/[0.04]" />
+                <div className="h-7 w-7 animate-pulse rounded-full bg-white/[0.08]" />
+                <div className="h-6 w-24 animate-pulse rounded bg-white/[0.06]" />
+              </div>
+            </div>
+            <div className="flex gap-2">
+              <div className="h-12 w-24 animate-pulse rounded-xl bg-white/[0.06]" />
+              <div className="h-12 w-24 animate-pulse rounded-xl bg-white/[0.06]" />
+            </div>
+          </div>
+          <div className="mt-4 h-10 animate-pulse rounded-xl bg-black/20" />
+          <div className="mt-4 grid gap-3 md:grid-cols-2">
+            {[1, 2].map((j) => (
+              <div key={j} className="rounded-xl border border-white/[0.07] bg-slate-950/40 p-3.5">
+                <div className="flex justify-between">
+                  <div className="h-5 w-24 animate-pulse rounded-full bg-white/[0.06]" />
+                  <div className="h-6 w-16 animate-pulse rounded bg-white/[0.06]" />
+                </div>
+                <div className="mt-3 h-5 w-3/4 animate-pulse rounded bg-white/[0.06]" />
+                <div className="mt-3 h-10 animate-pulse rounded-lg bg-amber-400/5" />
+                <div className="mt-3 space-y-2">
+                  <div className="h-3 w-full animate-pulse rounded bg-white/[0.04]" />
+                  <div className="h-3 w-5/6 animate-pulse rounded bg-white/[0.04]" />
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+      {/* Shimmer footer */}
+      <div className={`${GLASS_PANEL} p-6`}>
+        <div className="mx-auto h-3 w-2/3 animate-pulse rounded bg-white/[0.04]" />
+      </div>
     </div>
   );
 }
