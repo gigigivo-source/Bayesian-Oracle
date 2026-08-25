@@ -12,6 +12,7 @@ export const maxDuration = 300;
 
 const MIN_HIT_RATE = 0.95;
 const MIN_HANDICAP_PROBABILITY = 0.85;
+const MIN_CORNER_WINNER_PROBABILITY = 0.80;
 const MIN_WEIGHTED_FIELDS_PER_TEAM = 3;
 const MIN_EMPIRICAL_CALIBRATION_SAMPLES = 8;
 const LOOKAHEAD_DAYS = 7;
@@ -67,6 +68,7 @@ export type SureCornerMarketType =
   | "Total Corners"
   | "Team 1 Corners"
   | "Team 2 Corners"
+  | "Corner Winner"
   | "Corner Handicap";
 
 export interface SureCornerMarket {
@@ -870,11 +872,12 @@ function marketEligibility(
   hitRate: number,
   confidence: Confidence,
   calibrationReliable: boolean,
+  minRate = MIN_HIT_RATE,
 ): { accepted: boolean; rejectionReason?: string } {
-  if (!Number.isFinite(hitRate) || hitRate < MIN_HIT_RATE) {
+  if (!Number.isFinite(hitRate) || hitRate < minRate) {
     return {
       accepted: false,
-      rejectionReason: `hitRate ${hitRate.toFixed(3)} < ${MIN_HIT_RATE.toFixed(3)}`,
+      rejectionReason: `hitRate ${hitRate.toFixed(3)} < ${minRate.toFixed(3)}`,
     };
   }
   if (!calibrationReliable) {
@@ -895,13 +898,14 @@ function makeEvaluatedMarket(
   reason: string,
   quality: DataQuality,
   calibrationReliable: boolean,
+  minRate = MIN_HIT_RATE,
 ): EvaluatedMarket {
   const safeHitRate = round(clamp(hitRate, 0, 1), 4);
-  const confidence: Confidence = safeHitRate >= MIN_HIT_RATE &&
+  const confidence: Confidence = safeHitRate >= minRate &&
     calibrationReliable && quality.confidence !== "LOW"
     ? "HIGH"
     : quality.confidence === "LOW" ? "LOW" : "MEDIUM";
-  const gate = marketEligibility(safeHitRate, confidence, calibrationReliable);
+  const gate = marketEligibility(safeHitRate, confidence, calibrationReliable, minRate);
   return {
     id: `${marketType.toLowerCase().replaceAll(" ", "-")}-${line ?? selection.toLowerCase().replaceAll(" ", "-")}`,
     marketType,
@@ -1040,8 +1044,50 @@ function buildHandicapMarkets(
       `${expectationReason(expectations, input, calibration)} Expected corner difference is ${expectations.absoluteDifference.toFixed(1)}; ${favouredName} covers -${handicap.toFixed(1)} in ${(probability * 100).toFixed(1)}% of calibrated scenarios.`,
       quality,
       reliable,
+      MIN_HANDICAP_PROBABILITY,
     );
   });
+}
+
+function buildCornerWinnerMarket(
+  stronger: Side,
+  fx: FixtureLite,
+  expectations: CornerExpectations,
+  input: PreparedPrematchStats,
+  quality: DataQuality,
+): EvaluatedMarket | null {
+  if (expectations.absoluteDifference <= 2.0) {
+    return null;
+  }
+
+  const favouredName = stronger === "home" ? fx.home.name : fx.away.name;
+  const favouredCorners = stronger === "home" ? expectations.home : expectations.away;
+  const otherCorners = stronger === "home" ? expectations.away : expectations.home;
+
+  const empirical = empiricalDirectionalRate(input, expectations, stronger, 0.5);
+  const probability = empirical?.rate ?? handicapCoverProbability(favouredCorners, otherCorners, 0.5);
+
+  const reliable = empirical
+    ? empirical.samples >= MIN_EMPIRICAL_CALIBRATION_SAMPLES
+    : quality.hasCornerAnchorPair && quality.confidence !== "LOW";
+
+  const calibration = empirical
+    ? `${empirical.samples} similar historical expected-difference matches`
+    : "Poisson corner-difference distribution grounded in the weighted pre-match expectations";
+
+  const reason = `${expectationReason(expectations, input, calibration)} Expected corner difference is ${expectations.absoluteDifference.toFixed(1)}; ${favouredName} has a ${(probability * 100).toFixed(1)}% probability of winning the corner count.`;
+
+  return makeEvaluatedMarket(
+    "Corner Winner",
+    "Corner Winner",
+    favouredName,
+    null,
+    probability,
+    reason,
+    quality,
+    reliable,
+    MIN_CORNER_WINNER_PROBABILITY,
+  );
 }
 
 /**
@@ -1205,6 +1251,22 @@ function evaluateFixture(
   if (teamPair.away) markets.push(teamPair.away);
 
   if (strength.stronger) {
+    if (expectations.absoluteDifference > 2.0) {
+      const winnerMarket = buildCornerWinnerMarket(
+        strength.stronger,
+        fx,
+        expectations,
+        input,
+        quality,
+      );
+      if (winnerMarket) {
+        candidates.push(winnerMarket);
+        if (winnerMarket.accepted) {
+          markets.push(winnerMarket);
+        }
+      }
+    }
+
     const handicapOptions = buildHandicapMarkets(strength.stronger, fx, expectations, input, quality);
     candidates.push(...handicapOptions);
     const handicap = bestMarket(
@@ -1455,7 +1517,13 @@ export async function GET(req: Request): Promise<Response> {
         allowedLeagueTiers: [1, 2],
         totalCornerLines: TOTAL_CORNER_LINES,
         teamCornerLines: TEAM_CORNER_LINES,
-        marketTypes: ["Total Corners", "Team 1 Corners", "Team 2 Corners", "Corner Handicap"],
+        marketTypes: [
+          "Total Corners",
+          "Team 1 Corners",
+          "Team 2 Corners",
+          "Corner Winner",
+          "Corner Handicap",
+        ],
       },
     };
 
