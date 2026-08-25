@@ -115,6 +115,7 @@ export interface SureCornerMarket {
   hitRate: number;
   confidence: Confidence;
   reason: string;
+  qualified: boolean;
 }
 
 export interface SureCornerMatch {
@@ -1016,11 +1017,21 @@ function makeEvaluatedMarket(
   minRate = MINIMUM_HIT_RATE,
 ): EvaluatedMarket {
   const safeHitRate = round(clamp(hitRate, 0, 1), 4);
-  const confidence: Confidence = safeHitRate >= minRate &&
+  let confidence: Confidence = safeHitRate >= minRate &&
     calibrationReliable && quality.confidence !== "LOW"
     ? "HIGH"
     : quality.confidence === "LOW" ? "LOW" : "MEDIUM";
   const gate = marketEligibility(safeHitRate, confidence, calibrationReliable, minRate);
+  
+  if (!gate.accepted) {
+    confidence = "LOW";
+    if (gate.rejectionReason) {
+      reason = `${reason} (Not qualified: ${gate.rejectionReason})`;
+    } else {
+      reason = `${reason} (Not qualified)`;
+    }
+  }
+
   return {
     id: `${marketType.toLowerCase().replaceAll(" ", "-")}-${line ?? selection.toLowerCase().replaceAll(" ", "-")}`,
     marketType,
@@ -1030,6 +1041,7 @@ function makeEvaluatedMarket(
     hitRate: safeHitRate,
     confidence,
     reason,
+    qualified: gate.accepted,
     calibrationReliable,
     accepted: gate.accepted,
     rejectionReason: gate.rejectionReason,
@@ -1104,8 +1116,15 @@ function buildOuMarket(
 
 function bestMarket(markets: EvaluatedMarket[]): EvaluatedMarket | null {
   const accepted = markets.filter((market) => market.accepted);
-  if (!accepted.length) return null;
-  return [...accepted].sort((left, right) => right.hitRate - left.hitRate)[0] ?? null;
+  if (accepted.length) {
+    return [...accepted].sort((left, right) => right.hitRate - left.hitRate)[0] ?? null;
+  }
+  // If no market is accepted, return the one with the highest hitRate anyway,
+  // but it will be processed outside as qualified = false.
+  if (markets.length) {
+    return [...markets].sort((left, right) => right.hitRate - left.hitRate)[0] ?? null;
+  }
+  return null;
 }
 
 function handicapCoverProbability(favoured: number, other: number, handicap: number): number {
@@ -1183,11 +1202,7 @@ function buildCornerWinnerMarket(
   expectations: CornerExpectations,
   input: PreparedPrematchStats,
   quality: DataQuality,
-): EvaluatedMarket | null {
-  if (expectations.absoluteDifference <= 2.0) {
-    return null;
-  }
-
+): EvaluatedMarket {
   const favouredName = stronger === "home" ? fx.home.name : fx.away.name;
   const favouredCorners = stronger === "home" ? expectations.home : expectations.away;
   const otherCorners = stronger === "home" ? expectations.away : expectations.home;
@@ -1205,7 +1220,7 @@ function buildCornerWinnerMarket(
 
   const reason = `${expectationReason(expectations, input, calibration)} Expected corner difference is ${expectations.absoluteDifference.toFixed(1)}; ${favouredName} has a ${(probability * 100).toFixed(1)}% probability of winning the corner count.`;
 
-  return makeEvaluatedMarket(
+  const market = makeEvaluatedMarket(
     "Corner Winner",
     "Corner Winner",
     favouredName,
@@ -1216,6 +1231,14 @@ function buildCornerWinnerMarket(
     reliable,
     MIN_CORNER_WINNER_PROBABILITY,
   );
+
+  if (expectations.absoluteDifference <= 2.0) {
+    market.qualified = false;
+    market.confidence = "LOW";
+    market.reason = `${reason} (Not qualified: Expected difference ${expectations.absoluteDifference.toFixed(1)} ≤ 2.0)`;
+  }
+
+  return market;
 }
 
 /**
@@ -1387,30 +1410,26 @@ function evaluateFixture(
   if (teamPair.home) markets.push(teamPair.home);
   if (teamPair.away) markets.push(teamPair.away);
 
-  if (strength.stronger) {
-    if (expectations.absoluteDifference > 2.0) {
-      const winnerMarket = buildCornerWinnerMarket(
-        strength.stronger,
-        fx,
-        expectations,
-        input,
-        quality,
-      );
-      if (winnerMarket) {
-        candidates.push(winnerMarket);
-        if (winnerMarket.accepted) {
-          markets.push(winnerMarket);
-        }
-      }
-    }
+  const actualStronger = strength.stronger ?? "home";
+  const winnerMarket = buildCornerWinnerMarket(
+    actualStronger,
+    fx,
+    expectations,
+    input,
+    quality,
+  );
+  candidates.push(winnerMarket);
+  markets.push(winnerMarket);
 
-    const handicapOptions = buildHandicapMarkets(strength.stronger, fx, expectations, input, quality);
-    candidates.push(...handicapOptions);
-    const handicap = bestMarket(
-      handicapOptions.filter((candidate) => candidate.hitRate >= MIN_HANDICAP_PROBABILITY),
-    );
-    if (handicap) markets.push(handicap);
+  const handicapOptions = buildHandicapMarkets(actualStronger, fx, expectations, input, quality);
+  candidates.push(...handicapOptions);
+  let handicap = bestMarket(
+    handicapOptions.filter((candidate) => candidate.hitRate >= MIN_HANDICAP_PROBABILITY),
+  );
+  if (!handicap && handicapOptions.length > 0) {
+    handicap = bestMarket(handicapOptions);
   }
+  if (handicap) markets.push(handicap);
 
   // Defensive invariant: this route never emits opposite directions at the
   // same line for the same team.
@@ -1657,6 +1676,8 @@ async function persistSureCornerPicks(matches: SureCornerMatch[]): Promise<void>
     let saved = 0;
     for (const match of matches) {
       for (const market of match.markets) {
+        if (!market.qualified) continue;
+
         const existing = await db
           .select({ id: performanceLog.id })
           .from(performanceLog)

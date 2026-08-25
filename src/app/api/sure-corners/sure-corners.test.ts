@@ -150,11 +150,13 @@ describe("Sure Bet Corners Route & Corner Winner Market", () => {
     if (data.matches.length > 0) {
       const match = data.matches[0];
       const cornerWinnerMarket = match.markets.find((m) => m.marketType === "Corner Winner");
-      expect(cornerWinnerMarket).toBeUndefined();
+      expect(cornerWinnerMarket).toBeDefined();
+      expect(cornerWinnerMarket!.qualified).toBe(false);
+      expect(cornerWinnerMarket!.confidence).toBe("LOW");
     }
   });
 
-  it("does NOT include Corner Winner market if win probability is < 80%", async () => {
+  it("marks Corner Winner as not qualified if win probability is < 80%", async () => {
     const mockFixture = makeMockFixture("fixture-3", "Team A", "Team B");
 
     vi.mocked(espn.fetchScoreboard).mockImplementation(async (slug) => {
@@ -188,8 +190,10 @@ describe("Sure Bet Corners Route & Corner Winner Market", () => {
     if (data.matches.length > 0) {
       const match = data.matches[0];
       const cornerWinnerMarket = match.markets.find((m) => m.marketType === "Corner Winner");
-      if (cornerWinnerMarket) {
-        expect(cornerWinnerMarket.hitRate).toBeGreaterThanOrEqual(0.8);
+      expect(cornerWinnerMarket).toBeDefined();
+      if (cornerWinnerMarket!.hitRate < 0.8) {
+        expect(cornerWinnerMarket!.qualified).toBe(false);
+        expect(cornerWinnerMarket!.confidence).toBe("LOW");
       }
     }
   });
