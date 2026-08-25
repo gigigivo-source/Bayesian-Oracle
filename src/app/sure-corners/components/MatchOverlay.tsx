@@ -111,6 +111,14 @@ const MARKET_TONES: Record<SureCornerMarketType, string> = {
   "Corner Handicap": "border-rose-400/30 bg-rose-400/10 text-rose-200",
 };
 
+const ALL_MARKET_TYPES: SureCornerMarketType[] = [
+  "Total Corners",
+  "Team 1 Corners",
+  "Team 2 Corners",
+  "Corner Winner",
+  "Corner Handicap",
+];
+
 // ─── MatchOverlay ─────────────────────────────────────────────────────────────
 
 interface MatchOverlayProps {
@@ -162,8 +170,16 @@ export default function MatchOverlay({ match, onClose }: MatchOverlayProps) {
 
   const status = matchStatus(match);
 
-  // Markets sorted by hitRate descending
+  // All markets sorted by hitRate descending
   const sortedMarkets = [...match.markets].sort((a, b) => b.hitRate - a.hitRate);
+  const presentTypes = new Set(sortedMarkets.map(m => m.marketType));
+  
+  const missingMarketTypes = ALL_MARKET_TYPES.filter(t => !presentTypes.has(t));
+
+  const sortedRows = [
+    ...sortedMarkets.map(m => ({ type: "market" as const, data: m })),
+    ...missingMarketTypes.map(t => ({ type: "missing" as const, marketType: t }))
+  ];
 
   const hasScore =
     typeof match.homeScore === "number" && typeof match.awayScore === "number";
@@ -284,7 +300,7 @@ export default function MatchOverlay({ match, onClose }: MatchOverlayProps) {
             <div className="mb-3 flex items-center gap-2">
               <span className="text-base font-bold text-white sm:text-lg">Corner Markets</span>
               <span className="rounded-full border border-white/10 bg-white/[0.05] px-2 py-0.5 font-mono text-[11px] text-slate-400">
-                {sortedMarkets.length} market{sortedMarkets.length !== 1 ? "s" : ""} · ranked by hit rate
+                {sortedRows.length} market{sortedRows.length !== 1 ? "s" : ""} · ranked by hit rate
               </span>
             </div>
 
@@ -311,8 +327,31 @@ export default function MatchOverlay({ match, onClose }: MatchOverlayProps) {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-white/[0.05]">
-                  {sortedMarkets.map((market, idx) => {
+                  {sortedRows.map((row, idx) => {
                     const isTop = idx === 0;
+
+                    if (row.type === "missing") {
+                      return (
+                        <tr key={`missing-${row.marketType}`} className="hover:bg-white/[0.03] opacity-50">
+                          <td className="px-3 py-3" colSpan={5}>
+                            <div className="flex flex-col gap-1">
+                              <span
+                                className={`inline-flex w-fit rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider ${MARKET_TONES[row.marketType]}`}
+                              >
+                                {row.marketType}
+                              </span>
+                              <span className="text-slate-400 italic">
+                                {row.marketType} — Not available for this match.
+                              </span>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    }
+
+                    const market = row.data;
+                    const isLowConfidence = market.confidence === "LOW";
+
                     const outcome =
                       status === "FINISHED"
                         ? // The API may embed an outcome string in reasons; default PENDING
@@ -324,20 +363,28 @@ export default function MatchOverlay({ match, onClose }: MatchOverlayProps) {
                         key={market.id}
                         className={[
                           "transition-colors",
-                          isTop
+                          isTop && !isLowConfidence
                             ? "bg-amber-400/[0.06] hover:bg-amber-400/[0.10]"
                             : "hover:bg-white/[0.03]",
+                          isLowConfidence ? "opacity-60" : ""
                         ].join(" ")}
                       >
                         {/* Market name + type badge */}
                         <td className="px-3 py-3">
                           <div className="flex flex-col gap-1">
-                            <span
-                              className={`inline-flex w-fit rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider ${MARKET_TONES[market.marketType]}`}
-                            >
-                              {market.marketType}
-                            </span>
-                            <span className="font-semibold text-slate-100">
+                            <div className="flex items-center gap-2">
+                              <span
+                                className={`inline-flex w-fit rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider ${MARKET_TONES[market.marketType]}`}
+                              >
+                                {market.marketType}
+                              </span>
+                              {isLowConfidence && (
+                                <span className="inline-flex items-center rounded-full border border-slate-500/30 bg-slate-500/10 px-1.5 py-0.5 text-[9px] font-bold uppercase text-slate-400">
+                                  Not Qualified
+                                </span>
+                              )}
+                            </div>
+                            <span className={`font-semibold ${isLowConfidence ? "text-slate-400" : "text-slate-100"}`}>
                               {market.name}
                             </span>
                           </div>
@@ -345,7 +392,7 @@ export default function MatchOverlay({ match, onClose }: MatchOverlayProps) {
 
                         {/* Selection */}
                         <td className="whitespace-nowrap px-3 py-3">
-                          <span className="rounded-md border border-amber-400/20 bg-amber-400/10 px-2 py-1 font-bold text-amber-100">
+                          <span className={`rounded-md border px-2 py-1 font-bold ${isLowConfidence ? "border-slate-500/20 bg-slate-500/10 text-slate-300" : "border-amber-400/20 bg-amber-400/10 text-amber-100"}`}>
                             {market.selection}
                           </span>
                         </td>
@@ -354,7 +401,9 @@ export default function MatchOverlay({ match, onClose }: MatchOverlayProps) {
                         <td className="whitespace-nowrap px-3 py-3 text-right">
                           <span
                             className={`rounded-md px-2.5 py-1 font-mono font-extrabold ${
-                              market.hitRate >= 0.9
+                              isLowConfidence
+                                ? "bg-slate-500/15 text-slate-400"
+                                : market.hitRate >= 0.9
                                 ? "bg-emerald-500/15 text-emerald-300"
                                 : market.hitRate >= 0.75
                                 ? "bg-amber-500/15 text-amber-300"
@@ -368,9 +417,13 @@ export default function MatchOverlay({ match, onClose }: MatchOverlayProps) {
                         {/* Confidence */}
                         <td className="px-3 py-3 text-center">
                           <span
-                            className={`inline-flex rounded-full px-2.5 py-0.5 text-[11px] font-bold uppercase tracking-wider ${CONFIDENCE_PILL[market.confidence]}`}
+                            className={`inline-flex rounded-full px-2.5 py-0.5 text-[11px] font-bold uppercase tracking-wider ${
+                              isLowConfidence 
+                                ? "bg-slate-500/15 text-slate-400 ring-1 ring-slate-500/30"
+                                : CONFIDENCE_PILL[market.confidence]
+                            }`}
                           >
-                            {market.confidence}
+                            {isLowConfidence ? "Low Confidence" : market.confidence}
                           </span>
                         </td>
 
