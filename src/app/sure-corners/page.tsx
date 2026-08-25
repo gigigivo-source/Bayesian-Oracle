@@ -10,6 +10,7 @@ import {
   GLASS_PANEL,
   NAV_PILL,
   NAV_PILL_OFF,
+  NAV_PILL_PREMIUM,
   OUTLINE_NEUTRAL,
 } from "../_components/design";
 
@@ -111,6 +112,28 @@ function percentage(value: number): string {
   return `${(value * 100).toFixed(1)}%`;
 }
 
+function countOutcome(details: VerifyDetail[], outcome: VerifyDetail["outcome"]): number {
+  return details.filter((detail) => detail.outcome === outcome).length;
+}
+
+interface VerifyDetail {
+  eventId: string;
+  match: string;
+  market: string;
+  outcome: "WIN" | "LOSS" | "PUSH" | "VOID" | "PENDING";
+}
+
+interface VerifySummary {
+  total: number;
+  updated: number;
+  failed: number;
+  details: VerifyDetail[];
+}
+
+type VerifyStatus =
+  | { kind: "success"; summary: VerifySummary }
+  | { kind: "error"; message: string };
+
 export default function SureCornersPage() {
   const [data, setData] = useState<SureCornersData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -155,6 +178,42 @@ export default function SureCornersPage() {
     initialFetchDone.current = true;
     void load(false);
   }, [load]);
+
+  // ── Post-match verification chip ─────────────────────────────────────────
+  // Verifies every pending Sure Bet pick (rankingMode = 'S') against real
+  // results + corner stats and settles the outcomes. The route is guarded by
+  // the same CRON_SECRET as the settlement cron, so the secret must be
+  // exposed to the browser as NEXT_PUBLIC_CRON_SECRET for this chip to work
+  // on deployments that set CRON_SECRET.
+  const [verifying, setVerifying] = useState(false);
+  const [verifyStatus, setVerifyStatus] = useState<VerifyStatus | null>(null);
+
+  const verifyOutcomes = useCallback(async () => {
+    if (verifying) return;
+    setVerifying(true);
+    setVerifyStatus(null);
+    try {
+      const response = await fetch("/api/sure-corners/verify", {
+        method: "POST",
+        cache: "no-store",
+        headers: {
+          Authorization: `Bearer ${process.env.NEXT_PUBLIC_CRON_SECRET ?? ""}`,
+        },
+      });
+      const payload = (await response.json()) as VerifySummary & { error?: string };
+      if (!response.ok) throw new Error(payload.error ?? `HTTP ${response.status}`);
+      setVerifyStatus({ kind: "success", summary: payload });
+      // Re-fetch the feed so the page reflects the newly settled outcomes.
+      void load(false);
+    } catch (reason) {
+      setVerifyStatus({
+        kind: "error",
+        message: reason instanceof Error ? reason.message : "Verification failed.",
+      });
+    } finally {
+      setVerifying(false);
+    }
+  }, [verifying, load]);
 
   // Mirrors the API gate (filters.minimumHitRate) so this copy never drifts
   // from the route's calibration threshold.
@@ -209,8 +268,69 @@ export default function SureCornersPage() {
                 <>🔄 Refresh</>
               )}
             </button>
+            <button
+              type="button"
+              onClick={() => void verifyOutcomes()}
+              disabled={verifying}
+              title="Verify finished matches and update Sure Bet outcomes."
+              aria-label="Verify finished matches and update Sure Bet outcomes"
+              className={`${NAV_PILL_PREMIUM} bg-gradient-to-br from-[#F59E0B] to-[#FF8C00] px-4 py-2 text-xs font-bold text-white shadow-[0_0_25px_-8px_rgba(245,158,11,0.55)] hover:brightness-110 disabled:pointer-events-none disabled:opacity-60`}
+            >
+              {verifying ? (
+                <>
+                  <span className="h-3 w-3 animate-spin rounded-full border-2 border-white/40 border-t-white" />
+                  Verifying…
+                </>
+              ) : (
+                <>📊 post match corners</>
+              )}
+            </button>
           </div>
         </div>
+
+        {verifyStatus && (
+          <div
+            role="status"
+            aria-live="polite"
+            className={`flex items-start justify-between gap-3 rounded-2xl border p-4 text-sm backdrop-blur-xl ${
+              verifyStatus.kind === "success"
+                ? "border-emerald-400/25 bg-emerald-400/10 text-emerald-200"
+                : "border-rose-400/30 bg-rose-400/10 text-rose-200"
+            }`}
+          >
+            <div className="flex items-start gap-2.5">
+              <span className="text-base leading-none" aria-hidden="true">
+                {verifyStatus.kind === "success" ? "✅" : "⚠️"}
+              </span>
+              <div>
+                <div className="font-bold">
+                  {verifyStatus.kind === "success" ? "Post-match verification complete" : "Verification failed"}
+                </div>
+                {verifyStatus.kind === "success" ? (
+                  <p className="mt-0.5 text-xs text-emerald-200/80">
+                    Verified {verifyStatus.summary.total} match{verifyStatus.summary.total === 1 ? "" : "es"} ·{" "}
+                    {verifyStatus.summary.updated} outcome{verifyStatus.summary.updated === 1 ? "" : "s"} updated ·{" "}
+                    {countOutcome(verifyStatus.summary.details, "WIN")} WIN ·{" "}
+                    {countOutcome(verifyStatus.summary.details, "LOSS")} LOSS ·{" "}
+                    {countOutcome(verifyStatus.summary.details, "PUSH")} PUSH ·{" "}
+                    {countOutcome(verifyStatus.summary.details, "VOID")} VOID
+                    {verifyStatus.summary.failed > 0 ? ` · ${verifyStatus.summary.failed} failed` : ""}
+                  </p>
+                ) : (
+                  <p className="mt-0.5 text-xs text-rose-200/80">{verifyStatus.message}</p>
+                )}
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setVerifyStatus(null)}
+              className="rounded px-1 text-xs opacity-60 transition hover:opacity-100"
+              aria-label="Dismiss verification summary"
+            >
+              ✕
+            </button>
+          </div>
+        )}
 
         <div className={`${GLASS_PANEL} grid grid-cols-1 gap-3 p-4 text-xs sm:grid-cols-3`}>
           <div>

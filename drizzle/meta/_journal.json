@@ -15,6 +15,13 @@
       "when": 1787558963348,
       "tag": "0001_add_ranking_mode",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1787687725227,
+      "tag": "0002_sure_corners_verification",
+      "breakpoints": true
     }
   ]
 }
