@@ -1,5 +1,5 @@
 import { statsAggregator } from "@/lib/data/aggregator";
-import type { CanonicalMatchStats } from "@/lib/data/types";
+import { emptyTeamStats, type CanonicalMatchStats } from "@/lib/data/types";
 import { fetchScoreboard, fetchSummary, type FixtureLite, type MatchSummary } from "@/lib/espn";
 import type { EngineResult, Market } from "@/lib/engine";
 import type { MeshProfile } from "@/lib/engine/dataMesh";
@@ -10,7 +10,10 @@ import { LEAGUE_TIER, leagueTier } from "@/lib/leaguePriority";
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
-const MIN_HIT_RATE = 0.95;
+// Temporarily disabled so every finite market probability can be inspected in
+// Sure Bet Corners. Keep this explicit rather than silently retaining the old
+// 95% gate; it can be raised again once the synthetic-baseline feed is reviewed.
+const MINIMUM_HIT_RATE = 0.0;
 const MIN_HANDICAP_PROBABILITY = 0.85;
 const MIN_CORNER_WINNER_PROBABILITY = 0.80;
 const MIN_EMPIRICAL_CALIBRATION_SAMPLES = 8;
@@ -559,7 +562,10 @@ function prepareMatchInputs(
       : homeAdvantageValue,
   );
   const observedHomePossession = getAnchors(fx.leagueSlug).homePossession;
-  const homeAdvantage = fx.neutralSite
+  // Synthetic avgCornersPerGame values already include the requested +5% home
+  // / -5% away effect, so do not apply the regular home multiplier a second time.
+  const usesSyntheticBaseline = stats?.metadata.source === "baseline (synthetic)";
+  const homeAdvantage = usesSyntheticBaseline || fx.neutralSite
     ? 1
     : explicitHomeAdvantage ?? observedHomePossession / 0.5;
 
@@ -631,7 +637,8 @@ const TEAM_INPUT_FIELDS: Array<keyof PrematchTeamInputs> = [
  * when a team lacks avgCornersPerGame. Partial input is legitimate: the
  * weighted formula resolves each team's corner baseline through the
  * avgCornersPerGame → avgCornersLast5 → avgCornersConcededPerGame → league
- * average cascade, and the 95% hit-rate market gate is the real quality bar.
+ * average cascade. The hit-rate gate is temporarily disabled so available
+ * synthetic or real inputs can be inspected in the Sure Corners feed.
  */
 function preMatchGate(input: PreparedPrematchStats): GateResult {
   const seasonPair = input.home.avgCornersPerGame !== null && input.away.avgCornersPerGame !== null;
@@ -865,11 +872,10 @@ function dataQuality(input: PreparedPrematchStats, expectations: CornerExpectati
   //        concession rates), never the league fallback.
   // MEDIUM — at least one team-specific input (real corners, xg, possession or
   //          h2h) grounds the model; the other side may ride the league
-  //          baseline (Part 2). These matches qualify on the 95% hit-rate
-  //          gate alone — the threshold, not the shape of the inputs, is the
-  //          sure-bet filter.
-  // LOW — neither team has any team-specific input; the expectation is the
-  //       league average alone and can never clear the sure-bet bar.
+  //          baseline. This is retained for data-availability reporting while
+  //          the normal hit-rate gate is disabled.
+  // LOW — neither team has any team-specific input; this is rejected by the
+  //       remaining confidence/calibration gate.
   const confidence: Confidence = bothRealBaselines
     ? "HIGH"
     : anyTeamSpecific
@@ -958,8 +964,9 @@ function modelAndCalibrationRate(
     !engineMarket!.rejected &&
     engineMarket!.confidence === "HIGH",
   );
-  // Partial-data matches calibrate on the model's own line probability; the
-  // 95% hit-rate gate (not the shape of the inputs) is what qualifies them.
+  // Partial-data matches calibrate on the model's own line probability. The
+  // hit-rate threshold is currently disabled, but reliability is still needed
+  // before a market can be emitted.
   const betaBinomialReliable = quality.confidence !== "LOW";
   return {
     hitRate,
@@ -974,12 +981,18 @@ function marketEligibility(
   hitRate: number,
   confidence: Confidence,
   calibrationReliable: boolean,
-  minRate = MIN_HIT_RATE,
+  minRate = MINIMUM_HIT_RATE,
 ): { accepted: boolean; rejectionReason?: string } {
-  if (!Number.isFinite(hitRate) || hitRate < minRate) {
+  if (!Number.isFinite(hitRate)) {
+    return { accepted: false, rejectionReason: "hit rate was not finite" };
+  }
+  // The normal Sure Corners hit-rate gate is deliberately disabled while the
+  // synthetic baseline is being assessed. Explicit market-specific floors
+  // (corner winner / handicap) remain intact when a caller supplies one.
+  if (minRate > MINIMUM_HIT_RATE && hitRate < minRate) {
     return {
       accepted: false,
-      rejectionReason: `hitRate ${hitRate.toFixed(3)} < ${minRate.toFixed(3)}`,
+      rejectionReason: `hitRate ${hitRate.toFixed(3)} < market-specific ${minRate.toFixed(3)} floor`,
     };
   }
   if (!calibrationReliable) {
@@ -1000,7 +1013,7 @@ function makeEvaluatedMarket(
   reason: string,
   quality: DataQuality,
   calibrationReliable: boolean,
-  minRate = MIN_HIT_RATE,
+  minRate = MINIMUM_HIT_RATE,
 ): EvaluatedMarket {
   const safeHitRate = round(clamp(hitRate, 0, 1), 4);
   const confidence: Confidence = safeHitRate >= minRate &&
@@ -1281,13 +1294,10 @@ function missingWeightedStatistics(
 
 function diagnosticForNoMarkets(candidates: EvaluatedMarket[]): string {
   const best = [...candidates].sort((left, right) => right.hitRate - left.hitRate)[0];
-  const reasons: string[] = [];
-  if (best && best.hitRate < MIN_HIT_RATE) {
-    reasons.push(`hitRate ${best.hitRate.toFixed(3)} < ${MIN_HIT_RATE.toFixed(3)} (best line: ${best.name} ${best.selection})`);
-  } else if (best?.rejectionReason) {
-    reasons.push(`${best.rejectionReason} (best line: ${best.name} ${best.selection})`);
+  if (best?.rejectionReason) {
+    return `${best.rejectionReason} (best line: ${best.name} ${best.selection}; hit rate gate disabled)`;
   }
-  return reasons.join("; ") || `no corner market passed the ${MIN_HIT_RATE.toFixed(2)} hit-rate and HIGH-confidence gates`;
+  return "no corner market passed the remaining calibration and confidence gates (hit rate gate disabled)";
 }
 
 function evaluateFixture(
@@ -1491,16 +1501,84 @@ function cornerBaselineForLog(
 }
 
 /**
+ * Use the score-board record where available, then recent form, as the
+ * historical-performance proxy for a team’s place in the table. A points rate
+ * of at least 50% of the maximum is treated as top-half (+10%); below that is
+ * bottom-half (-10%). A team with neither signal stays at the league baseline.
+ */
+function syntheticStrengthMultiplier(team: FixtureLite["home"]): number {
+  const record = team.record?.match(/(\d+)\s*-\s*(\d+)\s*-\s*(\d+)/);
+  const recordRate = record
+    ? (() => {
+      const wins = Number(record[1]);
+      const draws = Number(record[2]);
+      const losses = Number(record[3]);
+      const matches = wins + draws + losses;
+      return matches > 0 ? (wins * 3 + draws) / (matches * 3) : null;
+    })()
+    : null;
+  const performance = recordRate ?? formRate(team.form ?? null);
+  if (performance === null) return 1;
+  return performance >= 0.5 ? 1.1 : 0.9;
+}
+
+/**
+ * Build a complete canonical object when no source can supply upcoming-match
+ * data. League anchors are match totals, while avgCornersPerGame is per team,
+ * so the anchor is split between the two teams before applying the requested
+ * strength and home/away adjustments. avgGoals is the available league-level
+ * proxy for league average xG.
+ */
+function syntheticBaselineStats(fx: FixtureLite): CanonicalMatchStats {
+  const anchors = getAnchors(fx.leagueSlug);
+  const leagueAvgCorners = anchors.avgCorners / 2;
+  const leagueAvgXG = anchors.avgGoals / 2;
+  const homeStrength = syntheticStrengthMultiplier(fx.home);
+  const awayStrength = syntheticStrengthMultiplier(fx.away);
+  const homeAdvantage = 1.05;
+  const awayAdvantage = 0.95;
+  const homeCorners = leagueAvgCorners * homeStrength * homeAdvantage;
+  const awayCorners = leagueAvgCorners * awayStrength * awayAdvantage;
+
+  const baseline: CanonicalMatchStats = {
+    home: {
+      ...emptyTeamStats(),
+      avgCornersPerGame: homeCorners,
+      xg: leagueAvgXG * homeStrength,
+      possession: 50 + homeStrength * 5,
+    },
+    away: {
+      ...emptyTeamStats(),
+      avgCornersPerGame: awayCorners,
+      xg: leagueAvgXG * awayStrength,
+      possession: 50 + awayStrength * 5,
+    },
+    metadata: {
+      source: "baseline (synthetic)",
+      fetchedAt: new Date().toISOString(),
+      matchDate: fx.date.slice(0, 10),
+      leagueSlug: fx.leagueSlug,
+    },
+  };
+
+  console.info(
+    `[SureCorners] ${formatMatch(fx)}: using synthetic baseline ` +
+    `(league avg: ${leagueAvgCorners.toFixed(1)} corners, home: ${homeCorners.toFixed(1)}, away: ${awayCorners.toFixed(1)})`,
+  );
+  return baseline;
+}
+
+/**
  * Fetch the merged CanonicalMatchStats for a fixture from the multi-source
  * stats aggregator. The aggregator walks its full priority-ordered source
  * chain (SportScore → API-Football → StatsBomb → FBref → TheSportsDB →
  * Understat → OpenLigaDB → Highlightly, plus the other registered sources),
  * applies its own timeout per source, logs and skips any source that fails
  * (timeout, 404, 500, rate limit), and first-wins merges partial payloads
- * from every contributing source. It returns null only when NO source
- * contributed a single field; this function never throws.
+ * from every contributing source. For an upcoming match, a null result is
+ * represented by an explicit synthetic baseline rather than a rejection.
  */
-async function fetchPrematchStats(fx: FixtureLite, force: boolean): Promise<CanonicalMatchStats | null> {
+async function fetchPrematchStats(fx: FixtureLite, force: boolean): Promise<CanonicalMatchStats> {
   try {
     const stats = await statsAggregator.fetch(
       {
@@ -1512,26 +1590,23 @@ async function fetchPrematchStats(fx: FixtureLite, force: boolean): Promise<Cano
       },
       { force },
     );
-    if (stats) {
-      // Part 4: every baseline is tagged with its origin — "(real)" for
-      // team-specific corner data, "(league avg)" when the team rode the
-      // league-average fallback.
-      const leaguePerTeam = leagueAverageFor(stats, fx).value / 2;
-      const format = (baseline: CornerBaseline) =>
-        baseline.value === null ? "n/a" : baseline.value.toFixed(1) + (baseline.label ? ` (${baseline.label})` : "");
-      console.info(
-        `[SureCorners] ${formatMatch(fx)}: stats from ${stats.metadata.source || "multi-source merge"} ` +
-        `(avgCorners: home ${format(cornerBaselineForLog(stats, "home", leaguePerTeam))}, away ${format(cornerBaselineForLog(stats, "away", leaguePerTeam))})`,
-      );
-    } else {
-      console.info(`[SureCorners] ${formatMatch(fx)}: no stats from any source`);
-    }
+    if (!stats) return syntheticBaselineStats(fx);
+
+    // Every baseline is tagged with its origin — "(real)" for team-specific
+    // corner data, "(league avg)" when the team rode the league-average fallback.
+    const leaguePerTeam = leagueAverageFor(stats, fx).value / 2;
+    const format = (baseline: CornerBaseline) =>
+      baseline.value === null ? "n/a" : baseline.value.toFixed(1) + (baseline.label ? ` (${baseline.label})` : "");
+    console.info(
+      `[SureCorners] ${formatMatch(fx)}: stats from ${stats.metadata.source || "multi-source merge"} ` +
+      `(avgCorners: home ${format(cornerBaselineForLog(stats, "home", leaguePerTeam))}, away ${format(cornerBaselineForLog(stats, "away", leaguePerTeam))})`,
+    );
     return stats;
   } catch (error) {
     console.warn(
-      `[SureCorners] ${formatMatch(fx)}: stats aggregator failed (${error instanceof Error ? error.message : String(error)})`,
+      `[SureCorners] ${formatMatch(fx)}: stats aggregator failed (${error instanceof Error ? error.message : String(error)}); using synthetic baseline`,
     );
-    return null;
+    return syntheticBaselineStats(fx);
   }
 }
 
@@ -1644,14 +1719,6 @@ export async function GET(req: Request): Promise<Response> {
       // (with its own per-source timeout and fail-soft fallback/merging) and
       // returns null only when no source contributed a single field.
       const stats = await fetchPrematchStats(fx, isRefresh);
-      if (!stats) {
-        reject(
-          fx,
-          "noStats",
-          "no pre-match statistical inputs were available for either team (no source contributed any field)",
-        );
-        return null;
-      }
 
       // Supplement the merged canonical stats with the ESPN summary and the
       // mesh profiles; the weighted corner expectation formula then consumes
@@ -1675,9 +1742,11 @@ export async function GET(req: Request): Promise<Response> {
           reject(
             fx,
             evaluation.rejectionCode ?? "marketGate",
-            evaluation.reason ?? `no corner market passed hitRate ${MIN_HIT_RATE.toFixed(2)}`,
+            evaluation.reason ?? "no corner market passed the remaining calibration and confidence gates (hit rate gate disabled)",
             evaluation.missingStatistics,
           );
+        } else {
+          console.info(`[SureCorners] ${formatMatch(fx)}: hit rate gate disabled — match accepted`);
         }
         return evaluation.match;
       } catch (error) {
@@ -1702,7 +1771,7 @@ export async function GET(req: Request): Promise<Response> {
       rejections,
       matches,
       filters: {
-        minimumHitRate: MIN_HIT_RATE,
+        minimumHitRate: MINIMUM_HIT_RATE,
         requiredConfidence: "HIGH",
         requiresRealPerMatchCorners: false,
         requiresPreMatchStatistics: true,
