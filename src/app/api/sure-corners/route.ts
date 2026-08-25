@@ -16,7 +16,12 @@ const MIN_CORNER_WINNER_PROBABILITY = 0.80;
 const MIN_WEIGHTED_FIELDS_PER_TEAM = 3;
 const MIN_EMPIRICAL_CALIBRATION_SAMPLES = 8;
 const LOOKAHEAD_DAYS = 7;
-const PREMATCH_STATS_TIMEOUT_MS = 20_000;
+// Timeout note: the multi-source stats aggregator enforces its own per-source
+// timeout budget (and skips a timed-out source). This route deliberately does
+// NOT impose a shorter ceiling on the aggregator call, so every configured
+// source (SportScore, API-Football, StatsBomb, FBref, TheSportsDB, Understat,
+// OpenLigaDB, Highlightly, …) is tried in priority order before a fixture is
+// rejected for lack of statistics.
 const PROFILE_TIMEOUT_MS = 25_000;
 const TEAM_CORNER_LINES = [5.5, 6.5, 7.5, 8.5] as const;
 const TOTAL_CORNER_LINES = [6.5, 7.5, 8.5, 9.5, 10.5, 11.5, 12.5, 13.5, 14.5] as const;
@@ -1341,19 +1346,48 @@ async function runPrematchEngine(
   return runEngineFromRealWithProfiles(fx, summary);
 }
 
+/** First non-null corner average on a side, for the per-match source log. */
+function cornerAverageForLog(stats: CanonicalMatchStats, side: Side): number | null {
+  const team = stats[side] as unknown as Record<string, unknown>;
+  return finiteNumber(team.avgCornersPerGame, team.avgCornersLast5, team.corners);
+}
+
+/**
+ * Fetch the merged CanonicalMatchStats for a fixture from the multi-source
+ * stats aggregator. The aggregator walks its full priority-ordered source
+ * chain (SportScore → API-Football → StatsBomb → FBref → TheSportsDB →
+ * Understat → OpenLigaDB → Highlightly, plus the other registered sources),
+ * applies its own timeout per source, logs and skips any source that fails
+ * (timeout, 404, 500, rate limit), and first-wins merges partial payloads
+ * from every contributing source. It returns null only when NO source
+ * contributed a single field; this function never throws.
+ */
 async function fetchPrematchStats(fx: FixtureLite, force: boolean): Promise<CanonicalMatchStats | null> {
   try {
-    return await Promise.race([
-      statsAggregator.fetch({
+    const stats = await statsAggregator.fetch(
+      {
         leagueSlug: fx.leagueSlug,
         eventId: fx.id,
         homeTeam: fx.home.name,
         awayTeam: fx.away.name,
         date: fx.date,
-      }, { force }),
-      new Promise<null>((resolve) => setTimeout(() => resolve(null), PREMATCH_STATS_TIMEOUT_MS)),
-    ]);
-  } catch {
+      },
+      { force },
+    );
+    if (stats) {
+      const format = (value: number | null) => (value === null ? "n/a" : value.toFixed(1));
+      console.info(
+        `[SureCorners] ${formatMatch(fx)}: stats from ${stats.metadata.source || "multi-source merge"} ` +
+        `(avgCorners: home ${format(cornerAverageForLog(stats, "home"))}, away ${format(cornerAverageForLog(stats, "away"))})`,
+      );
+    } else {
+      console.info(`[SureCorners] ${formatMatch(fx)}: no stats from any source`);
+    }
+    return stats;
+  } catch (error) {
+    console.warn(
+      `[SureCorners] ${formatMatch(fx)}: stats aggregator failed (${error instanceof Error ? error.message : String(error)})`,
+    );
     return null;
   }
 }
@@ -1462,8 +1496,20 @@ export async function GET(req: Request): Promise<Response> {
       .sort((left, right) => new Date(left.date).getTime() - new Date(right.date).getTime());
 
     const evaluated = await mapWithConcurrency(fixtures, 8, async (fx) => {
-      const [stats, summary, profiles] = await Promise.all([
-        fetchPrematchStats(fx, isRefresh),
+      // Every fixture goes through the full multi-source stats aggregator
+      // first. The aggregator tries all configured sources in priority order
+      // (with its own per-source timeout and fail-soft fallback/merging) and
+      // returns null only when no source contributed a single field.
+      const stats = await fetchPrematchStats(fx, isRefresh);
+      if (!stats) {
+        reject(fx, "noStats", "no stats from any source");
+        return null;
+      }
+
+      // Supplement the merged canonical stats with the ESPN summary and the
+      // mesh profiles; the weighted corner expectation formula then consumes
+      // every available field with missing weights re-normalised.
+      const [summary, profiles] = await Promise.all([
         fetchSummary(fx.leagueSlug, fx.id).catch(() => null),
         fetchProfiles(fx),
       ]);
