@@ -4,35 +4,48 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { TeamBadge } from "../_components/ui";
 import {
+  CARD_ACCENT_ORDER,
+  CARD_GLASS,
+  CARD_GLASS_SKIN,
   CARD_SURFACE,
   CHIP,
   CHIP_ON_AMBER,
   GLASS_PANEL,
+  GLASS_TEXT_SHADOW,
   NAV_PILL,
   NAV_PILL_OFF,
   NAV_PILL_PREMIUM,
   OUTLINE_NEUTRAL,
+  type CardAccent,
 } from "../_components/design";
+import { MatchOverlay, StatusBadge, bestMarket, deriveMatchStatus } from "./components/MatchOverlay";
 
-type SureCornerMarketType =
+export type SureCornerMarketType =
   | "Total Corners"
   | "Team 1 Corners"
   | "Team 2 Corners"
   | "Corner Winner"
   | "Corner Handicap";
 
-interface SureCornerMarket {
+export type SureCornerConfidence = "HIGH" | "MEDIUM" | "LOW";
+
+export type SureCornerOutcome = "WIN" | "LOSS" | "PUSH" | "VOID" | "PENDING";
+
+export interface SureCornerMarket {
   id: string;
   marketType: SureCornerMarketType;
   name: string;
   selection: string;
   line: number | null;
   hitRate: number;
-  confidence: "HIGH";
+  /** The route gate only emits HIGH today; the union keeps the UI future-proof. */
+  confidence: SureCornerConfidence;
   reason: string;
+  /** Settled post-match by the verify route. Absent → rendered as PENDING. */
+  outcome?: SureCornerOutcome;
 }
 
-interface SureCornerMatch {
+export interface SureCornerMatch {
   fixtureId: string;
   homeTeam: string;
   awayTeam: string;
@@ -45,16 +58,20 @@ interface SureCornerMatch {
   confidence: "HIGH";
   realStats: true;
   statsSource: string;
+  /** Optional: the current feed does not ship scores, so the UI degrades gracefully. */
+  homeScore?: number;
+  awayScore?: number;
   predictedCorners: {
     home: number;
     away: number;
+    total?: number;
     difference: number;
     strongerTeam: string | null;
   };
   markets: SureCornerMarket[];
 }
 
-interface SureCornersData {
+export interface SureCornersData {
   generatedAt: string;
   totalFixturesChecked: number;
   rejectedMatches: number;
@@ -67,13 +84,12 @@ interface SureCornersData {
   };
 }
 
-const MARKET_TONES: Record<SureCornerMarketType, string> = {
-  "Total Corners": "border-cyan-400/30 bg-cyan-400/10 text-cyan-200",
-  "Team 1 Corners": "border-amber-400/30 bg-amber-400/10 text-amber-200",
-  "Team 2 Corners": "border-violet-400/30 bg-violet-400/10 text-violet-200",
-  "Corner Winner": "border-emerald-400/30 bg-emerald-400/10 text-emerald-200",
-  "Corner Handicap": "border-rose-400/30 bg-rose-400/10 text-rose-200",
-};
+/** Deterministic glass-deck accent per fixture so the card rhythm is stable across refreshes. */
+function accentForFixture(id: string): CardAccent {
+  let hash = 0;
+  for (const char of id) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+  return CARD_ACCENT_ORDER[hash % CARD_ACCENT_ORDER.length];
+}
 
 function formatDate(value: string): string {
   const date = new Date(value);
@@ -139,6 +155,12 @@ export default function SureCornersPage() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /**
+   * The match whose corner-market overlay is open. The overlay renders purely
+   * from this already-loaded object — opening it never touches the network,
+   * so it appears instantly. `null` = closed (normal fixture-card grid view).
+   */
+  const [selectedMatch, setSelectedMatch] = useState<SureCornerMatch | null>(null);
   /**
    * Tracks the latest loaded payload without making `load` depend on state.
    * A data-dependent `load` callback used to re-arm the mount effect on every
@@ -388,9 +410,13 @@ export default function SureCornersPage() {
                     </span>
                     <div className="h-px flex-1 bg-white/[0.06]" />
                   </div>
-                  <div className="space-y-5">
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                     {group.matches.map((match) => (
-                      <MatchCard key={match.fixtureId} match={match} />
+                      <MatchCard
+                        key={match.fixtureId}
+                        match={match}
+                        onOpen={() => setSelectedMatch(match)}
+                      />
                     ))}
                   </div>
                 </div>
@@ -405,88 +431,81 @@ export default function SureCornersPage() {
           No model can guarantee a sports result. This view deliberately returns no match rather than relax a gate when the evidence is not strong enough.
         </p>
       </div>
+
+      {selectedMatch && (
+        <MatchOverlay match={selectedMatch} onClose={() => setSelectedMatch(null)} />
+      )}
     </main>
   );
 }
 
-function MatchCard({ match }: { match: SureCornerMatch }) {
+/**
+ * Premium clickable fixture card (glass deck). The whole card is one button:
+ * match details, a LIVE/UPCOMING/FINISHED badge and the best corner-market
+ * summary at a glance — the full ranked market list opens in the MatchOverlay.
+ */
+function MatchCard({ match, onOpen }: { match: SureCornerMatch; onOpen: (match: SureCornerMatch) => void }) {
+  const status = deriveMatchStatus(match.date);
+  const best = bestMarket(match);
+
   return (
-    <article className={`${CARD_SURFACE} overflow-hidden p-4 sm:p-5`}>
-      <div className="flex flex-wrap items-start justify-between gap-4 border-b border-white/[0.07] pb-4">
-        <div>
-          <div className="mb-2 flex flex-wrap items-center gap-2 text-[11px] font-mono uppercase tracking-wider text-slate-400">
-            <span className="rounded-full border border-amber-400/30 bg-amber-400/10 px-2 py-1 text-amber-200">Tier {match.leagueTier}</span>
-            <span>{match.league}</span>
-            <span className="text-slate-600">·</span>
-            <span>{formatDate(match.date)}</span>
-          </div>
-          <div className="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-3 sm:gap-5">
-            <TeamName logo={match.homeLogo} name={match.homeTeam} align="right" />
-            <span className="font-mono text-xs text-slate-500">VS</span>
-            <TeamName logo={match.awayLogo} name={match.awayTeam} align="left" />
-          </div>
-        </div>
-        <div className="flex flex-wrap justify-end gap-2 text-right">
-          <div className="rounded-xl border border-emerald-400/20 bg-emerald-400/10 px-3 py-2">
-            <div className="text-[10px] font-mono uppercase tracking-wider text-emerald-300">Real corner stats</div>
-            <div className="mt-1 text-xs font-semibold text-emerald-100">{match.statsSource}</div>
-          </div>
-          <div className="rounded-xl border border-cyan-400/20 bg-cyan-400/10 px-3 py-2">
-            <div className="text-[10px] font-mono uppercase tracking-wider text-cyan-300">Match confidence</div>
-            <div className="mt-1 text-xs font-bold text-cyan-100">{match.confidence}</div>
-          </div>
-        </div>
-      </div>
-
-      <div className="mt-4 flex flex-wrap items-center gap-x-5 gap-y-2 rounded-xl border border-white/[0.06] bg-black/15 px-3 py-2.5 text-xs font-mono text-slate-400">
-        <span>Engine corner expectation: <strong className="text-slate-200">{match.predictedCorners.home.toFixed(1)} — {match.predictedCorners.away.toFixed(1)}</strong></span>
-        <span>Difference: <strong className="text-amber-200">{match.predictedCorners.difference.toFixed(1)}</strong></span>
-        {match.predictedCorners.strongerTeam && <span>Strength edge: <strong className="text-cyan-200">{match.predictedCorners.strongerTeam}</strong></span>}
-      </div>
-
-      <div className="mt-4 grid gap-3 md:grid-cols-2">
-        {match.markets.map((market) => (
-          <MarketCard key={market.id} market={market} />
-        ))}
-      </div>
-    </article>
-  );
-}
-
-function TeamName({ logo, name, align }: { logo: string | null; name: string; align: "left" | "right" }) {
-  return (
-    <div className={`flex min-w-0 items-center gap-2 ${align === "right" ? "justify-end" : "justify-start"}`}>
-      {align === "right" && <span className="truncate text-right text-sm font-bold text-white sm:text-base">{name}</span>}
-      <TeamBadge logo={logo} name={name} size={30} />
-      {align === "left" && <span className="truncate text-sm font-bold text-white sm:text-base">{name}</span>}
-    </div>
-  );
-}
-
-function MarketCard({ market }: { market: SureCornerMarket }) {
-  return (
-    <div className="rounded-xl border border-white/[0.07] bg-slate-950/40 p-3.5">
-      <div className="flex flex-wrap items-start justify-between gap-2">
-        <div>
-          <span className={`inline-flex rounded-full border px-2 py-1 text-[10px] font-bold uppercase tracking-wider ${MARKET_TONES[market.marketType]}`}>
-            {market.marketType}
+    <button
+      type="button"
+      onClick={() => onOpen(match)}
+      aria-label={`Open corner markets for ${match.homeTeam} vs ${match.awayTeam}`}
+      className={`group p-4 text-left ${CARD_GLASS} ${CARD_GLASS_SKIN[accentForFixture(match.fixtureId)]} ${GLASS_TEXT_SHADOW}`}
+    >
+      <div className="mb-2 flex items-center justify-between gap-2 text-[11px]">
+        <span className="flex min-w-0 items-center gap-1.5 truncate text-slate-400">
+          <span
+            className="shrink-0 rounded-full border border-amber-400/30 bg-amber-400/10 px-2 py-1 font-mono text-[9px] font-bold uppercase tracking-wider text-amber-200"
+            title={`League priority tier ${match.leagueTier}`}
+          >
+            Tier {match.leagueTier}
           </span>
-          <div className="mt-2 text-sm font-semibold text-slate-100">{market.name}</div>
+          <span className="truncate font-mono uppercase tracking-wider">{match.league}</span>
+        </span>
+        <StatusBadge status={status} />
+      </div>
+
+      <div className="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-2 sm:gap-3">
+        <div className="flex min-w-0 items-center justify-end gap-2">
+          <span className="truncate text-right text-sm font-bold text-white sm:text-base">{match.homeTeam}</span>
+          <TeamBadge logo={match.homeLogo} name={match.homeTeam} size={26} />
         </div>
-        <div className="flex items-center gap-2 font-mono">
-          <span className="rounded-md border border-emerald-400/30 bg-emerald-400/10 px-2 py-1 text-sm font-extrabold text-emerald-300">
-            {percentage(market.hitRate)}
-          </span>
-          <span className="rounded-md border border-emerald-400/30 bg-emerald-400/10 px-2 py-1 text-[10px] font-bold text-emerald-200">
-            {market.confidence}
-          </span>
+        <span className="font-mono text-xs text-slate-500">VS</span>
+        <div className="flex min-w-0 items-center justify-start gap-2">
+          <TeamBadge logo={match.awayLogo} name={match.awayTeam} size={26} />
+          <span className="truncate text-sm font-bold text-white sm:text-base">{match.awayTeam}</span>
         </div>
       </div>
-      <div className="mt-3 rounded-lg border border-amber-400/20 bg-amber-400/10 px-3 py-2 text-sm font-bold text-amber-100">
-        {market.selection}
+
+      <div className="mt-1 text-center font-mono text-[11px] text-slate-500">{formatDate(match.date)}</div>
+
+      {best && (
+        <div className="mt-3 rounded-xl border border-white/[0.08] bg-black/25 px-3 py-2.5">
+          <div className="font-mono text-[10px] uppercase tracking-wider text-amber-200">Best corner bet</div>
+          <div className="mt-1 flex flex-wrap items-baseline justify-between gap-x-2 gap-y-1">
+            <span className="truncate text-sm font-bold text-white">
+              {best.name} · {percentage(best.hitRate)} hit rate
+            </span>
+            <span className="shrink-0 rounded-md border border-emerald-400/30 bg-emerald-400/10 px-2 py-0.5 font-mono text-xs font-extrabold text-emerald-300">
+              {best.selection}
+            </span>
+          </div>
+        </div>
+      )}
+
+      <div className="mt-2.5 flex items-center justify-between font-mono text-[11px] text-slate-500">
+        <span>
+          {match.markets.length} corner market{match.markets.length === 1 ? "" : "s"} · engine{" "}
+          {match.predictedCorners.home.toFixed(1)}—{match.predictedCorners.away.toFixed(1)}
+        </span>
+        <span className="font-bold text-slate-300 transition-transform duration-200 group-hover:translate-x-0.5">
+          View markets →
+        </span>
       </div>
-      <p className="mt-3 text-xs leading-relaxed text-slate-400">{market.reason}</p>
-    </div>
+    </button>
   );
 }
 
