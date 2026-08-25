@@ -4,7 +4,7 @@ import { fetchScoreboard, fetchSummary, type FixtureLite, type MatchSummary } fr
 import type { EngineResult, Market } from "@/lib/engine";
 import type { MeshProfile } from "@/lib/engine/dataMesh";
 import { betaBinomOver, poissonPmf } from "@/lib/engine/stats";
-import { LEAGUE_ANCHORS } from "@/lib/engine/statisticalAnchors";
+import { getAnchors } from "@/lib/engine/statisticalAnchors";
 import { LEAGUE_TIER, leagueTier } from "@/lib/leaguePriority";
 
 export const dynamic = "force-dynamic";
@@ -13,7 +13,6 @@ export const maxDuration = 300;
 const MIN_HIT_RATE = 0.95;
 const MIN_HANDICAP_PROBABILITY = 0.85;
 const MIN_CORNER_WINNER_PROBABILITY = 0.80;
-const MIN_WEIGHTED_FIELDS_PER_TEAM = 3;
 const MIN_EMPIRICAL_CALIBRATION_SAMPLES = 8;
 const LOOKAHEAD_DAYS = 7;
 // Timeout note: the multi-source stats aggregator enforces its own per-source
@@ -29,22 +28,50 @@ const HANDICAP_LINES = [3.5, 2.5, 1.5, 0.5] as const;
 const CACHE_TTL_MS = 60 * 60 * 1000;
 
 /**
- * The seven inputs in the requested corner-expectation formula. Missing
- * components are removed and the remaining weights are re-normalised.
+ * The four terms of the requested corner-expectation formula:
+ *
+ *   expectedCorners = (
+ *     (avgCornersPerGame | avgCornersLast5 | leagueAvg) * weight
+ *     + (xg * xgWeight)
+ *     + (possession / 10 * possessionWeight)
+ *     + (h2hCorners * h2hWeight)
+ *   ) / totalWeight
+ *
+ * If a term is missing it is excluded and its weight is redistributed
+ * proportionally among the remaining terms (the weighted sum is re-normalised
+ * by the available weight).
+ *
+ * The primary term is a per-team cascade, so a team without corner data is
+ * still grounded instead of being rejected (Parts 1 + 2):
+ *   1. avgCornersPerGame        (season average)  — origin "real"
+ *   2. avgCornersLast5          (last-5 average)  — origin "last5"
+ *   3. avgCornersConcededPerGame (concession rate) — origin "conceded"
+ *   4. league average           (per-team baseline) — origin "league"
+ * The old standalone concession and league-average terms are absorbed into
+ * that cascade; the primary term keeps the combined 0.55 weight the two
+ * per-team corner-average fields used to carry, and the freed 0.45 is split
+ * evenly across the xg, possession and h2h terms.
  */
 const EXPECTATION_WEIGHTS = {
-  avgCornersPerGame: 0.35,
-  avgCornersLast5: 0.20,
-  avgCornersConcededPerGame: 0.10,
-  xg: 0.10,
-  possession: 0.10,
-  h2hCorners: 0.10,
-  leagueAvgCorners: 0.05,
+  avgCorners: 0.55,
+  xg: 0.15,
+  possession: 0.15,
+  h2hCorners: 0.15,
 } as const;
 
 type WeightedField = keyof typeof EXPECTATION_WEIGHTS;
 type Confidence = "HIGH" | "MEDIUM" | "LOW";
 type Side = "home" | "away";
+
+/** Where a team's corner baseline came from in the Part 1/2 cascade. */
+type CornerBaselineOrigin = "real" | "last5" | "conceded" | "league";
+
+interface CornerBaseline {
+  value: number | null;
+  origin: CornerBaselineOrigin | null;
+  /** Human label for the per-match log line, e.g. "real" or "league avg". */
+  label: string | null;
+}
 
 type CacheEntry = {
   data: SureCornersResponse;
@@ -134,7 +161,6 @@ export interface SureCornersResponse {
     requiredConfidence: "HIGH";
     requiresRealPerMatchCorners: false;
     requiresPreMatchStatistics: true;
-    minimumWeightedFieldsPerTeam: number;
     allowedLeagueTiers: number[];
     totalCornerLines: readonly number[];
     teamCornerLines: readonly number[];
@@ -174,7 +200,12 @@ interface HistoricalCornerSample {
 interface PrematchMatchInputs {
   h2hHomeCorners: number | null;
   h2hAwayCorners: number | null;
+  /** League-average corners per MATCH (home + away combined). */
   leagueAvgCorners: number | null;
+  /** Per-team share of the league average — the formula's team baseline (Part 2). */
+  leagueAvgCornersPerTeam: number | null;
+  /** "source" = the aggregator's leagueAvgCorners field; "anchor" = observed league baseline. */
+  leagueAvgSource: "source" | "anchor" | null;
   homeAdvantage: number | null;
   matchImportanceMultiplier: number | null;
   matchImportance: string | null;
@@ -196,6 +227,12 @@ interface TeamExpectation {
   weightedFieldCount: number;
   weightedFields: WeightedField[];
   missingWeightedFields: WeightedField[];
+  /** Origin of the resolved corner baseline (Part 1/2 cascade). */
+  baselineOrigin: CornerBaselineOrigin | null;
+  /** The resolved corner baseline value (per team, corners per game). */
+  baselineValue: number | null;
+  /** Weighted terms grounded in team-specific data (excludes the league fallback). */
+  teamSpecificFieldCount: number;
 }
 
 interface CornerExpectations {
@@ -216,7 +253,6 @@ interface DataQuality {
   awayWeightedFields: number;
   availableTeamFields: number;
   totalTeamFields: number;
-  hasCornerAnchorPair: boolean;
 }
 
 interface StrengthProfile {
@@ -490,16 +526,31 @@ function extractHistoricalSamples(stats: CanonicalMatchStats | null): Historical
   return samples;
 }
 
+/**
+ * Part 2 fallback: league-average corners per MATCH (home + away combined).
+ * Comes from the aggregator's leagueAvgCorners field when a source provides
+ * it, otherwise from the observed (historical, checked-in) league anchors —
+ * alias-aware, so every competition in this feed resolves a real baseline.
+ * Per-match corner totals live well inside 4–25; anything outside that band
+ * is treated as malformed and ignored.
+ */
+function leagueAverageFor(
+  stats: CanonicalMatchStats | null,
+  fx: FixtureLite,
+): { value: number; source: "source" | "anchor" } {
+  const raw = finiteNumber(firstMatchValue(stats, "leagueAvgCorners"));
+  const explicit = raw !== null && raw >= 4 && raw <= 25 ? raw : null;
+  if (explicit !== null) return { value: explicit, source: "source" };
+  return { value: getAnchors(fx.leagueSlug).avgCorners, source: "anchor" };
+}
+
 function prepareMatchInputs(
   stats: CanonicalMatchStats | null,
   fx: FixtureLite,
   summary: MatchSummary | null,
 ): PrematchMatchInputs {
   const h2h = firstMatchValue(stats, "h2hCorners");
-  const explicitLeagueAverage = finiteNumber(firstMatchValue(stats, "leagueAvgCorners"));
-  // These are observed, checked-in league baselines, not a zero/default. Unknown
-  // leagues remain null so the formula redistributes this field's weight.
-  const observedLeagueAverage = LEAGUE_ANCHORS[fx.leagueSlug]?.avgCorners ?? null;
+  const leagueAverage = leagueAverageFor(stats, fx);
 
   const homeAdvantageValue = firstMatchValue(stats, "homeAdvantage");
   const explicitHomeAdvantage = normaliseMultiplier(
@@ -507,10 +558,10 @@ function prepareMatchInputs(
       ? homeAdvantageValue.cornerMultiplier ?? homeAdvantageValue.multiplier ?? homeAdvantageValue.homeMultiplier
       : homeAdvantageValue,
   );
-  const observedHomePossession = LEAGUE_ANCHORS[fx.leagueSlug]?.homePossession ?? null;
+  const observedHomePossession = getAnchors(fx.leagueSlug).homePossession;
   const homeAdvantage = fx.neutralSite
     ? 1
-    : explicitHomeAdvantage ?? (observedHomePossession !== null ? observedHomePossession / 0.5 : null);
+    : explicitHomeAdvantage ?? observedHomePossession / 0.5;
 
   const importanceValue = firstMatchValue(stats, "matchImportance");
   const importance = importanceFrom(importanceValue, fx);
@@ -520,7 +571,11 @@ function prepareMatchInputs(
   return {
     h2hHomeCorners: sideValue(h2h, "home"),
     h2hAwayCorners: sideValue(h2h, "away"),
-    leagueAvgCorners: explicitLeagueAverage ?? observedLeagueAverage,
+    leagueAvgCorners: leagueAverage.value,
+    // League averages are per-match TOTALS (home + away); the per-team
+    // baseline in the formula is each team's share of that total.
+    leagueAvgCornersPerTeam: leagueAverage.value / 2,
+    leagueAvgSource: leagueAverage.source,
     homeAdvantage,
     matchImportanceMultiplier: importance.multiplier,
     matchImportance: importance.description,
@@ -537,18 +592,19 @@ function preparePrematchStats(
   summary: MatchSummary | null,
   profiles: { home: MeshProfile | null; away: MeshProfile | null },
 ): PreparedPrematchStats {
+  const match = prepareMatchInputs(stats, fx, summary);
   const sources = new Set<string>();
   if (stats?.metadata.source?.trim()) sources.add(stats.metadata.source.trim());
   for (const profile of [profiles.home, profiles.away]) {
     for (const provider of profile?.providers ?? []) sources.add(provider);
   }
   if (summary) sources.add("ESPN pre-match summary");
-  if (LEAGUE_ANCHORS[fx.leagueSlug]) sources.add("observed league anchors");
+  if (match.leagueAvgSource === "anchor") sources.add("observed league anchors");
 
   return {
     home: prepareTeamInputs(stats, "home", fx, summary, profiles.home),
     away: prepareTeamInputs(stats, "away", fx, summary, profiles.away),
-    match: prepareMatchInputs(stats, fx, summary),
+    match,
     source: [...sources].join(" + ") || "pre-match statistical mesh",
   };
 }
@@ -569,6 +625,14 @@ const TEAM_INPUT_FIELDS: Array<keyof PrematchTeamInputs> = [
   "avgCornersConcededLast5",
 ];
 
+/**
+ * Relaxed availability gate (Part 1): a fixture is rejected for missing
+ * pre-match statistics only when NEITHER team has any consumable input — not
+ * when a team lacks avgCornersPerGame. Partial input is legitimate: the
+ * weighted formula resolves each team's corner baseline through the
+ * avgCornersPerGame → avgCornersLast5 → avgCornersConcededPerGame → league
+ * average cascade, and the 95% hit-rate market gate is the real quality bar.
+ */
 function preMatchGate(input: PreparedPrematchStats): GateResult {
   const seasonPair = input.home.avgCornersPerGame !== null && input.away.avgCornersPerGame !== null;
   const recentPair = input.home.avgCornersLast5 !== null && input.away.avgCornersLast5 !== null;
@@ -612,22 +676,40 @@ function formRate(form: string | null): number | null {
   return points / (results.length * 3);
 }
 
+/**
+ * The Part 1/2 corner-baseline cascade for one team:
+ *   avgCornersPerGame → avgCornersLast5 → avgCornersConcededPerGame →
+ *   league average (per-team baseline). Every rung is real data — the league
+ *   average is an observed historical baseline, never a simulated stand-in.
+ */
+function resolveCornerBaseline(
+  team: PrematchTeamInputs,
+  leaguePerTeam: number | null,
+): CornerBaseline {
+  if (team.avgCornersPerGame !== null) return { value: team.avgCornersPerGame, origin: "real", label: "real" };
+  if (team.avgCornersLast5 !== null) return { value: team.avgCornersLast5, origin: "last5", label: "last5" };
+  if (team.avgCornersConcededPerGame !== null) {
+    return { value: team.avgCornersConcededPerGame, origin: "conceded", label: "conceded" };
+  }
+  if (leaguePerTeam !== null) return { value: leaguePerTeam, origin: "league", label: "league avg" };
+  return { value: null, origin: null, label: null };
+}
+
 function weightedExpectation(
   team: PrematchTeamInputs,
-  opponent: PrematchTeamInputs,
   h2hCorners: number | null,
-  leagueAvgCorners: number | null,
+  leaguePerTeam: number | null,
 ): TeamExpectation | null {
+  const baseline = resolveCornerBaseline(team, leaguePerTeam);
   const values: Record<WeightedField, number | null> = {
-    avgCornersPerGame: team.avgCornersPerGame,
-    avgCornersLast5: team.avgCornersLast5,
-    // A team's attacking corner expectation uses the opponent's observed
-    // concession rate. Across both calls every home/away field is consumed.
-    avgCornersConcededPerGame: opponent.avgCornersConcededPerGame,
+    // Part 3 primary term: the first available rung of the cascade.
+    avgCorners: baseline.value,
+    // Part 1: xg doubles as a proxy for the expected corner count when corner
+    // data is missing; its weight is then redistributed to it automatically.
     xg: team.xg,
+    // Part 1: possession share as a corner-dominance estimate (55% → 5.5).
     possession: team.possession === null ? null : team.possession / 10,
     h2hCorners,
-    leagueAvgCorners,
   };
 
   let weightedTotal = 0;
@@ -648,11 +730,20 @@ function weightedExpectation(
   }
 
   if (availableWeight === 0) return null;
+  // Team-specific = weighted terms grounded in actual team data. The league
+  // fallback grounds the match (Part 2) but carries no team differentiation.
+  const teamSpecificFieldCount = weightedFields.reduce(
+    (count, field) => count + (field === "avgCorners" && baseline.origin === "league" ? 0 : 1),
+    0,
+  );
   return {
     value: weightedTotal / availableWeight,
     weightedFieldCount: weightedFields.length,
     weightedFields,
     missingWeightedFields,
+    baselineOrigin: baseline.origin,
+    baselineValue: baseline.value,
+    teamSpecificFieldCount,
   };
 }
 
@@ -707,18 +798,9 @@ function pressureAdjustment(input: PreparedPrematchStats): {
 }
 
 function expectedCorners(input: PreparedPrematchStats): CornerExpectations | null {
-  const homeDetail = weightedExpectation(
-    input.home,
-    input.away,
-    input.match.h2hHomeCorners,
-    input.match.leagueAvgCorners,
-  );
-  const awayDetail = weightedExpectation(
-    input.away,
-    input.home,
-    input.match.h2hAwayCorners,
-    input.match.leagueAvgCorners,
-  );
+  const leaguePerTeam = input.match.leagueAvgCornersPerTeam;
+  const homeDetail = weightedExpectation(input.home, input.match.h2hHomeCorners, leaguePerTeam);
+  const awayDetail = weightedExpectation(input.away, input.match.h2hAwayCorners, leaguePerTeam);
   if (!homeDetail || !awayDetail) return null;
 
   const pressure = pressureAdjustment(input);
@@ -763,18 +845,34 @@ function expectedCorners(input: PreparedPrematchStats): CornerExpectations | nul
   };
 }
 
+function isTeamSpecificBaseline(origin: CornerBaselineOrigin | null): boolean {
+  return origin === "real" || origin === "last5" || origin === "conceded";
+}
+
 function dataQuality(input: PreparedPrematchStats, expectations: CornerExpectations): DataQuality {
   const availableTeamFields = [input.home, input.away].reduce(
     (total, team) => total + TEAM_INPUT_FIELDS.filter((field) => team[field] !== null).length,
     0,
   );
-  const minimum = Math.min(
-    expectations.homeDetail.weightedFieldCount,
-    expectations.awayDetail.weightedFieldCount,
-  );
-  const confidence: Confidence = minimum === 7
+  const bothRealBaselines =
+    isTeamSpecificBaseline(expectations.homeDetail.baselineOrigin) &&
+    isTeamSpecificBaseline(expectations.awayDetail.baselineOrigin);
+  const anyTeamSpecific =
+    expectations.homeDetail.teamSpecificFieldCount > 0 ||
+    expectations.awayDetail.teamSpecificFieldCount > 0;
+
+  // HIGH — both teams' corner baselines are real team data (season / last-5 /
+  //        concession rates), never the league fallback.
+  // MEDIUM — at least one team-specific input (real corners, xg, possession or
+  //          h2h) grounds the model; the other side may ride the league
+  //          baseline (Part 2). These matches qualify on the 95% hit-rate
+  //          gate alone — the threshold, not the shape of the inputs, is the
+  //          sure-bet filter.
+  // LOW — neither team has any team-specific input; the expectation is the
+  //       league average alone and can never clear the sure-bet bar.
+  const confidence: Confidence = bothRealBaselines
     ? "HIGH"
-    : minimum >= MIN_WEIGHTED_FIELDS_PER_TEAM
+    : anyTeamSpecific
       ? "MEDIUM"
       : "LOW";
 
@@ -784,9 +882,6 @@ function dataQuality(input: PreparedPrematchStats, expectations: CornerExpectati
     awayWeightedFields: expectations.awayDetail.weightedFieldCount,
     availableTeamFields,
     totalTeamFields: TEAM_INPUT_FIELDS.length * 2,
-    hasCornerAnchorPair:
-      (input.home.avgCornersPerGame !== null && input.away.avgCornersPerGame !== null) ||
-      (input.home.avgCornersLast5 !== null && input.away.avgCornersLast5 !== null),
   };
 }
 
@@ -863,7 +958,9 @@ function modelAndCalibrationRate(
     !engineMarket!.rejected &&
     engineMarket!.confidence === "HIGH",
   );
-  const betaBinomialReliable = quality.hasCornerAnchorPair && quality.confidence !== "LOW";
+  // Partial-data matches calibrate on the model's own line probability; the
+  // 95% hit-rate gate (not the shape of the inputs) is what qualifies them.
+  const betaBinomialReliable = quality.confidence !== "LOW";
   return {
     hitRate,
     reliable: engineReliable || betaBinomialReliable,
@@ -926,6 +1023,12 @@ function makeEvaluatedMarket(
   };
 }
 
+function baselineText(detail: TeamExpectation, side: string): string | null {
+  if (detail.baselineValue === null || detail.baselineOrigin === null) return null;
+  const label = detail.baselineOrigin === "league" ? "league avg" : detail.baselineOrigin;
+  return `${side} ${detail.baselineValue.toFixed(1)} (${label})`;
+}
+
 function expectationReason(
   expectations: CornerExpectations,
   input: PreparedPrematchStats,
@@ -937,7 +1040,14 @@ function expectationReason(
   const pressure = expectations.pressureSignals.length
     ? ` Supplemental pressure signals: ${expectations.pressureSignals.join(", ")}.`
     : "";
-  return `Weighted pre-match model expects ${expectations.home.toFixed(1)} home and ${expectations.away.toFixed(1)} away corners (${expectations.total.toFixed(1)} total). Missing weights were redistributed across available inputs. ${calibrationText}.${pressure}${adjustments} Sources: ${input.source}.`;
+  const baselines = [
+    baselineText(expectations.homeDetail, "home"),
+    baselineText(expectations.awayDetail, "away"),
+  ]
+    .filter((text): text is string => text !== null)
+    .join(", ");
+  const baselineNote = baselines ? ` Corner baselines: ${baselines}.` : "";
+  return `Weighted pre-match model expects ${expectations.home.toFixed(1)} home and ${expectations.away.toFixed(1)} away corners (${expectations.total.toFixed(1)} total). Missing weights were redistributed across available inputs.${baselineNote} ${calibrationText}.${pressure}${adjustments} Sources: ${input.source}.`;
 }
 
 function buildOuMarket(
@@ -1036,7 +1146,7 @@ function buildHandicapMarkets(
     const probability = empirical?.rate ?? handicapCoverProbability(favouredCorners, otherCorners, handicap);
     const reliable = empirical
       ? empirical.samples >= MIN_EMPIRICAL_CALIBRATION_SAMPLES
-      : quality.hasCornerAnchorPair && quality.confidence !== "LOW";
+      : quality.confidence !== "LOW";
     const calibration = empirical
       ? `${empirical.samples} similar historical expected-difference matches`
       : "Poisson corner-difference distribution grounded in the weighted pre-match expectations";
@@ -1074,7 +1184,7 @@ function buildCornerWinnerMarket(
 
   const reliable = empirical
     ? empirical.samples >= MIN_EMPIRICAL_CALIBRATION_SAMPLES
-    : quality.hasCornerAnchorPair && quality.confidence !== "LOW";
+    : quality.confidence !== "LOW";
 
   const calibration = empirical
     ? `${empirical.samples} similar historical expected-difference matches`
@@ -1147,13 +1257,25 @@ function selectTeamPair(
   return pair ? { home: pair.home, away: pair.away } : { home: bestHome, away: bestAway };
 }
 
+/** Long form for the primary term — it stands for the whole Part 1/2 cascade. */
+const WEIGHTED_FIELD_LABELS: Record<WeightedField, string> = {
+  avgCorners: "avgCorners (avgCornersPerGame → avgCornersLast5 → avgCornersConcededPerGame → leagueAvg)",
+  xg: "xg",
+  possession: "possession",
+  h2hCorners: "h2hCorners",
+};
+
 function missingWeightedStatistics(
   fx: FixtureLite,
   expectations: CornerExpectations,
 ): string[] {
   return [
-    ...expectations.homeDetail.missingWeightedFields.map((field) => `${fx.home.name}.${field}`),
-    ...expectations.awayDetail.missingWeightedFields.map((field) => `${fx.away.name}.${field}`),
+    ...expectations.homeDetail.missingWeightedFields.map(
+      (field) => `${fx.home.name}.${WEIGHTED_FIELD_LABELS[field]}`,
+    ),
+    ...expectations.awayDetail.missingWeightedFields.map(
+      (field) => `${fx.away.name}.${WEIGHTED_FIELD_LABELS[field]}`,
+    ),
   ];
 }
 
@@ -1173,31 +1295,31 @@ function evaluateFixture(
   input: PreparedPrematchStats,
   result: EngineResult,
 ): EvaluationResult {
+  const leaguePerTeam = input.match.leagueAvgCornersPerTeam;
   const expectations = expectedCorners(input);
   if (!expectations) {
-    const emptySide = weightedExpectation(input.home, input.away, input.match.h2hHomeCorners, input.match.leagueAvgCorners)
+    const emptySide = weightedExpectation(input.home, input.match.h2hHomeCorners, leaguePerTeam)
       ? fx.away.name
       : fx.home.name;
     return {
       match: null,
       rejectionCode: "preMatchStats",
-      reason: `missing pre-match corner averages for ${emptySide} (avgCornersPerGame = null, avgCornersLast5 = null, xg = null)`,
+      reason: `no pre-match statistical input is available for ${emptySide} (no corner baseline in the avgCornersPerGame → avgCornersLast5 → avgCornersConcededPerGame → leagueAvg cascade, and no xg / possession / h2h data)`,
       missingStatistics: [
-        `${emptySide}.avgCornersPerGame`,
-        `${emptySide}.avgCornersLast5`,
+        `${emptySide}.avgCorners (perGame → last5 → conceded → leagueAvg)`,
         `${emptySide}.xg`,
+        `${emptySide}.possession`,
+        `${emptySide}.h2hCorners`,
       ],
     };
   }
 
   const quality = dataQuality(input, expectations);
   if (quality.confidence === "LOW") {
-    const lowerSide = quality.homeWeightedFields <= quality.awayWeightedFields ? fx.home.name : fx.away.name;
-    const available = Math.min(quality.homeWeightedFields, quality.awayWeightedFields);
     return {
       match: null,
       rejectionCode: "insufficientData",
-      reason: `insufficient data (${lowerSide} has only ${available} of 7 weighted statistical fields available)`,
+      reason: "no team-specific pre-match statistical inputs were available for either team (both corner baselines fell back to the league average and no xg / possession / h2h data could differentiate them)",
       missingStatistics: missingWeightedStatistics(fx, expectations),
     };
   }
@@ -1319,7 +1441,7 @@ function evaluateFixture(
       weightedFieldsAvailable: {
         home: quality.homeWeightedFields,
         away: quality.awayWeightedFields,
-        total: 7,
+        total: Object.keys(EXPECTATION_WEIGHTS).length,
       },
       predictedCorners: {
         home: expectations.home,
@@ -1346,10 +1468,26 @@ async function runPrematchEngine(
   return runEngineFromRealWithProfiles(fx, summary);
 }
 
-/** First non-null corner average on a side, for the per-match source log. */
-function cornerAverageForLog(stats: CanonicalMatchStats, side: Side): number | null {
+/**
+ * Resolved corner baseline on a side for the per-match source log — the same
+ * cascade the formula uses (avgCornersPerGame → avgCornersLast5 →
+ * avgCornersConcededPerGame → league average), tagged with its origin so
+ * fallback use is explicit in the log (Part 4).
+ */
+function cornerBaselineForLog(
+  stats: CanonicalMatchStats,
+  side: Side,
+  leaguePerTeam: number | null,
+): CornerBaseline {
   const team = stats[side] as unknown as Record<string, unknown>;
-  return finiteNumber(team.avgCornersPerGame, team.avgCornersLast5, team.corners);
+  const real = finiteNumber(team.avgCornersPerGame);
+  if (real !== null) return { value: real, origin: "real", label: "real" };
+  const last5 = finiteNumber(team.avgCornersLast5);
+  if (last5 !== null) return { value: last5, origin: "last5", label: "last5" };
+  const conceded = finiteNumber(team.avgCornersConcededPerGame);
+  if (conceded !== null) return { value: conceded, origin: "conceded", label: "conceded" };
+  if (leaguePerTeam !== null) return { value: leaguePerTeam, origin: "league", label: "league avg" };
+  return { value: null, origin: null, label: null };
 }
 
 /**
@@ -1375,10 +1513,15 @@ async function fetchPrematchStats(fx: FixtureLite, force: boolean): Promise<Cano
       { force },
     );
     if (stats) {
-      const format = (value: number | null) => (value === null ? "n/a" : value.toFixed(1));
+      // Part 4: every baseline is tagged with its origin — "(real)" for
+      // team-specific corner data, "(league avg)" when the team rode the
+      // league-average fallback.
+      const leaguePerTeam = leagueAverageFor(stats, fx).value / 2;
+      const format = (baseline: CornerBaseline) =>
+        baseline.value === null ? "n/a" : baseline.value.toFixed(1) + (baseline.label ? ` (${baseline.label})` : "");
       console.info(
         `[SureCorners] ${formatMatch(fx)}: stats from ${stats.metadata.source || "multi-source merge"} ` +
-        `(avgCorners: home ${format(cornerAverageForLog(stats, "home"))}, away ${format(cornerAverageForLog(stats, "away"))})`,
+        `(avgCorners: home ${format(cornerBaselineForLog(stats, "home", leaguePerTeam))}, away ${format(cornerBaselineForLog(stats, "away", leaguePerTeam))})`,
       );
     } else {
       console.info(`[SureCorners] ${formatMatch(fx)}: no stats from any source`);
@@ -1502,7 +1645,11 @@ export async function GET(req: Request): Promise<Response> {
       // returns null only when no source contributed a single field.
       const stats = await fetchPrematchStats(fx, isRefresh);
       if (!stats) {
-        reject(fx, "noStats", "no stats from any source");
+        reject(
+          fx,
+          "noStats",
+          "no pre-match statistical inputs were available for either team (no source contributed any field)",
+        );
         return null;
       }
 
@@ -1559,7 +1706,6 @@ export async function GET(req: Request): Promise<Response> {
         requiredConfidence: "HIGH",
         requiresRealPerMatchCorners: false,
         requiresPreMatchStatistics: true,
-        minimumWeightedFieldsPerTeam: MIN_WEIGHTED_FIELDS_PER_TEAM,
         allowedLeagueTiers: [1, 2],
         totalCornerLines: TOTAL_CORNER_LINES,
         teamCornerLines: TEAM_CORNER_LINES,
