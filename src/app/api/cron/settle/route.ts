@@ -1,10 +1,9 @@
 // ĞIGI GIVØ — All-league settlement cron.
 //
-// Part 2 of the coverage overhaul. In addition to the settlement engine
-// (ESPN-based), this job:
+// In addition to the settlement engine (ESPN-based), this job:
 //   1. settles EVERY pending tracked item across ALL competitions — including
 //      matches sourced from TheSportsDB / OpenLigaDB / API-Football, via the
-//      multi-source result lookup;
+//      live fixture-feed catalogue plus the multi-source result lookup;
 //   2. refreshes performance_log rows whose stat markets were still pending
 //      (boxscore arrives later than the final whistle);
 //   3. backfills leagueSlug / competitionName on legacy performance rows so
@@ -27,8 +26,12 @@ import { evaluateLeg, type MatchResult } from "@/lib/settlement/evaluate";
 import {
   fetchEspnBoxscore,
   lookupMultiSourceResult,
+  resultFromFixture,
+  statsToBoxscore,
 } from "../daily-picks/route";
+import { GET as fixturesGET } from "@/app/api/fixtures/route";
 import { statsAggregator } from "@/lib/data/aggregator";
+import { canonicalLeagueSlug } from "@/lib/leaguePriority";
 import { evaluateFinishedMatch } from "@/lib/engine";
 import { runOracleWithStandings } from "@/lib/engine/oracle";
 import type { RankingMode } from "@/lib/engine/selector";
@@ -86,10 +89,22 @@ async function refreshPendingPerformanceRows(force = false): Promise<number> {
     try {
       const fx = fixtureFromPerformanceRow(row);
       if (!fx) continue;
-      const rankingMode = (row.rankingMode as RankingMode) || 'B';
+      const rankingMode = (row.rankingMode as RankingMode) || "B";
       const pred = await runOracleWithStandings(fx, { rankingMode });
       if (!pred) continue;
-      const boxscore = await fetchEspnBoxscore(fx.leagueSlug, fx.id);
+      const boxscore =
+        (await fetchEspnBoxscore(fx.leagueSlug, fx.id)) ??
+        statsToBoxscore(
+          await statsAggregator
+            .fetch({
+              leagueSlug: fx.leagueSlug,
+              eventId: fx.id,
+              homeTeam: fx.home.name,
+              awayTeam: fx.away.name,
+              date: fx.date,
+            })
+            .catch(() => null),
+        );
       evaluateFinishedMatch(fx, pred, boxscore);
 
       // Merge fresh outcomes into the stored detail, keeping original fields.
@@ -139,6 +154,54 @@ interface SettlePass {
   resolvedByLeague: Record<string, number>;
 }
 
+function namesLooseMatch(a: string, b: string): boolean {
+  const na = a.toLowerCase().replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
+  const nb = b.toLowerCase().replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
+  if (!na || !nb) return false;
+  return na === nb || na.includes(nb) || nb.includes(na);
+}
+
+/** Seed finished results from the live fixture-feed catalogue (all competitions). */
+async function seedResultsFromFixtureFeed(): Promise<MatchResult[]> {
+  const feed = await fixturesGET(new Request("http://gigi.local/api/fixtures?days=3&stats=0")).catch(
+    (err) => {
+      console.warn("[Settle] Fixture-feed result seed failed:", err);
+      return null;
+    },
+  );
+  if (!feed || !feed.ok) return [];
+  const payload = (await feed.json()) as { fixtures?: FixtureLite[] };
+  const results: MatchResult[] = [];
+  for (const fx of payload.fixtures ?? []) {
+    const result = resultFromFixture(fx);
+    if (result) results.push(result);
+  }
+  console.log(`[Settle] Seeded ${results.length} finished results from the fixture-feed catalogue`);
+  return results;
+}
+
+function matchFeedResult(
+  seeded: MatchResult[],
+  eventId: string,
+  leagueSlug: string,
+  matchLabel: string,
+  matchDate: string,
+): MatchResult | null {
+  const byId = seeded.find((r) => r.eventId === eventId);
+  if (byId) return byId;
+  const home = matchLabel.split(" vs ")[0]?.trim() ?? "";
+  const away = matchLabel.split(" vs ")[1]?.trim() ?? "";
+  const day = matchDate.slice(0, 10);
+  const slug = canonicalLeagueSlug(leagueSlug);
+  return (
+    seeded.find((r) => {
+      const sameDay = !day || r.date.slice(0, 10) === day;
+      const sameSlug = !slug || canonicalLeagueSlug(r.leagueSlug) === slug;
+      return sameDay && sameSlug && namesLooseMatch(r.homeName, home) && namesLooseMatch(r.awayName, away);
+    }) ?? null
+  );
+}
+
 async function settlePendingAcrossAllSources(force = false): Promise<SettlePass> {
   const queues = await getPendingSettlementItems({
     accumulators: SWEEP_LIMIT(force),
@@ -146,11 +209,18 @@ async function settlePendingAcrossAllSources(force = false): Promise<SettlePass>
     valueBets:    SWEEP_LIMIT(force),
   });
 
+  const seeded = await seedResultsFromFixtureFeed();
+
   const cache = new Map<string, MatchResult | null>();
   const resolve = async (eventId: string, leagueSlug: string, matchLabel: string, matchDate: string) => {
     const key = `${leagueSlug}|${eventId}`;
     if (!cache.has(key)) {
-      cache.set(key, await lookupMultiSourceResult({ eventId, leagueSlug, matchLabel, matchDate }));
+      const fromFeed = matchFeedResult(seeded, eventId, leagueSlug, matchLabel, matchDate);
+      cache.set(
+        key,
+        fromFeed ??
+          (await lookupMultiSourceResult({ eventId, leagueSlug, matchLabel, matchDate })),
+      );
     }
     return cache.get(key) ?? null;
   };
