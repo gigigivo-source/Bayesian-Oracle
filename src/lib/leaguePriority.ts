@@ -163,11 +163,17 @@ const NAME_TIER: Array<{ match: string; tier: number }> = [
 ];
 
 /**
- * Alternate spellings that show up in audit lists / fallback providers but
- * are not ESPN catalogue slugs. Mapped onto the canonical ESPN form so
- * `LEAGUE_TIER` and scoreboard fetches still hit.
+ * Alternate provider spellings and ESPN's separate qualifying-round slugs.
+ * They map onto the canonical parent competition so `LEAGUE_TIER` and
+ * scoreboard fetches keep UEFA qualifying fixtures in the main feed.
  */
 export const LEAGUE_SLUG_ALIASES: Record<string, string> = {
+  // ESPN publishes summer qualifying rounds under separate competition slugs.
+  // Normalize them into their parent UEFA competitions so those fixtures stay
+  // visible in the main feed and retain the same tier/order as the league phase.
+  "uefa.champions_qual": "uefa.champions",
+  "uefa.europa_qual": "uefa.europa",
+  "uefa.europa.conf_qual": "uefa.europa.conf",
   "uefa.conference": "uefa.europa.conf",
   "uefa.europa.conference": "uefa.europa.conf",
   "uefa.nationsleague": "uefa.nations",

@@ -6,7 +6,8 @@
 //   • ?days=N         — dynamic ALL-competitions path. The competition list
 //                       is the data source's live catalogue (ESPN primary,
 //                       SportScore / TheSportsDB / OpenLigaDB / API-Football
-//                       as fallbacks). No hardcoded league list is walked.
+//                       as fallbacks), with the three UEFA club competitions
+//                       always retained as required primary-source targets.
 //
 // Per-competition fixture lists are cached for 1 hour. Empty catalogue
 // entries are logged and retried against fallback sources.
@@ -107,6 +108,16 @@ const FEED_TTL_MS = 60 * 60_000;
 const SWEEP_BUDGET_MS = Number(process.env.FIXTURES_SWEEP_BUDGET_MS ?? 90_000);
 const STATS_BUDGET_MS = Number(process.env.FIXTURES_STATS_BUDGET_MS ?? 12_000);
 const STATS_MAX_FETCHES = Number(process.env.FIXTURES_STATS_MAX_FETCHES ?? 24);
+
+// ESPN's canonical soccer competition slugs. Keep these in the dynamic feed
+// even when an incomplete upstream catalogue omits them. In particular, this
+// prevents a long catalogue sweep from reaching its budget before UEFA's
+// midweek fixtures are requested.
+const REQUIRED_UEFA_COMPETITIONS: readonly CatalogueCompetition[] = [
+  { slug: "uefa.champions", name: "UEFA Champions League" },
+  { slug: "uefa.europa", name: "UEFA Europa League" },
+  { slug: "uefa.europa.conf", name: "UEFA Conference League" },
+];
 
 // ─── Process-local caches (survive HMR / route re-imports) ───────────────────
 
@@ -358,14 +369,33 @@ async function espnReachable(): Promise<boolean> {
   return data !== null;
 }
 
+/** Add required UEFA competitions without replacing names supplied by ESPN. */
+function withRequiredUefaCompetitions(
+  catalogue: CatalogueCompetition[],
+): CatalogueCompetition[] {
+  const merged = new Map<string, string>();
+  for (const competition of catalogue) {
+    const slug = canonicalLeagueSlug(competition.slug);
+    if (slug && !merged.has(slug)) merged.set(slug, competition.name);
+  }
+  for (const competition of REQUIRED_UEFA_COMPETITIONS) {
+    const slug = canonicalLeagueSlug(competition.slug);
+    if (!merged.has(slug)) merged.set(slug, competition.name);
+  }
+  return [...merged.entries()].map(([slug, name]) => ({ slug, name }));
+}
+
 /**
  * Live competition catalogue from the primary data source (ESPN), with
- * TheSportsDB / OpenLigaDB as catalogue fallbacks. Never walks a hardcoded
- * league list.
+ * TheSportsDB / OpenLigaDB as catalogue fallbacks. The normal catalogue stays
+ * dynamic; the three canonical UEFA club competitions are retained if ESPN's
+ * catalogue is temporarily incomplete.
  */
 async function fetchCompetitionCatalogue(): Promise<CatalogueCompetition[]> {
   const cached = g.__gigiCatalogueCache;
-  if (cached && Date.now() - cached.at < CATALOGUE_TTL_MS) return cached.competitions;
+  if (cached && Date.now() - cached.at < CATALOGUE_TTL_MS) {
+    return withRequiredUefaCompetitions(cached.competitions);
+  }
 
   const merged = new Map<string, string>();
   const add = (list: CatalogueCompetition[]) => {
@@ -388,8 +418,12 @@ async function fetchCompetitionCatalogue(): Promise<CatalogueCompetition[]> {
     add(await fetchOpenLigaDbCatalogue());
   }
 
-  const competitions = [...merged.entries()].map(([slug, name]) => ({ slug, name }));
-  console.log(`[Fixtures] Catalogue: ${competitions.length} competitions from live data sources`);
+  const competitions = withRequiredUefaCompetitions(
+    [...merged.entries()].map(([slug, name]) => ({ slug, name })),
+  );
+  console.log(
+    `[Fixtures] Catalogue: ${competitions.length} competitions from live data sources (UEFA required targets included)`,
+  );
   if (competitions.length > 0) {
     g.__gigiCatalogueCache = { at: Date.now(), competitions };
   }
@@ -420,6 +454,32 @@ async function fetchEspnCompetition(
 
   compCache().set(key, { at: Date.now(), fixtures, source: "ESPN" });
   return fixtures;
+}
+
+/**
+ * Fetch the three UEFA club competitions before the broader catalogue sweep.
+ * They are deliberately not left behind a potentially large dynamic catalogue:
+ * ESPN's global board is useful for discovery, but it is not a reliable
+ * substitute for each competition's 14-day scoreboard window.
+ */
+async function fetchRequiredUefaFixtures(
+  targets: CatalogueCompetition[],
+  window: string,
+): Promise<Array<{ competition: CatalogueCompetition; fixtures: FixtureLite[] }>> {
+  const targetSlugs = new Set(targets.map((competition) => canonicalLeagueSlug(competition.slug)));
+  const requested = REQUIRED_UEFA_COMPETITIONS.filter((competition) =>
+    targetSlugs.has(competition.slug),
+  );
+
+  return Promise.all(
+    requested.map(async (competition) => {
+      const fixtures = await fetchEspnCompetition(competition.slug, window).catch(
+        () => [] as FixtureLite[],
+      );
+      console.log(`[Fixtures] Fetched ${fixtures.length} matches for ${competition.name}.`);
+      return { competition, fixtures };
+    }),
+  );
 }
 
 // ─── Fallback providers (bulk — discover every competition they cover) ───────
@@ -805,6 +865,16 @@ async function collectAllCompetitionFixtures(opts?: {
   };
 
   const espnUp = await espnReachable();
+
+  // Fetch required UEFA competition boards regardless of the generic ESPN
+  // health probe. A temporary failure of that probe must not suppress the
+  // dedicated qualifying-round fallback for Champions/Europa/Conference.
+  const uefaWindow = dateWindow(now, addDays(now, days));
+  const uefaPages = await fetchRequiredUefaFixtures(targets, uefaWindow);
+  for (const { competition, fixtures } of uefaPages) {
+    for (const fixture of fixtures) add(fixture, "ESPN", competition.name);
+  }
+
   if (espnUp) {
     // Fast path: ESPN's global soccer board already lists every competition
     // it is covering on a given day. Remap the `all` slug onto the catalogue
@@ -842,7 +912,9 @@ async function collectAllCompetitionFixtures(opts?: {
       );
     }
   } else {
-    console.log(`[Fixtures] ESPN unreachable — skipping per-competition ESPN sweep`);
+    console.log(
+      `[Fixtures] ESPN unreachable — direct UEFA attempts completed; skipping global and broad catalogue sweep`,
+    );
   }
 
   // Fallbacks: SportScore → API-Football → TheSportsDB → OpenLigaDB.
