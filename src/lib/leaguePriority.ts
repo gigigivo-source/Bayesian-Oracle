@@ -112,6 +112,10 @@ const NAME_TIER: Array<{ match: string; tier: number }> = [
   { match: "uefa euro", tier: 1 },
   { match: "copa américa", tier: 1 },
   { match: "copa america", tier: 1 },
+  { match: "nations league", tier: 1 },
+  { match: "club world cup", tier: 1 },
+  { match: "libertadores", tier: 1 },
+  { match: "sudamericana", tier: 1 },
 
   // Tier 2
   { match: "premier league", tier: 2 }, // note: refined below for non-English PLs
@@ -135,6 +139,14 @@ const NAME_TIER: Array<{ match: string; tier: number }> = [
   { match: "super lig", tier: 3 },
   { match: "super league greece", tier: 3 },
   { match: "swiss super league", tier: 3 },
+  { match: "fa cup", tier: 3 },
+  { match: "copa del rey", tier: 3 },
+  { match: "dfb-pokal", tier: 3 },
+  { match: "dfb pokal", tier: 3 },
+  { match: "coppa italia", tier: 3 },
+  { match: "coupe de france", tier: 3 },
+  { match: "carabao cup", tier: 3 },
+  { match: "efl cup", tier: 3 },
 
   // Tier 4
   { match: "mls", tier: 4 },
@@ -151,6 +163,47 @@ const NAME_TIER: Array<{ match: string; tier: number }> = [
 ];
 
 /**
+ * Alternate spellings that show up in audit lists / fallback providers but
+ * are not ESPN catalogue slugs. Mapped onto the canonical ESPN form so
+ * `LEAGUE_TIER` and scoreboard fetches still hit.
+ */
+export const LEAGUE_SLUG_ALIASES: Record<string, string> = {
+  "uefa.conference": "uefa.europa.conf",
+  "uefa.europa.conference": "uefa.europa.conf",
+  "uefa.nationsleague": "uefa.nations",
+  "uefa.nations_league": "uefa.nations",
+  "fifa.worldcup": "fifa.world",
+  "fifa.clubworldcup": "fifa.cwc",
+  "fifa.club.world.cup": "fifa.cwc",
+  "conmebol.copaamerica": "conmebol.america",
+  "eng.facup": "eng.fa",
+  "eng.fa_cup": "eng.fa",
+  "eng.eflcup": "eng.league_cup",
+  "eng.efl_cup": "eng.league_cup",
+  "esp.cup": "esp.copa_del_rey",
+  "ger.cup": "ger.dfb_pokal",
+  "ita.cup": "ita.coppa_italia",
+  "fra.cup": "fra.coupe_de_france",
+};
+
+/** Collapse a known alias onto the ESPN catalogue slug. Unknown slugs pass through. */
+export function canonicalLeagueSlug(slug: string): string {
+  return LEAGUE_SLUG_ALIASES[slug.trim()] ?? slug.trim();
+}
+
+/**
+ * ESPN scoreboard slug candidates for a competition: the canonical slug first,
+ * then any known aliases. Used when a catalogue slug returns an empty board.
+ */
+export function espnSlugCandidates(slug: string): string[] {
+  const canonical = canonicalLeagueSlug(slug);
+  const aliases = Object.entries(LEAGUE_SLUG_ALIASES)
+    .filter(([, target]) => target === canonical)
+    .map(([alias]) => alias);
+  return [canonical, ...aliases.filter((alias) => alias !== canonical)];
+}
+
+/**
  * Resolve the priority tier for a fixture-like object.
  * Prefers the exact slug map, then falls back to a name substring match,
  * and finally to the lowest tier for anything unlisted.
@@ -160,7 +213,11 @@ export function leagueTier(input: {
   leagueName?: string | null;
 }): number {
   const slug = input.leagueSlug?.trim();
-  if (slug && slug in LEAGUE_TIER) return LEAGUE_TIER[slug];
+  if (slug) {
+    const canonical = canonicalLeagueSlug(slug);
+    if (canonical in LEAGUE_TIER) return LEAGUE_TIER[canonical];
+    if (slug in LEAGUE_TIER) return LEAGUE_TIER[slug];
+  }
 
   const name = input.leagueName?.trim().toLowerCase();
   if (name) {

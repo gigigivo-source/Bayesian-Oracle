@@ -1,12 +1,12 @@
 // ĞIGI GIVØ — Daily all-league picks cron.
 //
-// Part 2 of the coverage overhaul: instead of a handful of top feeds, this job
-// walks EVERY competition in the catalog (ESPN primary) and additionally pulls
-// fixture lists from SportScore, OpenLigaDB (German leagues), TheSportsDB and
-// API-Football so smaller leagues are covered too. Every fixture is processed
-// through the prediction engine (multi-source aggregator + confidence gate),
-// and predictions / settled results are persisted to the performance tables
-// with leagueSlug + competitionName populated.
+// Walks the live fixture-feed catalogue (ESPN / SportScore / OpenLigaDB /
+// TheSportsDB / API-Football — never a hardcoded league list) so a single
+// cron tick produces picks for every competition that has a fixture in the
+// window. Every fixture is processed through the prediction engine
+// (multi-source aggregator + confidence gate), and predictions / settled
+// results are persisted to the performance tables with leagueSlug +
+// competitionName populated.
 //
 // Behaviour:
 //   • fail-soft per league — one broken league never stops the sweep
@@ -34,9 +34,11 @@ import { ALL_RANKING_MODES, type RankingMode } from "@/lib/engine/selector";
 import { findValueBets, type BookmakerOdds } from "@/lib/engine/value";
 import { evaluateLeg, type MatchResult } from "@/lib/settlement/evaluate";
 import { LEAGUES, LEAGUE_MAP } from "@/lib/leagues";
+import { canonicalLeagueSlug } from "@/lib/leaguePriority";
 import { resilientJson } from "@/lib/httpClient";
 import { statsAggregator } from "@/lib/data/aggregator";
 import type { CanonicalMatchStats, TeamStats } from "@/lib/data/types";
+import { GET as fixturesGET } from "@/app/api/fixtures/route";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -102,7 +104,7 @@ export function resolveLeagueSlug(name: string, namespace: FixtureSource): strin
   for (const l of LEAGUES) {
     const candidate = norm(l.name);
     if (candidate === target || candidate.includes(target) || target.includes(candidate)) {
-      return l.slug;
+      return canonicalLeagueSlug(l.slug);
     }
   }
   return `${namespace.toLowerCase()}:${kebabSlug(name)}`;
@@ -413,77 +415,63 @@ export async function fetchApiFootballFixtures(dates: string[]): Promise<Aggrega
   return out;
 }
 
-// ─── Aggregation: every source → per-competition fixture lists ────────────────
-
-function threeDayDates(now = new Date()): string[] {
-  const fmt = (d: Date) => d.toISOString().slice(0, 10);
-  const yesterday = new Date(now); yesterday.setDate(now.getDate() - 1);
-  const tomorrow  = new Date(now); tomorrow.setDate(now.getDate() + 1);
-  return [fmt(yesterday), fmt(now), fmt(tomorrow)];
-}
+// ─── Aggregation: live fixture-feed catalogue → per-competition lists ─────────
 
 /**
- * Fetch fixtures for every competition from every source, deduplicated across
- * providers (ESPN wins key collisions) and grouped by league slug.
+ * Fetch fixtures for every competition from the shared fixture feed
+ * (live data-source catalogue + fallbacks). Deduplicated across providers
+ * and grouped by league slug. Does not walk a hardcoded league list.
  */
 export async function aggregateAllCompetitions(opts?: {
   leagueSlugs?: string[];
   dates?: string[];
   now?: Date;
+  days?: number;
 }): Promise<CompetitionFixtures[]> {
-  const dates = opts?.dates ?? threeDayDates(opts?.now);
-  const allowed = opts?.leagueSlugs?.length ? new Set(opts.leagueSlugs) : null;
-  const slugs = LEAGUES
-    .map((l) => l.slug)
-    .filter((s) => !allowed || allowed.has(s));
+  const days = opts?.days ?? (opts?.dates?.length ? opts.dates.length : 14);
+  const allow = opts?.leagueSlugs?.length
+    ? opts.leagueSlugs.map(canonicalLeagueSlug)
+    : undefined;
 
-  // ESPN sweep — primary source, every catalog competition.
-  const espnSweep = await Promise.all(
-    slugs.map(async (slug) => ({ slug, fixtures: await fetchEspnFixtures(slug) })),
-  );
-
-  // Secondary sources (all competitions / smaller leagues).
-  const [tsdb, oligadb, sportscore, apif] = await Promise.all([
-    fetchTheSportsDbFixtures(dates),
-    fetchOpenLigaDbFixtures(new Date(dates[0]), new Date(dates[dates.length - 1])),
-    fetchSportScoreFixtures(),
-    fetchApiFootballFixtures(dates),
-  ]);
-
-  // Group everything by league slug; dedupe across sources by team-pair + day.
-  const groups = new Map<string, CompetitionFixtures>();
-  const seen = new Set<string>();
-
-  const keyFor = (f: FixtureLite): string => {
-    const day = f.date.slice(0, 10);
-    return [f.leagueSlug, day, norm(f.home.name), norm(f.away.name)].sort().join("|");
+  const url = new URL("http://gigi.local/api/fixtures");
+  url.searchParams.set("days", String(days));
+  url.searchParams.set("stats", "0");
+  const res = await fixturesGET(new Request(url));
+  const payload = (await res.json()) as {
+    fixtures?: Array<FixtureLite & { leagueSlug: string; leagueName: string }>;
   };
 
-  const add = (fx: FixtureLite, source: FixtureSource, competitionName: string) => {
-    const k = keyFor(fx);
-    const slug = fx.leagueSlug;
+  const allowSet = allow ? new Set(allow) : null;
+  const groups = new Map<string, CompetitionFixtures>();
+  const sourceOf = (id: string): FixtureSource =>
+    id.startsWith("tsdb:")
+      ? "TheSportsDB"
+      : id.startsWith("oligadb:")
+        ? "OpenLigaDB"
+        : id.startsWith("sportscore:")
+          ? "SportScore"
+          : id.startsWith("apif:")
+            ? "ApiFootball"
+            : "ESPN";
+
+  for (const fx of payload.fixtures ?? []) {
+    const slug = canonicalLeagueSlug(fx.leagueSlug);
+    if (allowSet && !allowSet.has(slug)) continue;
     let group = groups.get(slug);
     if (!group) {
-      group = { leagueSlug: slug, competitionName, fixtures: [] };
+      group = {
+        leagueSlug: slug,
+        competitionName: fx.leagueName || LEAGUE_MAP[slug]?.name || slug,
+        fixtures: [],
+      };
       groups.set(slug, group);
     }
-    if (seen.has(k)) return;
-    seen.add(k);
-    group.fixtures.push({ fixture: fx, source });
-  };
-
-  for (const { slug, fixtures } of espnSweep) {
-    const name = LEAGUE_MAP[slug]?.name ?? slug;
-    for (const { fixture } of fixtures) add(fixture, "ESPN", name);
-  }
-  for (const { fixture, source } of [...tsdb, ...oligadb, ...sportscore, ...apif]) {
-    add(fixture, source, fixture.leagueName);
+    group.fixtures.push({ fixture: fx, source: sourceOf(fx.id) });
   }
 
   return [...groups.values()]
     .filter((g) => g.fixtures.length > 0)
     .sort((a, b) => {
-      // Catalog competitions first (tier order), then alphabetical.
       const ta = LEAGUE_MAP[a.leagueSlug]?.tier ?? 9;
       const tb = LEAGUE_MAP[b.leagueSlug]?.tier ?? 9;
       if (ta !== tb) return ta - tb;
@@ -1031,7 +1019,7 @@ export async function runDailyPicksSweep(): Promise<DailyPicksSweepSummary> {
     allowlist.length ? { leagueSlugs: allowlist } : undefined,
   );
 
-  console.log(`[Cron] Aggregated ${competitions.length} competitions from ESPN + SportScore + OpenLigaDB + TheSportsDB + API-Football`);
+  console.log(`[Cron] Aggregated ${competitions.length} competitions from the live fixture-feed catalogue`);
 
   const summary: DailyPicksSweepSummary = {
     ok: true,
