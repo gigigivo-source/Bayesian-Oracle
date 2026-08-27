@@ -4,9 +4,17 @@
 //   1. settles EVERY pending tracked item across ALL competitions — including
 //      matches sourced from TheSportsDB / OpenLigaDB / API-Football, via the
 //      live fixture-feed catalogue plus the multi-source result lookup;
-//   2. refreshes performance_log rows whose stat markets were still pending
+//   2. settles the dedicated feature picks (performance_log rows whose
+//      `feature` column is not NULL):
+//        · feature = 'corners' — Sure Bet Corners picks, resolved from real
+//          corner counts via the same evaluator the verification endpoint uses;
+//        · feature = 'first5'  — First 5 Minutes picks, resolved from real
+//          first-5-minute event data (minute-stamped goal / corner / card /
+//          penalty events, with the aggregator's full-match totals as the
+//          zero-event proof);
+//   3. refreshes performance_log rows whose stat markets were still pending
 //      (boxscore arrives later than the final whistle);
-//   3. backfills leagueSlug / competitionName on legacy performance rows so
+//   4. backfills leagueSlug / competitionName on legacy performance rows so
 //      the league dashboard has full transparency across old + new data.
 //
 // POST /api/cron/settle?force=true manually runs an immediate uncapped sweep.
@@ -14,7 +22,7 @@
 
 import { db } from "@/db";
 import { dailyPicks, performanceLog, savedSlips, valueBetLog } from "@/db/schema";
-import { and, count, eq, isNull, gt } from "drizzle-orm";
+import { and, count, eq, isNull, isNotNull, gt } from "drizzle-orm";
 import { runSettlementEngine } from "@/lib/settlement/engine";
 import {
   getPendingSettlementItems,
@@ -23,6 +31,9 @@ import {
   settleValueBet,
 } from "@/db/queries/settlement";
 import { evaluateLeg, type MatchResult } from "@/lib/settlement/evaluate";
+import { resolveSureCornerOutcome } from "@/lib/settlement/sureCornerOutcomes";
+import type { CanonicalMatchStats } from "@/lib/data/types";
+import { resilientJson } from "@/lib/httpClient";
 import {
   fetchEspnBoxscore,
   lookupMultiSourceResult,
@@ -362,6 +373,390 @@ async function settlePendingAcrossAllSources(force = false): Promise<SettlePass>
   return pass;
 }
 
+// ─── Task 2b: dedicated feature picks (Sure Bet Corners / First 5 Minutes) ───
+//
+// performance_log rows whose `feature` column is set are tracked products with
+// their own dashboards (/performance/corners, /performance/first5), fully
+// separate from the A–D ranking-mode rows. They settle through the `outcome`
+// column (pending | WIN | LOSS | PUSH | VOID) exactly like the Sure Bet
+// Corners verification endpoint, so both settlement paths are idempotent and
+// whichever runs first wins.
+//
+// Evidence used per feature:
+//   · corners — the final result + canonical corner stats, resolved by the
+//     shared sureCornerOutcomes evaluator (O/U via the settlement engine's
+//     evaluateLeg, plus the Corner Winner / Corner Handicap resolvers).
+//   · first5  — minute-stamped match events (ESPN summary `details`) decide
+//     whether a goal / corner / card / penalty happened inside the opening
+//     window; the aggregator's full-match totals only ever prove the NEGATIVE
+//     side (a zero total proves the event never happened anywhere in the
+//     match, a non-zero total says nothing about the first five minutes, so
+//     the pick stays pending until a timeline is available).
+
+/** An event counts as "in the first 5 minutes" when its match minute is ≤ 5. */
+const FIRST5_WINDOW_MINUTES = 5;
+
+type First5Family = "goal" | "corner" | "card" | "penalty";
+
+/** One entry of the ESPN summary `details` event timeline. */
+interface EspnTimelineEvent {
+  type?: { text?: string } | null;
+  clock?: { displayValue?: string; value?: number } | null;
+}
+
+/** Which First 5 Minutes family a stored market label belongs to. */
+export function first5FamilyOf(market: string): First5Family | null {
+  const m = market.toLowerCase();
+  if (m.includes("goal")) return "goal";
+  if (m.includes("corner")) return "corner";
+  if (m.includes("card")) return "card";
+  if (m.includes("penalty")) return "penalty";
+  return null;
+}
+
+/**
+ * Match minute of a timeline event. `displayValue` looks like "5'", "45+2'" or
+ * "90+4'"; stoppage time is folded into the running minute so an event at
+ * 45+2 counts as minute 47. Falls back to the seconds `value` when the display
+ * string is missing or unparsable.
+ */
+export function eventMinute(clock: EspnTimelineEvent["clock"]): number | null {
+  const raw = clock?.displayValue ?? "";
+  const match = raw.match(/(\d+)(?:\s*\+\s*(\d+))?/);
+  if (match) {
+    const base = Number(match[1]);
+    const stoppage = match[2] ? Number(match[2]) : 0;
+    const minute = base + stoppage;
+    return Number.isFinite(minute) ? minute : null;
+  }
+  const seconds = clock?.value;
+  if (typeof seconds === "number" && Number.isFinite(seconds) && seconds >= 0) {
+    return Math.ceil(seconds / 60);
+  }
+  return null;
+}
+
+/**
+ * Whether a timeline event's type belongs to a First 5 Minutes family:
+ *   goal    — "Goal", "Own Goal" and scored penalties (a scored penalty IS a goal)
+ *   corner  — "Corner Kick"
+ *   card    — "Yellow Card" / "Red Card" (any card)
+ *   penalty — any awarded penalty ("Penalty - Scored" / "Saved" / "Missed" / VAR awards)
+ */
+export function eventMatchesFamily(typeText: string, family: First5Family): boolean {
+  const t = typeText.toLowerCase();
+  switch (family) {
+    case "goal":
+      return t.includes("goal") || t.includes("penalty - scored");
+    case "corner":
+      return t.includes("corner");
+    case "card":
+      return t.includes("card");
+    case "penalty":
+      return t.includes("penalty");
+  }
+}
+
+/** Full-match total for a family from the canonical stats, or null if unknowable. */
+export function first5TotalFromStats(
+  family: First5Family,
+  stats: CanonicalMatchStats | null,
+): number | null {
+  if (!stats) return null;
+  const h = stats.home;
+  const a = stats.away;
+  const sum = (...values: Array<number | null>): number | null =>
+    values.some((v) => v === null)
+      ? null
+      : values.reduce<number>((acc, v) => acc + (v ?? 0), 0);
+  switch (family) {
+    case "goal":
+      return sum(h.goals, a.goals);
+    case "corner":
+      return sum(h.corners, a.corners);
+    case "card":
+      return sum(h.yellowCards, a.yellowCards, h.redCards, a.redCards);
+    case "penalty":
+      return sum(h.penalties, a.penalties);
+  }
+}
+
+/**
+ * The most authoritative full-match total available for a family. For goals
+ * the final score IS the goal count, so it needs no stats object at all.
+ */
+function first5AuthoritativeTotal(
+  family: First5Family,
+  result: MatchResult,
+  stats: CanonicalMatchStats | null,
+): number | null {
+  if (family === "goal") return result.homeScore + result.awayScore;
+  return first5TotalFromStats(family, stats);
+}
+
+/**
+ * Resolve one stored First 5 Minutes pick (market + "Yes"/"No" selection)
+ * against real match data. Returns WIN | LOSS, or null while the outcome
+ * cannot be determined honestly yet (the next cron run retries).
+ *
+ *   1. Minute-stamped timeline — an event of the family inside the window
+ *      proves "Yes"; a timeline that is complete for the family (it saw at
+ *      least as many family events as the aggregate total) proves "No".
+ *   2. Aggregate totals — a zero full-match total proves the event never
+ *      happened, settling "No" as a win and "Yes" as a loss. A non-zero
+ *      total alone never guesses: the pick stays pending.
+ */
+export function resolveFirst5Outcome(
+  market: string,
+  selection: string,
+  result: MatchResult,
+  stats: CanonicalMatchStats | null,
+  timeline: EspnTimelineEvent[] | null,
+): "WIN" | "LOSS" | null {
+  const family = first5FamilyOf(market);
+  if (!family) return null;
+  const sel = selection.trim().toLowerCase();
+  if (sel !== "yes" && sel !== "no") return null;
+  const wantsYes = sel === "yes";
+
+  const total = first5AuthoritativeTotal(family, result, stats);
+
+  // 1) Minute-stamped event timeline — direct first-5 evidence.
+  if (timeline && timeline.length > 0) {
+    const early = timeline.some((event) => {
+      if (!eventMatchesFamily(event.type?.text ?? "", family)) return false;
+      const minute = eventMinute(event.clock);
+      return minute !== null && minute <= FIRST5_WINDOW_MINUTES;
+    });
+    // A detected early event is always trustworthy.
+    if (early) return wantsYes ? "WIN" : "LOSS";
+    // No early event: trustworthy only when the timeline is complete for the
+    // family — a partial feed must never fabricate a "No".
+    const timelineTotal = timeline.filter((event) =>
+      eventMatchesFamily(event.type?.text ?? "", family),
+    ).length;
+    if (total === null || timelineTotal >= total) return wantsYes ? "LOSS" : "WIN";
+  }
+
+  // 2) Aggregate totals — only ever prove the negative side.
+  if (total === 0) return wantsYes ? "LOSS" : "WIN";
+
+  return null;
+}
+
+/**
+ * ESPN's event timeline (`details` array of the summary endpoint — the same
+ * payload fetchEspnBoxscore reads). Returns null for non-ESPN events (their
+ * ids are provider-namespaced with a colon) or when no timeline exists.
+ */
+async function fetchEspnEventTimeline(
+  leagueSlug: string | null | undefined,
+  eventId: string,
+): Promise<EspnTimelineEvent[] | null> {
+  if (!leagueSlug || leagueSlug.includes(":") || !eventId || eventId.includes(":")) return null;
+  const data = await resilientJson<{ details?: EspnTimelineEvent[] }>(
+    `https://site.api.espn.com/apis/site/v2/sports/soccer/${leagueSlug}/summary?event=${eventId}`,
+    { revalidate: 600 },
+  ).catch(() => null);
+  const details = data?.details;
+  return Array.isArray(details) && details.length > 0 ? details : null;
+}
+
+interface FeatureSettlePass {
+  /** Legacy rankingMode='S' rows tagged feature='corners' by the backfill. */
+  backfilledCorners: number;
+  /** Corner picks settled this run. */
+  corners: number;
+  /** First 5 Minutes picks settled this run. */
+  first5: number;
+  won: number;
+  lost: number;
+  push: number;
+  voided: number;
+  stillPending: number;
+  failed: number;
+  resolvedByLeague: Record<string, number>;
+}
+
+/** Stamp a settled detail entry: WIN → HIT, LOSS → MISS, pushes/voids kept. */
+function detailOutcomeForUpdate(outcome: string): string {
+  return outcome === "WIN" ? "HIT" : outcome === "LOSS" ? "MISS" : outcome;
+}
+
+export async function settleFeaturePicks(force = false): Promise<FeatureSettlePass> {
+  const pass: FeatureSettlePass = {
+    backfilledCorners: 0, corners: 0, first5: 0, won: 0, lost: 0, push: 0,
+    voided: 0, stillPending: 0, failed: 0, resolvedByLeague: {},
+  };
+
+  // Legacy backfill: every rankingMode='S' row is a Sure Bet Corners pick by
+  // definition — tag it so /performance/corners covers the full history.
+  try {
+    const backfill = await db
+      .update(performanceLog)
+      .set({ feature: "corners" })
+      .where(and(
+        eq(performanceLog.rankingMode, "S"),
+        isNull(performanceLog.feature),
+        isNotNull(performanceLog.market),
+      ));
+    pass.backfilledCorners = backfill.rowCount ?? 0;
+  } catch {
+    // best-effort — retried on the next sweep
+  }
+
+  const pending = await db
+    .select()
+    .from(performanceLog)
+    .where(and(isNotNull(performanceLog.feature), eq(performanceLog.outcome, "pending")))
+    .limit(SWEEP_LIMIT(force));
+  if (pending.length === 0) return pass;
+
+  // Group by eventId so each match's result + stats + timeline is fetched once.
+  const byEvent = new Map<string, Array<typeof performanceLog.$inferSelect>>();
+  for (const row of pending) {
+    const group = byEvent.get(row.eventId) ?? [];
+    group.push(row);
+    byEvent.set(row.eventId, group);
+  }
+
+  const seeded = await seedResultsFromFixtureFeed();
+
+  const resultCache = new Map<string, MatchResult | null>();
+  const statsCache = new Map<string, CanonicalMatchStats | null>();
+  const timelineCache = new Map<string, EspnTimelineEvent[] | null>();
+
+  const recordResolved = (leagueSlug: string | null | undefined) => {
+    const label = LEAGUE_MAP[leagueSlug ?? ""]?.name ?? leagueSlug ?? "Unknown League";
+    pass.resolvedByLeague[label] = (pass.resolvedByLeague[label] ?? 0) + 1;
+  };
+
+  for (const [eventId, picks] of byEvent) {
+    const first = picks[0];
+    try {
+      let result: MatchResult | null = null;
+      const resultKey = `${first.leagueSlug ?? ""}|${eventId}`;
+      if (!resultCache.has(resultKey)) {
+        resultCache.set(
+          resultKey,
+          matchFeedResult(seeded, eventId, first.leagueSlug ?? "", first.matchLabel, first.matchDate) ??
+            (await lookupMultiSourceResult({
+              eventId,
+              leagueSlug: first.leagueSlug,
+              matchLabel: first.matchLabel,
+              matchDate: first.matchDate,
+            })),
+        );
+      }
+      result = resultCache.get(resultKey) ?? null;
+
+      if (!result) {
+        // The match has not finished anywhere yet — every pick stays pending.
+        pass.stillPending += picks.length;
+        continue;
+      }
+
+      // Cache-first canonical stats, exactly like the settlement engine.
+      const statsKey = `${result.leagueSlug}|${result.eventId}`;
+      if (!statsCache.has(statsKey)) {
+        const query = {
+          leagueSlug: result.leagueSlug,
+          eventId: result.eventId,
+          homeTeam: result.homeName,
+          awayTeam: result.awayName,
+          date: result.date,
+        };
+        statsCache.set(
+          statsKey,
+          statsAggregator.peek(query) ??
+            (await statsAggregator.fetch(query).catch(() => null)),
+        );
+      }
+      const stats = statsCache.get(statsKey) ?? null;
+
+      // Minute-stamped event timeline — only needed for first5 picks.
+      if (picks.some((pick) => pick.feature === "first5")) {
+        const timelineKey = `${result.leagueSlug}|${result.eventId}`;
+        if (!timelineCache.has(timelineKey)) {
+          timelineCache.set(
+            timelineKey,
+            await fetchEspnEventTimeline(result.leagueSlug, result.eventId),
+          );
+        }
+      }
+      const timeline = timelineCache.get(`${result.leagueSlug}|${result.eventId}`) ?? null;
+
+      for (const pick of picks) {
+        try {
+          const market = pick.market ?? "";
+          const selection = pick.selection ?? "";
+          let outcome: "WIN" | "LOSS" | "PUSH" | "VOID" | null = null;
+          if (pick.feature === "corners") {
+            outcome = resolveSureCornerOutcome(market, selection, result, stats);
+          } else if (pick.feature === "first5") {
+            outcome = resolveFirst5Outcome(market, selection, result, stats, timeline);
+          }
+          if (outcome === null || outcome === undefined) {
+            pass.stillPending++;
+            continue;
+          }
+
+          // Guarded update: only settle rows still 'pending' so a concurrent
+          // run (or the sure-corners verify endpoint) can never settle the
+          // same pick twice.
+          const previousDetail = Array.isArray(pick.top10Detail)
+            ? (pick.top10Detail as Array<Record<string, unknown>>)
+            : [];
+          const changed = await db
+            .update(performanceLog)
+            .set({
+              outcome,
+              settledAt: new Date(),
+              homeScore: result.homeScore,
+              awayScore: result.awayScore,
+              hits: outcome === "WIN" ? 1 : 0,
+              misses: outcome === "LOSS" ? 1 : 0,
+              pending: 0,
+              accuracy: outcome === "WIN" ? 1 : 0,
+              top10Detail: previousDetail.map((entry) =>
+                entry.name === market
+                  ? { ...entry, outcome: detailOutcomeForUpdate(outcome) }
+                  : entry,
+              ),
+            })
+            .where(and(eq(performanceLog.id, pick.id), eq(performanceLog.outcome, "pending")))
+            .returning({ id: performanceLog.id });
+
+          if (!changed[0]) {
+            pass.failed++;
+            continue;
+          }
+
+          if (pick.feature === "corners") pass.corners++;
+          else pass.first5++;
+          recordResolved(pick.leagueSlug);
+          if (outcome === "WIN") pass.won++;
+          else if (outcome === "LOSS") pass.lost++;
+          else if (outcome === "PUSH") pass.push++;
+          else pass.voided++;
+          console.log(
+            `[Settle] Feature ${pick.feature} · ${pick.matchLabel}: ${market} → ${selection} ${outcome}`,
+          );
+        } catch {
+          pass.failed++;
+        }
+      }
+    } catch {
+      pass.failed += picks.length;
+    }
+  }
+
+  for (const [league, resolved] of Object.entries(pass.resolvedByLeague)) {
+    console.log(`[Settle] Resolved ${resolved} feature pick(s) for ${league}`);
+  }
+  return pass;
+}
+
 // ─── Task 3: legacy leagueSlug / competitionName backfill ────────────────────
 
 async function backfillLegacyLeagueFields(): Promise<{
@@ -425,6 +820,7 @@ export interface SettleSweepSummary {
   ok: boolean;
   engine: Awaited<ReturnType<typeof runSettlementEngine>> | null;
   multiSource: SettlePass;
+  featurePicks: FeatureSettlePass;
   refreshedPerformanceRows: number;
   legacyBackfill: { performanceRows: number; valueBetRows: number; slipRows: number };
   failures: string[];
@@ -435,13 +831,16 @@ export interface SettleSweepSummary {
 }
 
 async function countPendingRows(): Promise<number> {
-  const [daily, value, slips, performance] = await Promise.all([
+  const [daily, value, slips, performance, featurePicks] = await Promise.all([
     db.select({ value: count() }).from(dailyPicks).where(eq(dailyPicks.status, "pending")),
     db.select({ value: count() }).from(valueBetLog).where(eq(valueBetLog.outcome, "pending")),
     db.select({ value: count() }).from(savedSlips).where(eq(savedSlips.status, "pending")),
     db.select({ value: count() }).from(performanceLog).where(gt(performanceLog.pending, 0)),
+    db.select({ value: count() }).from(performanceLog)
+      .where(and(isNotNull(performanceLog.feature), eq(performanceLog.outcome, "pending"))),
   ]);
-  return Number(daily[0]?.value ?? 0) + Number(value[0]?.value ?? 0) + Number(slips[0]?.value ?? 0) + Number(performance[0]?.value ?? 0);
+  return Number(daily[0]?.value ?? 0) + Number(value[0]?.value ?? 0) + Number(slips[0]?.value ?? 0) +
+    Number(performance[0]?.value ?? 0) + Number(featurePicks[0]?.value ?? 0);
 }
 
 async function runAllLeagueSettlement(force = false): Promise<SettleSweepSummary> {
@@ -467,7 +866,19 @@ async function runAllLeagueSettlement(force = false): Promise<SettleSweepSummary
     failures.push(`multi-source settlement: ${err instanceof Error ? err.message : String(err)}`);
   }
 
-  // 3) Refresh performance rows with late-arriving boxscores.
+  // 3) Dedicated feature picks — Sure Bet Corners (feature = 'corners') and
+  //    First 5 Minutes (feature = 'first5').
+  let featurePicks: FeatureSettlePass = {
+    backfilledCorners: 0, corners: 0, first5: 0, won: 0, lost: 0, push: 0, voided: 0,
+    stillPending: 0, failed: 0, resolvedByLeague: {},
+  };
+  try {
+    featurePicks = await settleFeaturePicks(force);
+  } catch (err) {
+    failures.push(`feature pick settlement: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  // 4) Refresh performance rows with late-arriving boxscores.
   let refreshedPerformanceRows = 0;
   try {
     refreshedPerformanceRows = await refreshPendingPerformanceRows(force);
@@ -475,7 +886,7 @@ async function runAllLeagueSettlement(force = false): Promise<SettleSweepSummary
     failures.push(`performance refresh: ${err instanceof Error ? err.message : String(err)}`);
   }
 
-  // 4) Legacy league field backfill.
+  // 5) Legacy league field backfill.
   let legacyBackfill = { performanceRows: 0, valueBetRows: 0, slipRows: 0 };
   try {
     legacyBackfill = await backfillLegacyLeagueFields();
@@ -486,12 +897,21 @@ async function runAllLeagueSettlement(force = false): Promise<SettleSweepSummary
   console.log(
     `[Cron][settle] engine settled ${engine?.settled.total ?? 0} · multi-source settled ` +
     `${multiSource.dailyPicks + multiSource.valueBets + multiSource.accumulators} ` +
-    `(${multiSource.stillPending} still pending) · refreshed ${refreshedPerformanceRows} performance rows · ` +
+    `(${multiSource.stillPending} still pending) · feature picks settled ` +
+    `${featurePicks.corners + featurePicks.first5} ` +
+    `(${featurePicks.stillPending} still pending, ${featurePicks.backfilledCorners} legacy rows backfilled) · ` +
+    `refreshed ${refreshedPerformanceRows} performance rows · ` +
     `legacy backfill ${legacyBackfill.performanceRows + legacyBackfill.valueBetRows + legacyBackfill.slipRows} rows`,
   );
 
-  const resolved = (engine?.settled.total ?? 0) + multiSource.dailyPicks + multiSource.valueBets + multiSource.accumulators + refreshedPerformanceRows;
-  return { ok: failures.length === 0, engine, multiSource, refreshedPerformanceRows, legacyBackfill, failures, totalPending, resolved, failed: multiSource.failed + failures.length, ranAt: new Date().toISOString() };
+  const resolved = (engine?.settled.total ?? 0) + multiSource.dailyPicks + multiSource.valueBets +
+    multiSource.accumulators + featurePicks.corners + featurePicks.first5 + refreshedPerformanceRows;
+  return {
+    ok: failures.length === 0, engine, multiSource, featurePicks, refreshedPerformanceRows,
+    legacyBackfill, failures, totalPending, resolved,
+    failed: multiSource.failed + featurePicks.failed + failures.length,
+    ranAt: new Date().toISOString(),
+  };
 }
 
 function authorized(req: Request): boolean {

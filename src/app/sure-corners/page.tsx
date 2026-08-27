@@ -277,6 +277,14 @@ export default function SureCornersPage() {
             >
               ← Oracle
             </Link>
+            <Link
+              href="/performance/corners"
+              title="Sure Bet Corners track record — historical picks, hit rate, P&L and ROI"
+              aria-label="Open the Sure Bet Corners performance tracker"
+              className={`${NAV_PILL} bg-gradient-to-r from-[#F59E0B] to-[#FF8C00] px-4 py-2 text-xs font-bold text-white shadow-[0_0_20px_-5px_rgba(245,158,11,0.5)] hover:brightness-110`}
+            >
+              📊 Track Records
+            </Link>
             <button
               type="button"
               onClick={() => void load(true)}

@@ -712,6 +712,103 @@ function emptyResponse(overrides: Partial<First5MinutesResponse> = {}): First5Mi
   };
 }
 
+// ─── Pick persistence (dedicated feature tracking) ────────────────────────────
+
+/**
+ * Persist every generated First 5 Minutes pick to performance_log
+ * (feature = 'first5', outcome = 'pending') so the settlement cron's feature
+ * pass (/api/cron/settle) can resolve each market from real first-5-minute
+ * event data once the match finishes, and /performance/first5 can report the
+ * feature's dedicated track record.
+ *
+ * The saved pick is the market's selected side — the more likely of Yes / No —
+ * with its predicted hit rate, confidence tier and the 1xBet-ladder price at
+ * pick time (stored inside top10Detail so P&L settles at the quoted price).
+ * Idempotent: one row per (eventId, market label, selection).
+ *
+ * rankingMode is stamped with the 'F' feature sentinel — never one of the
+ * A–D ranking modes — so the pick is never adopted by the ranking-mode
+ * pipeline. pending is deliberately 0 for the same reason the sure-corners
+ * writer keeps it 0: the settle cron's pending-performance refresh (which
+ * sweeps rows with pending > 0) must never adopt these rows; they settle
+ * through the `outcome` column instead.
+ *
+ * Fail-soft by design: a missing or unreachable database must never break
+ * the public feed, so the whole persistence step is wrapped in try/catch
+ * and the db module is imported dynamically (the same pattern the Sure Bet
+ * Corners route uses).
+ */
+async function persistFirst5Picks(matches: First5Match[]): Promise<void> {
+  try {
+    const { db } = await import("@/db");
+    const { performanceLog } = await import("@/db/schema");
+    const { and, eq } = await import("drizzle-orm");
+
+    let saved = 0;
+    for (const match of matches) {
+      for (const market of match.markets) {
+        // The pick is the market's selected side: "Yes" or "No".
+        const selection = market.outcome;
+        const existing = await db
+          .select({ id: performanceLog.id })
+          .from(performanceLog)
+          .where(and(
+            eq(performanceLog.eventId, match.fixtureId),
+            eq(performanceLog.feature, "first5"),
+            eq(performanceLog.market, market.label),
+            eq(performanceLog.selection, selection),
+          ))
+          .limit(1);
+        if (existing[0]) continue;
+
+        await db.insert(performanceLog).values({
+          eventId: match.fixtureId,
+          matchLabel: `${match.homeTeam} vs ${match.awayTeam}`,
+          homeTeam: match.homeTeam,
+          awayTeam: match.awayTeam,
+          league: match.league,
+          leagueSlug: match.leagueSlug,
+          competitionName: match.league,
+          matchDate: match.date.slice(0, 10),
+          // Pre-match row: the settlement cron's feature pass stamps the
+          // final score, outcome and settledAt once the match has finished.
+          homeScore: 0,
+          awayScore: 0,
+          totalPicks: 1,
+          hits: 0,
+          misses: 0,
+          pending: 0,
+          accuracy: 0,
+          top10Detail: [{
+            name: market.label,
+            selection,
+            hitRate: market.hitRate,
+            outcome: "PENDING",
+            family: market.shortLabel,   // Goal | Corner | Card | Penalty
+            odds: market.odds.selected,  // 1xBet-ladder price at pick time
+          }],
+          lowConfidence: false,
+          rankingMode: "F",
+          feature: "first5",
+          market: market.label,
+          selection,
+          outcome: "pending",
+          hitRate: market.hitRate,
+          confidence: market.confidence,
+        });
+        saved++;
+      }
+    }
+    console.info(
+      `[First5] Persisted ${saved} new first-5-minute pick(s) to performance_log (feature first5)`,
+    );
+  } catch (error) {
+    console.warn(
+      `[First5] Could not persist first-5-minute picks: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
 // ─── Route ────────────────────────────────────────────────────────────────────
 
 export async function GET(req: Request): Promise<Response> {
@@ -745,6 +842,12 @@ export async function GET(req: Request): Promise<Response> {
       `[First5] ${matches.length} upcoming fixture(s) scored over a ${LOOKAHEAD_DAYS}-day window ` +
       `(${realCount} with real aggregator data, ${matches.length - realCount} on league baselines).`,
     );
+
+    // Record every generated pick so the settlement cron's feature pass
+    // (/api/cron/settle) can resolve it from real first-5-minute event data
+    // once the match finishes, and /performance/first5 can report the
+    // feature's dedicated track record.
+    await persistFirst5Picks(matches);
 
     const body = emptyResponse({
       totalFixturesChecked: fixtures.length,

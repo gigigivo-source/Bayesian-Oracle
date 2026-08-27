@@ -22,6 +22,13 @@
       "when": 1787687725227,
       "tag": "0002_sure_corners_verification",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1787857271885,
+      "tag": "0003_feature_performance_tracking",
+      "breakpoints": true
     }
   ]
 }

@@ -1638,9 +1638,12 @@ async function fetchProfiles(fx: FixtureLite): Promise<{ home: MeshProfile | nul
 
 /**
  * Persist every accepted sure-bet corner pick to performance_log
- * (rankingMode = 'S', outcome = 'pending') so the post-match verification
- * endpoint (/api/sure-corners/verify) can settle each market once the match
- * finishes. Idempotent: one row per (eventId, market, selection).
+ * (rankingMode = 'S', feature = 'corners', outcome = 'pending') so the
+ * post-match verification endpoint (/api/sure-corners/verify) and the
+ * settlement cron's feature pass (/api/cron/settle) can settle each market
+ * once the match finishes, and /performance/corners can report the
+ * feature's dedicated track record. Idempotent: one row per
+ * (eventId, market, selection).
  *
  * Fail-soft by design: a missing or unreachable database must never break
  * the public feed, so the whole persistence step is wrapped in try/catch.
@@ -1699,6 +1702,9 @@ async function persistSureCornerPicks(matches: SureCornerMatch[]): Promise<void>
           }],
           lowConfidence: false,
           rankingMode: "S",
+          // Dedicated feature discriminator — drives /performance/corners and
+          // the settle cron's feature pass, independent of the ranking modes.
+          feature: "corners",
           market: market.name,
           selection: market.selection,
           outcome: "pending",
@@ -1710,7 +1716,7 @@ async function persistSureCornerPicks(matches: SureCornerMatch[]): Promise<void>
       }
     }
     console.info(
-      `[SureCorners] Persisted ${saved} new sure-bet corner pick(s) to performance_log (rankingMode S)`,
+      `[SureCorners] Persisted ${saved} new sure-bet corner pick(s) to performance_log (rankingMode S, feature corners)`,
     );
   } catch (error) {
     console.warn(
