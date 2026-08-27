@@ -568,6 +568,22 @@ function Header({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
               </div>
               <div className="text-[11px] mt-0.5 leading-snug text-slate-500">corner bets with 98 percent plus predicted hit rate</div>
             </button>
+            <button
+              type="button"
+              role="menuitem"
+              title="goal, corner, card and penalty markets for the first 5 minutes"
+              aria-label="First 5 Minutes — goal, corner, card and penalty markets for the first 5 minutes"
+              onClick={() => {
+                router.push("/first-5-minutes");
+                setMenuOpen(false);
+              }}
+              className={`${MENU_ITEM} w-full px-4 py-3 text-left rounded-xl`}
+            >
+              <div className="flex items-center justify-between">
+                <div className="text-sm font-medium leading-tight">⏱️ First 5 Minutes</div>
+              </div>
+              <div className="text-[11px] mt-0.5 leading-snug text-slate-500">Goal, corner, card &amp; penalty markets for minutes 0–5</div>
+            </button>
             {menuTabs.map((t) => (
               <button
                 key={t.id}
