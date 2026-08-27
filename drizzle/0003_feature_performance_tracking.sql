@@ -1,0 +1,1 @@
+ALTER TABLE "performance_log" ADD COLUMN "feature" text;

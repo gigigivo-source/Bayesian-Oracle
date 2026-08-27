@@ -141,6 +141,14 @@ export default function First5MinutesPage() {
             >
               ← Oracle
             </Link>
+            <Link
+              href="/performance/first5"
+              title="First 5 Minutes track record — historical picks, hit rate, P&L and ROI"
+              aria-label="Open the First 5 Minutes performance tracker"
+              className="inline-flex items-center gap-1.5 rounded-full bg-gradient-to-r from-cyan-400 to-teal-400 px-4 py-2 text-xs font-bold text-white shadow-lg shadow-cyan-500/30 transition-all duration-300 hover:scale-105 hover:shadow-cyan-400/50 active:scale-95"
+            >
+              📊 Track Records
+            </Link>
             <button
               type="button"
               onClick={() => void load(true)}
