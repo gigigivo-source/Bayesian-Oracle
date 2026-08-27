@@ -8,7 +8,7 @@
 //      stats aggregator (src/lib/data/aggregator.ts).
 //   2. HONEST FALLBACK — when no source can supply a team-level baseline the
 //      league anchor (observed long-run league average) is used instead and the
-//      market is explicitly tagged `origin: "league"` (synthetic baseline).
+//      market is explicitly tagged `origin: "league"` (Synthetic Baseline).
 //   3. FAIL-SOFT — a failing aggregator, source or fixture feed never breaks
 //      the response; that fixture simply falls back to the league baseline.
 //
@@ -16,9 +16,10 @@
 // Every market is modelled as a Poisson arrival process over match time:
 //
 //   λ_match  = expected events for the WHOLE match (real stats → league anchor)
-//   λ_window = λ_match × (5 / 96) × openingIntensity × tempoAdjustment
-//   P(event) = 1 − exp(−λ_window)                     ← the hit rate
+//   λ_window = λ_match × (5 / 96) × openingIntensity × tempo
+//   P(Yes)   = 1 − exp(−λ_window)
 //   fairOdds = 1 / P(outcome)
+//   1xBet    = fair odds snapped to the 1xBet decimal ladder
 //
 // `openingIntensity` corrects the naive uniform-minute assumption with the
 // observed shape of the opening five minutes (goals and especially cards are
@@ -53,10 +54,12 @@ const CONCURRENCY = 8;
  * holding the whole feed hostage — it then rides the league baseline.
  */
 const STATS_TIMEOUT_MS = 15_000;
-/** Bookmaker overround applied to the fair odds for the 1xBet-style price. */
-const BOOKMAKER_MARGIN = 0.06;
 /** Competition tiers included in the feed. */
 const MAX_LEAGUE_TIER = 3;
+/** Label used whenever the aggregator cannot supply a real source. */
+export const SYNTHETIC_BASELINE = "Synthetic Baseline";
+/** Hit-rate threshold that flips the "Likely Guaranteed" flag. */
+export const GUARANTEED_HIT_RATE = 0.95;
 
 /**
  * Share of the match's events that land in minutes 0–5, relative to a uniform
@@ -88,6 +91,20 @@ export type Confidence = "HIGH" | "MEDIUM" | "LOW";
 /** Where the per-match baseline came from: real stats, mixed, or league avg. */
 export type BaselineOrigin = "real" | "partial" | "league";
 
+/** One side of a dual-outcome market (Yes or No) with every displayed metric. */
+export interface First5OutcomeSide {
+  label: First5Outcome;
+  /** Probability of this side. */
+  probability: number;
+  /** Same as probability — the displayed hit rate for this side. */
+  hitRate: number;
+  /** 1 / probability. */
+  fairOdds: number;
+  /** Fair odds snapped onto the 1xBet decimal ladder. */
+  odds1xBet: number;
+  confidence: Confidence;
+}
+
 export interface First5Market {
   id: string;
   key: First5MarketKey;
@@ -96,23 +113,34 @@ export interface First5Market {
   /** e.g. "Goal". */
   shortLabel: string;
   icon: string;
-  /** The predicted outcome. */
+  /** The more likely outcome (kept for sorting / filters). */
   outcome: First5Outcome;
   /** P(event happens in minutes 0–5). */
   probability: number;
-  /** Probability of the PREDICTED outcome — the displayed hit rate. */
+  /** Probability of the more likely outcome. */
   hitRate: number;
   /** 1 / hitRate. */
   fairOdds: number;
-  /** 1xBet-style decimal prices (fair odds with a 6% book margin). */
+  /** 1xBet-style decimal prices for both sides. */
   odds: { yes: number; no: number; selected: number };
+  /** Dual-outcome payload — both sides are always populated. */
+  yes: First5OutcomeSide;
+  no: First5OutcomeSide;
+  /** True when either side has hit rate ≥ 95%. */
+  isGuaranteed: boolean;
   confidence: Confidence;
   /** λ for the 5-minute window. */
   expectedInWindow: number;
   /** λ for the full match (the baseline the window is derived from). */
   expectedPerMatch: number;
   origin: BaselineOrigin;
-  /** Human-readable data provenance, e.g. "API-Football" or "league average". */
+  /**
+   * Aggregator metadata.source (e.g. SportScore, API-Football) or
+   * "Synthetic Baseline" when the aggregator returned null / the market
+   * rode the league average.
+   */
+  statsSource: string;
+  /** Human-readable data provenance. */
   source: string;
   reason: string;
 }
@@ -128,7 +156,7 @@ export interface First5Match {
   leagueTier: number;
   date: string;
   venue: string | null;
-  /** Aggregator source that contributed the most fields (or the baseline tag). */
+  /** Aggregator source that contributed the most fields (or Synthetic Baseline). */
   statsSource: string;
   /** Worst-case origin across the four markets. */
   dataOrigin: BaselineOrigin;
@@ -149,7 +177,6 @@ export interface First5MinutesResponse {
     description: string;
     matchMinutes: number;
     openingIntensity: Record<First5MarketKey, number>;
-    bookmakerMargin: number;
   };
   cache: { ttlMinutes: number; hit: boolean };
   matches: First5Match[];
@@ -179,9 +206,9 @@ function getCacheKey(url: URL): string {
 
 const MARKET_META: Record<First5MarketKey, { label: string; shortLabel: string; icon: string }> = {
   goal: { label: "Goal in First 5 Minutes", shortLabel: "Goal", icon: "⚽" },
-  corner: { label: "Corner in First 5 Minutes", shortLabel: "Corner", icon: "🚩" },
+  corner: { label: "Corner in First 5 Minutes", shortLabel: "Corner", icon: "🏁" },
   card: { label: "Card in First 5 Minutes", shortLabel: "Card", icon: "🟨" },
-  penalty: { label: "Penalty in First 5 Minutes", shortLabel: "Penalty", icon: "🎯" },
+  penalty: { label: "Penalty in First 5 Minutes", shortLabel: "Penalty", icon: "⚠️" },
 };
 
 const MARKET_ORDER: First5MarketKey[] = ["goal", "corner", "card", "penalty"];
@@ -221,26 +248,52 @@ function dateRange(days: number): string {
 }
 
 /** Poisson: probability of at least one arrival given the window intensity. */
-function atLeastOne(lambda: number): number {
+export function atLeastOne(lambda: number): number {
   return 1 - Math.exp(-Math.max(0, lambda));
 }
 
+/**
+ * Confidence from the outcome's own probability:
+ *   HIGH   ≥ 80%
+ *   MEDIUM 60% – 79%
+ *   LOW    < 60%
+ */
+export function confidenceFor(probability: number): Confidence {
+  if (probability >= 0.8) return "HIGH";
+  if (probability >= 0.6) return "MEDIUM";
+  return "LOW";
+}
+
 /** Decimal odds, never quoted below the 1.01 floor books use. */
-function decimalOdds(probability: number): number {
+export function fairOddsFor(probability: number): number {
   const safe = clamp(probability, 1e-4, 0.999);
   return round(1 / safe, 2);
 }
 
 /**
- * 1xBet-style decimal price: the fair odds shaded by the book margin. The
- * margin is loaded with the p(1−p) shape books actually use — full overround
- * around a coin flip, almost none on a near-certain outcome — instead of a
- * flat haircut that would quote absurd prices on the 99% side.
+ * Snap decimal odds onto the 1xBet-style ladder:
+ *   < 1.20  → 0.005 ticks  (1.03, 1.125)
+ *   < 2.00  → 0.01 ticks   (1.5)
+ *   < 3.00  → 0.02 ticks
+ *   < 10.0  → 0.10 ticks   (5.8)
+ *   ≥ 10.0  → integers     (15)
  */
-function bookOdds(probability: number): number {
-  const safe = clamp(probability, 1e-4, 0.999);
-  const shaded = clamp(safe + BOOKMAKER_MARGIN * 2 * safe * (1 - safe), 1e-4, 0.999);
-  return round(Math.max(1.01, 1 / shaded), 2);
+export function round1xBetOdds(odds: number): number {
+  const value = Math.max(1.01, odds);
+  if (value < 1.2) return round(Math.round(value * 200) / 200, 3);
+  if (value < 2) return round(Math.round(value * 100) / 100, 2);
+  if (value < 3) return round(Math.round(value * 50) / 50, 2);
+  if (value < 10) return round(Math.round(value * 10) / 10, 1);
+  return Math.round(value);
+}
+
+export function bookOddsFor(probability: number): number {
+  return round1xBetOdds(fairOddsFor(probability));
+}
+
+export function resolveStatsSource(source: string | null | undefined): string {
+  const trimmed = source?.trim();
+  return trimmed ? trimmed : SYNTHETIC_BASELINE;
 }
 
 // ─── Baselines from the aggregator (Part 2) ───────────────────────────────────
@@ -408,19 +461,16 @@ function aggressionFactor(stats: CanonicalMatchStats | null, anchors: LeagueAnch
 
 // ─── Market construction (Part 1 + Part 2) ────────────────────────────────────
 
-/**
- * Confidence blends how decisive the prediction is with how much of the
- * baseline is real data:
- *   · HIGH   — a near-certain outcome (≥85%) backed by real data, or ≥93% on
- *              any baseline (e.g. "No penalty" is safe in every league).
- *   · MEDIUM — a clear lean (≥65%), or ≥55% with real team data behind it.
- *   · LOW    — anything closer to a coin flip.
- */
-function confidenceFor(hitRate: number, origin: BaselineOrigin): Confidence {
-  const grounded = origin !== "league";
-  if (hitRate >= 0.93 || (hitRate >= 0.85 && grounded)) return "HIGH";
-  if (hitRate >= 0.65 || (hitRate >= 0.55 && origin === "real")) return "MEDIUM";
-  return "LOW";
+function buildOutcome(label: First5Outcome, probability: number): First5OutcomeSide {
+  const hitRate = round(probability);
+  return {
+    label,
+    probability: hitRate,
+    hitRate,
+    fairOdds: fairOddsFor(probability),
+    odds1xBet: bookOddsFor(probability),
+    confidence: confidenceFor(probability),
+  };
 }
 
 function buildMarket(
@@ -428,23 +478,26 @@ function buildMarket(
   key: First5MarketKey,
   baseline: Baseline,
   adjustment: number,
-  statsSource: string,
+  aggregatorSource: string,
 ): First5Market {
   const meta = MARKET_META[key];
   const uniformShare = WINDOW_MINUTES / MATCH_MINUTES;
   const lambdaWindow =
     baseline.perMatch * uniformShare * OPENING_INTENSITY[key] * adjustment;
   const probability = clamp(atLeastOne(lambdaWindow), 0.0005, 0.9995);
+  const yes = buildOutcome("Yes", probability);
+  const no = buildOutcome("No", 1 - probability);
   const outcome: First5Outcome = probability >= 0.5 ? "Yes" : "No";
-  const hitRate = outcome === "Yes" ? probability : 1 - probability;
+  const selected = outcome === "Yes" ? yes : no;
   const origin = baseline.origin;
+  const statsSource = origin === "league" ? SYNTHETIC_BASELINE : aggregatorSource;
 
   const originLabel =
     origin === "real"
       ? "real pre-match stats"
       : origin === "partial"
         ? "partial real stats"
-        : "league average (synthetic baseline)";
+        : "league average (Synthetic Baseline)";
 
   return {
     id: `${fx.id}-${key}`,
@@ -454,18 +507,22 @@ function buildMarket(
     icon: meta.icon,
     outcome,
     probability: round(probability),
-    hitRate: round(hitRate),
-    fairOdds: decimalOdds(hitRate),
+    hitRate: selected.hitRate,
+    fairOdds: selected.fairOdds,
     odds: {
-      yes: bookOdds(probability),
-      no: bookOdds(1 - probability),
-      selected: bookOdds(hitRate),
+      yes: yes.odds1xBet,
+      no: no.odds1xBet,
+      selected: selected.odds1xBet,
     },
-    confidence: confidenceFor(hitRate, origin),
+    yes,
+    no,
+    isGuaranteed: yes.hitRate >= GUARANTEED_HIT_RATE || no.hitRate >= GUARANTEED_HIT_RATE,
+    confidence: selected.confidence,
     expectedInWindow: round(lambdaWindow),
     expectedPerMatch: round(baseline.perMatch, 2),
     origin,
-    source: origin === "league" ? "league average" : statsSource,
+    statsSource,
+    source: statsSource,
     reason:
       `${baseline.detail} → ${round(lambdaWindow, 3)} expected ${meta.shortLabel.toLowerCase()} ` +
       `events in minutes 0–${WINDOW_MINUTES} ` +
@@ -474,17 +531,20 @@ function buildMarket(
   };
 }
 
-function buildMarkets(fx: FixtureLite, stats: CanonicalMatchStats | null): First5Market[] {
+function buildMarkets(
+  fx: FixtureLite,
+  stats: CanonicalMatchStats | null,
+  aggregatorSource: string,
+): First5Market[] {
   const anchors = getAnchors(fx.leagueSlug);
   const attacking = tempoFactor(stats, anchors);
   const aggressive = aggressionFactor(stats, anchors);
-  const statsSource = stats?.metadata.source?.trim() || "multi-source merge";
 
   return [
-    buildMarket(fx, "goal", goalsBaseline(stats, anchors), attacking, statsSource),
-    buildMarket(fx, "corner", cornersBaseline(stats, anchors), attacking, statsSource),
-    buildMarket(fx, "card", cardsBaseline(stats, anchors), aggressive, statsSource),
-    buildMarket(fx, "penalty", penaltiesBaseline(stats, anchors), aggressive, statsSource),
+    buildMarket(fx, "goal", goalsBaseline(stats, anchors), attacking, aggregatorSource),
+    buildMarket(fx, "corner", cornersBaseline(stats, anchors), attacking, aggregatorSource),
+    buildMarket(fx, "card", cardsBaseline(stats, anchors), aggressive, aggregatorSource),
+    buildMarket(fx, "penalty", penaltiesBaseline(stats, anchors), aggressive, aggregatorSource),
   ];
 }
 
@@ -599,7 +659,8 @@ async function fetchUpcomingFixtures(): Promise<FixtureLite[]> {
 }
 
 function buildMatch(fx: FixtureLite, stats: CanonicalMatchStats | null): First5Match {
-  const markets = buildMarkets(fx, stats);
+  const aggregatorSource = resolveStatsSource(stats?.metadata.source);
+  const markets = buildMarkets(fx, stats, aggregatorSource);
   const realMarketCount = markets.filter((market) => market.origin !== "league").length;
   const dataOrigin: BaselineOrigin =
     realMarketCount === markets.length
@@ -619,10 +680,7 @@ function buildMatch(fx: FixtureLite, stats: CanonicalMatchStats | null): First5M
     leagueTier: leagueTier(fx),
     date: fx.date,
     venue: fx.venue,
-    statsSource:
-      dataOrigin === "league"
-        ? "league average (synthetic baseline)"
-        : stats?.metadata.source?.trim() || "multi-source merge",
+    statsSource: dataOrigin === "league" ? SYNTHETIC_BASELINE : aggregatorSource,
     dataOrigin,
     realMarketCount,
     markets,
@@ -647,7 +705,6 @@ function emptyResponse(overrides: Partial<First5MinutesResponse> = {}): First5Mi
         "λ_match comes from the multi-source stats aggregator, falling back to observed league averages.",
       matchMinutes: MATCH_MINUTES,
       openingIntensity: { ...OPENING_INTENSITY },
-      bookmakerMargin: BOOKMAKER_MARGIN,
     },
     cache: { ttlMinutes: CACHE_TTL_MS / 60_000, hit: false },
     matches: [],
