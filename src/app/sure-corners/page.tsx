@@ -293,6 +293,14 @@ export default function SureCornersPage() {
                 <>🔄 Refresh</>
               )}
             </button>
+            <Link
+              href="/performance/corners"
+              title="Track the historical performance of every Sure Bet Corners pick."
+              aria-label="Track the historical performance of Sure Bet Corners picks"
+              className={`${NAV_PILL} bg-gradient-to-br from-[#F59E0B] to-[#FF8C00] px-4 py-2 text-xs font-bold text-white shadow-[0_0_25px_-8px_rgba(245,158,11,0.55)] transition hover:brightness-110`}
+            >
+              📊 Track Records
+            </Link>
             <button
               type="button"
               onClick={() => void verifyOutcomes()}

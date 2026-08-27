@@ -1638,9 +1638,14 @@ async function fetchProfiles(fx: FixtureLite): Promise<{ home: MeshProfile | nul
 
 /**
  * Persist every accepted sure-bet corner pick to performance_log
- * (rankingMode = 'S', outcome = 'pending') so the post-match verification
- * endpoint (/api/sure-corners/verify) can settle each market once the match
- * finishes. Idempotent: one row per (eventId, market, selection).
+ * (feature = 'corners', rankingMode = 'S', outcome = 'pending') so the
+ * post-match verification endpoint (/api/sure-corners/verify) and the settle
+ * cron's feature sweep can settle each market once the match finishes.
+ * Idempotent: one row per (eventId, market, selection).
+ *
+ * The row's top10Detail entry carries the fair model odds (1 / hitRate) so
+ * the /performance/corners dashboard can report P&L / ROI on a $10 unit
+ * stake — the same convention the rest of the app uses for model prices.
  *
  * Fail-soft by design: a missing or unreachable database must never break
  * the public feed, so the whole persistence step is wrapped in try/catch.
@@ -1652,22 +1657,29 @@ async function persistSureCornerPicks(matches: SureCornerMatch[]): Promise<void>
   try {
     const { db } = await import("@/db");
     const { performanceLog } = await import("@/db/schema");
-    const { and, eq } = await import("drizzle-orm");
+    const { and, eq, isNull, or } = await import("drizzle-orm");
 
     let saved = 0;
     for (const match of matches) {
       for (const market of match.markets) {
+        // Also match legacy rows (feature IS NULL) so a deploy of the feature
+        // column never double-tracks a match that is already being watched.
         const existing = await db
           .select({ id: performanceLog.id })
           .from(performanceLog)
           .where(and(
             eq(performanceLog.eventId, match.fixtureId),
             eq(performanceLog.rankingMode, "S"),
+            or(eq(performanceLog.feature, "corners"), isNull(performanceLog.feature)),
             eq(performanceLog.market, market.name),
             eq(performanceLog.selection, market.selection),
           ))
           .limit(1);
         if (existing[0]) continue;
+
+        // Fair model price for the $10 unit-stake P&L reported by the
+        // /performance/corners dashboard (odds column on the detail entry).
+        const modelOdds = market.hitRate > 0 ? Math.round((1 / market.hitRate) * 100) / 100 : null;
 
         await db.insert(performanceLog).values({
           eventId: match.fixtureId,
@@ -1694,10 +1706,15 @@ async function persistSureCornerPicks(matches: SureCornerMatch[]): Promise<void>
             name: market.name,
             selection: market.selection,
             hitRate: market.hitRate,
+            odds: modelOdds,
             outcome: "PENDING",
             family: "Corners",
+            confidence: "HIGH",
           }],
           lowConfidence: false,
+          // Dedicated feature tracking (independent of ranking modes A–D):
+          // reported on /performance/corners, settled by the settle cron.
+          feature: "corners",
           rankingMode: "S",
           market: market.name,
           selection: market.selection,
@@ -1710,7 +1727,7 @@ async function persistSureCornerPicks(matches: SureCornerMatch[]): Promise<void>
       }
     }
     console.info(
-      `[SureCorners] Persisted ${saved} new sure-bet corner pick(s) to performance_log (rankingMode S)`,
+      `[SureCorners] Persisted ${saved} new sure-bet corner pick(s) to performance_log (feature 'corners')`,
     );
   } catch (error) {
     console.warn(

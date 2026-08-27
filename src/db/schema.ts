@@ -112,6 +112,15 @@ export const performanceLog = pgTable("performance_log", {
   top10Detail:     jsonb("top10_detail").notNull(),  // full top10 with outcomes
   lowConfidence:   boolean("low_confidence").notNull().default(false), // confidence gate flag
   rankingMode:     text("ranking_mode").notNull().default("B"),
+  /**
+   * Dedicated feature tracking (independent of the A–D ranking modes):
+   *   'corners' → Sure Bet Corners picks (rankingMode 'S')
+   *   'first5'  → First 5 Minutes picks (rankingMode 'F5')
+   *   NULL      → main ranking-mode picks (A/B/C/D)
+   * Feature rows are settled by the settle cron's feature sweep (Part 3)
+   * and reported on /performance/corners and /performance/first5.
+   */
+  feature:         text("feature"),
   // ── Sure Bet Corners (rankingMode = 'S') verification fields ──────────────
   // One row per sure-bet corner pick. `outcome` drives the post-match
   // verification chip (/api/sure-corners/verify): 'pending' rows are
