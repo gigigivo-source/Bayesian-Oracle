@@ -74,6 +74,13 @@ export interface CanonicalMatchStats {
     fetchedAt: string;  // ISO timestamp
     matchDate: string;  // ISO date of the match
     leagueSlug: string;
+    /**
+     * EVERY source that contributed at least one field to the merged stats,
+     * in priority order (metadata.source is only the dominant one). Feeds the
+     * data-source-agreement factor of the per-market confidence score; empty
+     * or absent means a synthetic/league-average baseline with no source data.
+     */
+    sources?: string[];
   };
 }
 

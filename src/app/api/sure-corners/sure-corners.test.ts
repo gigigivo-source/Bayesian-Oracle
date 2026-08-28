@@ -194,3 +194,154 @@ describe("Sure Bet Corners Route & Corner Winner Market", () => {
     }
   });
 });
+
+describe("Sure Corners data quality & confidence annotations", () => {
+  it("annotates every market: real badge, contributing source names and a 0-100 score", async () => {
+    const mockFixture = makeMockFixture("fixture-quality-real", "Real Home", "Real Away");
+
+    vi.mocked(espn.fetchScoreboard).mockImplementation(async (slug) => {
+      if (slug === "eng.1") return [mockFixture];
+      return [];
+    });
+
+    // Both teams grounded in team-specific corner data, every weighted field
+    // present, and three aggregator sources contributed → top-of-scale score.
+    vi.mocked(statsAggregator.fetch).mockResolvedValue({
+      home: {
+        avgCornersPerGame: 6.4,
+        avgCornersConcededPerGame: 3.4,
+        xg: 1.7,
+        possession: 55,
+      },
+      away: {
+        avgCornersPerGame: 5.8,
+        avgCornersConcededPerGame: 3.1,
+        xg: 1.3,
+        possession: 45,
+      },
+      match: { h2hCorners: { home: 6.1, away: 4.9 } },
+      context: {},
+      metadata: {
+        source: "SportScore",
+        sources: ["SportScore", "API-Football", "FBref"],
+      },
+    } as any);
+
+    const res = await GET(new Request("http://localhost/api/sure-corners?refresh=true"));
+    expect(res.status).toBe(200);
+
+    const data = (await res.json()) as SureCornersResponse;
+    expect(data.matches.length).toBe(1);
+    expect(data.matches[0].markets.length).toBeGreaterThan(0);
+
+    for (const market of data.matches[0].markets) {
+      expect(market.dataQuality).toBe("real");
+      expect(market.dataSourceDetail).toBe("SportScore + API-Football + FBref (Real)");
+      expect(market.confidenceScore).toBe(100);
+      expect(market.confidenceBreakdown.dataQualityPoints).toBe(40);
+      expect(market.confidenceBreakdown.sourceAgreementPoints).toBe(30);
+      expect(market.confidenceBreakdown.completenessPoints).toBe(30);
+      expect(market.confidenceBreakdown.sourceCount).toBe(3);
+    }
+  });
+
+  it("rates a single-source prediction lower than the same multi-source one", async () => {
+    const mockFixture = makeMockFixture("fixture-quality-one-source", "Real Home", "Real Away");
+
+    vi.mocked(espn.fetchScoreboard).mockImplementation(async (slug) => {
+      if (slug === "eng.1") return [mockFixture];
+      return [];
+    });
+
+    vi.mocked(statsAggregator.fetch).mockResolvedValue({
+      home: {
+        avgCornersPerGame: 6.4,
+        avgCornersConcededPerGame: 3.4,
+        xg: 1.7,
+        possession: 55,
+      },
+      away: {
+        avgCornersPerGame: 5.8,
+        avgCornersConcededPerGame: 3.1,
+        xg: 1.3,
+        possession: 45,
+      },
+      match: { h2hCorners: { home: 6.1, away: 4.9 } },
+      context: {},
+      // Only one source provided data — no cross-source agreement.
+      metadata: { source: "API-Football" },
+    } as any);
+
+    const res = await GET(new Request("http://localhost/api/sure-corners?refresh=true"));
+    const data = (await res.json()) as SureCornersResponse;
+    expect(data.matches.length).toBe(1);
+
+    for (const market of data.matches[0].markets) {
+      expect(market.dataQuality).toBe("real");
+      expect(market.dataSourceDetail).toBe("API-Football (Real)");
+      // real (40) + 1 source (15) + all stats present (30) = 85
+      expect(market.confidenceScore).toBe(85);
+    }
+  });
+
+  it("marks synthetic-baseline matches visibly lower than real-data matches", async () => {
+    const realFixture = makeMockFixture("fixture-quality-both-real", "Real Home", "Real Away");
+    const syntheticFixture = makeMockFixture(
+      "fixture-quality-both-synthetic",
+      "Synthetic Home",
+      "Synthetic Away",
+    );
+
+    vi.mocked(espn.fetchScoreboard).mockImplementation(async (slug) => {
+      if (slug === "eng.1") return [realFixture, syntheticFixture];
+      return [];
+    });
+
+    vi.mocked(statsAggregator.fetch).mockImplementation(async (query: any) => {
+      if (query.homeTeam === "Real Home") {
+        return {
+          home: { avgCornersPerGame: 6.4, xg: 1.7, possession: 55 },
+          away: { avgCornersPerGame: 5.8, xg: 1.3, possession: 45 },
+          metadata: { source: "SportScore", sources: ["SportScore", "API-Football", "FBref"] },
+        } as any;
+      }
+      // No source could supply data → the route falls back to the synthetic
+      // league-average baseline.
+      return null;
+    });
+
+    const res = await GET(new Request("http://localhost/api/sure-corners?refresh=true"));
+    expect(res.status).toBe(200);
+
+    const data = (await res.json()) as SureCornersResponse;
+    const byTeam = new Map(data.matches.map((match) => [match.homeTeam, match]));
+    const realMatch = byTeam.get("Real Home");
+    const syntheticMatch = byTeam.get("Synthetic Home");
+    expect(realMatch).toBeDefined();
+    expect(syntheticMatch).toBeDefined();
+
+    for (const market of realMatch!.markets) {
+      expect(market.dataQuality).toBe("real");
+    }
+    for (const market of syntheticMatch!.markets) {
+      expect(market.dataQuality).toBe("synthetic");
+      expect(market.dataSourceDetail).toBe("Synthetic Baseline (League Avg)");
+      // Quality floor (12) + no sources (0) + league-default inputs only,
+      // so it must stay clearly below any real-data score.
+      expect(market.confidenceScore).toBeLessThanOrEqual(30);
+    }
+
+    const bestReal = Math.max(...realMatch!.markets.map((market) => market.confidenceScore));
+    const bestSynthetic = Math.max(
+      ...syntheticMatch!.markets.map((market) => market.confidenceScore),
+    );
+    expect(bestReal).toBeGreaterThan(bestSynthetic);
+
+    // Even at a 90%+ hit rate the synthetic pick shows the low confidence —
+    // that gap is the whole point of the annotation.
+    const highHitSynthetic = syntheticMatch!.markets.find((market) => market.hitRate >= 0.9);
+    if (highHitSynthetic) {
+      expect(highHitSynthetic.confidenceScore).toBeLessThan(50);
+    }
+  });
+});

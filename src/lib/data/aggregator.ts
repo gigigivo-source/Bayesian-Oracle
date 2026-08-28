@@ -311,6 +311,10 @@ export class StatsAggregator {
     }
 
     stats.metadata.source = this.primarySource(contributions, priority);
+    // Every source that actually filled at least one field, in priority order.
+    // Additive metadata only — never consumed by the prediction paths; it
+    // powers the data-source-agreement factor of the market confidence score.
+    stats.metadata.sources = priority.filter((source) => (contributions.get(source) ?? 0) > 0);
     stats.metadata.fetchedAt = new Date().toISOString();
     stats.metadata.matchDate = match.date.slice(0, 10);
     stats.metadata.leagueSlug = match.leagueSlug;
