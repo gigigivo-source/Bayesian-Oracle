@@ -584,6 +584,23 @@ function Header({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
               </div>
               <div className="text-[11px] mt-0.5 leading-snug text-slate-500">Goal, corner, card &amp; penalty markets for minutes 0–5</div>
             </button>
+            <button
+              type="button"
+              role="menuitem"
+              title="positive expected value bets across every source with optimal Kelly stakes"
+              aria-label="Profit Maximizer — positive expected value bets across every source with optimal Kelly stakes"
+              onClick={() => {
+                router.push("/profit-maximizer");
+                setMenuOpen(false);
+              }}
+              className={`${MENU_ITEM} w-full px-4 py-3 text-left rounded-xl`}
+            >
+              <div className="flex items-center justify-between">
+                <div className="text-sm font-medium leading-tight">💰 Profit Maximizer</div>
+                <span className="rounded-full bg-emerald-500/15 px-1.5 py-0.5 font-mono text-[9px] font-bold uppercase tracking-wider text-emerald-300">EV</span>
+              </div>
+              <div className="text-[11px] mt-0.5 leading-snug text-slate-500">Positive EV bets across all sources, sized by Kelly</div>
+            </button>
             {menuTabs.map((t) => (
               <button
                 key={t.id}
