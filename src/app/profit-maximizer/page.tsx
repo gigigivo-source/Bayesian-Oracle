@@ -98,6 +98,8 @@ interface ProfitMaximizerData {
     lookaheadDays: number;
     maxRankingFixtures: number;
     sources: ProfitSource[];
+    /** Scan window for the header pill — label ("Next 7 days") + concrete dates. */
+    dateRange: { label: string; from: string; to: string };
   };
   summary: {
     totalMarketsScanned: number;
@@ -409,6 +411,7 @@ export default function ProfitMaximizerPage() {
                 <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-400" />
               </span>
               Rank A–D · Sure Bet Corners · First 5 Minutes
+              {data && ` · ${data.filters.dateRange.label}`}
             </div>
             <h1 className="profit-title-glow text-3xl font-extrabold tracking-tight text-emerald-50 sm:text-4xl">
               💰 Profit Maximizer

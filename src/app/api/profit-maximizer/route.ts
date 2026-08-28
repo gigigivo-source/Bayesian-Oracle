@@ -66,13 +66,18 @@ const DEFAULT_MIN_EV = 0.05;
 const MAX_MIN_EV = 0.5;
 /** The scan is cached for an hour — same TTL as Sure Bet Corners / First 5. */
 const CACHE_TTL_MS = 60 * 60 * 1000;
-/** Fixture window for the ranking-mode walk (the two feature feeds keep their own 7 days). */
-const LOOKAHEAD_DAYS = Number(process.env.PROFIT_MAXIZER_LOOKAHEAD_DAYS ?? 3);
+/** Fixture window for the scan — today through the next 7 days, same as the two feature feeds. */
+const LOOKAHEAD_DAYS = 7;
 /** Hard cap on fixtures pushed through the engine in one scan (bounded wall time). */
 const MAX_RANKING_FIXTURES = Number(process.env.PROFIT_MAXIZER_MAX_FIXTURES ?? 24);
 /** Fixtures walked in parallel — the oracle fan-out is much heavier than a feature feed. */
 const RANKING_CONCURRENCY = 4;
-/** Soft deadline: new fixtures are not started after this, the scan is flagged partial. */
+/**
+ * Soft deadline: new fixtures are not started after this, the scan is flagged
+ * partial instead. This is what keeps the wider 7-day window inside the time
+ * budget — worst case the route wall time is this plus one in-flight oracle
+ * walk, well under the route's maxDuration.
+ */
 const SCAN_TIME_BUDGET_MS = Number(process.env.PROFIT_MAXIZER_TIME_BUDGET_MS ?? 150_000);
 /** Competition tiers walked by the ranking pass (the feature feeds filter their own tiers). */
 const MAX_LEAGUE_TIER = 3;
@@ -184,6 +189,13 @@ export interface ProfitMaximizerResponse {
     lookaheadDays: number;
     maxRankingFixtures: number;
     sources: ProfitSource[];
+    /**
+     * Human-facing scan window for the UI header: `label` ("Next 7 days") plus
+     * the concrete UTC dates the fixture feed was asked for. Derived from the
+     * scan's own start instant, so every request inside the one-hour cache
+     * reports the same window.
+     */
+    dateRange: { label: string; from: string; to: string };
   };
   summary: {
     totalMarketsScanned: number;
@@ -948,6 +960,20 @@ function getScan(forceRefresh: boolean): Promise<ProfitMaximizerScan> {
 
 // ─── Response assembly ────────────────────────────────────────────────────────
 
+/**
+ * The scan window as the UI header should show it: "Next 7 days" plus the
+ * inclusive UTC dates the fixture feed was queried for. Anchored to the scan's
+ * own `generatedAt` so a cached (up to one hour old) scan still reports the
+ * window it actually covered, never the request's current date.
+ */
+function scanDateRange(generatedAt: string): { label: string; from: string; to: string } {
+  const start = new Date(generatedAt);
+  const anchor = Number.isNaN(start.getTime()) ? new Date() : start;
+  const end = new Date(anchor.getTime() + LOOKAHEAD_DAYS * 24 * 60 * 60 * 1000);
+  const iso = (date: Date) => date.toISOString().slice(0, 10);
+  return { label: `Next ${LOOKAHEAD_DAYS} days`, from: iso(anchor), to: iso(end) };
+}
+
 function buildResponse(
   scan: ProfitMaximizerScan,
   minEv: number,
@@ -975,6 +1001,7 @@ function buildResponse(
       lookaheadDays: LOOKAHEAD_DAYS,
       maxRankingFixtures: MAX_RANKING_FIXTURES,
       sources: ALL_SOURCES,
+      dateRange: scanDateRange(scan.generatedAt),
     },
     summary: {
       totalMarketsScanned: scan.totalMarketsScanned,
