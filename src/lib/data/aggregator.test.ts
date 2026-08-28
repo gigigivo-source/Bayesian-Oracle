@@ -6,7 +6,7 @@
 //    API-Football payload breaks early.
 // 3. Fail-soft: when every source returns nothing, fetch() returns null.
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { StatsAggregator } from "./aggregator";
 import type { SourceHandler } from "./sources/context";
 import type { MatchStatsQuery } from "./types";
@@ -143,5 +143,222 @@ describe("StatsAggregator fallback chain", () => {
     expect(stats!.away.corners).toBe(11);
     expect(stats!.home.goals).toBe(2);
     expect(stats!.metadata.source).toBe("SportScore"); // 2 fields vs 4? SportScore=2 corners, TSDB=2 goals+... tie → priority wins
+  });
+});
+
+// ─── Failure attribution ─────────────────────────────────────────────────────
+//
+// "no data" and "egress blocked" both surface downstream as a synthetic
+// baseline. These tests pin the trace's ability to tell them apart: every
+// attempt must carry a machine-readable `reason` and a human `detail` naming
+// the actual cause (blocked host, timeout, 404, missing key, wrong league).
+
+/** Build a stub `fetch` that resolves to the given HTTP status + JSON body. */
+function stubFetch(impl: (url: string) => Response | Promise<Response>): void {
+  vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => impl(String(input))));
+}
+
+function json(status: number, body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+/** A handler that reaches the network once, then normalises nothing. */
+const fetchingSource = (name: SourceHandler["name"]): SourceHandler => ({
+  name,
+  capabilities: ["goals", "corners"],
+  available: () => true,
+  fetch: async (_m, ctx) => {
+    await ctx.http("https://example.invalid/api/match/1");
+    return null; // reached the wire, got nothing usable
+  },
+});
+
+describe("StatsAggregator failure attribution", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("attributes a blocked host to network-error, not a generic empty payload", async () => {
+    stubFetch(() => Promise.reject(new Error("fetch failed")));
+    const agg = new StatsAggregator({ handlers: { SportScore: fetchingSource("SportScore") } });
+
+    const { attempts } = await agg.fetchWithTrace(MATCH);
+    const attempt = attempts.find((a) => a.source === "SportScore")!;
+
+    expect(attempt.reason).toBe("network-error");
+    expect(attempt.detail).toMatch(/egress blocked/);
+    expect(attempt.http).toHaveLength(1);
+    expect(attempt.http![0].status).toBe("network-error");
+    expect(attempt.http![0].url).toBe("https://example.invalid/api/match/1");
+  });
+
+  it("attributes a hung host to timeout", async () => {
+    stubFetch(() => {
+      const err = new Error("This operation was aborted");
+      err.name = "AbortError";
+      return Promise.reject(err);
+    });
+    const agg = new StatsAggregator({ handlers: { SportScore: fetchingSource("SportScore") } });
+
+    const attempt = (await agg.fetchWithTrace(MATCH)).attempts.find((a) => a.source === "SportScore")!;
+    expect(attempt.reason).toBe("timeout");
+    expect(attempt.detail).toMatch(/^timeout/);
+  });
+
+  it("attributes a 404 to an HTTP error, distinct from an unreachable host", async () => {
+    stubFetch(() => json(404, { error: "not found" }));
+    const agg = new StatsAggregator({ handlers: { SportScore: fetchingSource("SportScore") } });
+
+    const attempt = (await agg.fetchWithTrace(MATCH)).attempts.find((a) => a.source === "SportScore")!;
+    expect(attempt.reason).toBe("http-error");
+    expect(attempt.detail).toMatch(/404/);
+    expect(attempt.http![0].httpStatus).toBe(404);
+  });
+
+  it("marks a source that responded fine but normalised nothing as empty-payload", async () => {
+    stubFetch(() => json(200, { statistics: [] }));
+    const agg = new StatsAggregator({ handlers: { SportScore: fetchingSource("SportScore") } });
+
+    const attempt = (await agg.fetchWithTrace(MATCH)).attempts.find((a) => a.source === "SportScore")!;
+    expect(attempt.reason).toBe("empty-payload");
+    expect(attempt.detail).toMatch(/normaliser found no usable fields/);
+  });
+
+  it("marks a handler that bails before the network as no-requests", async () => {
+    const agg = new StatsAggregator({ handlers: { FBref: neverReturns } });
+
+    const attempt = (await agg.fetchWithTrace(MATCH)).attempts.find((a) => a.source === "FBref")!;
+    expect(attempt.reason).toBe("no-requests");
+    expect(attempt.http).toEqual([]);
+  });
+
+  it("names the unset env var when a keyed source is gated off", async () => {
+    delete process.env.API_FOOTBALL_KEY;
+    delete process.env.FOOTBALL_API_KEY;
+
+    const keyed: SourceHandler = {
+      name: "API-Football",
+      capabilities: ["goals"],
+      available: (_m, ctx) =>
+        ctx.env("API_FOOTBALL_KEY").length > 0 || ctx.env("FOOTBALL_API_KEY").length > 0,
+      fetch: async () => ({ home: { goals: 1 }, away: { goals: 1 } }),
+    };
+    const agg = new StatsAggregator({ handlers: { "API-Football": keyed } });
+
+    const attempt = (await agg.fetchWithTrace(MATCH)).attempts.find((a) => a.source === "API-Football")!;
+    expect(attempt.status).toBe("unavailable");
+    expect(attempt.reason).toBe("key-missing");
+    expect(attempt.detail).toMatch(/API_FOOTBALL_KEY/);
+  });
+
+  it("reports a league-scoped source as not-applicable rather than key-missing", async () => {
+    const germanOnly: SourceHandler = {
+      name: "OpenLigaDB",
+      capabilities: ["corners"],
+      available: (m) => /^ger\./.test(m.leagueSlug),
+      fetch: async () => ({ home: { corners: 5 }, away: { corners: 4 } }),
+    };
+    const agg = new StatsAggregator({ handlers: { OpenLigaDB: germanOnly } });
+
+    const attempt = (await agg.fetchWithTrace(MATCH)).attempts.find((a) => a.source === "OpenLigaDB")!;
+    expect(attempt.reason).toBe("not-applicable");
+    expect(attempt.detail).toMatch(/not applicable to eng\.1/);
+  });
+
+  it("logs one line per source attempt plus the walk header", async () => {
+    stubFetch(() => json(200, { statistics: [] }));
+    delete process.env.API_FOOTBALL_KEY;
+    delete process.env.FOOTBALL_API_KEY;
+
+    const keyed: SourceHandler = {
+      name: "API-Football",
+      capabilities: ["goals"],
+      available: (_m, ctx) => ctx.env("API_FOOTBALL_KEY").length > 0,
+      fetch: async () => ({ home: { goals: 1 }, away: { goals: 1 } }),
+    };
+    const lines: string[] = [];
+    const agg = new StatsAggregator({
+      handlers: {
+        SportScore: fetchingSource("SportScore"),
+        "API-Football": keyed,
+        StatsBomb: fetchingSource("StatsBomb"),
+      },
+      log: (m) => lines.push(m),
+    });
+
+    await agg.fetchWithTrace(MATCH);
+
+    expect(lines.some((l) => l.includes("— walk ") && l.includes("SportScore → API-Football"))).toBe(true);
+    expect(lines.some((l) => l.includes(" SportScore → FAIL"))).toBe(true);
+    expect(lines.some((l) => l.includes(" API-Football → SKIP key missing"))).toBe(true);
+    expect(lines.some((l) => l.includes("SYNTHETIC BASELINE"))).toBe(true);
+  });
+
+  it("reports the dominant cause as blocked egress when nothing can reach its host", async () => {
+    stubFetch(() => Promise.reject(new Error("fetch failed")));
+    const lines: string[] = [];
+    const agg = new StatsAggregator({
+      handlers: { SportScore: fetchingSource("SportScore") },
+      log: (m) => lines.push(m),
+    });
+
+    await agg.fetchWithTrace(MATCH);
+
+    expect(lines.some((l) => l.includes("could not reach their host"))).toBe(true);
+  });
+});
+
+// ─── Priority + readiness ────────────────────────────────────────────────────
+
+describe("StatsAggregator priority and readiness", () => {
+  it("walks sources in the documented priority order", () => {
+    const priority = new StatsAggregator().prioritySnapshot();
+
+    expect(priority[0]).toBe("SportScore");
+    expect(priority[1]).toBe("API-Football");
+    expect(priority[2]).toBe("StatsBomb");
+    // Understat (Big-5 xG) is consulted before the German-only OpenLigaDB.
+    expect(priority.indexOf("Understat")).toBeLessThan(priority.indexOf("OpenLigaDB"));
+    // Historical CSV is always the last resort.
+    expect(priority[priority.length - 1]).toBe("GitHubDatasets");
+    // Every registered source appears exactly once.
+    expect(new Set(priority).size).toBe(priority.length);
+  });
+
+  it("exposes per-source env readiness without touching the network", () => {
+    delete process.env.API_FOOTBALL_KEY;
+    delete process.env.FOOTBALL_API_KEY;
+    process.env.HIGHLIGHTLY_KEY = "test-key";
+
+    const readiness = new StatsAggregator().sourceReadiness(MATCH);
+    const byName = Object.fromEntries(readiness.map((r) => [r.source, r]));
+
+    expect(byName["SportScore"].keyPresent).toBeNull(); // unkeyed source
+    expect(byName["API-Football"].keyPresent).toBe(false);
+    expect(byName["API-Football"].requiresEnv).toEqual(["API_FOOTBALL_KEY", "FOOTBALL_API_KEY"]);
+    expect(byName["Highlightly"].keyPresent).toBe(true);
+    expect(readiness.map((r) => r.priority)).toEqual(readiness.map((_, i) => i + 1));
+
+    delete process.env.HIGHLIGHTLY_KEY;
+  });
+
+  it("evaluates the league gate for a probe match in readiness output", () => {
+    const german = Object.fromEntries(
+      new StatsAggregator().sourceReadiness({ ...MATCH, leagueSlug: "ger.1" }).map((r) => [r.source, r]),
+    );
+    const english = Object.fromEntries(
+      new StatsAggregator().sourceReadiness({ ...MATCH, leagueSlug: "eng.1" }).map((r) => [r.source, r]),
+    );
+
+    // OpenLigaDB covers German football only; Understat covers the Big 5 top flights.
+    expect(german["OpenLigaDB"].applicable).toBe(true);
+    expect(german["Understat"].applicable).toBe(true);
+    expect(english["OpenLigaDB"].applicable).toBe(false);
+    expect(english["Understat"].applicable).toBe(true);
+    // Unkeyed, non-league-scoped sources have no gate to evaluate.
+    expect(english["SportScore"].applicable).toBe(true);
   });
 });

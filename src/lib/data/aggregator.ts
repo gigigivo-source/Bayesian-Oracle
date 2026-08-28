@@ -15,6 +15,13 @@
 // on a FIRST-WINS basis — a higher-priority source's value can never be
 // overwritten by a lower-priority one. If API-Football (the most comprehensive
 // live source) contributes every per-match stat, the walk breaks early.
+//
+// OBSERVABILITY: every source attempt is logged AND recorded in the returned
+// `attempts` trace, with the *reason* it produced nothing — cooldown, missing
+// API key, league not covered, HTTP timeout/404/500, or a blocked network.
+// "no data" and "egress blocked" look identical downstream (both yield a
+// synthetic-baseline match), so the trace must tell them apart; see
+// docs/NETWORK_ALLOWLIST.md and GET /api/diagnostics/connectivity.
 
 import { fetchWithTimeout, type HttpResult } from "./http";
 import { SOURCE_HANDLERS } from "./sources";
@@ -35,13 +42,50 @@ import {
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
+/**
+ * Source priority, highest first. First-wins merging means an earlier source's
+ * value is never overwritten, so this order IS the data-quality policy:
+ *
+ *   1. SportScore      — no key, broadest live coverage
+ *   2. API-Football    — keyed, most complete per-match stat set
+ *   3. StatsBomb       — open data, no key
+ *   4. datafc          — optional keyed/self-hosted endpoint
+ *   5. worldcup2026    — tournament-scoped supplement
+ *   6. FBref           — scraped advanced stats (needs `fbref:`-namespaced ids)
+ *   7. TheSportsDB     — keyed tier
+ *   8. Understat       — xG, Big-5 leagues only
+ *   9. OpenLigaDB      — German leagues only
+ *  10. Highlightly     — keyed
+ *  11. GitHubDatasets  — historical, last resort
+ *
+ * League-scoped sources (Understat, OpenLigaDB) sit after the general ones:
+ * their `available()` gate rejects every other league anyway, and where both
+ * apply Understat's xG coverage is the richer signal.
+ */
 const DEFAULT_PRIORITY: StatSourceName[] = [
   "SportScore", "API-Football", "StatsBomb", "datafc",
   "worldcup2026", "FBref", "TheSportsDB",
-  "OpenLigaDB", "Highlightly", "Understat", "GitHubDatasets",
+  "Understat", "OpenLigaDB", "Highlightly", "GitHubDatasets",
 ];
 
-const DEFAULT_SOURCE_TIMEOUT_MS = 12_000;
+/**
+ * Env vars that gate a source. Used ONLY to explain why `available()` returned
+ * false — "key missing (API_FOOTBALL_KEY)" vs "not applicable to this league"
+ * are two completely different failures with two completely different fixes.
+ */
+const SOURCE_ENV_REQUIREMENTS: Partial<Record<StatSourceName, string[]>> = {
+  "API-Football": ["API_FOOTBALL_KEY", "FOOTBALL_API_KEY"],
+  "TheSportsDB": ["THESPORTSDB_KEY"],
+  "Highlightly": ["HIGHLIGHTLY_KEY"],
+  "datafc": ["DATAFCC_ENDPOINT"],
+};
+
+/**
+ * Per-source fetch budget. 12s matches the HTTP layer default; raise it via
+ * STATS_SOURCE_TIMEOUT_MS only if sources are legitimately slow — a longer
+ * budget means a hung source stalls the whole fixture feed for longer.
+ */
+const DEFAULT_SOURCE_TIMEOUT_MS = Number(process.env.STATS_SOURCE_TIMEOUT_MS) || 12_000;
 const DEFAULT_COOLDOWN_MS = 5 * 60_000;
 const DEFAULT_CACHE_TTL_MS = 2 * 60 * 60_000;
 
@@ -67,12 +111,32 @@ export interface StatsFetchOptions {
   force?: boolean;
 }
 
+/** One outbound HTTP call a source made, as the aggregator saw it. */
+export interface SourceHttpCall {
+  /** Host + path (query string kept — it carries the fixture/league lookup). */
+  url: string;
+  /** Typed outcome from the fail-soft HTTP layer. */
+  status: HttpResult["status"];
+  /** Real HTTP status when a response was received, else null. */
+  httpStatus: number | null;
+  /** Wall-clock ms for the call. */
+  ms: number;
+}
+
 /** One source attempt, for the per-match monitoring trace. */
 export interface SourceAttempt {
   source: string;
   status: "ok" | "unavailable" | "cooldown" | "empty" | "error";
   fields: number;
   detail?: string;
+  /**
+   * Machine-readable cause: `no-handler`, `cooldown`, `key-missing`,
+   * `not-applicable`, `network-error`, `timeout`, `http-error`,
+   * `rate-limited`, `no-requests`, `empty-payload`, `handler-threw`.
+   */
+  reason?: string;
+  /** Every HTTP call the handler made (empty when it bailed before fetching). */
+  http?: SourceHttpCall[];
 }
 
 export interface StatsFetchResult {
@@ -137,6 +201,87 @@ function isComplete(stats: CanonicalMatchStats): boolean {
   return stats.home.cleanSheet !== null && stats.away.cleanSheet !== null;
 }
 
+/** Total fillable slots, both teams — the denominator for the log's `n/total`. */
+const TOTAL_STAT_SLOTS = (STAT_FIELDS.length + BOOLEAN_FIELDS.length) * 2;
+
+// ─── Failure attribution ──────────────────────────────────────────────────────
+
+/** Env vars a source needs that are currently unset ("" counts as unset). */
+function missingEnvVars(source: string): string[] {
+  const required = SOURCE_ENV_REQUIREMENTS[source as StatSourceName] ?? [];
+  return required.filter((name) => (process.env[name] ?? "").trim().length === 0);
+}
+
+/** Compact render of a source's HTTP calls, e.g. `2 calls: network-error ×2`. */
+function httpSummary(calls: SourceHttpCall[]): string {
+  if (calls.length === 0) return "0 requests";
+  const counts = new Map<string, number>();
+  for (const call of calls) {
+    const label = call.httpStatus !== null ? `${call.status} ${call.httpStatus}` : call.status;
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+  }
+  const rendered = [...counts.entries()]
+    .map(([label, n]) => (n > 1 ? `${label} ×${n}` : label))
+    .join(", ");
+  return `${calls.length} request${calls.length > 1 ? "s" : ""}: ${rendered}`;
+}
+
+/**
+ * Work out WHY a source produced nothing, from the HTTP calls it actually made.
+ * This is the difference between "the league has no data" and "egress to the
+ * data source is blocked" — the two are otherwise indistinguishable.
+ */
+function describeFailure(
+  calls: SourceHttpCall[],
+  error?: string,
+): { reason: string; detail: string } {
+  if (error) return { reason: "handler-threw", detail: `handler threw: ${error}` };
+
+  if (calls.length === 0) {
+    return {
+      reason: "no-requests",
+      detail:
+        "handler made no HTTP request — bailed before the network " +
+        "(match id could not be resolved for this source)",
+    };
+  }
+
+  const statuses = new Set(calls.map((c) => c.status));
+  const summary = httpSummary(calls);
+
+  if (statuses.has("timeout")) {
+    return { reason: "timeout", detail: `timeout after ${summary}` };
+  }
+  if (statuses.has("network-error")) {
+    return {
+      reason: "network-error",
+      detail: `${summary} — host unreachable (egress blocked or DNS/TLS failure)`,
+    };
+  }
+  if (statuses.has("rate-limited")) {
+    return { reason: "rate-limited", detail: `rate-limited (cooldown armed) — ${summary}` };
+  }
+  if (statuses.has("not-found")) {
+    return { reason: "http-error", detail: `404 — source has no record of this match (${summary})` };
+  }
+  if (statuses.has("server-error")) {
+    return { reason: "http-error", detail: `upstream 5xx — ${summary}` };
+  }
+  if (statuses.has("http-error")) {
+    return { reason: "http-error", detail: `HTTP error — ${summary}` };
+  }
+  if (statuses.has("invalid-json")) {
+    return { reason: "http-error", detail: `unparseable response — ${summary}` };
+  }
+  if (calls.every((c) => c.status === "ok")) {
+    return {
+      reason: "empty-payload",
+      detail: `request succeeded (${summary}) but the normaliser found no usable fields`,
+    };
+  }
+  return { reason: "empty-payload", detail: `no usable fields — ${summary}` };
+}
+
 // ─── Aggregator ───────────────────────────────────────────────────────────────
 
 export class StatsAggregator {
@@ -181,6 +326,62 @@ export class StatsAggregator {
     return Object.fromEntries(this.cooldowns);
   }
 
+  /** Effective source priority (the order the walk will use). */
+  prioritySnapshot(): string[] {
+    return [...this.sourcePriority];
+  }
+
+  /**
+   * Per-source readiness for the CURRENT process env — no network involved.
+   * Answers "why is every match on the synthetic baseline?" without a fetch:
+   * a source is `key-missing` when its env vars are unset, `registered` when
+   * it will be attempted, `not-registered` when no handler exists.
+   */
+  sourceReadiness(match?: MatchStatsQuery): Array<{
+    source: string;
+    priority: number;
+    registered: boolean;
+    requiresEnv: string[];
+    keyPresent: boolean | null;
+    coolingDown: boolean;
+    applicable: boolean | null;
+  }> {
+    const probe: MatchStatsQuery | null = match ?? null;
+    return this.sourcePriority.map((source, i) => {
+      const name = source as StatSourceName;
+      const handler = this.handlers[name];
+      const requires = SOURCE_ENV_REQUIREMENTS[name] ?? [];
+      const keyPresent = requires.length
+        ? requires.some((v) => (process.env[v] ?? "").trim().length > 0)
+        : null;
+      return {
+        source,
+        priority: i + 1,
+        registered: Boolean(handler),
+        requiresEnv: requires,
+        keyPresent,
+        coolingDown: this.isCoolingDown(source),
+        // Only meaningful for league-scoped sources (Understat, OpenLigaDB),
+        // which gate on the league slug rather than on an env var.
+        applicable:
+          probe && handler ? this.gateAllows(handler, probe, source) : null,
+      };
+    });
+  }
+
+  /** Run a handler's no-network `available()` gate, never letting it throw. */
+  private gateAllows(handler: SourceHandler, match: MatchStatsQuery, source: string): boolean {
+    try {
+      return handler.available(match, this.buildContext(source, { rateLimited: false, calls: [] }));
+    } catch (err) {
+      this.logSink(
+        `[stats:${source}] available() gate threw (treated as unavailable): ` +
+        (err instanceof Error ? err.message : String(err)),
+      );
+      return false;
+    }
+  }
+
   clearCache(key?: string): void {
     if (key) this.cache.delete(key);
     else this.cache.clear();
@@ -195,14 +396,25 @@ export class StatsAggregator {
     this.cooldowns.set(source, Date.now() + this.cooldownMs);
   }
 
-  private buildContext(source: string, tracker: { rateLimited: boolean }): SourceContext {
+  /** Mutable per-attempt state the context writes into as the handler runs. */
+  private buildContext(source: string, tracker: { rateLimited: boolean; calls: SourceHttpCall[] }): SourceContext {
     return {
       http: async (url, opts) => {
+        const startedAt = Date.now();
         const res: HttpResult = await fetchWithTimeout(url, {
           ...opts,
           timeoutMs: opts?.timeoutMs ?? this.sourceTimeoutMs,
         });
         if (res.status === "rate-limited") tracker.rateLimited = true;
+        // Record every call so the attempt trace can name the real cause.
+        // Without this, a blocked host and an empty response are
+        // indistinguishable — both surface as "no usable fields".
+        tracker.calls.push({
+          url,
+          status: res.status,
+          httpStatus: "httpStatus" in res ? res.httpStatus : null,
+          ms: Date.now() - startedAt,
+        });
         return res;
       },
       env: (name) => (process.env[name] ?? "").trim(),
@@ -212,27 +424,30 @@ export class StatsAggregator {
     };
   }
 
-  /** Attempt one source; return its partial payload (or null). Never throws. */
+  /**
+   * Attempt one source; return its partial payload (or null) plus every HTTP
+   * call it made. Never throws — a source that blows up is reported, not fatal.
+   */
   private async trySource(
     source: string,
     match: MatchStatsQuery,
-  ): Promise<{ payload: SourcePayload | null; error?: string }> {
+  ): Promise<{ payload: SourcePayload | null; error?: string; http: SourceHttpCall[] }> {
     const handler = this.handlers[source as StatSourceName];
-    if (!handler) return { payload: null };
-    if (this.isCoolingDown(source)) return { payload: null };
+    if (!handler) return { payload: null, http: [] };
+    if (this.isCoolingDown(source)) return { payload: null, http: [] };
 
-    const tracker = { rateLimited: false };
+    const tracker = { rateLimited: false, calls: [] as SourceHttpCall[] };
     const ctx = this.buildContext(source, tracker);
 
     try {
-      if (!handler.available(match, ctx)) return { payload: null };
+      if (!this.gateAllows(handler, match, source)) return { payload: null, http: tracker.calls };
       const payload = await handler.fetch(match, ctx);
       if (tracker.rateLimited) this.setCooldown(source);
-      return { payload };
+      return { payload, http: tracker.calls };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.logSink(`[stats:${source}] source threw (treated as unavailable): ${message}`);
-      return { payload: null, error: message };
+      return { payload: null, error: message, http: tracker.calls };
     }
   }
 
@@ -265,37 +480,83 @@ export class StatsAggregator {
     const fieldSources: Partial<Record<StatKey, string>> = {};
     const attempts: SourceAttempt[] = [];
 
-    for (const source of priority) {
-      // API-Football "break early" applies to the default order; when a caller
-      // supplied an explicit priority, still break when the payload is complete.
+    // Log the chain up front so a truncated/hanging walk is visible in the log.
+    this.logSink(`[stats] ${key} — walk ${priority.join(" → ")} (timeout ${this.sourceTimeoutMs}ms/source)`);
+
+    for (const [index, source] of priority.entries()) {
+      const step = `${index + 1}/${priority.length}`;
       const attemptStart = Date.now();
+
+      // ── Gate 1: rate-limit cooldown ────────────────────────────────────────
       if (this.isCoolingDown(source)) {
-        attempts.push({ source, status: "cooldown", fields: 0, detail: "rate-limited earlier — cooldown active" });
-        continue;
-      }
-      const handler = this.handlers[source];
-      if (!handler) {
-        attempts.push({ source, status: "unavailable", fields: 0, detail: "no handler registered" });
-        continue;
-      }
-      if (!handler.available(match, this.buildContext(source, { rateLimited: false }))) {
-        attempts.push({ source, status: "unavailable", fields: 0, detail: "source not applicable to this match" });
+        const until = this.cooldowns.get(source) ?? 0;
+        const detail = `rate-limited earlier — cooldown active (${Math.max(0, Math.round((until - Date.now()) / 1000))}s left)`;
+        attempts.push({ source, status: "cooldown", fields: 0, detail, reason: "cooldown", http: [] });
+        this.logSink(`[stats] ${key} ${step} ${source} → SKIP ${detail}`);
         continue;
       }
 
-      const { payload, error } = await this.trySource(source, match);
+      // ── Gate 2: handler registered? ────────────────────────────────────────
+      const handler = this.handlers[source];
+      if (!handler) {
+        attempts.push({ source, status: "unavailable", fields: 0, detail: "no handler registered", reason: "no-handler", http: [] });
+        this.logSink(`[stats] ${key} ${step} ${source} → SKIP no handler registered`);
+        continue;
+      }
+
+      // ── Gate 3: no-network applicability (key present? league covered?) ────
+      if (!this.gateAllows(handler, match, source)) {
+        const missing = missingEnvVars(source);
+        const detail = missing.length
+          ? `key missing (${missing.join(" or ")} unset in env)`
+          : `not applicable to ${match.leagueSlug} / event ${match.eventId}`;
+        attempts.push({
+          source,
+          status: "unavailable",
+          fields: 0,
+          detail,
+          reason: missing.length ? "key-missing" : "not-applicable",
+          http: [],
+        });
+        this.logSink(`[stats] ${key} ${step} ${source} → SKIP ${detail}`);
+        continue;
+      }
+
+      // ── Fetch + merge ──────────────────────────────────────────────────────
+      const { payload, error, http } = await this.trySource(source, match);
+
       if (!payload) {
+        const failure = describeFailure(http, error);
         attempts.push({
           source,
           status: error ? "error" : "empty",
           fields: 0,
-          detail: error ?? "source returned no usable fields",
+          detail: error ? `${error} | ${failure.detail}` : failure.detail,
+          reason: failure.reason,
+          http,
         });
+        this.logSink(
+          `[stats] ${key} ${step} ${source} → FAIL ${failure.detail} (${Date.now() - attemptStart}ms)`,
+        );
         continue;
       }
 
       const filled = mergePayload(stats, payload, source, contributions, fieldSources);
-      attempts.push({ source, status: filled > 0 ? "ok" : "empty", fields: filled, detail: `merged in ${Date.now() - attemptStart}ms` });
+      attempts.push({
+        source,
+        status: filled > 0 ? "ok" : "empty",
+        fields: filled,
+        detail:
+          filled > 0
+            ? `merged ${filled} field(s) in ${Date.now() - attemptStart}ms`
+            : `payload returned but no field was still empty (${httpSummary(http)})`,
+        reason: filled > 0 ? "merged" : "empty-payload",
+        http,
+      });
+      this.logSink(
+        `[stats] ${key} ${step} ${source} → ${filled > 0 ? "OK" : "EMPTY"} ` +
+        `${filled} field(s) | ${httpSummary(http)} | total ${nonNullFieldCount(stats)}/${TOTAL_STAT_SLOTS} (${Date.now() - attemptStart}ms)`,
+      );
 
       if (source === "API-Football" && isComplete(stats)) {
         this.logSink(`[stats] ${key} — API-Football covered every per-match stat; breaking early (remaining sources skipped)`);
@@ -304,8 +565,19 @@ export class StatsAggregator {
     }
 
     if (nonNullFieldCount(stats) === 0) {
+      // Name the dominant cause: "every source hit network-error" means egress
+      // is blocked, which is an infra problem — NOT missing league coverage.
+      const blocked = attempts.filter((a) => a.reason === "network-error" || a.reason === "timeout").length;
+      const gated = attempts.filter((a) => a.reason === "key-missing").length;
+      const verdict =
+        blocked > 0
+          ? `${blocked} source(s) could not reach their host (network-error/timeout) — check egress with GET /api/diagnostics/connectivity`
+          : gated > 0
+            ? `${gated} source(s) skipped for a missing API key — check .env.local`
+            : "sources responded but normalised no usable fields";
       this.logSink(
-        `[stats] ${key} — no source contributed any field (${attempts.map((a) => `${a.source}=${a.status}`).join(", ") || "no sources"})`,
+        `[stats] ${key} — no source contributed any field → SYNTHETIC BASELINE | ${verdict} | ` +
+        `attempts ${attempts.map((a) => `${a.source}=${a.status}${a.reason ? `:${a.reason}` : ""}`).join(", ") || "no sources"}`,
       );
       return { stats: null, cacheKey: key, attempts, fieldSources };
     }
@@ -323,7 +595,8 @@ export class StatsAggregator {
     this.pruneCache();
 
     this.logSink(
-      `[stats] ${key} → source ${stats.metadata.source} | fields ${nonNullFieldCount(stats)} | ` +
+      `[stats] ${key} → source ${stats.metadata.source} | fields ${nonNullFieldCount(stats)}/${TOTAL_STAT_SLOTS} | ` +
+      `sources ${(stats.metadata.sources ?? []).join("+") || stats.metadata.source} | ` +
       `attempts ${attempts.map((a) => `${a.source}=${a.status}${a.fields ? `(${a.fields})` : ""}`).join(", ")}`,
     );
 
