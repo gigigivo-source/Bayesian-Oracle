@@ -16,6 +16,22 @@ export type SureCornerMarketType =
   | "Corner Winner"
   | "Corner Handicap";
 
+export type SureCornerDataQuality = "real" | "mixed" | "synthetic";
+
+export interface SureCornerConfidenceBreakdown {
+  dataQuality: SureCornerDataQuality;
+  /** Out of 40. */
+  dataQualityPoints: number;
+  /** Distinct real aggregator sources backing the prediction. */
+  sourceCount: number;
+  /** Out of 30. */
+  sourceAgreementPoints: number;
+  /** 0–100 — share of required inputs grounded in team-specific data. */
+  completenessPct: number;
+  /** Out of 30. */
+  completenessPoints: number;
+}
+
 export interface SureCornerMarket {
   id: string;
   marketType: SureCornerMarketType;
@@ -25,6 +41,14 @@ export interface SureCornerMarket {
   hitRate: number;
   confidence: "HIGH" | "MEDIUM" | "LOW";
   reason: string;
+  /** Optional (added by the API) — where this market's stats came from. */
+  dataQuality?: SureCornerDataQuality;
+  /** Optional — 0–100 model-confidence score. */
+  confidenceScore?: number;
+  /** Optional — e.g. "SportScore (Real)" / "Synthetic Baseline (League Avg)". */
+  dataSourceDetail?: string;
+  /** Optional — per-factor breakdown for the hover tooltip. */
+  confidenceBreakdown?: SureCornerConfidenceBreakdown;
 }
 
 export interface SureCornerMatch {
@@ -110,6 +134,69 @@ const MARKET_TONES: Record<SureCornerMarketType, string> = {
   "Corner Winner": "border-emerald-400/30 bg-emerald-400/10 text-emerald-200",
   "Corner Handicap": "border-rose-400/30 bg-rose-400/10 text-rose-200",
 };
+
+// ─── Data Quality / Confidence Score (why a 90%+ hit rate can still fail) ────
+
+const DATA_QUALITY_BADGE: Record<
+  SureCornerDataQuality,
+  { label: string; name: string; tone: string; tooltip: string }
+> = {
+  real: {
+    label: "🔵 Real",
+    name: "Real",
+    tone: "border-cyan-400/40 bg-cyan-500/15 text-cyan-200",
+    tooltip: "Based on real team-specific stats",
+  },
+  mixed: {
+    label: "🟡 Mixed",
+    name: "Mixed",
+    tone: "border-amber-400/40 bg-amber-500/15 text-amber-200",
+    tooltip:
+      "One team had real stats, the other fell back to the synthetic league-average baseline",
+  },
+  synthetic: {
+    label: "⚪ Synthetic",
+    name: "Synthetic",
+    tone: "border-slate-400/30 bg-slate-500/15 text-slate-300",
+    tooltip: "Based on the synthetic baseline (league averages), not team-specific stats",
+  },
+};
+
+/** Colour gradient for the numeric confidence score. */
+function confidenceScoreTone(score: number): string {
+  if (score >= 80) return "bg-teal-500/15 text-teal-300 ring-1 ring-teal-400/30";
+  if (score >= 50) return "bg-amber-500/15 text-amber-300 ring-1 ring-amber-400/30";
+  return "bg-rose-500/15 text-rose-300 ring-1 ring-rose-400/30";
+}
+
+/** Multi-line hover tooltip mirroring the confidence breakdown spec. */
+function confidenceTooltip(market: SureCornerMarket): string | undefined {
+  const score = market.confidenceScore;
+  if (typeof score !== "number") return market.dataSourceDetail;
+  const b = market.confidenceBreakdown;
+  const lines = [`Confidence: ${score}`];
+  if (b) {
+    lines.push(
+      `• Data Quality: ${DATA_QUALITY_BADGE[b.dataQuality].name} (${b.dataQualityPoints}/40)`,
+      `• Source Agreement: ${
+        b.sourceCount >= 2
+          ? `${b.sourceCount} sources agree`
+          : b.sourceCount === 1
+            ? "1 source (no cross-check)"
+            : "No real sources"
+      } (${b.sourceAgreementPoints}/30)`,
+      `• Stat Completeness: ${
+        b.completenessPct >= 100
+          ? "All stats present"
+          : b.completenessPct <= 0
+            ? "No team-specific stats"
+            : `${Math.round(b.completenessPct)}% of stats present`
+      } (${b.completenessPoints}/30)`,
+    );
+  }
+  if (market.dataSourceDetail) lines.push(`Source: ${market.dataSourceDetail}`);
+  return lines.join("\n");
+}
 
 // ─── MatchOverlay ─────────────────────────────────────────────────────────────
 
@@ -329,7 +416,7 @@ export default function MatchOverlay({ match, onClose }: MatchOverlayProps) {
                             : "hover:bg-white/[0.03]",
                         ].join(" ")}
                       >
-                        {/* Market name + type badge */}
+                        {/* Market name + type badge + data quality badge */}
                         <td className="px-3 py-3">
                           <div className="flex flex-col gap-1">
                             <span
@@ -340,6 +427,23 @@ export default function MatchOverlay({ match, onClose }: MatchOverlayProps) {
                             <span className="font-semibold text-slate-100">
                               {market.name}
                             </span>
+                            {(market.dataQuality || market.dataSourceDetail) && (
+                              <span className="flex flex-wrap items-center gap-1.5">
+                                {market.dataQuality && (
+                                  <span
+                                    title={DATA_QUALITY_BADGE[market.dataQuality].tooltip}
+                                    className={`inline-flex w-fit rounded-full border px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider ${DATA_QUALITY_BADGE[market.dataQuality].tone}`}
+                                  >
+                                    {DATA_QUALITY_BADGE[market.dataQuality].label}
+                                  </span>
+                                )}
+                                {market.dataSourceDetail && (
+                                  <span className="max-w-[240px] truncate font-mono text-[9px] text-slate-500">
+                                    {market.dataSourceDetail}
+                                  </span>
+                                )}
+                              </span>
+                            )}
                           </div>
                         </td>
 
@@ -350,19 +454,32 @@ export default function MatchOverlay({ match, onClose }: MatchOverlayProps) {
                           </span>
                         </td>
 
-                        {/* Hit rate */}
+                        {/* Hit rate + numeric model confidence */}
                         <td className="whitespace-nowrap px-3 py-3 text-right">
-                          <span
-                            className={`rounded-md px-2.5 py-1 font-mono font-extrabold ${
-                              market.hitRate >= 0.9
-                                ? "bg-emerald-500/15 text-emerald-300"
-                                : market.hitRate >= 0.75
-                                ? "bg-amber-500/15 text-amber-300"
-                                : "bg-slate-500/15 text-slate-300"
-                            }`}
-                          >
-                            {pct(market.hitRate)}
-                          </span>
+                          <div className="flex flex-col items-end gap-1">
+                            <span
+                              className={`rounded-md px-2.5 py-1 font-mono font-extrabold ${
+                                market.hitRate >= 0.9
+                                  ? "bg-emerald-500/15 text-emerald-300"
+                                  : market.hitRate >= 0.75
+                                  ? "bg-amber-500/15 text-amber-300"
+                                  : "bg-slate-500/15 text-slate-300"
+                              }`}
+                            >
+                              {pct(market.hitRate)}
+                            </span>
+                            {typeof market.confidenceScore === "number" && (
+                              <span
+                                title={confidenceTooltip(market)}
+                                className={`inline-flex items-baseline gap-1 rounded-md px-2 py-0.5 font-mono text-[11px] font-bold ${confidenceScoreTone(market.confidenceScore)}`}
+                              >
+                                <span className="text-[8px] uppercase tracking-wider opacity-70">
+                                  conf
+                                </span>
+                                {market.confidenceScore}
+                              </span>
+                            )}
+                          </div>
                         </td>
 
                         {/* Confidence */}

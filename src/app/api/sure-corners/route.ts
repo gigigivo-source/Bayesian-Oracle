@@ -1,4 +1,11 @@
 import { statsAggregator } from "@/lib/data/aggregator";
+import {
+  assessMarketConfidence,
+  toConfidenceBreakdown,
+  type MarketConfidenceAssessment,
+  type MarketConfidenceBreakdown,
+  type MarketDataQuality,
+} from "@/lib/data/confidence";
 import { emptyTeamStats, type CanonicalMatchStats } from "@/lib/data/types";
 import { fetchScoreboard, fetchSummary, type FixtureLite, type MatchSummary } from "@/lib/espn";
 import type { EngineResult, Market } from "@/lib/engine";
@@ -115,6 +122,19 @@ export interface SureCornerMarket {
   hitRate: number;
   confidence: Confidence;
   reason: string;
+  /**
+   * Where this market's prediction inputs came from: "real" (both teams'
+   * stats are team-specific aggregator data), "mixed" (one team real, the
+   * other on the league-average fallback) or "synthetic" (league average /
+   * synthetic baseline). Presentation-only — never used to gate a market.
+   */
+  dataQuality: MarketDataQuality;
+  /** 0–100 model-confidence score (data quality 40% / source agreement 30% / stat completeness 30%). */
+  confidenceScore: number;
+  /** e.g. "SportScore (Real)", "Synthetic Baseline (League Avg)", "SportScore (Real) + Synthetic". */
+  dataSourceDetail: string;
+  /** Per-factor breakdown backing the score (drives the UI hover tooltip). */
+  confidenceBreakdown: MarketConfidenceBreakdown;
 }
 
 export interface SureCornerMatch {
@@ -223,6 +243,14 @@ interface PreparedPrematchStats {
   away: PrematchTeamInputs;
   match: PrematchMatchInputs;
   source: string;
+  /**
+   * Real aggregator sources that contributed fields to the merged stats, in
+   * priority order (empty for a synthetic-baseline fixture). Feeds the
+   * confidence-score data-source agreement factor.
+   */
+  contributingSources: string[];
+  /** True when no source supplied data and the league-average synthetic baseline was used. */
+  usesSyntheticBaseline: boolean;
 }
 
 interface TeamExpectation {
@@ -607,11 +635,28 @@ function preparePrematchStats(
   if (summary) sources.add("ESPN pre-match summary");
   if (match.leagueAvgSource === "anchor") sources.add("observed league anchors");
 
+  // Provenance for the confidence score (additive only — the model below
+  // never reads these): the aggregator's contributing-source list, or the
+  // primary source name for payloads that predate the `sources` field.
+  const usesSyntheticBaseline = stats?.metadata.source === "baseline (synthetic)";
+  const declaredSources = usesSyntheticBaseline
+    ? []
+    : stats?.metadata.sources?.length
+      ? stats.metadata.sources
+      : stats?.metadata.source?.trim()
+        ? [stats.metadata.source.trim()]
+        : [];
+  const contributingSources = [...new Set(
+    declaredSources.map((name) => name.trim()).filter((name) => name && name !== "baseline (synthetic)"),
+  )];
+
   return {
     home: prepareTeamInputs(stats, "home", fx, summary, profiles.home),
     away: prepareTeamInputs(stats, "away", fx, summary, profiles.away),
     match,
     source: [...sources].join(" + ") || "pre-match statistical mesh",
+    contributingSources,
+    usesSyntheticBaseline,
   };
 }
 
@@ -891,6 +936,58 @@ function dataQuality(input: PreparedPrematchStats, expectations: CornerExpectati
   };
 }
 
+/**
+ * Per-team contribution to stat completeness. Each of the four weighted
+ * formula terms scores 1.0 when grounded in team-specific data, 0.5 when the
+ * value is a league-average / synthetic default substitution, and 0 when the
+ * term was missing entirely (its weight was redistributed).
+ */
+function teamCompletenessScore(detail: TeamExpectation, usesSyntheticBaseline: boolean): number {
+  if (usesSyntheticBaseline) return detail.weightedFields.length * 0.5;
+  return detail.weightedFields.reduce(
+    (sum, field) =>
+      sum + (field === "avgCorners" && detail.baselineOrigin === "league" ? 0.5 : 1),
+    0,
+  );
+}
+
+/**
+ * Data Quality / Confidence Score inputs for one fixture — computed once and
+ * stamped identically on every market of the match (the inputs are shared at
+ * match level). PURELY ADDITIVE: nothing here feeds the hit-rate or
+ * acceptance gates.
+ */
+function assessCornerConfidence(
+  input: PreparedPrematchStats,
+  expectations: CornerExpectations,
+): MarketConfidenceAssessment {
+  const synthetic = input.usesSyntheticBaseline;
+  const teamIsReal = (detail: TeamExpectation) =>
+    !synthetic &&
+    (isTeamSpecificBaseline(detail.baselineOrigin) || detail.teamSpecificFieldCount > 0);
+
+  const homeReal = teamIsReal(expectations.homeDetail);
+  const awayReal = teamIsReal(expectations.awayDetail);
+  const dataQuality: MarketDataQuality = synthetic || (!homeReal && !awayReal)
+    ? "synthetic"
+    : homeReal && awayReal
+      ? "real"
+      : "mixed";
+
+  const totalWeightedFields = Object.keys(EXPECTATION_WEIGHTS).length * 2;
+  const completenessPct =
+    ((teamCompletenessScore(expectations.homeDetail, synthetic) +
+      teamCompletenessScore(expectations.awayDetail, synthetic)) /
+      totalWeightedFields) * 100;
+
+  return assessMarketConfidence({
+    dataQuality,
+    sourceCount: input.contributingSources.length,
+    completenessPct,
+    sourceNames: input.contributingSources,
+  });
+}
+
 function teamStrength(expectations: CornerExpectations): StrengthProfile {
   return {
     stronger: expectations.absoluteDifference >= 1
@@ -1013,6 +1110,8 @@ function makeEvaluatedMarket(
   reason: string,
   quality: DataQuality,
   calibrationReliable: boolean,
+  /** Data-quality / confidence annotation — display metadata, never a gate. */
+  assessment: MarketConfidenceAssessment,
   minRate = MINIMUM_HIT_RATE,
 ): EvaluatedMarket {
   const safeHitRate = round(clamp(hitRate, 0, 1), 4);
@@ -1030,6 +1129,10 @@ function makeEvaluatedMarket(
     hitRate: safeHitRate,
     confidence,
     reason,
+    dataQuality: assessment.dataQuality,
+    confidenceScore: assessment.confidenceScore,
+    dataSourceDetail: assessment.dataSourceDetail,
+    confidenceBreakdown: toConfidenceBreakdown(assessment),
     calibrationReliable,
     accepted: gate.accepted,
     rejectionReason: gate.rejectionReason,
@@ -1073,6 +1176,7 @@ function buildOuMarket(
   expectations: CornerExpectations,
   input: PreparedPrematchStats,
   quality: DataQuality,
+  assessment: MarketConfidenceAssessment,
 ): EvaluatedMarket {
   const engineMarket = teamName
     ? engineCornerMarket(result, teamName, line)
@@ -1099,6 +1203,7 @@ function buildOuMarket(
     `${reason} The ${selection} line has a ${(calibrated.hitRate * 100).toFixed(1)}% calibrated hit rate at expectation ${expected.toFixed(2)}.`,
     quality,
     calibrated.reliable,
+    assessment,
   );
 }
 
@@ -1149,6 +1254,7 @@ function buildHandicapMarkets(
   expectations: CornerExpectations,
   input: PreparedPrematchStats,
   quality: DataQuality,
+  assessment: MarketConfidenceAssessment,
 ): EvaluatedMarket[] {
   const favouredName = stronger === "home" ? fx.home.name : fx.away.name;
   const favouredCorners = stronger === "home" ? expectations.home : expectations.away;
@@ -1172,6 +1278,7 @@ function buildHandicapMarkets(
       `${expectationReason(expectations, input, calibration)} Expected corner difference is ${expectations.absoluteDifference.toFixed(1)}; ${favouredName} covers -${handicap.toFixed(1)} in ${(probability * 100).toFixed(1)}% of calibrated scenarios.`,
       quality,
       reliable,
+      assessment,
       MIN_HANDICAP_PROBABILITY,
     );
   });
@@ -1183,6 +1290,7 @@ function buildCornerWinnerMarket(
   expectations: CornerExpectations,
   input: PreparedPrematchStats,
   quality: DataQuality,
+  assessment: MarketConfidenceAssessment,
 ): EvaluatedMarket | null {
   if (expectations.absoluteDifference <= 2.0) {
     return null;
@@ -1214,6 +1322,7 @@ function buildCornerWinnerMarket(
     reason,
     quality,
     reliable,
+    assessment,
     MIN_CORNER_WINNER_PROBABILITY,
   );
 }
@@ -1335,6 +1444,9 @@ function evaluateFixture(
   }
 
   const strength = teamStrength(expectations);
+  // Data-quality + confidence annotation (display metadata only — the gates
+  // above already ran; nothing here can accept or reject a market).
+  const confidenceAssessment = assessCornerConfidence(input, expectations);
   const candidates: EvaluatedMarket[] = [];
   const markets: EvaluatedMarket[] = [];
 
@@ -1349,6 +1461,7 @@ function evaluateFixture(
       expectations,
       input,
       quality,
+      confidenceAssessment,
     ),
   );
   candidates.push(...totalOptions);
@@ -1366,6 +1479,7 @@ function evaluateFixture(
       expectations,
       input,
       quality,
+      confidenceAssessment,
     ),
   );
   const awayOptions = TEAM_CORNER_LINES.map((line) =>
@@ -1379,6 +1493,7 @@ function evaluateFixture(
       expectations,
       input,
       quality,
+      confidenceAssessment,
     ),
   );
   candidates.push(...homeOptions, ...awayOptions);
@@ -1395,6 +1510,7 @@ function evaluateFixture(
         expectations,
         input,
         quality,
+        confidenceAssessment,
       );
       if (winnerMarket) {
         candidates.push(winnerMarket);
@@ -1404,7 +1520,14 @@ function evaluateFixture(
       }
     }
 
-    const handicapOptions = buildHandicapMarkets(strength.stronger, fx, expectations, input, quality);
+    const handicapOptions = buildHandicapMarkets(
+      strength.stronger,
+      fx,
+      expectations,
+      input,
+      quality,
+      confidenceAssessment,
+    );
     candidates.push(...handicapOptions);
     const handicap = bestMarket(
       handicapOptions.filter((candidate) => candidate.hitRate >= MIN_HANDICAP_PROBABILITY),
@@ -1555,6 +1678,9 @@ function syntheticBaselineStats(fx: FixtureLite): CanonicalMatchStats {
     },
     metadata: {
       source: "baseline (synthetic)",
+      // No real aggregator source contributed — drives the "synthetic" data
+      // quality badge and the zeroed source-agreement factor of the score.
+      sources: [],
       fetchedAt: new Date().toISOString(),
       matchDate: fx.date.slice(0, 10),
       leagueSlug: fx.leagueSlug,

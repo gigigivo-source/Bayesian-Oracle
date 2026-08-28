@@ -26,6 +26,12 @@
 // rarer than a uniform split implies; corners are close to uniform).
 
 import { statsAggregator } from "@/lib/data/aggregator";
+import {
+  assessMarketConfidence,
+  toConfidenceBreakdown,
+  type MarketConfidenceBreakdown,
+  type MarketDataQuality,
+} from "@/lib/data/confidence";
 import type { CanonicalMatchStats, TeamStats } from "@/lib/data/types";
 import { fetchScoreboard, type FixtureLite, type TeamLite } from "@/lib/espn";
 import { getAnchors, type LeagueAnchors } from "@/lib/engine/statisticalAnchors";
@@ -143,6 +149,19 @@ export interface First5Market {
   /** Human-readable data provenance. */
   source: string;
   reason: string;
+  /**
+   * Where this market's baseline came from: "real" (both teams' stats are
+   * team-specific aggregator data), "mixed" (one side real, the other
+   * mirrored / league-substituted) or "synthetic" (league average baseline).
+   * Presentation-only — never used to gate a market.
+   */
+  dataQuality: MarketDataQuality;
+  /** 0–100 model-confidence score (data quality 40% / source agreement 30% / stat completeness 30%). */
+  confidenceScore: number;
+  /** e.g. "SportScore (Real)", "Synthetic Baseline (League Avg)", "SportScore (Real) + Synthetic". */
+  dataSourceDetail: string;
+  /** Per-factor breakdown backing the score (drives the UI hover tooltip). */
+  confidenceBreakdown: MarketConfidenceBreakdown;
 }
 
 export interface First5Match {
@@ -461,6 +480,49 @@ function aggressionFactor(stats: CanonicalMatchStats | null, anchors: LeagueAnch
 
 // ─── Market construction (Part 1 + Part 2) ────────────────────────────────────
 
+/**
+ * Data-quality tier per baseline origin. "partial" (only one team reported
+ * the stat, the other side mirrored) is the "mixed" tier from the confidence
+ * spec — one team real, the other effectively a synthetic substitute.
+ */
+const ORIGIN_QUALITY: Record<BaselineOrigin, MarketDataQuality> = {
+  real: "real",
+  partial: "mixed",
+  league: "synthetic",
+};
+
+/**
+ * Stat-completeness factor per baseline origin (percent of required
+ * home/away inputs grounded in real team-specific data — a mirrored or
+ * league-substituted side still supplies a value, so it earns half credit).
+ */
+const ORIGIN_COMPLETENESS: Record<BaselineOrigin, number> = {
+  real: 100,
+  partial: 75,
+  league: 50,
+};
+
+/**
+ * Real aggregator sources that contributed fields to the merged stats.
+ * Falls back to the primary `metadata.source` for payloads without the
+ * multi-source list; a fully synthetic payload contributes none.
+ */
+function contributingSourcesOf(stats: CanonicalMatchStats | null): string[] {
+  if (!stats) return [];
+  const declared = stats.metadata.sources?.length
+    ? stats.metadata.sources
+    : stats.metadata.source?.trim()
+      ? [stats.metadata.source.trim()]
+      : [];
+  return [
+    ...new Set(
+      declared
+        .map((name) => name.trim())
+        .filter((name) => name && name !== SYNTHETIC_BASELINE && name !== "baseline (synthetic)"),
+    ),
+  ];
+}
+
 function buildOutcome(label: First5Outcome, probability: number): First5OutcomeSide {
   const hitRate = round(probability);
   return {
@@ -479,6 +541,7 @@ function buildMarket(
   baseline: Baseline,
   adjustment: number,
   aggregatorSource: string,
+  contributingSources: string[],
 ): First5Market {
   const meta = MARKET_META[key];
   const uniformShare = WINDOW_MINUTES / MATCH_MINUTES;
@@ -491,6 +554,16 @@ function buildMarket(
   const selected = outcome === "Yes" ? yes : no;
   const origin = baseline.origin;
   const statsSource = origin === "league" ? SYNTHETIC_BASELINE : aggregatorSource;
+
+  // Data-quality / confidence annotation. Purely additive: a league-origin
+  // market scores no source-agreement credit even when other fields were
+  // real, because THIS market's baseline never consumed them.
+  const assessment = assessMarketConfidence({
+    dataQuality: ORIGIN_QUALITY[origin],
+    sourceCount: origin === "league" ? 0 : contributingSources.length,
+    completenessPct: ORIGIN_COMPLETENESS[origin],
+    sourceNames: origin === "league" ? [] : contributingSources,
+  });
 
   const originLabel =
     origin === "real"
@@ -528,6 +601,10 @@ function buildMarket(
       `events in minutes 0–${WINDOW_MINUTES} ` +
       `(opening intensity ${OPENING_INTENSITY[key]}× uniform, tempo ${adjustment.toFixed(2)}×). ` +
       `Poisson P(at least one) = ${(probability * 100).toFixed(1)}% · ${originLabel}.`,
+    dataQuality: assessment.dataQuality,
+    confidenceScore: assessment.confidenceScore,
+    dataSourceDetail: assessment.dataSourceDetail,
+    confidenceBreakdown: toConfidenceBreakdown(assessment),
   };
 }
 
@@ -539,12 +616,13 @@ function buildMarkets(
   const anchors = getAnchors(fx.leagueSlug);
   const attacking = tempoFactor(stats, anchors);
   const aggressive = aggressionFactor(stats, anchors);
+  const contributingSources = contributingSourcesOf(stats);
 
   return [
-    buildMarket(fx, "goal", goalsBaseline(stats, anchors), attacking, aggregatorSource),
-    buildMarket(fx, "corner", cornersBaseline(stats, anchors), attacking, aggregatorSource),
-    buildMarket(fx, "card", cardsBaseline(stats, anchors), aggressive, aggregatorSource),
-    buildMarket(fx, "penalty", penaltiesBaseline(stats, anchors), aggressive, aggregatorSource),
+    buildMarket(fx, "goal", goalsBaseline(stats, anchors), attacking, aggregatorSource, contributingSources),
+    buildMarket(fx, "corner", cornersBaseline(stats, anchors), attacking, aggregatorSource, contributingSources),
+    buildMarket(fx, "card", cardsBaseline(stats, anchors), aggressive, aggregatorSource, contributingSources),
+    buildMarket(fx, "penalty", penaltiesBaseline(stats, anchors), aggressive, aggregatorSource, contributingSources),
   ];
 }
 

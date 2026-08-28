@@ -145,6 +145,151 @@ describe("First 5 Minutes API", () => {
     expect(penalty?.no.hitRate).toBeGreaterThanOrEqual(0.95);
   });
 
+  it("annotates every market with data quality, a confidence score and source detail", async () => {
+    const fixture = makeMockFixture("fx-quality", "Arsenal", "Chelsea");
+    vi.mocked(espn.fetchScoreboard).mockImplementation(async (slug) => {
+      if (slug === "eng.1") return [fixture];
+      return [];
+    });
+
+    // Single-source payload (only metadata.source, no multi-source list).
+    vi.mocked(statsAggregator.fetch).mockResolvedValue({
+      home: {
+        ...emptyTeamStats(),
+        xg: 1.8,
+        avgCornersPerGame: 6.2,
+        avgCardsPerGame: 1.9,
+        fouls: 11,
+      },
+      away: {
+        ...emptyTeamStats(),
+        xg: 1.4,
+        avgCornersPerGame: 4.8,
+        avgCardsPerGame: 2.1,
+        fouls: 12,
+      },
+      metadata: {
+        source: "SportScore",
+        fetchedAt: new Date().toISOString(),
+        matchDate: fixture.date.slice(0, 10),
+        leagueSlug: "eng.1",
+      },
+    });
+
+    const res = await GET(new Request("http://localhost/api/first-5-minutes?refresh=true"));
+    const data = (await res.json()) as First5MinutesResponse;
+    const markets = data.matches[0].markets;
+
+    for (const market of markets) {
+      expect(["real", "mixed", "synthetic"]).toContain(market.dataQuality);
+      expect(market.confidenceScore).toBeGreaterThanOrEqual(0);
+      expect(market.confidenceScore).toBeLessThanOrEqual(100);
+      expect(market.confidenceScore).toBe(
+        market.confidenceBreakdown.dataQualityPoints +
+          market.confidenceBreakdown.sourceAgreementPoints +
+          market.confidenceBreakdown.completenessPoints,
+      );
+    }
+
+    const goal = markets.find((market) => market.key === "goal");
+    // real (40) + 1 source (15) + all stats present (30) = 85
+    expect(goal?.dataQuality).toBe("real");
+    expect(goal?.dataSourceDetail).toBe("SportScore (Real)");
+    expect(goal?.confidenceScore).toBe(85);
+
+    // The penalty baseline always falls back to the league anchor here, so the
+    // market must be flagged synthetic and score far below the real markets —
+    // even though its own hit rate is ≥95%.
+    const penalty = markets.find((market) => market.key === "penalty");
+    expect(penalty?.dataQuality).toBe("synthetic");
+    expect(penalty?.dataSourceDetail).toBe("Synthetic Baseline (League Avg)");
+    expect(penalty?.confidenceScore).toBeLessThan(40);
+    expect(penalty?.hitRate).toBeGreaterThanOrEqual(0.9);
+  });
+
+  it("raises the score when multiple aggregator sources agree", async () => {
+    const fixture = makeMockFixture("fx-multi", "Arsenal", "Chelsea");
+    vi.mocked(espn.fetchScoreboard).mockImplementation(async (slug) => {
+      if (slug === "eng.1") return [fixture];
+      return [];
+    });
+
+    vi.mocked(statsAggregator.fetch).mockResolvedValue({
+      home: {
+        ...emptyTeamStats(),
+        xg: 1.8,
+        avgCornersPerGame: 6.2,
+        avgCardsPerGame: 1.9,
+        fouls: 11,
+      },
+      away: {
+        ...emptyTeamStats(),
+        xg: 1.4,
+        avgCornersPerGame: 4.8,
+        avgCardsPerGame: 2.1,
+        fouls: 12,
+      },
+      metadata: {
+        source: "SportScore",
+        sources: ["SportScore", "API-Football", "FBref"],
+        fetchedAt: new Date().toISOString(),
+        matchDate: fixture.date.slice(0, 10),
+        leagueSlug: "eng.1",
+      },
+    });
+
+    const res = await GET(new Request("http://localhost/api/first-5-minutes?refresh=true"));
+    const data = (await res.json()) as First5MinutesResponse;
+    const goal = data.matches[0].markets.find((market) => market.key === "goal");
+
+    // real (40) + 3 sources agree (30) + all stats present (30) = 100
+    expect(goal?.dataQuality).toBe("real");
+    expect(goal?.dataSourceDetail).toBe("SportScore + API-Football + FBref (Real)");
+    expect(goal?.confidenceScore).toBe(100);
+    expect(goal?.confidenceBreakdown.sourceCount).toBe(3);
+  });
+
+  it("labels one-sided stats as mixed with the + Synthetic detail suffix", async () => {
+    const fixture = makeMockFixture("fx-partial", "Arsenal", "Chelsea");
+    vi.mocked(espn.fetchScoreboard).mockImplementation(async (slug) => {
+      if (slug === "eng.1") return [fixture];
+      return [];
+    });
+
+    // Away xG is missing: the goal baseline mirrors the home side only →
+    // "mixed" tier, while the corner/card markets stay "real".
+    vi.mocked(statsAggregator.fetch).mockResolvedValue({
+      home: {
+        ...emptyTeamStats(),
+        xg: 1.8,
+        avgCornersPerGame: 6.2,
+        avgCardsPerGame: 1.9,
+      },
+      away: {
+        ...emptyTeamStats(),
+        avgCornersPerGame: 4.8,
+        avgCardsPerGame: 2.1,
+      },
+      metadata: {
+        source: "SportScore",
+        sources: ["SportScore", "API-Football"],
+        fetchedAt: new Date().toISOString(),
+        matchDate: fixture.date.slice(0, 10),
+        leagueSlug: "eng.1",
+      },
+    });
+
+    const res = await GET(new Request("http://localhost/api/first-5-minutes?refresh=true"));
+    const data = (await res.json()) as First5MinutesResponse;
+    const goal = data.matches[0].markets.find((market) => market.key === "goal");
+    const corner = data.matches[0].markets.find((market) => market.key === "corner");
+
+    expect(goal?.dataQuality).toBe("mixed");
+    expect(goal?.dataSourceDetail).toBe("SportScore + API-Football (Real) + Synthetic");
+    expect(goal?.confidenceScore).toBeLessThan(100);
+    expect(corner?.dataQuality).toBe("real");
+  });
+
   it("falls back to Synthetic Baseline when the aggregator returns null", async () => {
     const fixture = makeMockFixture("fx-2", "Everton", "Brentford");
     vi.mocked(espn.fetchScoreboard).mockImplementation(async (slug) => {
@@ -158,5 +303,20 @@ describe("First 5 Minutes API", () => {
     expect(data.matches[0].statsSource).toBe(SYNTHETIC_BASELINE);
     expect(data.matches[0].markets.every((market) => market.statsSource === SYNTHETIC_BASELINE)).toBe(true);
     expect(data.matches[0].markets.every((market) => market.origin === "league")).toBe(true);
+
+    // Every synthetic market carries the grey-badge label and a low score.
+    for (const market of data.matches[0].markets) {
+      expect(market.dataQuality).toBe("synthetic");
+      expect(market.dataSourceDetail).toBe("Synthetic Baseline (League Avg)");
+      expect(market.confidenceScore).toBeLessThanOrEqual(40);
+    }
+    // A ≥90% hit rate on synthetic data is exactly the trap the badge flags:
+    // high hit rate, low confidence.
+    const highHit = data.matches[0].markets.filter((market) => market.hitRate >= 0.9);
+    expect(highHit.length).toBeGreaterThan(0);
+    for (const market of highHit) {
+      expect(market.dataQuality).toBe("synthetic");
+      expect(market.confidenceScore).toBeLessThan(50);
+    }
   });
 });
