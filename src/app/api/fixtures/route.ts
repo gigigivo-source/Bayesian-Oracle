@@ -19,7 +19,7 @@ import {
   compareLeaguePriority,
   espnSlugCandidates,
 } from "@/lib/leaguePriority";
-import { statsAggregator } from "@/lib/data/aggregator";
+import { statsAggregator, type StatsAggregator } from "@/lib/data/aggregator";
 import type { CanonicalMatchStats, TeamStats } from "@/lib/data/types";
 import { resilientJson } from "@/lib/httpClient";
 
@@ -1120,6 +1120,90 @@ async function attachStatsToFixtures(
   });
 }
 
+// ─── Stats diagnostics ───────────────────────────────────────────────────────
+
+/**
+ * Why does every fixture carry `stats: null`?
+ *
+ * A null `stats` object has two very different causes — no fixtures reached the
+ * aggregator at all, or they did and every source failed. The response payload
+ * cannot tell them apart, and the server log scrolls past. This block is
+ * attached to both feed shapes so `curl /api/fixtures?days=7 | jq .statsDiagnostics`
+ * answers the question without reading logs.
+ *
+ * No network: it reports the aggregator's source priority, each source's
+ * readiness in the current process env, and active rate-limit cooldowns.
+ */
+function buildStatsDiagnostics(
+  fixtures: FixtureWithStats[],
+  opts?: { attached?: boolean },
+): {
+  fixtureCount: number;
+  fixturesWithStats: number;
+  statsAttached: boolean;
+  statsBudgetMs: number;
+  statsMaxFetches: number;
+  sourcePriority: string[];
+  sourceReadiness: ReturnType<StatsAggregator["sourceReadiness"]>;
+  cooldowns: Record<string, number>;
+  verdict: string;
+  hint: string;
+} {
+  const attached = opts?.attached !== false;
+  const withStats = fixtures.filter((fx) => fx.stats?.source).length;
+  const probe = fixtures[0]
+    ? {
+        leagueSlug: fixtures[0].leagueSlug,
+        eventId: fixtures[0].id,
+        homeTeam: fixtures[0].home.name,
+        awayTeam: fixtures[0].away.name,
+        date: fixtures[0].date,
+      }
+    : undefined;
+
+  const readiness = statsAggregator.sourceReadiness(probe);
+  const gatedOnKey = readiness.filter((s) => s.keyPresent === false).map((s) => s.source);
+  const attemptable = readiness.filter((s) => s.registered && s.keyPresent !== false);
+
+  const verdict =
+    !attached
+      ? "stats not requested — this response was built with ?stats=0, so the aggregator was skipped by design"
+      : fixtures.length === 0
+        ? "no fixtures in feed — the fixture feed itself returned nothing, so the aggregator was never called"
+        : withStats === 0
+          ? `all ${fixtures.length} fixture(s) returned null stats — every source failed (see sourceReadiness + server log)`
+          : `${withStats}/${fixtures.length} fixture(s) carry real stats`;
+
+  const hint =
+    !attached
+      ? "Re-request without ?stats=0 to have the aggregator attach stats to every fixture."
+      : fixtures.length === 0
+        ? "The fixture feed is sourced from site.api.espn.com (src/lib/espn.ts). " +
+          "If that host is firewalled the feed is empty and no stats source is ever tried. " +
+          "Verify with GET /api/diagnostics/connectivity."
+        : withStats === 0
+          ? gatedOnKey.length > 0
+            ? `Keyed sources skipped for a missing env var: ${gatedOnKey.join(", ")}. ` +
+              `Only ${attemptable.length} source(s) are actually attemptable. ` +
+              `Set the keys in .env.local, or check egress with GET /api/diagnostics/connectivity.`
+            : "No source is gated off by env, so the failures are network/upstream. " +
+              "Check GET /api/diagnostics/connectivity and the per-source [stats] log lines."
+          : "Stats are flowing.";
+
+  return {
+    fixtureCount: fixtures.length,
+    fixturesWithStats: withStats,
+    statsAttached: attached,
+    statsBudgetMs: STATS_BUDGET_MS,
+    statsMaxFetches: STATS_MAX_FETCHES,
+    sourcePriority: statsAggregator.prioritySnapshot(),
+    sourceReadiness: readiness,
+    cooldowns: statsAggregator.cooldownSnapshot(),
+    verdict,
+    hint,
+  };
+}
+
 // ─── Shared sort / split ─────────────────────────────────────────────────────
 
 function partitionAndSort(all: FixtureWithStats[]) {
@@ -1173,6 +1257,7 @@ export async function GET(req: Request) {
         catalogueCount: feed.catalogue.length,
         competitionCount: feed.competitions.length,
         ...split,
+        statsDiagnostics: buildStatsDiagnostics(split.fixtures, { attached: attachStats }),
       },
       300,
     );
@@ -1233,5 +1318,6 @@ export async function GET(req: Request) {
   return jsonResponse({
     league: leagueDefFor(league),
     ...split,
+    statsDiagnostics: buildStatsDiagnostics(withStats, { attached: true }),
   });
 }
