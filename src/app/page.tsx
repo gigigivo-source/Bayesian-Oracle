@@ -587,6 +587,23 @@ function Header({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
             <button
               type="button"
               role="menuitem"
+              title="multi-match arbitrage — guaranteed profit across 2 or 3 different matches"
+              aria-label="Arbitrage — multi-match arbitrage opportunities"
+              onClick={() => {
+                router.push("/arbitrage");
+                setMenuOpen(false);
+              }}
+              className={`${MENU_ITEM} w-full px-4 py-3 text-left rounded-xl`}
+            >
+              <div className="flex items-center justify-between">
+                <div className="text-sm font-medium leading-tight">⚖️ Arbitrage</div>
+                <span className="rounded-full bg-emerald-500/15 px-1.5 py-0.5 font-mono text-[9px] font-bold uppercase tracking-wider text-emerald-300">ARB</span>
+              </div>
+              <div className="text-[11px] mt-0.5 leading-snug text-slate-500">Guaranteed profit across 2–3 matches</div>
+            </button>
+            <button
+              type="button"
+              role="menuitem"
               title="positive expected value bets across every source with optimal Kelly stakes"
               aria-label="Profit Maximizer — positive expected value bets across every source with optimal Kelly stakes"
               onClick={() => {
