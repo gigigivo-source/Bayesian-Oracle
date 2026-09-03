@@ -9,6 +9,14 @@
 //                       as fallbacks), with the three UEFA club competitions
 //                       always retained as required primary-source targets.
 //
+// On top of those, openfootball/football.json is fetched through the GitHub
+// Contents API (`api.github.com`) for any mapped league the other sources
+// left empty. That host is the one data endpoint reachable from deployments
+// whose egress allowlist blocks ESPN/SportScore entirely (the failure mode
+// documented in docs/NETWORK_ALLOWLIST.md), so it is what keeps the Premier
+// League — and therefore /api/correct-score — populated there. The historical
+// model layer (src/lib/data/historical.ts) already uses the same repository.
+//
 // Per-competition fixture lists are cached for 1 hour. Empty catalogue
 // entries are logged and retried against fallback sources.
 
@@ -20,6 +28,11 @@ import {
   espnSlugCandidates,
 } from "@/lib/leaguePriority";
 import { statsAggregator, type StatsAggregator } from "@/lib/data/aggregator";
+import {
+  fullTimeScore,
+  OPENFOOTBALL_CODES,
+  seasonCodes,
+} from "@/lib/data/historical";
 import type { CanonicalMatchStats, TeamStats } from "@/lib/data/types";
 import { resilientJson } from "@/lib/httpClient";
 
@@ -33,7 +46,8 @@ type FixtureSource =
   | "SportScore"
   | "OpenLigaDB"
   | "TheSportsDB"
-  | "ApiFootball";
+  | "ApiFootball"
+  | "Openfootball";
 
 interface CatalogueCompetition {
   slug: string;
@@ -108,6 +122,24 @@ const FEED_TTL_MS = 60 * 60_000;
 const SWEEP_BUDGET_MS = Number(process.env.FIXTURES_SWEEP_BUDGET_MS ?? 90_000);
 const STATS_BUDGET_MS = Number(process.env.FIXTURES_STATS_BUDGET_MS ?? 12_000);
 const STATS_MAX_FETCHES = Number(process.env.FIXTURES_STATS_MAX_FETCHES ?? 24);
+
+// openfootball via the GitHub Contents API — the fixture fallback for
+// restricted-egress deployments (only `api.github.com` allowed). One small
+// JSON file per league per season; the same repository and mapping already
+// feed the historical model layer in src/lib/data/historical.ts.
+const OPENFOOTBALL_REPO = () =>
+  (process.env.HISTORICAL_OPENFOOTBALL_REPO ?? "openfootball/football.json").replace(/^\/+|\/+$/g, "");
+const OPENFOOTBALL_TTL_MS = 30 * 60_000; // half-hour cache per season file
+/**
+ * Leagues the GitHub fallback always considers, most important first: the
+ * Premier League drives /api/correct-score, then the rest of the big five.
+ * Catalogue leagues with an openfootball code are appended after these.
+ */
+const OPENFOOTBALL_FIXTURE_PRIORITY: readonly string[] = [
+  "eng.1", "esp.1", "ger.1", "ita.1", "fra.1",
+];
+/** Hard cap on GitHub requests per feed build — keeps the unauthenticated rate limit safe. */
+const OPENFOOTBALL_MAX_FETCHES = Number(process.env.FIXTURES_OPENFOOTBALL_MAX_FETCHES ?? 6);
 
 // ESPN's canonical soccer competition slugs. Keep these in the dynamic feed
 // even when an incomplete upstream catalogue omits them. In particular, this
@@ -746,6 +778,143 @@ async function fetchApiFootballFixtures(
   return out;
 }
 
+// ─── openfootball via api.github.com (restricted-egress fixture fallback) ────
+
+export interface OpenfootballRow {
+  round?: string;
+  date?: string;
+  time?: string;
+  team1?: string;
+  team2?: string;
+  /** `{ ht, ft }` object or openfootball's bare `[home, away]` shorthand. */
+  score?: { ht?: number[]; ft?: number[] } | number[] | null;
+  status?: string;
+}
+
+/**
+ * Map one openfootball/football.json row onto the app's fixture shape.
+ *
+ * Rows without a `score` are scheduled fixtures (`pre`); rows with one are
+ * results (`post`) — both encodings openfootball uses for results are handled
+ * by the historical layer's `fullTimeScore`. Team names are kept verbatim
+ * ("Liverpool FC"): every downstream lookup (standings, ELO, attack/defence)
+ * matches loosely on normalised names, so provider suffixes resolve fine.
+ */
+export function openfootballFixture(
+  row: OpenfootballRow,
+  context: { leagueSlug: string; leagueName: string; season: string; code: string },
+): FixtureLite | null {
+  const home = row.team1?.trim();
+  const away = row.team2?.trim();
+  const date = row.date?.trim();
+  if (!home || !away || !date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
+
+  // openfootball times are local kickoffs and the files carry no timezone
+  // metadata, so the value is interpreted as UTC: up to an hour or two off
+  // for some leagues, but the correct calendar day — which is what the feed
+  // window and cross-source dedupe work on. Missing times default to 15:00
+  // rather than midnight so same-day fixtures are not treated as already
+  // kicked off and dropped from the upcoming feed.
+  const rawTime = row.time?.trim() ?? "";
+  const time = /^\d{1,2}:\d{2}/.test(rawTime) ? rawTime : "15:00";
+  const [hours, minutes] = time.split(":");
+  const iso = `${date}T${hours.padStart(2, "0")}:${minutes}:00Z`;
+
+  const ft = fullTimeScore(row.score);
+  const statusText = row.status?.trim();
+
+  return buildLite({
+    id: `openfootball:${context.season}:${context.code}:${date}:${kebab(home)}-${kebab(away)}`,
+    leagueSlug: context.leagueSlug,
+    leagueName: context.leagueName,
+    date: iso,
+    state: ft ? "post" : "pre",
+    statusDetail: ft
+      ? statusText || "Full Time"
+      : statusText || row.round?.trim() || "Scheduled",
+    homeName: home,
+    awayName: away,
+    homeScore: ft ? String(ft[0]) : null,
+    awayScore: ft ? String(ft[1]) : null,
+  });
+}
+
+/** Loose cross-provider team-name equality: "Liverpool FC" ≈ "Liverpool". */
+export function fuzzyTeamNameEq(left: string, right: string): boolean {
+  const a = norm(left);
+  const b = norm(right);
+  if (!a || !b) return false;
+  return a === b || (Math.min(a.length, b.length) > 3 && (a.includes(b) || b.includes(a)));
+}
+
+/**
+ * True when the same league-day pairing already exists under another
+ * provider's spelling, so the GitHub fallback never duplicates a fixture
+ * ESPN (or SportScore) already delivered.
+ */
+export function hasLooseFixtureDuplicate(
+  existing: FixtureLite[],
+  candidate: FixtureLite,
+): boolean {
+  const day = candidate.date.slice(0, 10);
+  return existing.some(
+    (fixture) =>
+      fixture.date.slice(0, 10) === day &&
+      fuzzyTeamNameEq(fixture.home.name, candidate.home.name) &&
+      fuzzyTeamNameEq(fixture.away.name, candidate.away.name),
+  );
+}
+
+/**
+ * One league's fixtures from openfootball/football.json, fetched through the
+ * GitHub Contents API — the data host that stays reachable on deployments
+ * whose egress allowlist blocks ESPN/SportScore/TheSportsDB entirely
+ * (docs/NETWORK_ALLOWLIST.md). Without this source such deployments have an
+ * empty fixture feed and /api/correct-score can never show Premier League
+ * matches, no matter how its filter is written.
+ */
+export async function fetchOpenfootballFixtures(
+  leagueSlug: string,
+  season: string,
+  from: Date,
+  to: Date,
+): Promise<SourcedFixture[]> {
+  const slug = canonicalLeagueSlug(leagueSlug);
+  const code = OPENFOOTBALL_CODES[slug];
+  if (!code) return [];
+
+  const url = `https://api.github.com/repos/${OPENFOOTBALL_REPO()}/contents/${season}/${code}.json`;
+  const payload = await resilientJson<
+    { name?: string; matches?: OpenfootballRow[] } | OpenfootballRow[]
+  >(url, {
+    headers: { Accept: "application/vnd.github.raw+json" },
+    revalidate: 1800,
+    cacheTtlMs: OPENFOOTBALL_TTL_MS,
+  });
+  if (!payload) return [];
+
+  const rows = Array.isArray(payload) ? payload : (payload.matches ?? []);
+  // File headers read e.g. "English Premier League 2026/27" — strip the season.
+  const headerName = !Array.isArray(payload) ? payload.name : undefined;
+  const leagueName =
+    headerName?.replace(/\s*\d{4}\/\d{2,4}\s*$/, "").trim() || leagueDefFor(slug).name;
+
+  const fromMs = from.getTime() - 12 * 3600_000;
+  const toMs = to.getTime() + 36 * 3600_000;
+  const out: SourcedFixture[] = [];
+  for (const row of rows) {
+    const fixture = openfootballFixture(row, { leagueSlug: slug, leagueName, season, code });
+    if (!fixture) continue;
+    const when = new Date(fixture.date).getTime();
+    if (!Number.isFinite(when) || when < fromMs || when > toMs) continue;
+    out.push({ fixture, source: "Openfootball" });
+  }
+  console.log(
+    `[Fixtures] Openfootball ${season}/${code}.json (${leagueName}): ${out.length} fixture(s) in window`,
+  );
+  return out;
+}
+
 // ─── Discover extra slugs from ESPN's global scoreboard ──────────────────────
 
 async function discoverSlugsFromGlobalBoard(
@@ -927,6 +1096,50 @@ async function collectAllCompetitionFixtures(opts?: {
 
   for (const { fixture, source } of [...sportscore, ...apif, ...tsdb, ...oligadb]) {
     add(fixture, source, fixture.leagueName);
+  }
+
+  // → Openfootball (api.github.com): fills mapped leagues every source above
+  // left without a single fixture — the only path that works when the egress
+  // allowlist blocks ESPN/SportScore/TheSportsDB (docs/NETWORK_ALLOWLIST.md),
+  // which is otherwise an empty feed and a permanently bare /correct-score
+  // page. Costs nothing when the primary sources are healthy: leagues that
+  // already carry fixtures are never re-fetched.
+  const ghSlugs: string[] = [];
+  const ghCandidates = [
+    ...OPENFOOTBALL_FIXTURE_PRIORITY,
+    ...targets
+      .map((competition) => competition.slug)
+      .filter((slug) => OPENFOOTBALL_CODES[canonicalLeagueSlug(slug)]),
+  ];
+  for (const slug of new Set(ghCandidates.map(canonicalLeagueSlug))) {
+    if (ghSlugs.length >= OPENFOOTBALL_MAX_FETCHES) break;
+    if (allow && !allow.has(slug)) continue;
+    if (groups.has(slug)) continue;
+    ghSlugs.push(slug);
+  }
+  if (ghSlugs.length > 0) {
+    const season = seasonCodes(now, 1)[0];
+    const ghPages = await Promise.all(
+      ghSlugs.map((slug) =>
+        fetchOpenfootballFixtures(slug, season, from, to).catch(() => [] as SourcedFixture[]),
+      ),
+    );
+    let ghAdded = 0;
+    ghPages.forEach((page, index) => {
+      const slug = ghSlugs[index];
+      const existing = (groups.get(slug)?.fixtures ?? []).map((entry) => entry.fixture);
+      for (const { fixture } of page) {
+        // Cross-provider dedupe: "Liverpool FC" (openfootball) is the same
+        // fixture as "Liverpool" (ESPN) on the same league day.
+        if (hasLooseFixtureDuplicate(existing, fixture)) continue;
+        existing.push(fixture);
+        add(fixture, "Openfootball", fixture.leagueName);
+        ghAdded++;
+      }
+    });
+    console.log(
+      `[Fixtures] Openfootball fallback (api.github.com): ${ghAdded} fixture(s) across ${ghSlugs.join(", ")}`,
+    );
   }
 
   for (const c of targets) {
@@ -1306,6 +1519,20 @@ export async function GET(req: Request) {
       if (seen.has(fixture.id)) continue;
       seen.add(fixture.id);
       all.push({ ...fixture, leagueSlug: league });
+    }
+    // Last resort: openfootball/football.json through api.github.com — the
+    // data host that survives egress allowlists which block every provider
+    // above (docs/NETWORK_ALLOWLIST.md).
+    if (all.length === 0 && OPENFOOTBALL_CODES[league]) {
+      const season = seasonCodes(now, 1)[0];
+      const ghFixtures = await fetchOpenfootballFixtures(league, season, from, to).catch(
+        () => [] as SourcedFixture[],
+      );
+      for (const { fixture } of ghFixtures) {
+        if (seen.has(fixture.id) || hasLooseFixtureDuplicate(all, fixture)) continue;
+        seen.add(fixture.id);
+        all.push({ ...fixture, leagueSlug: league });
+      }
     }
     if (all.length === 0) {
       console.log(`[Fixtures] No fixtures found for ${league} after fallbacks`);

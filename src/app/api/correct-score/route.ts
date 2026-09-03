@@ -28,6 +28,7 @@
 import { statsAggregator } from "@/lib/data/aggregator";
 import type { CanonicalMatchStats } from "@/lib/data/types";
 import { fetchSummary, type FixtureLite, type MatchSummary } from "@/lib/espn";
+import { canonicalLeagueSlug } from "@/lib/leaguePriority";
 import { getAnchors } from "@/lib/engine/statisticalAnchors";
 import { poissonPmf } from "@/lib/engine/stats";
 import {
@@ -183,6 +184,7 @@ interface WeightedValue {
 interface CacheEntry {
   at: number;
   matches: CorrectScoreMatch[];
+  diagnostics?: FeedDiagnostics;
 }
 
 const responseCache = new Map<string, CacheEntry>();
@@ -624,7 +626,123 @@ async function mapWithConcurrency<T, R>(
   return result as R[];
 }
 
-async function fetchUpcomingFixtures(requestUrl: string): Promise<FixtureLite[]> {
+/** Placeholder identities a degraded feed can emit instead of a real club. */
+const UNRESOLVED_TEAM_NAMES = new Set([
+  "", "unknown", "tbd", "n/a", "none", "null", "undefined",
+]);
+
+function teamNameOr(team: { name?: unknown } | null | undefined): string {
+  const raw: unknown = team?.name;
+  return typeof raw === "string" && raw.trim() ? raw.trim() : "null";
+}
+
+/**
+ * True when both sides of a fixture carry a real, displayable club identity.
+ *
+ * Degraded feeds occasionally deliver rows without one: ESPN's normaliser
+ * falls back to "Unknown" when a competitor has no `team.displayName`, and
+ * fallback widgets can emit partial rows. Predicting those is fabrication —
+ * every standings / form / aggregator lookup fails for an anonymous club, so
+ * each such fixture collapses onto the same league-anchor synthetic inputs
+ * and the page fills with "Unknown vs Unknown" cards all showing an identical
+ * 1-1. They are dropped (and logged) instead.
+ */
+export function hasResolvableTeams(
+  fixture: Pick<FixtureLite, "home" | "away">,
+): boolean {
+  for (const team of [fixture.home, fixture.away] as Array<{ name?: unknown } | undefined>) {
+    const raw: unknown = team?.name;
+    const name = typeof raw === "string" ? raw.trim().toLowerCase() : "";
+    if (UNRESOLVED_TEAM_NAMES.has(name)) return false;
+  }
+  return true;
+}
+
+/** Why the feed produced the match list it did — reported on empty responses. */
+export interface FeedDiagnostics {
+  /** Rows the fixture feed delivered for the lookahead window. */
+  feedFixtures: number;
+  /** Rows that are upcoming, unique and kick off inside the 7-day horizon. */
+  inWindow: number;
+  /** In-window rows dropped for missing team identity. */
+  unresolvedTeams: number;
+  /** In-window rows dropped for not being eng.1, keyed by league slug. */
+  nonPremierLeague: Record<string, number>;
+}
+
+export interface FixtureSelection {
+  premierLeague: FixtureLite[];
+  /** In-window fixtures dropped because a team name was missing/placeholder. */
+  anonymous: FixtureLite[];
+  /** Non-PL fixtures dropped, counted per canonical league slug. */
+  skippedNonPl: Map<string, number>;
+  /** Fixtures that passed the state/window/dedupe filter, before league selection. */
+  inWindowCount: number;
+  diagnostics: FeedDiagnostics;
+}
+
+/**
+ * Narrow the fixture feed down to the Premier League matches this feature
+ * predicts. Pure and exported so the selection rules are unit-testable:
+ *
+ *   1. only `pre` fixtures, deduped by id, kicking off within the lookahead;
+ *   2. team identity must be resolvable on both sides (`hasResolvableTeams`);
+ *   3. league slug must canonicalise to `eng.1` — aliases included, so a feed
+ *      row can never slip through (or be dropped) on a slug spelling alone.
+ */
+export function selectPremierLeagueFixtures(
+  upcoming: FixtureLite[],
+  now: number = Date.now(),
+): FixtureSelection {
+  const horizon = now + LOOKAHEAD_DAYS * 86_400_000;
+  const seen = new Set<string>();
+  const inWindow = (Array.isArray(upcoming) ? upcoming : []).filter((fixture) => {
+    if (!fixture || fixture.state !== "pre" || typeof fixture.id !== "string") return false;
+    if (seen.has(fixture.id)) return false;
+    const kickoff = new Date(fixture.date).getTime();
+    if (!Number.isFinite(kickoff) || kickoff < now || kickoff > horizon) return false;
+    seen.add(fixture.id);
+    return true;
+  });
+
+  const anonymous: FixtureLite[] = [];
+  const premierLeague: FixtureLite[] = [];
+  const skippedNonPl = new Map<string, number>();
+  for (const fixture of inWindow) {
+    if (!hasResolvableTeams(fixture)) {
+      anonymous.push(fixture);
+      continue;
+    }
+    const slug = canonicalLeagueSlug(typeof fixture.leagueSlug === "string" ? fixture.leagueSlug : "");
+    if (slug !== PREMIER_LEAGUE_SLUG) {
+      skippedNonPl.set(slug || "unknown", (skippedNonPl.get(slug || "unknown") ?? 0) + 1);
+      continue;
+    }
+    // Stamp the canonical slug so downstream ESPN lookups (standings,
+    // summary) run on exactly the competition id the filter matched.
+    premierLeague.push(
+      fixture.leagueSlug === slug ? fixture : { ...fixture, leagueSlug: slug },
+    );
+  }
+  premierLeague.sort(
+    (left, right) => new Date(left.date).getTime() - new Date(right.date).getTime(),
+  );
+
+  return {
+    premierLeague,
+    anonymous,
+    skippedNonPl,
+    inWindowCount: inWindow.length,
+    diagnostics: {
+      feedFixtures: Array.isArray(upcoming) ? upcoming.length : 0,
+      inWindow: inWindow.length,
+      unresolvedTeams: anonymous.length,
+      nonPremierLeague: Object.fromEntries(skippedNonPl),
+    },
+  };
+}
+
+async function fetchUpcomingFixtures(requestUrl: string): Promise<FixtureSelection> {
   const origin = new URL(requestUrl).origin;
   const response = await withTimeout(
     fetch(`${origin}/api/fixtures?days=${LOOKAHEAD_DAYS}&stats=0`, { cache: "no-store" }),
@@ -634,36 +752,56 @@ async function fetchUpcomingFixtures(requestUrl: string): Promise<FixtureLite[]>
   if (!response?.ok) {
     throw new Error(response ? `Fixture feed HTTP ${response.status}` : "Fixture feed timed out");
   }
-  const body = (await response.json()) as { upcoming?: FixtureLite[] };
-  const now = Date.now();
-  const horizon = now + LOOKAHEAD_DAYS * 86_400_000;
-  const seen = new Set<string>();
-  const fixtures = (body.upcoming ?? [])
-    .filter((fixture) => {
-      if (fixture.state !== "pre" || seen.has(fixture.id)) return false;
-      const kickoff = new Date(fixture.date).getTime();
-      if (!Number.isFinite(kickoff) || kickoff < now || kickoff > horizon) return false;
-      seen.add(fixture.id);
-      return true;
-    })
-    .sort((left, right) => new Date(left.date).getTime() - new Date(right.date).getTime());
+  const body = (await response.json()) as {
+    upcoming?: FixtureLite[];
+    fixtures?: FixtureLite[];
+  };
+  // The all-competitions feed splits rows into `upcoming`/`results`, with
+  // `fixtures` carrying the concatenation. Accept either so a feed-shape
+  // change degrades into filtering rather than a silently empty page.
+  const selection = selectPremierLeagueFixtures(body.upcoming ?? body.fixtures ?? []);
 
-  // Premier League only: fixtures from every other league are dropped here so
-  // no stats, standings or summaries are ever fetched for them downstream.
-  const premierLeagueFixtures = fixtures.filter((fixture) => fixture.leagueSlug === PREMIER_LEAGUE_SLUG);
-  const skipped = fixtures.length - premierLeagueFixtures.length;
-  if (skipped > 0) {
-    console.info(
-      `[CorrectScore] Premier League only: skipped ${skipped} fixture(s) outside ${PREMIER_LEAGUE_SLUG}`,
+  // Diagnostics: the troubleshooting playbook greps for exactly these lines
+  // ("Processing eng.1:", "Skipping non-PL fixture:") to tell the four feed
+  // failure modes apart — no eng.1 in the feed, eng.1 filtered out, feed rows
+  // without team names, or a completely empty feed.
+  for (const fixture of selection.anonymous) {
+    console.warn(
+      `[CorrectScore] Skipping fixture with unresolved team names: ${fixture.id} ` +
+        `(${fixture.leagueSlug}, ${fixture.date}) — home=${teamNameOr(fixture.home)}, away=${teamNameOr(fixture.away)}`,
     );
   }
-  return premierLeagueFixtures;
+  for (const [slug, count] of selection.skippedNonPl) {
+    console.info(`[CorrectScore] Skipping non-PL fixture: ${count} × ${slug}`);
+  }
+  const skipped = selection.inWindowCount - selection.premierLeague.length;
+  if (skipped > 0) {
+    console.info(
+      `[CorrectScore] Premier League only: kept ${selection.premierLeague.length} of ${selection.inWindowCount} in-window fixture(s) for ${PREMIER_LEAGUE_SLUG}`,
+    );
+  }
+  console.info(
+    `[CorrectScore] Processing eng.1: ${selection.premierLeague.length} fixture(s)` +
+      (selection.premierLeague.length
+        ? ` — ${selection.premierLeague
+            .map((fixture) => `${fixture.home.name} vs ${fixture.away.name} (${fixture.date})`)
+            .join(", ")}`
+        : " — the fixture feed delivered no Premier League match with resolvable team names"),
+  );
+  return selection;
 }
 
-function feedResponse(matches: CorrectScoreMatch[], cacheStatus: "HIT" | "MISS"): Response {
+function feedResponse(
+  matches: CorrectScoreMatch[],
+  cacheStatus: "HIT" | "MISS",
+  diagnostics?: FeedDiagnostics,
+): Response {
   const headers = { "Cache-Control": "no-store", "X-Correct-Score-Cache": cacheStatus };
   if (!matches.length) {
-    return Response.json({ matches: [], message: NO_PREMIER_LEAGUE_MESSAGE }, { headers });
+    return Response.json(
+      { matches: [], message: NO_PREMIER_LEAGUE_MESSAGE, diagnostics },
+      { headers },
+    );
   }
   return Response.json(matches, { headers });
 }
@@ -874,15 +1012,16 @@ export async function GET(request: Request): Promise<Response> {
   if (!force) {
     const cached = responseCache.get(cacheKey);
     if (cached && Date.now() - cached.at < CACHE_TTL_MS) {
-      return feedResponse(cached.matches, "HIT");
+      return feedResponse(cached.matches, "HIT", cached.diagnostics);
     }
   }
 
   try {
-    const [fixtures, model] = await Promise.all([
+    const [selection, model] = await Promise.all([
       fetchUpcomingFixtures(request.url),
       loadSupercomputerModel(PREMIER_LEAGUE_SLUG, { force }),
     ]);
+    const fixtures = selection.premierLeague;
     const leagueSlugs = [...new Set(fixtures.map((fixture) => fixture.leagueSlug))];
     const standingEntries = await Promise.all(
       leagueSlugs.map(async (slug) => [slug, await fetchStandingAverages(slug)] as const),
@@ -896,8 +1035,8 @@ export async function GET(request: Request): Promise<Response> {
       );
       return buildCorrectScorePrediction(fixture, inputs, maxGoals, { model, simulations, method });
     });
-    responseCache.set(cacheKey, { at: Date.now(), matches });
-    return feedResponse(matches, "MISS");
+    responseCache.set(cacheKey, { at: Date.now(), matches, diagnostics: selection.diagnostics });
+    return feedResponse(matches, "MISS", selection.diagnostics);
   } catch (error) {
     console.error("[CorrectScore] prediction feed failed", error);
     return Response.json(
