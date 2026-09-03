@@ -33,6 +33,17 @@ interface CorrectScoreMatch {
   dataQuality: DataQuality;
   statsSources: string[];
   topScorelines: Scoreline[];
+  // ── Supercomputer diagnostics (optional: absent from cached older payloads) ──
+  model?: string;
+  modelBadge?: string;
+  simulations?: number;
+  simulationMethod?: string;
+  rho?: number;
+  homeElo?: number | null;
+  awayElo?: number | null;
+  eloDelta?: number | null;
+  structuralWeight?: number;
+  modelSources?: string[];
 }
 
 const qualityStyle: Record<DataQuality, string> = {
@@ -61,6 +72,49 @@ function formatKickoff(iso: string): string {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+function formatSimulations(count?: number): string {
+  if (!count) return "Monte Carlo";
+  return count >= 1000 ? `${Math.round(count / 1000)}k sims` : `${count} sims`;
+}
+
+/** 🧠 Supercomputer when the historical model drove λ, else the plain MC badge. */
+function modelBadge(match: CorrectScoreMatch): string {
+  if (match.modelBadge) return match.modelBadge;
+  return `🧠 Monte Carlo (${formatSimulations(match.simulations)})`;
+}
+
+function ModelBadge({ match }: { match: CorrectScoreMatch }) {
+  const supercomputer = modelBadge(match).includes("Supercomputer");
+  return (
+    <span
+      className={`rounded-full border px-2.5 py-1 text-[10px] font-bold ${
+        supercomputer
+          ? "border-violet-400/35 bg-violet-400/10 text-violet-200"
+          : "border-cyan-400/30 bg-cyan-400/[0.08] text-cyan-200"
+      }`}
+      title={`${match.model ?? "correct-score model"} · ${formatSimulations(match.simulations)}${
+        typeof match.rho === "number" ? ` · Dixon-Coles ρ ${match.rho.toFixed(3)}` : ""
+      }`}
+    >
+      {modelBadge(match)}
+    </span>
+  );
+}
+
+function EloRow({ team, elo }: { team: string; elo?: number | null }) {
+  return (
+    <span className="inline-flex items-baseline gap-1.5">
+      <span className="max-w-32 truncate">{team}</span>
+      <span
+        className="rounded-md border border-violet-400/25 bg-violet-400/[0.08] px-1.5 py-0.5 font-mono text-[10px] font-bold text-violet-200"
+        title="ELO rating — 1500 start, K = 20 friendly / 30 league / 40 cup, replayed over the last three seasons"
+      >
+        {typeof elo === "number" ? Math.round(elo) : "—"}
+      </span>
+    </span>
+  );
 }
 
 function MatchSkeleton() {
@@ -140,9 +194,12 @@ function MatchCard({ match }: { match: CorrectScoreMatch }) {
           </h2>
           {match.venue && <p className="mt-1 truncate text-xs text-slate-500">{match.venue}</p>}
         </div>
-        <span className={`rounded-full border px-2.5 py-1 text-[10px] font-bold ${qualityStyle[match.dataQuality]}`}>
-          {qualityDot[match.dataQuality]} {match.dataQuality} data
-        </span>
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <ModelBadge match={match} />
+          <span className={`rounded-full border px-2.5 py-1 text-[10px] font-bold ${qualityStyle[match.dataQuality]}`}>
+            {qualityDot[match.dataQuality]} {match.dataQuality} data
+          </span>
+        </div>
       </div>
 
       <div className="my-5 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-cyan-400/15 bg-cyan-400/[0.05] px-4 py-3">
@@ -153,11 +210,27 @@ function MatchCard({ match }: { match: CorrectScoreMatch }) {
             <span className="mx-2 text-slate-600">vs</span>
             {match.awayTeam} <span className="font-mono text-lg font-black text-cyan-200">{match.awayExpectedGoals.toFixed(2)}</span>
           </div>
+          <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[10px] uppercase tracking-[0.12em] text-violet-300/80">
+            <span className="text-slate-500">ELO</span>
+            <EloRow team={match.homeTeam} elo={match.homeElo} />
+            <span className="text-slate-600">vs</span>
+            <EloRow team={match.awayTeam} elo={match.awayElo} />
+            {typeof match.eloDelta === "number" && (
+              <span className="rounded-md border border-white/[0.07] bg-black/20 px-1.5 py-0.5 text-[10px] text-slate-400">
+                Δ {match.eloDelta > 0 ? "+" : ""}
+                {Math.round(match.eloDelta)}
+              </span>
+            )}
+          </div>
         </div>
         <div className="text-right text-[10px] text-slate-500">
+          {typeof match.rho === "number" && <div>Dixon-Coles ρ {match.rho.toFixed(3)}</div>}
           {match.h2hGoalAverage !== null && <div>H2H avg {match.h2hGoalAverage.toFixed(2)} goals</div>}
-          <div className="mt-0.5 max-w-xs truncate" title={match.statsSources.join(", ")}>
-            {match.statsSources.join(" · ")}
+          <div
+            className="mt-0.5 max-w-xs truncate"
+            title={[...(match.modelSources ?? []), ...match.statsSources].join(", ")}
+          >
+            {[...(match.modelSources ?? []), ...match.statsSources].join(" · ") || match.statsSources.join(" · ")}
           </div>
         </div>
       </div>
@@ -166,7 +239,10 @@ function MatchCard({ match }: { match: CorrectScoreMatch }) {
         <h3 className="font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-slate-400">
           Top 10 scorelines
         </h3>
-        <span className="text-[10px] text-slate-600">Independent Poisson model</span>
+        <span className="text-[10px] text-slate-600">
+          {match.model ? `${match.model} · ` : ""}
+          Monte Carlo {formatSimulations(match.simulations)}
+        </span>
       </div>
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
         {match.topScorelines.map((scoreline, index) => (
@@ -231,13 +307,13 @@ export default function CorrectScorePage() {
           <div>
             <div className="mb-3 inline-flex items-center gap-2 rounded-full border border-cyan-400/25 bg-cyan-400/[0.08] px-3 py-1.5 font-mono text-[10px] font-bold uppercase tracking-[0.16em] text-cyan-200">
               <span className="h-1.5 w-1.5 rounded-full bg-cyan-300 shadow-[0_0_8px_rgba(103,232,249,0.8)]" />
-              Poisson · Next 7 days
+              Supercomputer · ELO + Dixon-Coles + Monte Carlo · Next 7 days
             </div>
             <h1 className="bg-gradient-to-r from-white via-cyan-100 to-amber-200 bg-clip-text text-3xl font-black tracking-tight text-transparent sm:text-4xl">
               Premier League Correct Score Predictions
             </h1>
             <p className="mt-2 text-sm text-slate-400 sm:text-base">
-              Most likely final scorelines for Premier League matches based on real stats
+              Most likely final scorelines, simulated 10,000 times per match from real historical results
             </p>
           </div>
 
@@ -266,8 +342,21 @@ export default function CorrectScorePage() {
           </div>
         </header>
 
-        <div className={`rounded-2xl p-4 text-xs text-slate-400 ${GLASS_PANEL}`}>
-          Expected goals blend xG (40%), season scoring (25%), opponent goals conceded (20%), recent form (10%) and venue advantage (5%). Missing inputs are reweighted; fully missing profiles use that competition&apos;s observed league baseline.
+        <div className={`space-y-2 rounded-2xl p-4 text-xs text-slate-400 ${GLASS_PANEL}`}>
+          <p>
+            <span className="font-semibold text-slate-200">Supercomputer stack.</span> Expected goals come from
+            venue-split attack/defence strengths built on the last three seasons of results, modulated by each
+            team&apos;s ELO rating (1500 start; K = 20 friendly / 30 league / 40 cup). The score grid is corrected
+            for low-score dependence with a Dixon-Coles ρ estimated from the same history, then sampled by
+            Monte Carlo simulation — the top ten scorelines are read off the simulation, not the analytic grid.
+          </p>
+          <p>
+            <span className="font-semibold text-slate-200">Legacy blend.</span> The previous xG-weighted composite
+            (xG 40%, season scoring 25%, opponent goals conceded 20%, form 10%, venue advantage 5%) still
+            contributes 40% of λ when real pre-match xG is available. Missing inputs are reweighted; a fixture
+            with no historical model falls back to that competition&apos;s observed league baseline and is badged
+            🧠 Monte Carlo instead of 🧠 Supercomputer.
+          </p>
         </div>
 
         {error && (

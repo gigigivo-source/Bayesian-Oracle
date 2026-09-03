@@ -1,5 +1,24 @@
 // ĞIGI GIVØ — Correct Score Predictions.
 //
+// Prediction stack, in the order the numbers are produced:
+//
+//   1. HISTORICAL AGGREGATE  (src/lib/data/historical.ts) — completed matches
+//      from the database, then the GitHub datasets / openfootball / ESPN
+//      fallbacks, over the last three seasons.
+//   2. ELO                   (src/lib/data/elo.ts) — chronological replay of
+//      those matches, K = 20/30/40 by match importance, 1500 start.
+//   3. ATTACK / DEFENCE      (src/lib/data/attackDefence.ts) — venue-split
+//      strengths shrunk toward the league baseline, multiplied out to λ.
+//   4. DIXON–COLES           (src/lib/data/dixonColes.ts) — ρ estimated from
+//      the same history, correcting the four low-score cells.
+//   5. MONTE CARLO           (src/lib/data/monteCarlo.ts) — 10,000 simulations
+//      per fixture over the corrected distribution; the top ten scorelines are
+//      read off the simulation, not the analytic grid.
+//
+// The legacy xG-weighted composite is retained and blended with the structural
+// λ when both are available (see `STRUCTURAL_MODEL_WEIGHT`), so the upgrade
+// adds information rather than discarding the xG signal.
+//
 // The route reuses the app's next-seven-day fixture feed and the canonical
 // multi-source stats aggregator. Missing match-level data is never presented as
 // real: the model redistributes the documented weights over fields that are
@@ -11,6 +30,29 @@ import type { CanonicalMatchStats } from "@/lib/data/types";
 import { fetchSummary, type FixtureLite, type MatchSummary } from "@/lib/espn";
 import { getAnchors } from "@/lib/engine/statisticalAnchors";
 import { poissonPmf } from "@/lib/engine/stats";
+import {
+  ATTACK_DEFENCE_HALF_LIFE_DAYS,
+  buildAttackDefenceTable,
+  blendExpectedGoals,
+  computeMatchExpectedGoals,
+  STRUCTURAL_MODEL_WEIGHT,
+  STRUCTURAL_WEIGHT_WITHOUT_XG,
+  type AttackDefenceTable,
+  type ExpectedGoalsComponents,
+} from "@/lib/data/attackDefence";
+import { estimateLeagueRho, getRhoForLeague, type RhoEstimate } from "@/lib/data/dixonColes";
+import { buildEloRatings, getElo, type EloTable } from "@/lib/data/elo";
+import {
+  DEFAULT_SEASONS,
+  loadHistoricalMatches,
+  type HistoricalDataset,
+} from "@/lib/data/historical";
+import {
+  DEFAULT_SIMULATIONS,
+  simulateMatch,
+  type MonteCarloMarkets,
+  type SimulationMethod,
+} from "@/lib/data/monteCarlo";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -22,7 +64,13 @@ const CACHE_TTL_MS = 30 * 60_000;
 const FEED_TIMEOUT_MS = 100_000;
 const STATS_TIMEOUT_MS = 15_000;
 const SUMMARY_TIMEOUT_MS = 10_000;
+/** Budget for the whole supercomputer load (historical data + ELO + ρ). */
+const MODEL_TIMEOUT_MS = 45_000;
 const CONCURRENCY = 8;
+const MIN_SIMULATIONS = 1_000;
+const MAX_SIMULATIONS = 50_000;
+/** Identifier reported to the UI and stored with the prediction. */
+export const MODEL_VERSION = "supercomputer-v2";
 /** This feature is restricted to the Premier League; every other league is ignored. */
 const PREMIER_LEAGUE_SLUG = "eng.1";
 const NO_PREMIER_LEAGUE_MESSAGE = "No Premier League matches available.";
@@ -56,6 +104,10 @@ export interface CorrectScoreline {
   impliedOdds: number;
   confidence: ScoreConfidence;
   dataQuality: DataQuality;
+  /** Exact Dixon–Coles grid probability, alongside the simulated estimate. */
+  analyticProbability?: number;
+  /** Monte Carlo occurrences behind `probability`. */
+  simulatedCount?: number;
 }
 
 export interface CorrectScoreMatch {
@@ -74,6 +126,48 @@ export interface CorrectScoreMatch {
   dataQuality: DataQuality;
   statsSources: string[];
   topScorelines: CorrectScoreline[];
+  // ── Supercomputer diagnostics ──────────────────────────────────────────────
+  /** Engine identifier, e.g. `supercomputer-v2`. */
+  model: string;
+  /** Card badge text: `🧠 Supercomputer` or `🧠 Monte Carlo (10k sims)`. */
+  modelBadge: string;
+  /** Simulations behind this fixture's scorelines. */
+  simulations: number;
+  simulationMethod: SimulationMethod;
+  /** Dixon–Coles correction applied to the low-score cells. */
+  rho: number;
+  homeElo: number | null;
+  awayElo: number | null;
+  /** Home minus away, signed. */
+  eloDelta: number | null;
+  /** Weight the structural model carried in the final λ (0 = legacy only). */
+  structuralWeight: number;
+  structuralComponents: ExpectedGoalsComponents | null;
+  markets: MonteCarloMarkets | null;
+  /** Historical layers that fed the model, for the transparency line. */
+  modelSources: string[];
+}
+
+/** The loaded supercomputer state, shared by every fixture in a request. */
+export interface SupercomputerModel {
+  /** False when no historical source produced any completed match. */
+  available: boolean;
+  elo: EloTable | null;
+  attackDefence: AttackDefenceTable;
+  rho: number;
+  rhoEstimate: RhoEstimate | null;
+  matches: number;
+  seasonsCovered: string[];
+  primarySource: string | null;
+  sources: string[];
+  dataset: HistoricalDataset | null;
+  generatedAt: string;
+}
+
+export interface SupercomputerInputs {
+  model: SupercomputerModel;
+  simulations: number;
+  method: SimulationMethod;
 }
 
 interface StandingAverages {
@@ -91,7 +185,8 @@ interface CacheEntry {
   matches: CorrectScoreMatch[];
 }
 
-const responseCache = new Map<number, CacheEntry>();
+const responseCache = new Map<string, CacheEntry>();
+const modelCache = new Map<string, { at: number; model: SupercomputerModel }>();
 
 function finiteNonNegative(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) && value >= 0
@@ -171,7 +266,10 @@ export function confidenceForProbability(probability: number): ScoreConfidence {
   return "LOW";
 }
 
-/** Full independent-Poisson score grid, sorted from most to least probable. */
+/**
+ * Legacy independent-Poisson score grid, sorted from most to least probable.
+ * Kept exported: it is the baseline the backtest measures the upgrade against.
+ */
 export function scorelineProbabilities(
   homeExpectedGoals: number,
   awayExpectedGoals: number,
@@ -201,13 +299,268 @@ export function scorelineProbabilities(
   );
 }
 
+// ─── Supercomputer model ──────────────────────────────────────────────────────
+
+/**
+ * Neutral model used when no historical source produced data. The attack/defence
+ * table built from zero matches falls back to the documented league baseline and
+ * every team resolves to strength 1.0, so the route degrades to the legacy λ
+ * instead of failing.
+ */
+function unavailableModel(reason: string): SupercomputerModel {
+  return {
+    available: false,
+    elo: null,
+    attackDefence: buildAttackDefenceTable([], PREMIER_LEAGUE_SLUG),
+    // Prefer a still-valid cached estimate over silently reverting to the
+    // league default: one failed fetch should not change the published model.
+    rho: getRhoForLeague(PREMIER_LEAGUE_SLUG),
+    rhoEstimate: null,
+    matches: 0,
+    seasonsCovered: [],
+    primarySource: null,
+    sources: [reason],
+    dataset: null,
+    generatedAt: new Date().toISOString(),
+  };
+}
+
+/**
+ * Load the historical dataset and derive ELO, attack/defence and ρ from it.
+ *
+ * ρ is estimated against the attack/defence λ's (ELO excluded — ρ only touches
+ * the four low-score cells and is a single global parameter per league). This
+ * is in-sample for ρ, which is the standard treatment: it is one scalar fitted
+ * on the same history every other parameter comes from, and the backtest
+ * re-estimates it per fixture from strictly pre-kickoff data.
+ */
+export async function loadSupercomputerModel(
+  leagueSlug: string,
+  options: { force?: boolean; seasons?: number; timeoutMs?: number } = {},
+): Promise<SupercomputerModel> {
+  const cached = modelCache.get(leagueSlug);
+  if (!options.force && cached && Date.now() - cached.at < CACHE_TTL_MS) return cached.model;
+
+  const timeoutMs = options.timeoutMs ?? MODEL_TIMEOUT_MS;
+  let dataset: HistoricalDataset;
+  try {
+    dataset = await withTimeout(
+      loadHistoricalMatches({
+        leagueSlug,
+        seasons: options.seasons ?? DEFAULT_SEASONS,
+        force: options.force,
+      }),
+      timeoutMs,
+      null,
+    ).then((result) => {
+      if (result) return result;
+      throw new Error(`historical load exceeded ${timeoutMs}ms`);
+    });
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    console.warn(`[CorrectScore] supercomputer model unavailable for ${leagueSlug}: ${reason}`);
+    return unavailableModel(`historical data unavailable (${reason})`);
+  }
+
+  if (!dataset.matchCount) {
+    const reasons = dataset.sources
+      .map((source) => `${source.source}: ${source.note || "no matches"}`)
+      .join("; ");
+    console.warn(`[CorrectScore] no historical matches for ${leagueSlug} — ${reasons}`);
+    return unavailableModel(`no completed matches found (${reasons})`);
+  }
+
+  const elo = buildEloRatings(dataset.matches);
+  // Exponential time decay (Dixon & Coles' ξ): last season's results carry
+  // more weight than a match from two seasons ago, so promoted sides and
+  // rebuilt squads are not averaged away over three years.
+  const attackDefence = buildAttackDefenceTable(dataset.matches, leagueSlug, {
+    halfLifeDays: ATTACK_DEFENCE_HALF_LIFE_DAYS,
+    now: new Date(),
+  });
+  const rhoEstimate = estimateLeagueRho(leagueSlug, dataset.matches, (match) => {
+    const expected = computeMatchExpectedGoals({
+      homeTeam: match.homeTeam,
+      awayTeam: match.awayTeam,
+      table: attackDefence,
+      applyElo: false,
+    });
+    return {
+      homeLambda: expected.homeExpectedGoals,
+      awayLambda: expected.awayExpectedGoals,
+    };
+  });
+
+  const model: SupercomputerModel = {
+    available: true,
+    elo,
+    attackDefence,
+    rho: rhoEstimate.rho,
+    rhoEstimate,
+    matches: dataset.matchCount,
+    seasonsCovered: dataset.seasonsCovered,
+    primarySource: dataset.primarySource,
+    sources: [
+      ...new Set(
+        dataset.sources
+          .filter((source) => source.added > 0)
+          .map((source) => `${source.source} (${source.added})`),
+      ),
+    ],
+    dataset,
+    generatedAt: dataset.generatedAt,
+  };
+
+  modelCache.set(leagueSlug, { at: Date.now(), model });
+  console.info(
+    `[CorrectScore] supercomputer ${leagueSlug}: ${model.matches} matches across ` +
+      `${model.seasonsCovered.join(", ") || "n/a"} | ρ=${model.rho} | ` +
+      `${elo.global.size} rated teams | sources ${model.sources.join(", ")}`,
+  );
+  return model;
+}
+
+/** Badge text for a fixture: supercomputer when the structural model drove λ. */
+export function modelBadgeFor(model: SupercomputerModel | null, simulations: number): string {
+  if (model?.available) return "🧠 Supercomputer";
+  return `🧠 Monte Carlo (${Math.round(simulations / 1000)}k sims)`;
+}
+
+// ─── Expected goals ───────────────────────────────────────────────────────────
+
+export interface ResolvedExpectedGoals {
+  homeExpectedGoals: number;
+  awayExpectedGoals: number;
+  structuralHome: number;
+  structuralAway: number;
+  legacyHome: number;
+  legacyAway: number;
+  structuralWeight: number;
+  homeElo: number | null;
+  awayElo: number | null;
+  eloDelta: number | null;
+  components: ExpectedGoalsComponents | null;
+}
+
+/**
+ * How much of λ comes from the structural model, given what the legacy
+ * composite actually has to offer.
+ *
+ * The only legacy field the structural model cannot reproduce is pre-match xG:
+ * season scoring, goals conceded and recent form are all strict subsets of the
+ * venue-split attack/defence parameters, which are built from the same results
+ * but split by venue. So the legacy composite keeps 40% of the weight when
+ * both teams carry real xG, and only 20% when it is running on season averages
+ * alone — otherwise the upgrade would spend 40% of λ re-deriving information it
+ * already has, in a cruder form.
+ */
+export function structuralWeightFor(inputs: CorrectScoreModelInputs): number {
+  if (inputs.dataQuality === "Synthetic") return 1;
+  const xgAvailable = inputs.home.xg !== null && inputs.away.xg !== null;
+  return xgAvailable ? STRUCTURAL_MODEL_WEIGHT : STRUCTURAL_WEIGHT_WITHOUT_XG;
+}
+
+/**
+ * Final λ for one fixture.
+ *
+ * Weighting policy (see `structuralWeightFor`):
+ *   · historical model available → `structuralWeightFor(inputs)` on the
+ *     structural λ, the remainder on the legacy composite;
+ *   · no historical model at all → 0.0 structural, i.e. the pre-upgrade model.
+ */
+export interface ExpectedGoalsOverrides {
+  /** Override `structuralWeightFor` (used by the backtest for ablation). */
+  structuralWeight?: number;
+  /** Override `ELO_GOAL_ELASTICITY`. */
+  eloElasticity?: number;
+}
+
+export function resolveExpectedGoals(
+  fixture: Pick<FixtureLite, "home" | "away" | "leagueSlug">,
+  inputs: CorrectScoreModelInputs,
+  model: SupercomputerModel | null,
+  overrides: ExpectedGoalsOverrides = {},
+): ResolvedExpectedGoals {
+  const legacy = calculateExpectedGoals(inputs);
+  if (!model?.available) {
+    return {
+      homeExpectedGoals: legacy.homeExpectedGoals,
+      awayExpectedGoals: legacy.awayExpectedGoals,
+      structuralHome: legacy.homeExpectedGoals,
+      structuralAway: legacy.awayExpectedGoals,
+      legacyHome: legacy.homeExpectedGoals,
+      legacyAway: legacy.awayExpectedGoals,
+      structuralWeight: 0,
+      homeElo: null,
+      awayElo: null,
+      eloDelta: null,
+      components: null,
+    };
+  }
+
+  const homeElo = model.elo ? getElo(fixture.home.name, fixture.leagueSlug, model.elo) : null;
+  const awayElo = model.elo ? getElo(fixture.away.name, fixture.leagueSlug, model.elo) : null;
+  const structural = computeMatchExpectedGoals({
+    homeTeam: fixture.home.name,
+    awayTeam: fixture.away.name,
+    table: model.attackDefence,
+    eloHome: homeElo,
+    eloAway: awayElo,
+    eloElasticity: overrides.eloElasticity,
+  });
+  const structuralWeight = overrides.structuralWeight ?? structuralWeightFor(inputs);
+
+  return {
+    homeExpectedGoals: blendExpectedGoals(structural.homeExpectedGoals, legacy.homeExpectedGoals, structuralWeight),
+    awayExpectedGoals: blendExpectedGoals(structural.awayExpectedGoals, legacy.awayExpectedGoals, structuralWeight),
+    structuralHome: structural.homeExpectedGoals,
+    structuralAway: structural.awayExpectedGoals,
+    legacyHome: legacy.homeExpectedGoals,
+    legacyAway: legacy.awayExpectedGoals,
+    structuralWeight,
+    homeElo,
+    awayElo,
+    eloDelta: homeElo !== null && awayElo !== null ? homeElo - awayElo : null,
+    components: structural.components,
+  };
+}
+
 /** Build one public prediction. Exported so the backtest reruns this same model. */
 export function buildCorrectScorePrediction(
   fixture: Pick<FixtureLite, "id" | "home" | "away" | "leagueName" | "leagueSlug" | "date" | "venue">,
   inputs: CorrectScoreModelInputs,
   maxGoals = DEFAULT_MAX_GOALS,
+  supercomputer: SupercomputerInputs | null = null,
 ): CorrectScoreMatch {
-  const expected = calculateExpectedGoals(inputs);
+  const model = supercomputer?.model ?? null;
+  const simulations = supercomputer?.simulations ?? DEFAULT_SIMULATIONS;
+  const method: SimulationMethod = supercomputer?.method ?? "stratified";
+  const expected = resolveExpectedGoals(fixture, inputs, model);
+  // Without a live model, fall back to whatever ρ is cached for the league —
+  // `getRhoForLeague` returns `DEFAULT_RHO` when nothing has been estimated.
+  const rho = model?.available ? model.rho : getRhoForLeague(fixture.leagueSlug);
+
+  // The Monte Carlo layer runs even without the historical model: it still
+  // samples the corrected distribution, so the badge tells the two apart.
+  const simulation = simulateMatch({
+    homeLambda: expected.homeExpectedGoals,
+    awayLambda: expected.awayExpectedGoals,
+    rho,
+    options: { simulations, maxGoals, method, topScorelines: TOP_SCORELINES },
+  });
+
+  const topScorelines: CorrectScoreline[] = simulation.topScorelines.map((scoreline) => ({
+    score: scoreline.score,
+    homeGoals: scoreline.homeGoals,
+    awayGoals: scoreline.awayGoals,
+    probability: scoreline.probability,
+    impliedOdds: scoreline.impliedOdds,
+    confidence: confidenceForProbability(scoreline.probability),
+    dataQuality: inputs.dataQuality,
+    analyticProbability: scoreline.analyticProbability,
+    simulatedCount: scoreline.count,
+  }));
+
   return {
     fixtureId: fixture.id,
     homeTeam: fixture.home.name,
@@ -223,12 +576,19 @@ export function buildCorrectScorePrediction(
     h2hGoalAverage: inputs.h2hGoalAverage === null ? null : round(inputs.h2hGoalAverage, 2),
     dataQuality: inputs.dataQuality,
     statsSources: inputs.sources,
-    topScorelines: scorelineProbabilities(
-      expected.homeExpectedGoals,
-      expected.awayExpectedGoals,
-      maxGoals,
-      inputs.dataQuality,
-    ).slice(0, TOP_SCORELINES),
+    topScorelines,
+    model: MODEL_VERSION,
+    modelBadge: modelBadgeFor(model, simulations),
+    simulations: simulation.simulations,
+    simulationMethod: simulation.method,
+    rho,
+    homeElo: expected.homeElo === null ? null : round(expected.homeElo, 0),
+    awayElo: expected.awayElo === null ? null : round(expected.awayElo, 0),
+    eloDelta: expected.eloDelta === null ? null : round(expected.eloDelta, 0),
+    structuralWeight: expected.structuralWeight,
+    structuralComponents: expected.components,
+    markets: simulation.markets,
+    modelSources: model?.sources ?? [],
   };
 }
 
@@ -503,17 +863,26 @@ async function collectInputs(
 export async function GET(request: Request): Promise<Response> {
   const url = new URL(request.url);
   const maxGoals = Math.round(clamp(Number(url.searchParams.get("maxGoals")) || DEFAULT_MAX_GOALS, 3, 10));
+  const simulations = Math.round(
+    clamp(Number(url.searchParams.get("sims")) || DEFAULT_SIMULATIONS, MIN_SIMULATIONS, MAX_SIMULATIONS),
+  );
+  const method: SimulationMethod =
+    url.searchParams.get("method") === "iid-poisson" ? "iid-poisson" : "stratified";
   const force = url.searchParams.get("refresh") === "true";
+  const cacheKey = `${maxGoals}|${simulations}|${method}`;
 
   if (!force) {
-    const cached = responseCache.get(maxGoals);
+    const cached = responseCache.get(cacheKey);
     if (cached && Date.now() - cached.at < CACHE_TTL_MS) {
       return feedResponse(cached.matches, "HIT");
     }
   }
 
   try {
-    const fixtures = await fetchUpcomingFixtures(request.url);
+    const [fixtures, model] = await Promise.all([
+      fetchUpcomingFixtures(request.url),
+      loadSupercomputerModel(PREMIER_LEAGUE_SLUG, { force }),
+    ]);
     const leagueSlugs = [...new Set(fixtures.map((fixture) => fixture.leagueSlug))];
     const standingEntries = await Promise.all(
       leagueSlugs.map(async (slug) => [slug, await fetchStandingAverages(slug)] as const),
@@ -525,9 +894,9 @@ export async function GET(request: Request): Promise<Response> {
         standings.get(fixture.leagueSlug) ?? new Map(),
         force,
       );
-      return buildCorrectScorePrediction(fixture, inputs, maxGoals);
+      return buildCorrectScorePrediction(fixture, inputs, maxGoals, { model, simulations, method });
     });
-    responseCache.set(maxGoals, { at: Date.now(), matches });
+    responseCache.set(cacheKey, { at: Date.now(), matches });
     return feedResponse(matches, "MISS");
   } catch (error) {
     console.error("[CorrectScore] prediction feed failed", error);
