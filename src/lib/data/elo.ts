@@ -17,13 +17,21 @@
 // home bonus) rather than to the rating itself, so a team's stored rating stays
 // venue-independent and comparable across fixtures.
 
+import { fetchWithTimeout } from "./http";
 import {
+  DEFAULT_SEASONS,
   loadHistoricalMatches,
+  makeMatchId,
   normaliseTeamName,
+  parseGoals,
+  parseHistoricalDate,
+  seasonCodes,
   teamsMatch,
   type HistoricalLoadOptions,
   type HistoricalMatch,
+  type SourceReport,
 } from "./historical";
+import { parseCsv } from "./sources/githubDatasets";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -54,6 +62,16 @@ export const ELO_GOAL_ELASTICITY = 0.25;
 /** Hard bounds on the ELO λ multipliers so no rating can zero out a team. */
 const LAMBDA_MULTIPLIER_MIN = 0.55;
 const LAMBDA_MULTIPLIER_MAX = 1.85;
+
+// ─── engsoccerdata source ─────────────────────────────────────────────────────
+
+/** jalapic/engsoccerdata — comprehensive English football results since 1888. */
+const ENGSOCCERDATA_REPO = "jalapic/engsoccerdata";
+const ENGSOCCERDATA_PATH = "data-raw/england.csv";
+const ENGSOCCERDATA_TIMEOUT_MS = 90_000;
+const ENGSOCCERDATA_META_TIMEOUT_MS = 30_000;
+/** Below this the dataset is too thin to carry meaningful team-strength priors. */
+const MIN_ELO_MATCHES = 100;
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -262,16 +280,15 @@ export function getActiveEloTable(): EloTable | null {
 }
 
 /**
- * Current ELO rating for a team.
+ * Current ELO rating for a team, or `null` when the team has no replayed
+ * history in the loaded dataset. Callers must treat `null` as "rating
+ * unknown" — there is no synthetic fallback.
  *
  * Resolution order: exact `league|team` entry → the team's entry in any
- * competition (a promoted side or a cup tie still resolves) → `INITIAL_ELO`
- * for a team with no history. Unknown teams are rated, never invented: 1500 is
- * the documented starting rating, and callers can tell a cold start from a
- * rated team via `hasElo`.
+ * competition (a promoted side or a cup tie still resolves) → `null`.
  */
-export function getElo(team: string, league?: string | null, table: EloTable | null = activeTable): number {
-  return findEloEntry(team, league, table)?.rating ?? INITIAL_ELO;
+export function getElo(team: string, league?: string | null, table: EloTable | null = activeTable): number | null {
+  return findEloEntry(team, league, table)?.rating ?? null;
 }
 
 /** Same lookup as `getElo`, but null when the team has no replayed history. */
@@ -344,6 +361,154 @@ export function eloLambdaMultipliers(
   };
 }
 
+// ─── engsoccerdata loader ─────────────────────────────────────────────────────
+
+/**
+ * Load completed matches from `jalapic/engsoccerdata` via the GitHub Contents
+ * API. The `england.csv` file covers every English league tier from 1888 to
+ * the present — we filter to tiers 1–2 and the requested rolling-season
+ * window so the ELO replay has enough history to rate promoted sides
+ * (Coventry City, Hull City, Ipswich Town in 2026/27) without pulling in
+ * the entire 15 MB file at once.
+ *
+ * The Contents API returns raw content for files ≤ 1 MB; for larger files it
+ * returns JSON metadata with a `download_url`. We try the raw endpoint first
+ * and fall back to the download URL.
+ */
+export async function loadMatchesFromEngSoccerData(
+  options: { seasons?: string[]; maxTier?: number } = {},
+): Promise<{ matches: HistoricalMatch[]; notes: string[] }> {
+  const maxTier = options.maxTier ?? 2;
+  const seasonYears = new Set(
+    (options.seasons ?? []).map((s) => parseInt(s.slice(0, 4), 10)),
+  );
+
+  const contentsUrl =
+    `https://api.github.com/repos/${ENGSOCCERDATA_REPO}/contents/${ENGSOCCERDATA_PATH}`;
+
+  // Attempt 1: raw content (works for files ≤ 1 MB).
+  let csvText: string | null = null;
+  const rawRes = await fetchWithTimeout(contentsUrl, {
+    text: true,
+    timeoutMs: ENGSOCCERDATA_TIMEOUT_MS,
+    headers: { Accept: "application/vnd.github.raw+json" },
+  });
+
+  if (rawRes.status === "ok" && typeof rawRes.data === "string" && rawRes.data.length > 100) {
+    csvText = rawRes.data;
+  } else {
+    // Attempt 2: fetch metadata JSON → download_url (for files > 1 MB).
+    console.info(
+      `[Elo] engsoccerdata raw fetch: ${rawRes.status}${rawRes.status === "http-error" ? ` (HTTP ${rawRes.httpStatus})` : ""} — trying download_url`,
+    );
+    const metaRes = await fetchWithTimeout(contentsUrl, {
+      text: false,
+      timeoutMs: ENGSOCCERDATA_META_TIMEOUT_MS,
+    });
+    if (metaRes.status === "ok" && metaRes.data && typeof metaRes.data === "object") {
+      const downloadUrl = (metaRes.data as Record<string, unknown>).download_url;
+      if (typeof downloadUrl === "string") {
+        const dlRes = await fetchWithTimeout(downloadUrl, {
+          text: true,
+          timeoutMs: ENGSOCCERDATA_TIMEOUT_MS,
+        });
+        if (dlRes.status === "ok" && typeof dlRes.data === "string" && dlRes.data.length > 100) {
+          csvText = dlRes.data;
+        } else {
+          return {
+            matches: [],
+            notes: [`engsoccerdata download_url: ${dlRes.status}`],
+          };
+        }
+      } else {
+        return { matches: [], notes: ["engsoccerdata: no download_url in metadata"] };
+      }
+    } else {
+      return {
+        matches: [],
+        notes: [`engsoccerdata metadata: ${metaRes.status}`],
+      };
+    }
+  }
+
+  // Parse CSV — the file uses standard comma-separated quoting.
+  const rows = parseCsv(csvText, 60_000);
+  if (rows.length < 2) {
+    return { matches: [], notes: ["engsoccerdata: empty or unparseable CSV"] };
+  }
+
+  // Build column index from the header row.
+  const header = rows[0];
+  const norm = (v: string): string => v.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const colMap = new Map<string, number>();
+  header.forEach((cell, i) => {
+    const key = norm(cell);
+    if (!colMap.has(key)) colMap.set(key, i);
+  });
+
+  const dateCol = colMap.get("date");
+  const seasonCol = colMap.get("season");
+  const homeCol = colMap.get("home");
+  const visitorCol = colMap.get("visitor") ?? colMap.get("away");
+  const hgoalCol = colMap.get("hgoal") ?? colMap.get("homegoals");
+  const vgoalCol = colMap.get("vgoal") ?? colMap.get("awaygoals");
+  const tierCol = colMap.get("tier");
+
+  if (
+    homeCol === undefined ||
+    visitorCol === undefined ||
+    hgoalCol === undefined ||
+    vgoalCol === undefined
+  ) {
+    return {
+      matches: [],
+      notes: ["engsoccerdata: missing required columns (home/visitor/hgoal/vgoal)"],
+    };
+  }
+
+  const matches: HistoricalMatch[] = [];
+  for (let i = 1; i < rows.length; i++) {
+    const row = rows[i];
+
+    // Tier filter: 1 = top flight, 2 = second tier (for promoted-team history).
+    if (tierCol !== undefined) {
+      const tier = parseInt(row[tierCol], 10);
+      if (!Number.isFinite(tier) || tier > maxTier) continue;
+    }
+
+    // Season filter: keep only the rolling window.
+    if (seasonCol !== undefined && seasonYears.size > 0) {
+      const seasonVal = parseInt(row[seasonCol], 10);
+      if (!Number.isFinite(seasonVal) || !seasonYears.has(seasonVal)) continue;
+    }
+
+    const home = row[homeCol]?.trim();
+    const away = row[visitorCol]?.trim();
+    const homeGoals = parseGoals(row[hgoalCol]);
+    const awayGoals = parseGoals(row[vgoalCol]);
+    const matchDate = dateCol !== undefined ? parseHistoricalDate(row[dateCol]) : null;
+
+    if (!home || !away || homeGoals === null || awayGoals === null || !matchDate) continue;
+
+    const tier = tierCol !== undefined ? parseInt(row[tierCol], 10) : 1;
+    const leagueSlug = tier <= 1 ? "eng.1" : `eng.${tier}`;
+
+    matches.push({
+      id: makeMatchId(leagueSlug, home, away, matchDate),
+      homeTeam: home,
+      awayTeam: away,
+      leagueSlug,
+      matchDate,
+      homeGoals,
+      awayGoals,
+      competitionName: tier <= 1 ? "Premier League" : `English Tier ${tier}`,
+      source: "github-datasets",
+    });
+  }
+
+  return { matches, notes: [] };
+}
+
 // ─── Loading ──────────────────────────────────────────────────────────────────
 
 export interface EloTableBundle {
@@ -353,28 +518,139 @@ export interface EloTableBundle {
   primarySource: string | null;
   sources: Array<{ source: string; attempted: boolean; added: number; note: string }>;
   generatedAt: string;
+  /** Present when the model has no data and should not be used for predictions. */
+  error?: string;
 }
 
 /**
  * Load the historical dataset and replay it into an ELO table. This is what
  * makes the two-argument `getElo(team, league)` form work: the resulting table
  * becomes the active one.
+ *
+ * When the primary historical sources return too few matches the
+ * `jalapic/engsoccerdata` CSV is fetched as a supplementary layer so that
+ * promoted sides and lower-tier clubs carry real ratings into the model.
+ *
+ * If *no* source produces data the bundle carries an `error` string and the
+ * caller must not use the table for predictions.
  */
 export async function loadEloTable(
   options: HistoricalLoadOptions & EloBuildOptions = {},
 ): Promise<EloTableBundle> {
   const dataset = await loadHistoricalMatches(options);
-  const table = buildEloRatings(dataset.matches, options);
+
+  let allMatches = [...dataset.matches];
+  const sources: SourceReport[] = [...dataset.sources];
+
+  // Supplement with engsoccerdata when the primary sources are too thin.
+  if (allMatches.length < MIN_ELO_MATCHES) {
+    const now = options.now ?? new Date();
+    const seasons = Math.max(1, options.seasons ?? DEFAULT_SEASONS);
+    const seasonList = seasonCodes(now, seasons + 1); // +1 for promoted-team history
+
+    console.info(
+      `[Elo] Primary sources returned ${allMatches.length} matches (min ${MIN_ELO_MATCHES}), loading engsoccerdata...`,
+    );
+
+    try {
+      const engData = await loadMatchesFromEngSoccerData({
+        seasons: seasonList,
+        maxTier: 2,
+      });
+
+      if (engData.matches.length > 0) {
+        const seen = new Set(allMatches.map((m) => m.id));
+        let added = 0;
+        for (const match of engData.matches) {
+          if (!seen.has(match.id)) {
+            seen.add(match.id);
+            allMatches.push(match);
+            added++;
+          }
+        }
+        sources.push({
+          source: "github-datasets",
+          attempted: true,
+          added,
+          note: added > 0
+            ? `engsoccerdata: ${added} new matches (${engData.matches.length} parsed)`
+            : "engsoccerdata: all matches already present",
+        });
+        console.info(
+          `[Elo] engsoccerdata: added ${added} new matches from ${engData.matches.length} parsed`,
+        );
+      } else {
+        sources.push({
+          source: "github-datasets",
+          attempted: true,
+          added: 0,
+          note: engData.notes.join("; ") || "engsoccerdata: no usable matches",
+        });
+        console.warn(`[Elo] engsoccerdata: ${engData.notes.join("; ") || "no usable matches"}`);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      sources.push({
+        source: "github-datasets",
+        attempted: true,
+        added: 0,
+        note: `engsoccerdata error: ${message}`,
+      });
+      console.warn(`[Elo] engsoccerdata error: ${message}`);
+    }
+  }
+
+  // Sort all matches chronologically before replaying.
+  allMatches.sort(
+    (a, b) => new Date(a.matchDate).getTime() - new Date(b.matchDate).getTime(),
+  );
+
+  // Hard failure: no data at all → the model must not run.
+  if (allMatches.length === 0) {
+    const reasons = sources
+      .map((s) => `${s.source}: ${s.note || "no matches"}`)
+      .join("; ");
+    const error = `[Elo] Failed to load data: ${reasons}`;
+    console.error(error);
+    return {
+      table: createEloTable(),
+      matches: 0,
+      seasonsCovered: [],
+      primarySource: null,
+      sources: sources.map((s) => ({
+        source: s.source,
+        attempted: s.attempted,
+        added: s.added,
+        note: s.note,
+      })),
+      generatedAt: new Date().toISOString(),
+      error,
+    };
+  }
+
+  const table = buildEloRatings(allMatches, options);
+  const seasons = new Set<string>();
+  for (const m of allMatches) {
+    const y = new Date(m.matchDate).getUTCFullYear();
+    const start = new Date(m.matchDate).getUTCMonth() >= 6 ? y : y - 1;
+    seasons.add(`${start}-${String((start + 1) % 100).padStart(2, "0")}`);
+  }
+
+  console.info(
+    `[Elo] Loaded ${allMatches.length} historical matches for Premier League ` +
+      `(${[...seasons].sort().join(", ")}) — ${table.global.size} teams rated`,
+  );
+
   return {
     table,
-    matches: dataset.matchCount,
-    seasonsCovered: dataset.seasonsCovered,
+    matches: allMatches.length,
+    seasonsCovered: [...seasons].sort(),
     primarySource: dataset.primarySource,
-    sources: dataset.sources.map((source) => ({
-      source: source.source,
-      attempted: source.attempted,
-      added: source.added,
-      note: source.note,
+    sources: sources.map((s) => ({
+      source: s.source,
+      attempted: s.attempted,
+      added: s.added,
+      note: s.note,
     })),
     generatedAt: dataset.generatedAt,
   };
