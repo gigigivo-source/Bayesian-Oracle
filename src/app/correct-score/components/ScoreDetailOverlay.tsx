@@ -94,6 +94,8 @@ export interface CorrectScoreMatch {
   eloDelta?: number | null;
   structuralWeight?: number;
   modelSources?: string[];
+  /** Match week / round the fixture belongs to, when the feed supplied it. */
+  matchweek?: number | null;
   context?: MatchContext | null;
 }
 
@@ -106,9 +108,11 @@ export const qualityStyle: Record<DataQuality, string> = {
 };
 
 export const qualityDot: Record<DataQuality, string> = {
-  Real: "🔵",
-  Mixed: "🟡",
-  Synthetic: "⚪",
+  // Coloured by the surrounding `qualityStyle` badge, so a shared Unicode dot
+  // keeps the three states visually distinct without any emoji.
+  Real: "●",
+  Mixed: "●",
+  Synthetic: "●",
 };
 
 export const qualityTooltip: Record<DataQuality, string> = {
@@ -222,8 +226,12 @@ function formatEloDelta(delta?: number | null): string {
 }
 
 function modelBadgeText(match: CorrectScoreMatch): string {
-  if (match.modelBadge) return match.modelBadge.replace(/^🧠\s*/, "");
-  return `Monte Carlo (${formatSimulations(match.simulations)})`;
+  // The badge is already emoji-free on the wire ("Supercomputer" or
+  // "Monte Carlo (Nk sims)"); a defensive strip keeps older cached payloads
+  // from leaking a brain emoji into the UI.
+  return (match.modelBadge ?? `Monte Carlo (${formatSimulations(match.simulations)})`)
+    .replace(/\p{Extended_Pictographic}/gu, "")
+    .trim();
 }
 
 function isSupercomputer(match: CorrectScoreMatch): boolean {
@@ -450,7 +458,7 @@ export default function ScoreDetailOverlay({ match, onClose }: ScoreDetailOverla
               <span className="font-mono text-xs uppercase tracking-[0.2em] text-slate-500">vs</span>
               <span
                 className="rounded-xl border border-amber-400/35 bg-amber-400/[0.08] px-3 py-1.5 font-mono text-xl font-black text-amber-200"
-                title="Top predicted scoreline"
+                title="Projected Scoreline"
               >
                 {top ? top.score : "–"}
               </span>

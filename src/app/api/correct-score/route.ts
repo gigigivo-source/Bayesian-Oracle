@@ -175,8 +175,10 @@ export interface CorrectScoreMatch {
   // ── Supercomputer diagnostics ──────────────────────────────────────────────
   /** Engine identifier, e.g. `supercomputer-v2`. */
   model: string;
-  /** Card badge text: `🧠 Supercomputer` or `🧠 Monte Carlo (10k sims)`. */
+  /** Card badge text: `Supercomputer` or `Monte Carlo (10k sims)`. */
   modelBadge: string;
+  /** Match week / round the fixture belongs to (from the feed's matchday). */
+  matchweek: number | null;
   /** Simulations behind this fixture's scorelines. */
   simulations: number;
   simulationMethod: SimulationMethod;
@@ -625,8 +627,8 @@ export async function loadSupercomputerModel(
 
 /** Badge text for a fixture: supercomputer when the structural model drove λ. */
 export function modelBadgeFor(model: SupercomputerModel | null, simulations: number): string {
-  if (model?.available) return "🧠 Supercomputer";
-  return `🧠 Monte Carlo (${Math.round(simulations / 1000)}k sims)`;
+  if (model?.available) return "Supercomputer";
+  return `Monte Carlo (${Math.round(simulations / 1000)}k sims)`;
 }
 
 // ─── Expected goals ───────────────────────────────────────────────────────────
@@ -735,6 +737,7 @@ export function buildCorrectScorePrediction(
   maxGoals = DEFAULT_MAX_GOALS,
   supercomputer: SupercomputerInputs | null = null,
   context: CorrectScoreContext | null = null,
+  matchweek: number | null = null,
 ): CorrectScoreMatch {
   const model = supercomputer?.model ?? null;
   const simulations = supercomputer?.simulations ?? DEFAULT_SIMULATIONS;
@@ -794,7 +797,78 @@ export function buildCorrectScorePrediction(
     markets: simulation.markets,
     modelSources: model?.sources ?? [],
     context,
+    matchweek,
   };
+}
+
+// ─── Match week / round attribution ───────────────────────────────────────────
+
+/**
+ * Parse a round label the fixture feed can ship into a match week number.
+ *
+ * openfootball delivers "Matchday N" on every row (the value the feature
+ * spec calls the matchday), while other providers use "Matchweek N",
+ * "Round N", "Matchday N" or a local-language equivalent (Jornada, Journée,
+ * Spieltag). Returns `null` when the label carries no number, so the caller
+ * can fall back to a date-derived week.
+ */
+export function parseMatchweekLabel(value: string | null | undefined): number | null {
+  if (!value) return null;
+  const match = value.match(
+    /(?:matchday|matchweek|round|md|mday|jornada|journ[ée]e|spieltag|round robin)\s*(\d+)/i,
+  );
+  if (!match) return null;
+  const week = Number(match[1]);
+  return Number.isFinite(week) && week > 0 ? week : null;
+}
+
+/** Gap (ms) after which two fixtures belong to different match weeks. */
+const MATCHWEEK_GAP_MS = 3 * 86_400_000;
+
+/**
+ * Attribute a match week to every fixture.
+ *
+ * Prefers the provider's own round label (openfootball ships "Matchday N" in
+ * `statusDetail`). For feeds with no round label — an ESPN-only fixture list —
+ * it derives a synthetic week by clustering kickoffs within a few days of
+ * each other, so the match-week chips and the `?matchweek=` filter still work.
+ */
+function assignMatchweeks(fixtures: FixtureLite[]): Map<string, number> {
+  const weekById = new Map<string, number>();
+  const sorted = [...fixtures].sort(
+    (left, right) => new Date(left.date).getTime() - new Date(right.date).getTime(),
+  );
+
+  // Pass 1 — explicit round labels.
+  let maxParsed = 0;
+  for (const fixture of sorted) {
+    const week = parseMatchweekLabel(fixture.statusDetail);
+    if (week !== null) {
+      weekById.set(fixture.id, week);
+      if (week > maxParsed) maxParsed = week;
+    }
+  }
+
+  // Pass 2 — chronological clustering for the unlabelled remainder.
+  let nextSynthetic = maxParsed + 1;
+  let clusterWeek: number | null = null;
+  let clusterHead = 0;
+
+  for (const fixture of sorted) {
+    if (weekById.has(fixture.id)) continue;
+    const kickoff = new Date(fixture.date).getTime();
+    if (!Number.isFinite(kickoff)) {
+      weekById.set(fixture.id, nextSynthetic++);
+      continue;
+    }
+    if (clusterHead === 0 || kickoff - clusterHead > MATCHWEEK_GAP_MS) {
+      clusterWeek = nextSynthetic++;
+      clusterHead = kickoff;
+    }
+    weekById.set(fixture.id, clusterWeek!);
+  }
+
+  return weekById;
 }
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, fallback: T): Promise<T> {
@@ -1073,23 +1147,65 @@ function emptyDiagnostics(): FeedDiagnostics {
   };
 }
 
+export interface CorrectScoreFeedResponse {
+  matches: CorrectScoreMatch[];
+  /** Every match week that carries at least one fixture, sorted ascending. */
+  availableMatchweeks: number[];
+  /** The match week of the earliest fixture in the feed (the current round). */
+  currentMatchweek: number | null;
+  /** The match week this response was filtered to (defaults to current). */
+  selectedMatchweek: number | null;
+  /** Human-readable note for empty responses (no fixtures / future week). */
+  message?: string;
+  diagnostics?: FeedDiagnostics;
+}
+
+/**
+ * Build the feed response. When `requestedWeek` is non-null the feed is
+ * reduced to that match week (possibly empty for a future or unknown week);
+ * otherwise it returns every fixture and defaults `selectedMatchweek` to the
+ * current match week so the UI can pre-highlight the active chip.
+ */
 function feedResponse(
-  matches: CorrectScoreMatch[],
+  allMatches: CorrectScoreMatch[],
+  requestedWeek: number | null,
+  currentMatchweek: number | null,
   cacheStatus: "HIT" | "MISS",
   diagnostics?: FeedDiagnostics,
 ): Response {
   const headers = { "Cache-Control": "no-store", "X-Correct-Score-Cache": cacheStatus };
+  const availableMatchweeks = [
+    ...new Set(
+      allMatches
+        .map((match) => match.matchweek)
+        .filter((week): week is number => typeof week === "number"),
+    ),
+  ].sort((left, right) => left - right);
+
+  const selectedMatchweek = requestedWeek ?? currentMatchweek;
+  const matches =
+    requestedWeek !== null ? allMatches.filter((match) => match.matchweek === requestedWeek) : allMatches;
+
+  const body: CorrectScoreFeedResponse = {
+    matches,
+    availableMatchweeks,
+    currentMatchweek,
+    selectedMatchweek,
+  };
+
   if (!matches.length) {
-    return Response.json(
-      {
-        matches: [],
-        message: NO_PREMIER_LEAGUE_MESSAGE,
-        diagnostics: diagnostics ?? emptyDiagnostics(),
-      },
-      { headers },
-    );
+    if (requestedWeek !== null) {
+      body.message =
+        currentMatchweek !== null && requestedWeek > currentMatchweek
+          ? `Fixtures for Matchweek ${requestedWeek} will be available closer to the match date.`
+          : `No fixtures available for Matchweek ${requestedWeek}.`;
+    } else {
+      body.message = NO_PREMIER_LEAGUE_MESSAGE;
+    }
+    body.diagnostics = diagnostics ?? emptyDiagnostics();
   }
-  return Response.json(matches, { headers });
+
+  return Response.json(body, { headers });
 }
 
 async function fetchCanonicalStats(
@@ -1391,45 +1507,65 @@ export async function GET(request: Request): Promise<Response> {
   const force = url.searchParams.get("refresh") === "true";
   const cacheKey = `${maxGoals}|${simulations}|${method}`;
 
+  // Match-week filter: ?matchweek=N narrows the feed to that round (openfootball
+  // ships the round as "Matchday N" on every fixture). An absent or non-numeric
+  // value returns every fixture and defaults selectedMatchweek to the current one.
+  const requestedWeekRaw = url.searchParams.get("matchweek");
+  const requestedWeek =
+    requestedWeekRaw !== null && /^\d+$/.test(requestedWeekRaw) ? Number(requestedWeekRaw) : null;
+
+  let allMatches: CorrectScoreMatch[] | null = null;
+  let diagnostics: FeedDiagnostics | undefined;
+
   if (!force) {
     const cached = responseCache.get(cacheKey);
     if (cached && Date.now() - cached.at < CACHE_TTL_MS) {
-      return feedResponse(cached.matches, "HIT", cached.diagnostics);
+      allMatches = cached.matches;
+      diagnostics = cached.diagnostics;
     }
   }
 
-  try {
-    const [feed, model] = await Promise.all([
-      fetchUpcomingFixtures(request.url),
-      loadSupercomputerModel(PREMIER_LEAGUE_SLUG, { force }),
-    ]);
-    const fixtures = feed.fixtures;
-    const leagueSlugs = [...new Set(fixtures.map((fixture) => fixture.leagueSlug))];
-    const standingEntries = await Promise.all(
-      leagueSlugs.map(async (slug) => [slug, await fetchStandingAverages(slug)] as const),
-    );
-    const standings = new Map(standingEntries);
-    const matches = await mapWithConcurrency(fixtures, CONCURRENCY, async (fixture) => {
-      const { inputs, context } = await collectInputs(
-        fixture,
-        standings.get(fixture.leagueSlug) ?? new Map(),
-        force,
+  if (allMatches === null) {
+    try {
+      const [feed, model] = await Promise.all([
+        fetchUpcomingFixtures(request.url),
+        loadSupercomputerModel(PREMIER_LEAGUE_SLUG, { force }),
+      ]);
+      const fixtures = feed.fixtures;
+      const matchweeks = assignMatchweeks(fixtures);
+      const leagueSlugs = [...new Set(fixtures.map((fixture) => fixture.leagueSlug))];
+      const standingEntries = await Promise.all(
+        leagueSlugs.map(async (slug) => [slug, await fetchStandingAverages(slug)] as const),
       );
-      return buildCorrectScorePrediction(
-        fixture,
-        inputs,
-        maxGoals,
-        { model, simulations, method },
-        context,
+      const standings = new Map(standingEntries);
+      allMatches = await mapWithConcurrency(fixtures, CONCURRENCY, async (fixture) => {
+        const { inputs, context } = await collectInputs(
+          fixture,
+          standings.get(fixture.leagueSlug) ?? new Map(),
+          force,
+        );
+        return buildCorrectScorePrediction(
+          fixture,
+          inputs,
+          maxGoals,
+          { model, simulations, method },
+          context,
+          matchweeks.get(fixture.id) ?? null,
+        );
+      });
+      diagnostics = feed.diagnostics;
+      responseCache.set(cacheKey, { at: Date.now(), matches: allMatches, diagnostics });
+    } catch (error) {
+      console.error("[CorrectScore] prediction feed failed", error);
+      return Response.json(
+        { error: error instanceof Error ? error.message : "Unable to build correct-score predictions" },
+        { status: 503 },
       );
-    });
-    responseCache.set(cacheKey, { at: Date.now(), matches, diagnostics: feed.diagnostics });
-    return feedResponse(matches, "MISS", feed.diagnostics);
-  } catch (error) {
-    console.error("[CorrectScore] prediction feed failed", error);
-    return Response.json(
-      { error: error instanceof Error ? error.message : "Unable to build correct-score predictions" },
-      { status: 503 },
-    );
+    }
   }
+
+  // `allMatches` is sorted by kickoff, so the earliest fixture identifies the
+  // current round regardless of the incoming match-week filter.
+  const currentMatchweek = allMatches.length ? (allMatches[0].matchweek ?? null) : null;
+  return feedResponse(allMatches, requestedWeek, currentMatchweek, force ? "MISS" : "HIT", diagnostics);
 }
