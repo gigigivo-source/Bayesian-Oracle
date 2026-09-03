@@ -1,14 +1,27 @@
 // Tests for the /api/correct-score fixture selection and feed contract.
 //
-// The page must only ever show Premier League matches whose team identities
-// are real. Two failure modes are covered here:
+// The page must only ever show England Premier League (eng.1) matches whose
+// team identities are real and whose two clubs are in the 2026/27 division.
+// Three failure modes are covered here:
 //   • a degraded feed delivering rows without team names ("Unknown") used to
 //     reach the page and collapse onto identical league-anchor 1-1 predictions;
 //   • non-PL fixtures used to be counted but not attributed — the selection now
 //     reports exactly what it skipped and why (also surfaced as `diagnostics`
-//     on the empty-feed response).
+//     on the empty-feed response);
+//   • rows stamped `eng.1` that name a club outside the 2026/27 squad list
+//     (relegated sides from a stale feed, cup or reserve rows) are discarded by
+//     the allowlist, never predicted.
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { GET, hasResolvableTeams, selectPremierLeagueFixtures, type CorrectScoreMatch } from "./route";
+import {
+  GET,
+  PREMIER_LEAGUE_CLUBS_2026_27,
+  filterPremierLeagueSquad,
+  hasResolvableTeams,
+  matchPremierLeagueClub,
+  selectPremierLeagueFixtures,
+  type CorrectScoreMatch,
+  type FeedDiagnostics,
+} from "./route";
 import type { FixtureLite } from "@/lib/espn";
 import { loadHistoricalMatches, type HistoricalDataset } from "@/lib/data/historical";
 
@@ -156,6 +169,104 @@ describe("selectPremierLeagueFixtures", () => {
   });
 });
 
+describe("matchPremierLeagueClub — 2026/27 squad allowlist", () => {
+  it("covers exactly the 20 clubs in the division", () => {
+    expect(PREMIER_LEAGUE_CLUBS_2026_27).toHaveLength(20);
+    for (const club of PREMIER_LEAGUE_CLUBS_2026_27) {
+      expect(matchPremierLeagueClub(club.name), club.name).toBe(club.name);
+    }
+  });
+
+  it("matches the documented short forms, ignoring case, accents and punctuation", () => {
+    const cases: Array<[string, string]> = [
+      ["Bournemouth", "AFC Bournemouth"],
+      ["AFC Bournemouth", "AFC Bournemouth"],
+      ["brighton", "Brighton & Hove Albion"],
+      ["BRIGHTON & HOVE ALBION", "Brighton & Hove Albion"],
+      ["Coventry", "Coventry City"],
+      ["Hull", "Hull City"],
+      ["Ipswich", "Ipswich Town"],
+      ["Leeds", "Leeds United"],
+      ["Man City", "Manchester City"],
+      ["Manchester City FC", "Manchester City"],
+      ["Man United", "Manchester United"],
+      ["Manchester United", "Manchester United"],
+      ["Newcastle", "Newcastle United"],
+      ["Nottingham", "Nottingham Forest"],
+      ["Sunderland", "Sunderland"],
+      ["Tottenham", "Tottenham Hotspur"],
+      ["Spurs", "Tottenham Hotspur"],
+      ["  arsenal  ", "Arsenal"],
+      ["aston villa", "Aston Villa"],
+      ["Crystal Palace FC", "Crystal Palace"],
+      // Broadcast-style abbreviations a feed may deliver.
+      ["Nott'm Forest", "Nottingham Forest"],
+      ["Man. City", "Manchester City"],
+      ["Man. Utd", "Manchester United"],
+      ["Newcastle Utd", "Newcastle United"],
+    ];
+    for (const [input, expected] of cases) {
+      expect(matchPremierLeagueClub(input), input).toBe(expected);
+    }
+  });
+
+  it("never confuses the two Manchester clubs", () => {
+    expect(matchPremierLeagueClub("Manchester City")).toBe("Manchester City");
+    expect(matchPremierLeagueClub("Manchester United")).toBe("Manchester United");
+    expect(matchPremierLeagueClub("Manchester")).toBe(null);
+  });
+
+  it("rejects clubs that are not in the 2026/27 division", () => {
+    for (const name of [
+      "West Ham United", // relegated at the end of 2025/26
+      "Burnley", // relegated at the end of 2025/26
+      "Wolverhampton Wanderers", // relegated at the end of 2025/26
+      "Wolves",
+      "Leicester City",
+      "Real Madrid",
+      "Celtic",
+      "Home FC",
+      "Unknown",
+      "",
+    ]) {
+      expect(matchPremierLeagueClub(name), name).toBe(null);
+    }
+  });
+
+  it("rejects youth, women and reserve rows that carry a Premier League name", () => {
+    expect(matchPremierLeagueClub("Arsenal U21")).toBe(null);
+    expect(matchPremierLeagueClub("Manchester United Women")).toBe(null);
+    expect(matchPremierLeagueClub("Liverpool Reserves")).toBe(null);
+    expect(matchPremierLeagueClub(undefined)).toBe(null);
+  });
+});
+
+describe("filterPremierLeagueSquad", () => {
+  it("keeps only fixtures whose two clubs are both in the squad list", () => {
+    const kept = fixture({
+      id: "kept",
+      home: team("Coventry City", "home"),
+      away: team("Arsenal", "away"),
+    });
+    const stale = fixture({
+      id: "stale",
+      home: team("West Ham United", "home"),
+      away: team("Arsenal", "away"),
+    });
+    const partial = fixture({
+      id: "partial",
+      home: team("Arsenal", "home"),
+      away: team("Rangers", "away"),
+    });
+    const result = filterPremierLeagueSquad([kept, stale, partial]);
+    expect(result.kept.map((f) => f.id)).toEqual(["kept"]);
+    expect(result.rejected.map((r) => `${r.home} vs ${r.away}`)).toEqual([
+      "West Ham United vs Arsenal",
+      "Arsenal vs Rangers",
+    ]);
+  });
+});
+
 describe("GET /api/correct-score", () => {
   beforeEach(() => {
     vi.mocked(loadHistoricalMatches).mockResolvedValue(EMPTY_DATASET);
@@ -237,8 +348,76 @@ describe("GET /api/correct-score", () => {
       diagnostics?: { unresolvedTeams: number; inWindow: number; nonPremierLeague: Record<string, number> };
     };
     expect(body.matches).toEqual([]);
-    expect(body.message).toBe("No Premier League matches available.");
+    expect(body.message).toBe(
+      "No England Premier League matches available in the current fixture window.",
+    );
     expect(body.diagnostics?.unresolvedTeams).toBe(1);
     expect(body.diagnostics?.inWindow).toBe(1);
+  });
+
+  it("discards eng.1 fixtures naming a club outside the 2026/27 squad list", async () => {
+    stubFeed([
+      fixture({
+        id: "pl-kept",
+        home: team("Coventry City", "home"),
+        away: team("Arsenal", "away"),
+      }),
+      // Relegated at the end of 2025/26 — must never be predicted.
+      fixture({
+        id: "pl-stale",
+        home: team("West Ham United", "home"),
+        away: team("Burnley", "away"),
+      }),
+      // Right league filter, wrong division.
+      fixture({
+        id: "pl-reserve",
+        home: team("Manchester United Reserves", "home"),
+        away: team("Arsenal U21", "away"),
+      }),
+      // Right competition shape, wrong league.
+      fixture({ id: "es-1", leagueSlug: "esp.1", leagueName: "Spanish La Liga" }),
+    ]);
+
+    const response = await GET(
+      new Request("http://localhost:3000/api/correct-score?refresh=true&sims=1000"),
+    );
+    expect(response.status).toBe(200);
+    const matches = (await response.json()) as CorrectScoreMatch[];
+    expect(matches.map((m) => m.fixtureId)).toEqual(["pl-kept"]);
+    expect(matches[0].homeTeam).toBe("Coventry City");
+    expect(matches[0].awayTeam).toBe("Arsenal");
+    expect(matches[0].leagueSlug).toBe("eng.1");
+  });
+
+  it("reports the filter counters when no England Premier League fixture survives", async () => {
+    stubFeed([
+      fixture({
+        id: "stale",
+        home: team("West Ham United", "home"),
+        away: team("Wolverhampton Wanderers", "away"),
+      }),
+      fixture({ id: "es-1", leagueSlug: "esp.1", leagueName: "Spanish La Liga" }),
+    ]);
+
+    const response = await GET(
+      new Request("http://localhost:3000/api/correct-score?refresh=true&sims=1000"),
+    );
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      matches: CorrectScoreMatch[];
+      message: string;
+      diagnostics: FeedDiagnostics;
+    };
+    expect(body.matches).toEqual([]);
+    expect(body.message).toBe(
+      "No England Premier League matches available in the current fixture window.",
+    );
+    expect(body.diagnostics.totalFixturesScanned).toBe(2);
+    expect(body.diagnostics.filteredByLeague).toBe(1);
+    expect(body.diagnostics.filteredByTeamList).toBe(1);
+    expect(body.diagnostics.rejectedTeams).toEqual([
+      "West Ham United vs Wolverhampton Wanderers",
+    ]);
+    expect(body.diagnostics.season).toBe("2026/27");
   });
 });
