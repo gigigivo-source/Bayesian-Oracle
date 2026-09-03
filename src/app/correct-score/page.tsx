@@ -15,6 +15,8 @@ import ScoreDetailOverlay, {
   type CorrectScoreMatch,
 } from "./components/ScoreDetailOverlay";
 
+export const dynamic = "force-dynamic";
+
 /** localStorage key for the Predictor Mode preference. */
 const PREDICTOR_MODE_STORAGE_KEY = "correct-score:predictor-mode";
 

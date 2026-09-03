@@ -25,6 +25,8 @@ import {
 import { OUTLINE_CYAN } from "@/app/_components/design";
 import { LEAGUE_MAP } from "@/lib/leagues";
 
+export const dynamic = "force-dynamic";
+
 function competitionNameFor(slug: string | undefined | null): string | null {
   if (!slug) return null;
   return LEAGUE_MAP[slug]?.name ?? slug;

@@ -4,6 +4,8 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { GLASS_PANEL } from "../../_components/design";
 
+export const dynamic = "force-dynamic";
+
 type DataQuality = "Real" | "Mixed" | "Synthetic";
 
 interface CalibrationBucket {

@@ -3,7 +3,15 @@ import { Pool } from "pg";
 
 const databaseUrl = process.env.DATABASE_URL;
 
-if (!databaseUrl) {
+// `next build` evaluates every route module while "collecting page data", and
+// the build container (Railway, Vercel, CI) usually has no DATABASE_URL.
+// Throwing at import time there fails the entire build with "Failed to collect
+// page data for /api/…" — even for routes already marked
+// `export const dynamic = "force-dynamic"`, because that only opts out of
+// prerendering, not of module evaluation. The fail-fast guard is therefore
+// relaxed only during the build phase: every runtime environment (dev server,
+// production server, tests) keeps failing fast on a missing DATABASE_URL.
+if (!databaseUrl && process.env.NEXT_PHASE !== "phase-production-build") {
   throw new Error("DATABASE_URL is required");
 }
 

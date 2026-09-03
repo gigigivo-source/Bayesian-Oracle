@@ -28,6 +28,8 @@ import {
   type LeaguesResponse,
 } from "@/app/_components/perf/leagues";
 
+export const dynamic = "force-dynamic";
+
 type SortKey = "totalBets" | "hitRate" | "roi" | "totalPnl";
 const SORT_OPTIONS: Array<{ key: SortKey; label: string }> = [
   { key: "totalBets", label: "Total Bets" },

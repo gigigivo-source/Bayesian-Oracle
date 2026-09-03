@@ -24,6 +24,8 @@ import {
   NAV_PILL_OFF,
 } from "../_components/design";
 
+export const dynamic = "force-dynamic";
+
 // ─── Payload types (mirrors src/app/api/profit-maximizer/route.ts) ────────────
 
 type ProfitSource =
