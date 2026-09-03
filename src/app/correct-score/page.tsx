@@ -64,6 +64,9 @@ const confidenceStyle: Record<Confidence, string> = {
   LOW: "border-slate-500/30 bg-slate-500/10 text-slate-400",
 };
 
+/** localStorage key for the Predictor Mode preference. */
+const PREDICTOR_MODE_STORAGE_KEY = "correct-score:predictor-mode";
+
 function formatKickoff(iso: string): string {
   return new Date(iso).toLocaleString("en-GB", {
     weekday: "short",
@@ -175,7 +178,27 @@ function ScorelineTile({ scoreline, rank }: { scoreline: Scoreline; rank: number
   );
 }
 
-function MatchCard({ match }: { match: CorrectScoreMatch }) {
+/** 🎯 Predictor Mode: a single, oversized Top-1 scoreline per match. */
+function PredictorPick({ match }: { match: CorrectScoreMatch }) {
+  const top = match.topScorelines[0];
+  if (!top) return null;
+  return (
+    <div className="flex flex-col items-center gap-3 rounded-2xl border border-amber-400/35 bg-amber-400/[0.08] px-6 py-10 shadow-[0_0_40px_-16px_rgba(245,158,11,0.6)]">
+      <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-300/40 bg-amber-400/10 px-3 py-1 text-xs font-bold text-amber-200">
+        🎯 Best Guess
+      </span>
+      <div className="font-mono text-6xl font-black leading-none tracking-tight text-white sm:text-7xl">
+        {top.score}
+      </div>
+      <div className="text-2xl font-extrabold text-amber-200">
+        {(top.probability * 100).toFixed(1)}%
+      </div>
+      <div className="font-mono text-[10px] uppercase tracking-[0.16em] text-slate-500">Probability</div>
+    </div>
+  );
+}
+
+function MatchCard({ match, predictorMode }: { match: CorrectScoreMatch; predictorMode: boolean }) {
   return (
     <article className={`rounded-3xl p-5 sm:p-6 ${GLASS_PANEL}`}>
       <div className="flex flex-wrap items-start justify-between gap-3 border-b border-white/[0.07] pb-5">
@@ -235,20 +258,26 @@ function MatchCard({ match }: { match: CorrectScoreMatch }) {
         </div>
       </div>
 
-      <div className="mb-2 flex items-center justify-between">
-        <h3 className="font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-slate-400">
-          Top 10 scorelines
-        </h3>
-        <span className="text-[10px] text-slate-600">
-          {match.model ? `${match.model} · ` : ""}
-          Monte Carlo {formatSimulations(match.simulations)}
-        </span>
-      </div>
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
-        {match.topScorelines.map((scoreline, index) => (
-          <ScorelineTile key={scoreline.score} scoreline={scoreline} rank={index + 1} />
-        ))}
-      </div>
+      {predictorMode ? (
+        <PredictorPick match={match} />
+      ) : (
+        <>
+          <div className="mb-2 flex items-center justify-between">
+            <h3 className="font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-slate-400">
+              Top 10 scorelines
+            </h3>
+            <span className="text-[10px] text-slate-600">
+              {match.model ? `${match.model} · ` : ""}
+              Monte Carlo {formatSimulations(match.simulations)}
+            </span>
+          </div>
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
+            {match.topScorelines.map((scoreline, index) => (
+              <ScorelineTile key={scoreline.score} scoreline={scoreline} rank={index + 1} />
+            ))}
+          </div>
+        </>
+      )}
     </article>
   );
 }
@@ -259,7 +288,28 @@ export default function CorrectScorePage() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Predictor Mode: read once from localStorage at mount (same lazy-initialiser
+  // pattern the rest of the app uses for persisted preferences), then persist
+  // every change back so the choice survives a refresh.
+  const [predictorMode, setPredictorMode] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    try {
+      return window.localStorage.getItem(PREDICTOR_MODE_STORAGE_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
   const initialLoad = useRef(false);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      if (predictorMode) window.localStorage.setItem(PREDICTOR_MODE_STORAGE_KEY, "1");
+      else window.localStorage.removeItem(PREDICTOR_MODE_STORAGE_KEY);
+    } catch {
+      // Storage failures are non-fatal; the toggle still works for the session.
+    }
+  }, [predictorMode]);
 
   const load = useCallback(async (refresh = false) => {
     if (refresh) setRefreshing(true);
@@ -310,14 +360,38 @@ export default function CorrectScorePage() {
               Supercomputer · ELO + Dixon-Coles + Monte Carlo · Next 7 days
             </div>
             <h1 className="bg-gradient-to-r from-white via-cyan-100 to-amber-200 bg-clip-text text-3xl font-black tracking-tight text-transparent sm:text-4xl">
-              Premier League Correct Score Predictions
+              {predictorMode
+                ? "Predictor Mode — Submit your exact score predictions"
+                : "Premier League Correct Score Predictions"}
             </h1>
             <p className="mt-2 text-sm text-slate-400 sm:text-base">
-              Most likely final scorelines, simulated 10,000 times per match from real historical results
+              {predictorMode
+                ? "One best-guess scoreline per match, sized for quick entry"
+                : "Most likely final scorelines, simulated 10,000 times per match from real historical results"}
             </p>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              role="switch"
+              aria-checked={predictorMode}
+              onClick={() => setPredictorMode((current) => !current)}
+              className="inline-flex items-center gap-2 rounded-full border border-amber-300/25 bg-white/[0.04] py-1.5 pl-2 pr-4 text-xs font-semibold text-slate-300 transition hover:bg-white/[0.09] hover:text-white"
+            >
+              <span
+                className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${
+                  predictorMode ? "bg-amber-400" : "bg-slate-600"
+                }`}
+              >
+                <span
+                  className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${
+                    predictorMode ? "translate-x-[1.15rem]" : "translate-x-0.5"
+                  }`}
+                />
+              </span>
+              {predictorMode ? "🎯 Predictor Mode" : "Full Analysis"}
+            </button>
             <Link
               href="/"
               className="inline-flex items-center rounded-full border border-white/[0.08] bg-white/[0.04] px-4 py-2 text-xs font-semibold text-slate-300 transition hover:bg-white/[0.09] hover:text-white"
@@ -383,7 +457,9 @@ export default function CorrectScorePage() {
               <span>{matches.length} upcoming {matches.length === 1 ? "match" : "matches"}</span>
               <span>Probabilities are model estimates, not guarantees.</span>
             </div>
-            {matches.map((match) => <MatchCard key={`${match.leagueSlug}:${match.fixtureId}`} match={match} />)}
+            {matches.map((match) => (
+              <MatchCard key={`${match.leagueSlug}:${match.fixtureId}`} match={match} predictorMode={predictorMode} />
+            ))}
           </div>
         ) : !error ? (
           <div className={`rounded-3xl p-10 text-center ${GLASS_PANEL}`}>
