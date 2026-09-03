@@ -106,9 +106,9 @@ export const qualityStyle: Record<DataQuality, string> = {
 };
 
 export const qualityDot: Record<DataQuality, string> = {
-  Real: "🔵",
-  Mixed: "🟡",
-  Synthetic: "⚪",
+  Real: "●",
+  Mixed: "●",
+  Synthetic: "●",
 };
 
 export const qualityTooltip: Record<DataQuality, string> = {

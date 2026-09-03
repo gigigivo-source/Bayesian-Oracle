@@ -67,6 +67,49 @@ interface BacktestResponse {
 const RANGES = [7, 30, 90] as const;
 const PAGE_SIZE = 12;
 
+function RefreshIcon({ size = 14, className = "" }: { size?: number; className?: string }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      className={className}
+    >
+      <path d="M21 2v6h-6" />
+      <path d="M3 12a9 9 0 0 1 15-6.7L21 8" />
+      <path d="M3 22v-6h6" />
+      <path d="M21 12a9 9 0 0 1-15 6.7L3 16" />
+    </svg>
+  );
+}
+
+function ChartIcon({ size = 24 }: { size?: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <line x1="18" y1="20" x2="18" y2="10" />
+      <line x1="12" y1="20" x2="12" y2="4" />
+      <line x1="6" y1="20" x2="6" y2="14" />
+      <line x1="2" y1="20" x2="22" y2="20" />
+    </svg>
+  );
+}
+
 function percent(value: number): string {
   return `${(value * 100).toFixed(1)}%`;
 }
@@ -238,7 +281,7 @@ export default function CorrectScoreBacktestPage() {
               disabled={running || loading}
               className="inline-flex items-center gap-2 rounded-full border border-violet-300/25 bg-gradient-to-r from-violet-600 to-cyan-600 px-4 py-2 text-xs font-bold text-white shadow-[0_0_20px_-7px_rgba(139,92,246,0.75)] transition hover:scale-[1.03] disabled:cursor-wait disabled:opacity-60"
             >
-              <span className={running ? "animate-spin" : ""}>↻</span>
+              <RefreshIcon size={14} className={running ? "animate-spin" : ""} />
               {running ? "Running…" : "Run Backtest"}
             </button>
           </div>
@@ -424,7 +467,9 @@ export default function CorrectScoreBacktestPage() {
                 </table>
                 {!data.matches.length && (
                   <div className="p-10 text-center">
-                    <div className="text-2xl">📊</div>
+                    <div className="flex justify-center text-slate-500">
+                      <ChartIcon size={24} />
+                    </div>
                     <div className="mt-2 text-sm font-semibold text-slate-300">{data.message ?? "No completed matches found"}</div>
                     <p className="mt-1 text-xs text-slate-600">Try a longer date range or run again when the fixture cache has results.</p>
                   </div>
