@@ -2,67 +2,20 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { GLASS_PANEL } from "../_components/design";
-
-type DataQuality = "Real" | "Mixed" | "Synthetic";
-type Confidence = "HIGH" | "MEDIUM" | "LOW";
-
-interface Scoreline {
-  score: string;
-  homeGoals: number;
-  awayGoals: number;
-  probability: number;
-  impliedOdds: number;
-  confidence: Confidence;
-  dataQuality: DataQuality;
-}
-
-interface CorrectScoreMatch {
-  fixtureId: string;
-  homeTeam: string;
-  awayTeam: string;
-  homeLogo: string | null;
-  awayLogo: string | null;
-  league: string;
-  leagueSlug: string;
-  date: string;
-  venue: string | null;
-  homeExpectedGoals: number;
-  awayExpectedGoals: number;
-  h2hGoalAverage: number | null;
-  dataQuality: DataQuality;
-  statsSources: string[];
-  topScorelines: Scoreline[];
-  // ── Supercomputer diagnostics (optional: absent from cached older payloads) ──
-  model?: string;
-  modelBadge?: string;
-  simulations?: number;
-  simulationMethod?: string;
-  rho?: number;
-  homeElo?: number | null;
-  awayElo?: number | null;
-  eloDelta?: number | null;
-  structuralWeight?: number;
-  modelSources?: string[];
-}
-
-const qualityStyle: Record<DataQuality, string> = {
-  Real: "border-sky-400/30 bg-sky-400/10 text-sky-200",
-  Mixed: "border-amber-400/30 bg-amber-400/10 text-amber-200",
-  Synthetic: "border-slate-500/30 bg-slate-500/10 text-slate-300",
-};
-
-const qualityDot: Record<DataQuality, string> = {
-  Real: "🔵",
-  Mixed: "🟡",
-  Synthetic: "⚪",
-};
-
-const confidenceStyle: Record<Confidence, string> = {
-  HIGH: "border-emerald-400/30 bg-emerald-400/10 text-emerald-200",
-  MEDIUM: "border-amber-400/30 bg-amber-400/10 text-amber-200",
-  LOW: "border-slate-500/30 bg-slate-500/10 text-slate-400",
-};
+import {
+  CARD_ACCENT_ORDER,
+  CARD_GLASS,
+  CARD_GLASS_SKIN,
+  GLASS_PANEL,
+  GLASS_TEXT_SHADOW,
+} from "../_components/design";
+import ScoreDetailOverlay, {
+  confidenceStyle,
+  qualityDot,
+  qualityStyle,
+  type CorrectScoreMatch,
+  type Scoreline,
+} from "./components/ScoreDetailOverlay";
 
 /** localStorage key for the Predictor Mode preference. */
 const PREDICTOR_MODE_STORAGE_KEY = "correct-score:predictor-mode";
@@ -198,9 +151,30 @@ function PredictorPick({ match }: { match: CorrectScoreMatch }) {
   );
 }
 
-function MatchCard({ match, predictorMode }: { match: CorrectScoreMatch; predictorMode: boolean }) {
+interface MatchCardProps {
+  match: CorrectScoreMatch;
+  predictorMode: boolean;
+  /** Position in the list — drives the glass card accent cycle. */
+  accentIndex: number;
+  onOpen: () => void;
+}
+
+function MatchCard({ match, predictorMode, accentIndex, onOpen }: MatchCardProps) {
+  const accent = CARD_ACCENT_ORDER[accentIndex % CARD_ACCENT_ORDER.length];
   return (
-    <article className={`rounded-3xl p-5 sm:p-6 ${GLASS_PANEL}`}>
+    <article
+      role="button"
+      tabIndex={0}
+      aria-label={`Open the detailed analysis for ${match.homeTeam} vs ${match.awayTeam}`}
+      onClick={onOpen}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " " || event.key === "Spacebar") {
+          event.preventDefault();
+          onOpen();
+        }
+      }}
+      className={`group ${CARD_GLASS} ${CARD_GLASS_SKIN[accent]} ${GLASS_TEXT_SHADOW} cursor-pointer p-5 text-left sm:p-6`}
+    >
       <div className="flex flex-wrap items-start justify-between gap-3 border-b border-white/[0.07] pb-5">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2 font-mono text-[10px] uppercase tracking-[0.15em] text-cyan-300">
@@ -221,6 +195,9 @@ function MatchCard({ match, predictorMode }: { match: CorrectScoreMatch; predict
           <ModelBadge match={match} />
           <span className={`rounded-full border px-2.5 py-1 text-[10px] font-bold ${qualityStyle[match.dataQuality]}`}>
             {qualityDot[match.dataQuality]} {match.dataQuality} data
+          </span>
+          <span className="inline-flex items-center gap-1 rounded-full border border-amber-300/25 bg-amber-400/10 px-2.5 py-1 text-[10px] font-bold text-amber-200 transition group-hover:border-amber-300/45">
+            Full analysis →
           </span>
         </div>
       </div>
@@ -288,6 +265,8 @@ export default function CorrectScorePage() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** Fixture whose detail overlay is open; `null` keeps the overlay unmounted. */
+  const [selectedMatch, setSelectedMatch] = useState<CorrectScoreMatch | null>(null);
   // Predictor Mode: read once from localStorage at mount (same lazy-initialiser
   // pattern the rest of the app uses for persisted preferences), then persist
   // every change back so the choice survives a refresh.
@@ -357,17 +336,17 @@ export default function CorrectScorePage() {
           <div>
             <div className="mb-3 inline-flex items-center gap-2 rounded-full border border-cyan-400/25 bg-cyan-400/[0.08] px-3 py-1.5 font-mono text-[10px] font-bold uppercase tracking-[0.16em] text-cyan-200">
               <span className="h-1.5 w-1.5 rounded-full bg-cyan-300 shadow-[0_0_8px_rgba(103,232,249,0.8)]" />
-              Supercomputer · ELO + Dixon-Coles + Monte Carlo · Next 7 days
+              England Premier League 2026/27 · eng.1 only · Next 7 days
             </div>
             <h1 className="bg-gradient-to-r from-white via-cyan-100 to-amber-200 bg-clip-text text-3xl font-black tracking-tight text-transparent sm:text-4xl">
               {predictorMode
                 ? "Predictor Mode — Submit your exact score predictions"
-                : "Premier League Correct Score Predictions"}
+                : "England Premier League Correct Score Predictions"}
             </h1>
             <p className="mt-2 text-sm text-slate-400 sm:text-base">
               {predictorMode
                 ? "One best-guess scoreline per match, sized for quick entry"
-                : "Most likely final scorelines, simulated 10,000 times per match from real historical results"}
+                : "Most likely final scorelines, simulated 10,000 times per match from real historical results. Only England Premier League (eng.1) fixtures whose two clubs are in the 2026/27 division are shown — click any card for the full scoreline table and match analytics."}
             </p>
           </div>
 
@@ -457,18 +436,34 @@ export default function CorrectScorePage() {
               <span>{matches.length} upcoming {matches.length === 1 ? "match" : "matches"}</span>
               <span>Probabilities are model estimates, not guarantees.</span>
             </div>
-            {matches.map((match) => (
-              <MatchCard key={`${match.leagueSlug}:${match.fixtureId}`} match={match} predictorMode={predictorMode} />
+            {matches.map((match, index) => (
+              <MatchCard
+                key={`${match.leagueSlug}:${match.fixtureId}`}
+                match={match}
+                predictorMode={predictorMode}
+                accentIndex={index}
+                onOpen={() => setSelectedMatch(match)}
+              />
             ))}
           </div>
         ) : !error ? (
           <div className={`rounded-3xl p-10 text-center ${GLASS_PANEL}`}>
             <div className="text-3xl">⚽</div>
-            <h2 className="mt-3 text-lg font-bold text-white">{notice ?? "No upcoming fixtures found"}</h2>
-            <p className="mt-1 text-sm text-slate-500">The seven-day fixture feed is currently empty. Try refreshing shortly.</p>
+            <h2 className="mt-3 text-lg font-bold text-white">
+              {notice ?? "No England Premier League fixtures found"}
+            </h2>
+            <p className="mx-auto mt-1 max-w-xl text-sm text-slate-500">
+              Only England Premier League (eng.1) fixtures from the 2026/27 season are published here.
+              The seven-day fixture feed is currently empty for that competition — try refreshing shortly.
+            </p>
           </div>
         ) : null}
       </div>
+
+      {/* ── Detail overlay: reuses the match already in memory, no new fetch ── */}
+      {selectedMatch ? (
+        <ScoreDetailOverlay match={selectedMatch} onClose={() => setSelectedMatch(null)} />
+      ) : null}
     </main>
   );
 }

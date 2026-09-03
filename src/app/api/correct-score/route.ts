@@ -27,7 +27,7 @@
 
 import { statsAggregator } from "@/lib/data/aggregator";
 import type { CanonicalMatchStats } from "@/lib/data/types";
-import { fetchSummary, type FixtureLite, type MatchSummary } from "@/lib/espn";
+import { fetchSummary, type FixtureLite, type MatchSummary, type TeamForm } from "@/lib/espn";
 import { canonicalLeagueSlug } from "@/lib/leaguePriority";
 import { getAnchors } from "@/lib/engine/statisticalAnchors";
 import { poissonPmf } from "@/lib/engine/stats";
@@ -74,7 +74,10 @@ const MAX_SIMULATIONS = 50_000;
 export const MODEL_VERSION = "supercomputer-v2";
 /** This feature is restricted to the Premier League; every other league is ignored. */
 const PREMIER_LEAGUE_SLUG = "eng.1";
-const NO_PREMIER_LEAGUE_MESSAGE = "No Premier League matches available.";
+/** Canonical label shown on the page and used in diagnostics. */
+export const PREMIER_LEAGUE_NAME = "England Premier League";
+const NO_PREMIER_LEAGUE_MESSAGE =
+  "No England Premier League matches available in the current fixture window.";
 
 export type DataQuality = "Real" | "Mixed" | "Synthetic";
 export type ScoreConfidence = "HIGH" | "MEDIUM" | "LOW";
@@ -109,6 +112,48 @@ export interface CorrectScoreline {
   analyticProbability?: number;
   /** Monte Carlo occurrences behind `probability`. */
   simulatedCount?: number;
+}
+
+export interface CorrectScoreFormGame {
+  date: string;
+  opponent: string;
+  /** As delivered by the summary feed: usually `W`, `D` or `L`. */
+  result: string;
+  /** Goals for–against for the team in question, e.g. `2-1`. */
+  score: string;
+  venue: string | null;
+  competition: string | null;
+}
+
+export interface CorrectScoreTeamForm {
+  team: string;
+  /** Last five completed matches, most recent first. */
+  games: CorrectScoreFormGame[];
+  wins: number;
+  draws: number;
+  losses: number;
+  points: number;
+  goalsForAverage: number | null;
+  goalsAgainstAverage: number | null;
+}
+
+export interface CorrectScoreH2hMeeting {
+  date: string;
+  home: string;
+  away: string;
+  score: string;
+}
+
+/** Pre-match context the detail overlay renders, from the already-fetched summary. */
+export interface CorrectScoreContext {
+  homeForm: CorrectScoreTeamForm | null;
+  awayForm: CorrectScoreTeamForm | null;
+  h2h: CorrectScoreH2hMeeting[];
+  /** Head-to-head results attributed to this fixture's home side. */
+  h2hHomeWins: number;
+  h2hDraws: number;
+  h2hAwayWins: number;
+  h2hAverageGoals: number | null;
 }
 
 export interface CorrectScoreMatch {
@@ -147,6 +192,8 @@ export interface CorrectScoreMatch {
   markets: MonteCarloMarkets | null;
   /** Historical layers that fed the model, for the transparency line. */
   modelSources: string[];
+  /** Recent form + head-to-head for the detail overlay; null when unavailable. */
+  context: CorrectScoreContext | null;
 }
 
 /** The loaded supercomputer state, shared by every fixture in a request. */
@@ -218,6 +265,160 @@ function namesMatch(left: string, right: string): boolean {
   const a = normaliseName(left);
   const b = normaliseName(right);
   return a === b || (a.length > 4 && b.length > 4 && (a.includes(b) || b.includes(a)));
+}
+
+// ─── England Premier League squad allowlist (2026/27) ─────────────────────────
+
+/** Season the allowlist below describes; reported with every response. */
+export const PREMIER_LEAGUE_SEASON = "2026/27";
+
+export interface PremierLeagueClub {
+  /** Canonical club name, used in logs and diagnostics. */
+  name: string;
+  /** Extra spellings/short forms a fixture feed may deliver. */
+  aliases: readonly string[];
+}
+
+/**
+ * The 20 England Premier League clubs for 2026/27.
+ *
+ * The `eng.1` slug on its own is not enough: cup ties, reserve sides and
+ * stale-feed rows can arrive stamped with a Premier League slug, and a feed
+ * that has not rolled over still carries 2025/26 clubs. So every fixture must
+ * name two clubs from this list on top of carrying the slug.
+ *
+ * Coventry City, Ipswich Town and Hull City were promoted from the Championship.
+ * West Ham United, Burnley and Wolverhampton Wanderers were relegated at the end
+ * of 2025/26 and are deliberately absent — a fixture naming one is discarded.
+ */
+export const PREMIER_LEAGUE_CLUBS_2026_27: readonly PremierLeagueClub[] = [
+  { name: "Arsenal", aliases: [] },
+  { name: "Aston Villa", aliases: ["Villa"] },
+  { name: "AFC Bournemouth", aliases: ["Bournemouth"] },
+  { name: "Brentford", aliases: [] },
+  { name: "Brighton & Hove Albion", aliases: ["Brighton and Hove Albion", "Brighton"] },
+  { name: "Chelsea", aliases: [] },
+  { name: "Coventry City", aliases: ["Coventry"] },
+  { name: "Crystal Palace", aliases: [] },
+  { name: "Everton", aliases: [] },
+  { name: "Fulham", aliases: [] },
+  { name: "Hull City", aliases: ["Hull"] },
+  { name: "Ipswich Town", aliases: ["Ipswich"] },
+  { name: "Leeds United", aliases: ["Leeds"] },
+  { name: "Liverpool", aliases: [] },
+  { name: "Manchester City", aliases: ["Man City"] },
+  { name: "Manchester United", aliases: ["Man United", "Man Utd"] },
+  { name: "Newcastle United", aliases: ["Newcastle"] },
+  { name: "Nottingham Forest", aliases: ["Nottingham", "Nottm Forest", "Nott'm Forest"] },
+  { name: "Sunderland", aliases: [] },
+  { name: "Tottenham Hotspur", aliases: ["Tottenham", "Spurs"] },
+];
+
+/** Legal-entity tokens feeds append to a club: "Chelsea FC" → "chelsea". */
+const CLUB_SUFFIX_TOKENS = new Set(["fc", "afc", "cf", "sc", "club"]);
+
+/** Broadcast abbreviations expanded before matching: "Newcastle Utd" → "newcastle united". */
+const CLUB_TOKEN_ALIASES: Record<string, string> = { utd: "united" };
+
+/** Youth / women / reserve markers — never a senior Premier League fixture. */
+const NON_SENIOR_TOKENS = new Set([
+  "u17", "u18", "u19", "u20", "u21", "u23", "women", "wfc", "ladies",
+  "reserves", "academy", "youth", "xi", "ii",
+]);
+
+/**
+ * Case-, accent- and punctuation-insensitive club key. "Brighton & Hove
+ * Albion", "brighton & hove albion" and "BRIGHTON AND HOVE ALBION" all collapse
+ * to `brighton and hove albion`; "AFC Bournemouth FC" collapses to `bournemouth`.
+ */
+export function normaliseClubKey(value: string): string {
+  return value
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/&/g, " and ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .split(/\s+/)
+    .filter((token) => token && !CLUB_SUFFIX_TOKENS.has(token))
+    .map((token) => CLUB_TOKEN_ALIASES[token] ?? token)
+    .join(" ");
+}
+
+/** Normalised alias → canonical club name. */
+const CLUB_ALIAS_INDEX: ReadonlyMap<string, string> = (() => {
+  const index = new Map<string, string>();
+  for (const club of PREMIER_LEAGUE_CLUBS_2026_27) {
+    for (const alias of [club.name, ...club.aliases]) {
+      const key = normaliseClubKey(alias);
+      if (key) index.set(key, club.name);
+    }
+  }
+  return index;
+})();
+
+function hasNonSeniorToken(key: string): boolean {
+  return key.split(" ").some((token) => NON_SENIOR_TOKENS.has(token));
+}
+
+/**
+ * Resolve a feed team name to a 2026/27 Premier League club, or `null`.
+ *
+ * Exact key match covers every documented alias. Multi-word aliases also match
+ * at a word boundary ("Ipswich Town Reserves" is still rejected by
+ * `NON_SENIOR_TOKENS`), which absorbs decorative prefixes a feed may add.
+ * Single-word aliases require an exact match so "Hull" can never swallow a
+ * similarly-named lower-league club.
+ */
+export function matchPremierLeagueClub(teamName: unknown): string | null {
+  if (typeof teamName !== "string") return null;
+  const key = normaliseClubKey(teamName);
+  if (!key) return null;
+  const exact = CLUB_ALIAS_INDEX.get(key);
+  if (exact) return exact;
+  if (hasNonSeniorToken(key)) return null;
+  for (const [alias, club] of CLUB_ALIAS_INDEX) {
+    if (alias.includes(" ") && (key.startsWith(`${alias} `) || key.endsWith(` ${alias}`))) {
+      return club;
+    }
+  }
+  return null;
+}
+
+/** True only when both sides of a fixture are 2026/27 Premier League clubs. */
+export function isPremierLeagueSquadFixture(
+  fixture: Pick<FixtureLite, "home" | "away">,
+): boolean {
+  return (
+    matchPremierLeagueClub((fixture.home as { name?: unknown } | undefined)?.name) !== null &&
+    matchPremierLeagueClub((fixture.away as { name?: unknown } | undefined)?.name) !== null
+  );
+}
+
+export interface SquadFilterResult {
+  kept: FixtureLite[];
+  /** eng.1 fixtures rejected because a club is not in the 2026/27 squad list. */
+  rejected: Array<{ fixture: FixtureLite; home: string; away: string }>;
+}
+
+/**
+ * Second gate after the league-slug filter: both clubs must be on the 2026/27
+ * England Premier League list. Exported so the rule is unit-testable.
+ */
+export function filterPremierLeagueSquad(fixtures: readonly FixtureLite[]): SquadFilterResult {
+  const kept: FixtureLite[] = [];
+  const rejected: SquadFilterResult["rejected"] = [];
+  for (const fixture of fixtures) {
+    if (isPremierLeagueSquadFixture(fixture)) kept.push(fixture);
+    else {
+      rejected.push({
+        fixture,
+        home: teamNameOr(fixture.home),
+        away: teamNameOr(fixture.away),
+      });
+    }
+  }
+  return { kept, rejected };
 }
 
 /**
@@ -533,6 +734,7 @@ export function buildCorrectScorePrediction(
   inputs: CorrectScoreModelInputs,
   maxGoals = DEFAULT_MAX_GOALS,
   supercomputer: SupercomputerInputs | null = null,
+  context: CorrectScoreContext | null = null,
 ): CorrectScoreMatch {
   const model = supercomputer?.model ?? null;
   const simulations = supercomputer?.simulations ?? DEFAULT_SIMULATIONS;
@@ -591,6 +793,7 @@ export function buildCorrectScorePrediction(
     structuralComponents: expected.components,
     markets: simulation.markets,
     modelSources: model?.sources ?? [],
+    context,
   };
 }
 
@@ -668,6 +871,16 @@ export interface FeedDiagnostics {
   unresolvedTeams: number;
   /** In-window rows dropped for not being eng.1, keyed by league slug. */
   nonPremierLeague: Record<string, number>;
+  /** Fixtures scanned before any filtering (equals `inWindow`). */
+  totalFixturesScanned: number;
+  /** Fixtures dropped because `leagueSlug` did not canonicalise to `eng.1`. */
+  filteredByLeague: number;
+  /** eng.1 fixtures dropped because a club is not in the 2026/27 squad list. */
+  filteredByTeamList: number;
+  /** `"{home} vs {away}"` for every squad-list rejection, for quick triage. */
+  rejectedTeams: string[];
+  /** Season the squad allowlist describes. */
+  season: string;
 }
 
 export interface FixtureSelection {
@@ -676,6 +889,8 @@ export interface FixtureSelection {
   anonymous: FixtureLite[];
   /** Non-PL fixtures dropped, counted per canonical league slug. */
   skippedNonPl: Map<string, number>;
+  /** The same dropped rows, so each one can be logged by name. */
+  skippedNonPlFixtures: FixtureLite[];
   /** Fixtures that passed the state/window/dedupe filter, before league selection. */
   inWindowCount: number;
   diagnostics: FeedDiagnostics;
@@ -689,6 +904,9 @@ export interface FixtureSelection {
  *   2. team identity must be resolvable on both sides (`hasResolvableTeams`);
  *   3. league slug must canonicalise to `eng.1` — aliases included, so a feed
  *      row can never slip through (or be dropped) on a slug spelling alone.
+ *
+ * The 2026/27 squad allowlist is applied on top of this by
+ * `filterPremierLeagueSquad`, keeping each rule independently testable.
  */
 export function selectPremierLeagueFixtures(
   upcoming: FixtureLite[],
@@ -708,6 +926,7 @@ export function selectPremierLeagueFixtures(
   const anonymous: FixtureLite[] = [];
   const premierLeague: FixtureLite[] = [];
   const skippedNonPl = new Map<string, number>();
+  const skippedNonPlFixtures: FixtureLite[] = [];
   for (const fixture of inWindow) {
     if (!hasResolvableTeams(fixture)) {
       anonymous.push(fixture);
@@ -716,6 +935,9 @@ export function selectPremierLeagueFixtures(
     const slug = canonicalLeagueSlug(typeof fixture.leagueSlug === "string" ? fixture.leagueSlug : "");
     if (slug !== PREMIER_LEAGUE_SLUG) {
       skippedNonPl.set(slug || "unknown", (skippedNonPl.get(slug || "unknown") ?? 0) + 1);
+      skippedNonPlFixtures.push(
+        fixture.leagueSlug === slug ? fixture : { ...fixture, leagueSlug: slug },
+      );
       continue;
     }
     // Stamp the canonical slug so downstream ESPN lookups (standings,
@@ -732,17 +954,30 @@ export function selectPremierLeagueFixtures(
     premierLeague,
     anonymous,
     skippedNonPl,
+    skippedNonPlFixtures,
     inWindowCount: inWindow.length,
     diagnostics: {
       feedFixtures: Array.isArray(upcoming) ? upcoming.length : 0,
       inWindow: inWindow.length,
       unresolvedTeams: anonymous.length,
       nonPremierLeague: Object.fromEntries(skippedNonPl),
+      totalFixturesScanned: inWindow.length,
+      filteredByLeague: skippedNonPlFixtures.length,
+      // Filled in by the squad gate in `fetchUpcomingFixtures`.
+      filteredByTeamList: 0,
+      rejectedTeams: [],
+      season: PREMIER_LEAGUE_SEASON,
     },
   };
 }
 
-async function fetchUpcomingFixtures(requestUrl: string): Promise<FixtureSelection> {
+export interface PremierLeagueFeed {
+  /** eng.1 fixtures whose two clubs are both on the 2026/27 squad list. */
+  fixtures: FixtureLite[];
+  diagnostics: FeedDiagnostics;
+}
+
+async function fetchUpcomingFixtures(requestUrl: string): Promise<PremierLeagueFeed> {
   const origin = new URL(requestUrl).origin;
   const response = await withTimeout(
     fetch(`${origin}/api/fixtures?days=${LOOKAHEAD_DAYS}&stats=0`, { cache: "no-store" }),
@@ -761,34 +996,81 @@ async function fetchUpcomingFixtures(requestUrl: string): Promise<FixtureSelecti
   // change degrades into filtering rather than a silently empty page.
   const selection = selectPremierLeagueFixtures(body.upcoming ?? body.fixtures ?? []);
 
+  // Gate 2 — the 2026/27 squad allowlist. A row can carry `eng.1` and still
+  // name a club that is not in the division this season (a relegated side from
+  // a feed that has not rolled over, a cup or reserve row), so both clubs are
+  // checked by name on top of the slug.
+  const squad = filterPremierLeagueSquad(selection.premierLeague);
+
   // Diagnostics: the troubleshooting playbook greps for exactly these lines
-  // ("Processing eng.1:", "Skipping non-PL fixture:") to tell the four feed
-  // failure modes apart — no eng.1 in the feed, eng.1 filtered out, feed rows
-  // without team names, or a completely empty feed.
+  // ("Processing eng.1:", "Discarded non-EPL fixture:", "Discarded eng.1
+  // fixture with unknown team:") to tell the feed failure modes apart — no
+  // eng.1 in the feed, eng.1 filtered out on the slug, eng.1 rows outside the
+  // squad list, feed rows without team names, or a completely empty feed.
   for (const fixture of selection.anonymous) {
     console.warn(
       `[CorrectScore] Skipping fixture with unresolved team names: ${fixture.id} ` +
         `(${fixture.leagueSlug}, ${fixture.date}) — home=${teamNameOr(fixture.home)}, away=${teamNameOr(fixture.away)}`,
     );
   }
+  for (const fixture of selection.skippedNonPlFixtures) {
+    console.info(
+      `[CorrectScore] Discarded non-EPL fixture: ${teamNameOr(fixture.home)} vs ` +
+        `${teamNameOr(fixture.away)} (league: ${fixture.leagueSlug || "unknown"})`,
+    );
+  }
   for (const [slug, count] of selection.skippedNonPl) {
     console.info(`[CorrectScore] Skipping non-PL fixture: ${count} × ${slug}`);
   }
-  const skipped = selection.inWindowCount - selection.premierLeague.length;
-  if (skipped > 0) {
-    console.info(
-      `[CorrectScore] Premier League only: kept ${selection.premierLeague.length} of ${selection.inWindowCount} in-window fixture(s) for ${PREMIER_LEAGUE_SLUG}`,
+  for (const rejection of squad.rejected) {
+    console.warn(
+      `[CorrectScore] Discarded eng.1 fixture with unknown team: ${rejection.home} vs ${rejection.away}`,
     );
   }
-  console.info(
-    `[CorrectScore] Processing eng.1: ${selection.premierLeague.length} fixture(s)` +
-      (selection.premierLeague.length
-        ? ` — ${selection.premierLeague
-            .map((fixture) => `${fixture.home.name} vs ${fixture.away.name} (${fixture.date})`)
-            .join(", ")}`
-        : " — the fixture feed delivered no Premier League match with resolvable team names"),
-  );
-  return selection;
+  const dropped = selection.inWindowCount - squad.kept.length;
+  if (dropped > 0) {
+    console.info(
+      `[CorrectScore] England Premier League ${PREMIER_LEAGUE_SEASON} only: kept ${squad.kept.length} ` +
+        `of ${selection.inWindowCount} in-window fixture(s) for ${PREMIER_LEAGUE_SLUG} ` +
+        `(${selection.skippedNonPlFixtures.length} filtered by league, ` +
+        `${squad.rejected.length} filtered by team list)`,
+    );
+  }
+  for (const fixture of squad.kept) {
+    console.info(
+      `[CorrectScore] Processing eng.1: ${teamNameOr(fixture.home)} vs ${teamNameOr(fixture.away)}`,
+    );
+  }
+  if (!squad.kept.length) {
+    console.info(
+      `[CorrectScore] Processing eng.1: 0 fixture(s) — no ${PREMIER_LEAGUE_SEASON} ` +
+        `${PREMIER_LEAGUE_NAME} match with resolvable team names reached the model`,
+    );
+  }
+
+  return {
+    fixtures: squad.kept,
+    diagnostics: {
+      ...selection.diagnostics,
+      filteredByTeamList: squad.rejected.length,
+      rejectedTeams: squad.rejected.map(({ home, away }) => `${home} vs ${away}`),
+    },
+  };
+}
+
+/** Diagnostics for a request that never reached the fixture feed. */
+function emptyDiagnostics(): FeedDiagnostics {
+  return {
+    feedFixtures: 0,
+    inWindow: 0,
+    unresolvedTeams: 0,
+    nonPremierLeague: {},
+    totalFixturesScanned: 0,
+    filteredByLeague: 0,
+    filteredByTeamList: 0,
+    rejectedTeams: [],
+    season: PREMIER_LEAGUE_SEASON,
+  };
 }
 
 function feedResponse(
@@ -799,7 +1081,11 @@ function feedResponse(
   const headers = { "Cache-Control": "no-store", "X-Correct-Score-Cache": cacheStatus };
   if (!matches.length) {
     return Response.json(
-      { matches: [], message: NO_PREMIER_LEAGUE_MESSAGE, diagnostics },
+      {
+        matches: [],
+        message: NO_PREMIER_LEAGUE_MESSAGE,
+        diagnostics: diagnostics ?? emptyDiagnostics(),
+      },
       { headers },
     );
   }
@@ -944,11 +1230,99 @@ function syntheticInputs(leagueSlug: string): Pick<CorrectScoreModelInputs, "hom
   };
 }
 
+/** Recent form for one side, read off the ESPN summary already fetched for λ. */
+function teamFormContext(teamName: string, form: TeamForm | null): CorrectScoreTeamForm | null {
+  const games = (form?.games ?? []).slice(0, 5);
+  if (!games.length) return null;
+  let wins = 0;
+  let draws = 0;
+  let losses = 0;
+  for (const game of games) {
+    const result = String(game.result ?? "").trim().toUpperCase();
+    if (result === "W") wins += 1;
+    else if (result === "L") losses += 1;
+    else draws += 1;
+  }
+  return {
+    team: form?.teamName || teamName,
+    games: games.map((game) => ({
+      date: game.date,
+      opponent: game.opponent,
+      result: String(game.result ?? "").trim().toUpperCase() || "D",
+      score: `${game.scoreFor}-${game.scoreAgainst}`,
+      venue: game.atVs || null,
+      competition: game.competition || null,
+    })),
+    wins,
+    draws,
+    losses,
+    points: form?.points ?? wins * 3 + draws,
+    goalsForAverage: finiteNonNegative(form?.gfAvg),
+    goalsAgainstAverage: finiteNonNegative(form?.gaAvg),
+  };
+}
+
+/**
+ * Form and head-to-head context for the detail overlay.
+ *
+ * Reuses the summary `collectInputs` already fetches — no extra network call —
+ * and returns `null` when the feed has nothing, so the overlay can hide the
+ * section instead of inventing it.
+ */
+function buildMatchContext(
+  summary: MatchSummary | null,
+  homeTeam: string,
+  awayTeam: string,
+): CorrectScoreContext | null {
+  const homeForm = teamFormContext(homeTeam, summary?.homeForm ?? null);
+  const awayForm = teamFormContext(awayTeam, summary?.awayForm ?? null);
+  const meetings: CorrectScoreH2hMeeting[] = (summary?.h2h ?? []).map((meeting) => ({
+    date: meeting.date,
+    home: meeting.home,
+    away: meeting.away,
+    score: meeting.score,
+  }));
+
+  let h2hHomeWins = 0;
+  let h2hDraws = 0;
+  let h2hAwayWins = 0;
+  for (const meeting of meetings) {
+    const score = meeting.score.split(/\s*-\s*/).map(Number);
+    if (score.length !== 2 || !score.every(Number.isFinite)) continue;
+    // Head-to-head history spans both venues, so the club listed as "home" in a
+    // past meeting may be either side of this fixture.
+    const listedAsHome = namesMatch(meeting.home, homeTeam);
+    const listedAsAway = !listedAsHome && namesMatch(meeting.away, homeTeam);
+    if (!listedAsHome && !listedAsAway) continue;
+    const homeGoals = listedAsHome ? score[0] : score[1];
+    const awayGoals = listedAsHome ? score[1] : score[0];
+    if (homeGoals > awayGoals) h2hHomeWins += 1;
+    else if (awayGoals > homeGoals) h2hAwayWins += 1;
+    else h2hDraws += 1;
+  }
+
+  if (!homeForm && !awayForm && !meetings.length) return null;
+  return {
+    homeForm,
+    awayForm,
+    h2h: meetings,
+    h2hHomeWins,
+    h2hDraws,
+    h2hAwayWins,
+    h2hAverageGoals: h2hAverage(summary),
+  };
+}
+
+interface CollectedFixtureData {
+  inputs: CorrectScoreModelInputs;
+  context: CorrectScoreContext | null;
+}
+
 async function collectInputs(
   fixture: FixtureLite,
   standings: Map<string, StandingAverages>,
   force: boolean,
-): Promise<CorrectScoreModelInputs> {
+): Promise<CollectedFixtureData> {
   const [canonical, summary] = await Promise.all([
     fetchCanonicalStats(fixture, force),
     withTimeout(fetchSummary(fixture.leagueSlug, fixture.id).catch(() => null), SUMMARY_TIMEOUT_MS, null),
@@ -979,22 +1353,30 @@ async function collectInputs(
     ...(summary?.h2h.length ? ["ESPN head-to-head"] : []),
   ];
 
+  const context = buildMatchContext(summary, fixture.home.name, fixture.away.name);
+
   if (quality === "Synthetic") {
     const baseline = syntheticInputs(fixture.leagueSlug);
     return {
-      ...baseline,
-      h2hGoalAverage: null,
-      sources: [`${fixture.leagueSlug} observed league average`],
-      dataQuality: "Synthetic",
+      inputs: {
+        ...baseline,
+        h2hGoalAverage: null,
+        sources: [`${fixture.leagueSlug} observed league average`],
+        dataQuality: "Synthetic",
+      },
+      context,
     };
   }
 
   return {
-    home,
-    away,
-    h2hGoalAverage: h2hAverage(summary),
-    sources: [...new Set(sources)],
-    dataQuality: quality,
+    inputs: {
+      home,
+      away,
+      h2hGoalAverage: h2hAverage(summary),
+      sources: [...new Set(sources)],
+      dataQuality: quality,
+    },
+    context,
   };
 }
 
@@ -1017,26 +1399,32 @@ export async function GET(request: Request): Promise<Response> {
   }
 
   try {
-    const [selection, model] = await Promise.all([
+    const [feed, model] = await Promise.all([
       fetchUpcomingFixtures(request.url),
       loadSupercomputerModel(PREMIER_LEAGUE_SLUG, { force }),
     ]);
-    const fixtures = selection.premierLeague;
+    const fixtures = feed.fixtures;
     const leagueSlugs = [...new Set(fixtures.map((fixture) => fixture.leagueSlug))];
     const standingEntries = await Promise.all(
       leagueSlugs.map(async (slug) => [slug, await fetchStandingAverages(slug)] as const),
     );
     const standings = new Map(standingEntries);
     const matches = await mapWithConcurrency(fixtures, CONCURRENCY, async (fixture) => {
-      const inputs = await collectInputs(
+      const { inputs, context } = await collectInputs(
         fixture,
         standings.get(fixture.leagueSlug) ?? new Map(),
         force,
       );
-      return buildCorrectScorePrediction(fixture, inputs, maxGoals, { model, simulations, method });
+      return buildCorrectScorePrediction(
+        fixture,
+        inputs,
+        maxGoals,
+        { model, simulations, method },
+        context,
+      );
     });
-    responseCache.set(cacheKey, { at: Date.now(), matches, diagnostics: selection.diagnostics });
-    return feedResponse(matches, "MISS", selection.diagnostics);
+    responseCache.set(cacheKey, { at: Date.now(), matches, diagnostics: feed.diagnostics });
+    return feedResponse(matches, "MISS", feed.diagnostics);
   } catch (error) {
     console.error("[CorrectScore] prediction feed failed", error);
     return Response.json(
