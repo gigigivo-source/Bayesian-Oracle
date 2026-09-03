@@ -18,6 +18,19 @@ import ScoreDetailOverlay, {
 /** localStorage key for the Predictor Mode preference. */
 const PREDICTOR_MODE_STORAGE_KEY = "correct-score:predictor-mode";
 
+/**
+ * A correct-score match enriched with the Monte Carlo market probabilities the
+ * table view renders. The API serves these alongside the existing fields (see
+ * `src/app/api/correct-score/route.ts`), so the table can read win–draw–win
+ * probabilities and the Top-1 projected scoreline straight off the match.
+ */
+interface CorrectScoreMatchTableRow extends CorrectScoreMatch {
+  homeWinProbability: number;
+  drawProbability: number;
+  awayWinProbability: number;
+  projectedScoreline: string;
+}
+
 // ─── Icons (SVG only — the UI carries no emoji) ──────────────────────────────
 
 function TargetIcon({ size = 12 }: { size?: number }) {
@@ -229,6 +242,81 @@ function MatchCard({ match, accentIndex, onOpen }: MatchCardProps) {
   );
 }
 
+// ─── Match predictions table view ───────────────────────────────────────────
+
+interface MatchPredictionsTableProps {
+  matches: CorrectScoreMatchTableRow[];
+  onOpen: (match: CorrectScoreMatchTableRow) => void;
+}
+
+/**
+ * Squawka-style match predictions table. One row per fixture with the Monte
+ * Carlo win–draw–win probabilities and the Top-1 projected scoreline. Every
+ * row is clickable and reuses the same detail overlay as the compact cards.
+ */
+function MatchPredictionsTable({ matches, onOpen }: MatchPredictionsTableProps) {
+  return (
+    <div className="overflow-x-auto rounded-2xl border border-slate-700 bg-slate-900">
+      <table className="w-full border-collapse text-sm text-white">
+        <thead>
+          <tr className="bg-slate-800/60 font-mono text-[10px] uppercase tracking-[0.14em] text-slate-400">
+            <th scope="col" className="px-4 py-3 text-left font-bold text-slate-300">
+              Home Team
+            </th>
+            <th scope="col" className="px-4 py-3 text-center font-bold text-slate-300">
+              Home Win %
+            </th>
+            <th scope="col" className="px-4 py-3 text-center font-bold text-slate-300">
+              Draw %
+            </th>
+            <th scope="col" className="px-4 py-3 text-center font-bold text-slate-300">
+              Away Win %
+            </th>
+            <th scope="col" className="px-4 py-3 text-right font-bold text-slate-300">
+              Away Team
+            </th>
+            <th scope="col" className="px-4 py-3 text-center font-bold text-slate-300">
+              Projected Scoreline
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          {matches.map((match) => (
+            <tr
+              key={`${match.leagueSlug}:${match.fixtureId}`}
+              aria-label={`Open the detailed analysis for ${match.homeTeam} vs ${match.awayTeam}`}
+              tabIndex={0}
+              onClick={() => onOpen(match)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " " || event.key === "Spacebar") {
+                  event.preventDefault();
+                  onOpen(match);
+                }
+              }}
+              className="cursor-pointer border-t border-slate-700/70 transition hover:bg-slate-800/50 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/70"
+            >
+              <td className="px-4 py-3 text-left text-sm font-medium">{match.homeTeam}</td>
+              <td className="px-4 py-3 text-center text-sm text-slate-200">
+                {(match.homeWinProbability * 100).toFixed(1)}%
+              </td>
+              <td className="px-4 py-3 text-center text-sm text-slate-200">
+                {(match.drawProbability * 100).toFixed(1)}%
+              </td>
+              <td className="px-4 py-3 text-center text-sm text-slate-200">
+                {(match.awayWinProbability * 100).toFixed(1)}%
+              </td>
+              <td className="px-4 py-3 text-right text-sm font-medium">{match.awayTeam}</td>
+              <td className="px-4 py-3 text-center text-sm font-bold text-amber-400">
+                {match.projectedScoreline}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 // ─── URL helpers ──────────────────────────────────────────────────────────────
 
 function readWeekFromUrl(): number | null {
@@ -246,7 +334,7 @@ function writeWeekToUrl(week: number | null): void {
 }
 
 /** Sorted, distinct match weeks carried by a feed, when the API omits them. */
-function deriveMatchweeks(feed: CorrectScoreMatch[]): number[] {
+function deriveMatchweeks(feed: CorrectScoreMatchTableRow[]): number[] {
   return [
     ...new Set(
       feed
@@ -257,7 +345,7 @@ function deriveMatchweeks(feed: CorrectScoreMatch[]): number[] {
 }
 
 export default function CorrectScorePage() {
-  const [matches, setMatches] = useState<CorrectScoreMatch[]>([]);
+  const [matches, setMatches] = useState<CorrectScoreMatchTableRow[]>([]);
   const [availableMatchweeks, setAvailableMatchweeks] = useState<number[]>([]);
   const [currentMatchweek, setCurrentMatchweek] = useState<number | null>(null);
   const [selectedMatchweek, setSelectedMatchweek] = useState<number | null>(null);
@@ -278,6 +366,8 @@ export default function CorrectScorePage() {
       return false;
     }
   });
+  /** View mode: compact cards (default) or the match-predictions table. */
+  const [viewMode, setViewMode] = useState<"cards" | "table">("cards");
   const initialLoad = useRef(false);
 
   useEffect(() => {
@@ -303,9 +393,9 @@ export default function CorrectScorePage() {
         cache: "no-store",
       });
       const body = (await response.json()) as
-        | CorrectScoreMatch[]
+        | CorrectScoreMatchTableRow[]
         | {
-            matches?: CorrectScoreMatch[];
+            matches?: CorrectScoreMatchTableRow[];
             availableMatchweeks?: number[];
             currentMatchweek?: number | null;
             selectedMatchweek?: number | null;
@@ -410,6 +500,30 @@ export default function CorrectScorePage() {
                 {predictorMode ? "Predictor Mode" : "Full Analysis"}
               </span>
             </button>
+            <div
+              role="group"
+              aria-label="Match predictions view"
+              className="inline-flex items-center rounded-full border border-white/[0.08] bg-white/[0.04] p-1"
+            >
+              {(["cards", "table"] as const).map((mode) => {
+                const active = viewMode === mode;
+                return (
+                  <button
+                    key={mode}
+                    type="button"
+                    aria-pressed={active}
+                    onClick={() => setViewMode(mode)}
+                    className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-bold transition ${
+                      active
+                        ? "bg-gradient-to-r from-[#F59E0B] to-[#FF8C00] text-white shadow-[0_0_16px_-6px_rgba(245,158,11,0.6)]"
+                        : "text-slate-300 hover:bg-white/[0.09] hover:text-white"
+                    }`}
+                  >
+                    {mode === "cards" ? "Cards" : "Table"}
+                  </button>
+                );
+              })}
+            </div>
             <Link
               href="/"
               className="inline-flex items-center rounded-full border border-white/[0.08] bg-white/[0.04] px-4 py-2 text-xs font-semibold text-slate-300 transition hover:bg-white/[0.09] hover:text-white"
@@ -505,16 +619,20 @@ export default function CorrectScorePage() {
               </span>
               <span>Probabilities are model estimates, not guarantees.</span>
             </div>
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-              {matches.map((match, index) => (
-                <MatchCard
-                  key={`${match.leagueSlug}:${match.fixtureId}`}
-                  match={match}
-                  accentIndex={index}
-                  onOpen={() => setSelectedMatch(match)}
-                />
-              ))}
-            </div>
+            {viewMode === "table" ? (
+              <MatchPredictionsTable matches={matches} onOpen={(match) => setSelectedMatch(match)} />
+            ) : (
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                {matches.map((match, index) => (
+                  <MatchCard
+                    key={`${match.leagueSlug}:${match.fixtureId}`}
+                    match={match}
+                    accentIndex={index}
+                    onOpen={() => setSelectedMatch(match)}
+                  />
+                ))}
+              </div>
+            )}
           </>
         ) : !error ? (
           <div className={`rounded-3xl p-10 text-center ${GLASS_PANEL}`}>

@@ -172,6 +172,15 @@ export interface CorrectScoreMatch {
   dataQuality: DataQuality;
   statsSources: string[];
   topScorelines: CorrectScoreline[];
+  // ── Monte Carlo market probabilities (win–draw–win) ────────────────────────
+  /** Simulated probability the home side wins, 0–1. */
+  homeWinProbability: number;
+  /** Simulated probability the match ends drawn, 0–1. */
+  drawProbability: number;
+  /** Simulated probability the away side wins, 0–1. */
+  awayWinProbability: number;
+  /** Top-1 projected scoreline from the same simulation, e.g. `"2-1"`. */
+  projectedScoreline: string;
   // ── Supercomputer diagnostics ──────────────────────────────────────────────
   /** Engine identifier, e.g. `supercomputer-v2`. */
   model: string;
@@ -784,6 +793,10 @@ export function buildCorrectScorePrediction(
     dataQuality: inputs.dataQuality,
     statsSources: inputs.sources,
     topScorelines,
+    homeWinProbability: round(simulation.markets.homeWin, 4),
+    drawProbability: round(simulation.markets.draw, 4),
+    awayWinProbability: round(simulation.markets.awayWin, 4),
+    projectedScoreline: simulation.topScorelines[0]?.score ?? "0-0",
     model: MODEL_VERSION,
     modelBadge: modelBadgeFor(model, simulations),
     simulations: simulation.simulations,
