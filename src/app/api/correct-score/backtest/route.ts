@@ -8,7 +8,6 @@
 
 import { fetchScoreboard, type FixtureLite } from "@/lib/espn";
 import { getAnchors } from "@/lib/engine/statisticalAnchors";
-import { TOP_FEED_SLUGS } from "@/lib/leagues";
 import {
   buildCorrectScorePrediction,
   scorelineProbabilities,
@@ -27,6 +26,9 @@ const HISTORY_WARMUP_DAYS = 120;
 const MAX_MATCHES = 300;
 const CACHE_TTL_MS = 30 * 60_000;
 const CALIBRATION_BUCKETS = [0, 0.05, 0.1, 0.15, 0.2, 1.01] as const;
+/** This feature is restricted to the Premier League; every other league is ignored. */
+const PREMIER_LEAGUE_SLUG = "eng.1";
+const NO_PREMIER_LEAGUE_MESSAGE = "No Premier League matches available for backtesting.";
 
 export interface CalibrationBucket {
   label: string;
@@ -82,6 +84,8 @@ export interface CorrectScoreBacktestResponse {
   overall: BacktestMetrics;
   byLeague: BacktestLeagueResult[];
   matches: BacktestMatchLog[];
+  /** Present when no Premier League historical matches were available to replay. */
+  message?: string;
 }
 
 interface Evaluation {
@@ -250,25 +254,24 @@ async function fetchHistoricalFixtures(days: number): Promise<FixtureLite[]> {
   const from = new Date(now);
   from.setUTCDate(from.getUTCDate() - days - HISTORY_WARMUP_DAYS);
   const range = `${fmt(from)}-${fmt(now)}`;
-  const boards = await Promise.all(
-    TOP_FEED_SLUGS.map((slug) =>
-      fetchScoreboard(slug, range).catch((error) => {
-        console.warn(
-          `[CorrectScoreBacktest] fixture cache failed for ${slug}: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-        return [] as FixtureLite[];
-      }),
-    ),
-  );
-  const seen = new Set<string>();
-  return boards.flat().filter((fixture) => {
-    const key = `${fixture.leagueSlug}:${fixture.id}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
+  // Premier League only: no other league scoreboard is fetched or processed.
+  const board = await fetchScoreboard(PREMIER_LEAGUE_SLUG, range).catch((error) => {
+    console.warn(
+      `[CorrectScoreBacktest] fixture cache failed for ${PREMIER_LEAGUE_SLUG}: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    return [] as FixtureLite[];
   });
+  const seen = new Set<string>();
+  return board
+    .filter((fixture) => fixture.leagueSlug === PREMIER_LEAGUE_SLUG)
+    .filter((fixture) => {
+      const key = `${fixture.leagueSlug}:${fixture.id}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
 }
 
 function calibrationLabel(lower: number, upper: number): string {
@@ -380,6 +383,9 @@ function computeMetrics(evaluations: Evaluation[]): BacktestMetrics {
 
 async function runBacktest(days: number): Promise<CorrectScoreBacktestResponse> {
   const allFixtures = await fetchHistoricalFixtures(days);
+  console.info(
+    `[CorrectScoreBacktest] Premier League only: ${allFixtures.length} ${PREMIER_LEAGUE_SLUG} fixture(s) loaded`,
+  );
   const cutoff = Date.now() - days * 86_400_000;
   const byLeagueHistory = new Map<string, FixtureLite[]>();
   for (const fixture of allFixtures) {
@@ -398,6 +404,10 @@ async function runBacktest(days: number): Promise<CorrectScoreBacktestResponse> 
     })
     .sort((left, right) => new Date(right.date).getTime() - new Date(left.date).getTime())
     .slice(0, MAX_MATCHES);
+
+  if (!targets.length) {
+    console.info(`[CorrectScoreBacktest] ${NO_PREMIER_LEAGUE_MESSAGE}`);
+  }
 
   const evaluations: Evaluation[] = targets.map((fixture) => {
     const actual = scoreOf(fixture)!;
@@ -461,6 +471,7 @@ async function runBacktest(days: number): Promise<CorrectScoreBacktestResponse> 
     overall: computeMetrics(evaluations),
     byLeague,
     matches: evaluations.map((evaluation) => evaluation.log),
+    ...(evaluations.length ? {} : { message: NO_PREMIER_LEAGUE_MESSAGE }),
   };
 }
 

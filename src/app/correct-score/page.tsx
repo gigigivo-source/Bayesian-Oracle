@@ -179,6 +179,7 @@ function MatchCard({ match }: { match: CorrectScoreMatch }) {
 
 export default function CorrectScorePage() {
   const [matches, setMatches] = useState<CorrectScoreMatch[]>([]);
+  const [notice, setNotice] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -192,11 +193,16 @@ export default function CorrectScorePage() {
       const response = await fetch(`/api/correct-score${refresh ? "?refresh=true" : ""}`, {
         cache: "no-store",
       });
-      const body = (await response.json()) as CorrectScoreMatch[] | { error?: string };
-      if (!response.ok || !Array.isArray(body)) {
-        throw new Error(!Array.isArray(body) && body.error ? body.error : `HTTP ${response.status}`);
+      const body = (await response.json()) as
+        | CorrectScoreMatch[]
+        | { matches?: CorrectScoreMatch[]; message?: string; error?: string };
+      // Failure and empty-feed payloads are objects; a live feed is a bare array.
+      if (!Array.isArray(body) && !Array.isArray(body.matches)) {
+        throw new Error(!response.ok && body.error ? body.error : `HTTP ${response.status}`);
       }
-      setMatches(body);
+      const feed = Array.isArray(body) ? body : (body.matches ?? []);
+      setMatches(feed);
+      setNotice(!Array.isArray(body) && body.message ? body.message : null);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Unable to load correct-score predictions.");
     } finally {
@@ -228,10 +234,10 @@ export default function CorrectScorePage() {
               Poisson · Next 7 days
             </div>
             <h1 className="bg-gradient-to-r from-white via-cyan-100 to-amber-200 bg-clip-text text-3xl font-black tracking-tight text-transparent sm:text-4xl">
-              Correct Score Predictions
+              Premier League Correct Score Predictions
             </h1>
             <p className="mt-2 text-sm text-slate-400 sm:text-base">
-              Most likely final scorelines based on real stats
+              Most likely final scorelines for Premier League matches based on real stats
             </p>
           </div>
 
@@ -293,7 +299,7 @@ export default function CorrectScorePage() {
         ) : !error ? (
           <div className={`rounded-3xl p-10 text-center ${GLASS_PANEL}`}>
             <div className="text-3xl">⚽</div>
-            <h2 className="mt-3 text-lg font-bold text-white">No upcoming fixtures found</h2>
+            <h2 className="mt-3 text-lg font-bold text-white">{notice ?? "No upcoming fixtures found"}</h2>
             <p className="mt-1 text-sm text-slate-500">The seven-day fixture feed is currently empty. Try refreshing shortly.</p>
           </div>
         ) : null}
