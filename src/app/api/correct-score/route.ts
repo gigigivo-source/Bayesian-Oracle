@@ -23,6 +23,9 @@ const FEED_TIMEOUT_MS = 100_000;
 const STATS_TIMEOUT_MS = 15_000;
 const SUMMARY_TIMEOUT_MS = 10_000;
 const CONCURRENCY = 8;
+/** This feature is restricted to the Premier League; every other league is ignored. */
+const PREMIER_LEAGUE_SLUG = "eng.1";
+const NO_PREMIER_LEAGUE_MESSAGE = "No Premier League matches available.";
 
 export type DataQuality = "Real" | "Mixed" | "Synthetic";
 export type ScoreConfidence = "HIGH" | "MEDIUM" | "LOW";
@@ -275,7 +278,7 @@ async function fetchUpcomingFixtures(requestUrl: string): Promise<FixtureLite[]>
   const now = Date.now();
   const horizon = now + LOOKAHEAD_DAYS * 86_400_000;
   const seen = new Set<string>();
-  return (body.upcoming ?? [])
+  const fixtures = (body.upcoming ?? [])
     .filter((fixture) => {
       if (fixture.state !== "pre" || seen.has(fixture.id)) return false;
       const kickoff = new Date(fixture.date).getTime();
@@ -284,6 +287,25 @@ async function fetchUpcomingFixtures(requestUrl: string): Promise<FixtureLite[]>
       return true;
     })
     .sort((left, right) => new Date(left.date).getTime() - new Date(right.date).getTime());
+
+  // Premier League only: fixtures from every other league are dropped here so
+  // no stats, standings or summaries are ever fetched for them downstream.
+  const premierLeagueFixtures = fixtures.filter((fixture) => fixture.leagueSlug === PREMIER_LEAGUE_SLUG);
+  const skipped = fixtures.length - premierLeagueFixtures.length;
+  if (skipped > 0) {
+    console.info(
+      `[CorrectScore] Premier League only: skipped ${skipped} fixture(s) outside ${PREMIER_LEAGUE_SLUG}`,
+    );
+  }
+  return premierLeagueFixtures;
+}
+
+function feedResponse(matches: CorrectScoreMatch[], cacheStatus: "HIT" | "MISS"): Response {
+  const headers = { "Cache-Control": "no-store", "X-Correct-Score-Cache": cacheStatus };
+  if (!matches.length) {
+    return Response.json({ matches: [], message: NO_PREMIER_LEAGUE_MESSAGE }, { headers });
+  }
+  return Response.json(matches, { headers });
 }
 
 async function fetchCanonicalStats(
@@ -486,9 +508,7 @@ export async function GET(request: Request): Promise<Response> {
   if (!force) {
     const cached = responseCache.get(maxGoals);
     if (cached && Date.now() - cached.at < CACHE_TTL_MS) {
-      return Response.json(cached.matches, {
-        headers: { "Cache-Control": "no-store", "X-Correct-Score-Cache": "HIT" },
-      });
+      return feedResponse(cached.matches, "HIT");
     }
   }
 
@@ -508,9 +528,7 @@ export async function GET(request: Request): Promise<Response> {
       return buildCorrectScorePrediction(fixture, inputs, maxGoals);
     });
     responseCache.set(maxGoals, { at: Date.now(), matches });
-    return Response.json(matches, {
-      headers: { "Cache-Control": "no-store", "X-Correct-Score-Cache": "MISS" },
-    });
+    return feedResponse(matches, "MISS");
   } catch (error) {
     console.error("[CorrectScore] prediction feed failed", error);
     return Response.json(

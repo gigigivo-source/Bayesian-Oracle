@@ -60,6 +60,7 @@ interface BacktestResponse {
   overall: BacktestMetrics;
   byLeague: LeagueResult[];
   matches: MatchLog[];
+  message?: string;
   error?: string;
 }
 
@@ -197,10 +198,10 @@ export default function CorrectScoreBacktestPage() {
               Leakage-free historical replay
             </div>
             <h1 className="bg-gradient-to-r from-white via-violet-100 to-cyan-200 bg-clip-text text-3xl font-black tracking-tight text-transparent sm:text-4xl">
-              Correct Score Backtest
+              Premier League Backtest
             </h1>
             <p className="mt-2 text-sm text-slate-400 sm:text-base">
-              How accurate is the model? Past performance metrics.
+              How accurate is the model on Premier League matches?
             </p>
           </div>
 
@@ -288,7 +289,7 @@ export default function CorrectScoreBacktestPage() {
                     <p className="mt-0.5 text-[10px] text-slate-500">Exact-score hit rates and probabilistic error</p>
                   </div>
                   <span className="rounded-full border border-violet-400/20 bg-violet-400/[0.08] px-2 py-1 font-mono text-[9px] text-violet-300">
-                    {data.byLeague.length} leagues
+                    {data.byLeague.length} {data.byLeague.length === 1 ? "league" : "leagues"}
                   </span>
                 </div>
                 <div className="overflow-x-auto">
@@ -318,7 +319,7 @@ export default function CorrectScoreBacktestPage() {
                       ))}
                     </tbody>
                   </table>
-                  {!data.byLeague.length && <div className="p-8 text-center text-sm text-slate-500">No league samples in this date range.</div>}
+                  {!data.byLeague.length && <div className="p-8 text-center text-sm text-slate-500">{data.message ?? "No league samples in this date range."}</div>}
                 </div>
               </section>
 
@@ -424,7 +425,7 @@ export default function CorrectScoreBacktestPage() {
                 {!data.matches.length && (
                   <div className="p-10 text-center">
                     <div className="text-2xl">📊</div>
-                    <div className="mt-2 text-sm font-semibold text-slate-300">No completed matches found</div>
+                    <div className="mt-2 text-sm font-semibold text-slate-300">{data.message ?? "No completed matches found"}</div>
                     <p className="mt-1 text-xs text-slate-600">Try a longer date range or run again when the fixture cache has results.</p>
                   </div>
                 )}
