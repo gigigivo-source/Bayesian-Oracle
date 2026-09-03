@@ -9,6 +9,8 @@ import { PerformanceShell } from "@/app/_components/perf/PerformanceShell";
 import { DashboardSkeleton } from "@/app/_components/perf/modes";
 import { ModesDashboard } from "@/app/_components/perf/ModesDashboard";
 
+export const dynamic = "force-dynamic";
+
 export default function PerformancePage() {
   return (
     <Suspense

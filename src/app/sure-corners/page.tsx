@@ -20,6 +20,8 @@ import {
 import MatchOverlay from "./components/MatchOverlay";
 import type { SureCornerMatch } from "./components/MatchOverlay";
 
+export const dynamic = "force-dynamic";
+
 // ─── Local types (page-only) ──────────────────────────────────────────────────
 
 type SureCornerMarketType =

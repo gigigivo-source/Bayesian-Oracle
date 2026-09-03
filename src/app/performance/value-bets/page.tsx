@@ -23,6 +23,8 @@ import {
   type SortDir,
 } from "@/app/_components/perf/ui";
 
+export const dynamic = "force-dynamic";
+
 interface ValueBet {
   id: number;
   match: string;

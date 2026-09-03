@@ -23,6 +23,8 @@ import {
   type LeaguesResponse,
 } from "@/app/_components/perf/leagues";
 
+export const dynamic = "force-dynamic";
+
 export default function LeaguePage() {
   return (
     <Suspense fallback={<PerformanceShell title="League Performance" subtitle="Loading…"><LoadingState label="Loading league detail…" /></PerformanceShell>}>

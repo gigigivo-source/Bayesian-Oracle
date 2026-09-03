@@ -14,6 +14,8 @@ import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { GLASS_DROPDOWN, GLASS_PANEL } from "../_components/design";
 
+export const dynamic = "force-dynamic";
+
 // ─── Payload types (mirror src/app/api/arbitrage/route.ts) ───────────────────
 
 type DataQuality = "Real" | "Mixed" | "Synthetic";

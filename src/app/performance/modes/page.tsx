@@ -7,6 +7,8 @@ import { ModesDashboard } from "@/app/_components/perf/ModesDashboard";
 import { DashboardSkeleton } from "@/app/_components/perf/modes";
 import { PerformanceShell } from "@/app/_components/perf/PerformanceShell";
 
+export const dynamic = "force-dynamic";
+
 export default function RankingModePerformancePage() {
   const [refreshing, setRefreshing] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);

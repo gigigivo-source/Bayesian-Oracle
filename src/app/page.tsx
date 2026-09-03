@@ -1,7 +1,9 @@
 "use client";
 
 import Image from "next/image";
-import dynamic from "next/dynamic";
+// `next/dynamic` is aliased to `nextDynamic` because this file exports the
+// Next.js route segment config `dynamic` (force-dynamic) further below.
+import nextDynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { FixtureLite } from "@/lib/espn";
@@ -19,7 +21,7 @@ import { ErrorBoundary } from "./_components/ErrorBoundary";
 // The match modal is ~1,300 lines of markup + the whole engine type surface and
 // is only ever rendered after the user taps a fixture. Loading it lazily keeps
 // it out of the initial page bundle so first paint isn't waiting on it.
-const MatchDetail = dynamic(
+const MatchDetail = nextDynamic(
   () => import("./_components/MatchDetail").then((m) => m.MatchDetail),
   {
     ssr: false,
@@ -62,6 +64,8 @@ import {
   CHIP_PREMIUM_ON_AMBER,
   CHIP_PREMIUM_ON_EMERALD,
 } from "./_components/design";
+
+export const dynamic = "force-dynamic";
 
 type Tab = "top" | "live" | "accumulators" | "performance" | "leagues" | "standings" | "oracle" | "chat" | "bankroll" | "slipbuilder" | "dailypicks" | "oddscalc" | "verified" | "results" | "backtest" | "valuebets";
 

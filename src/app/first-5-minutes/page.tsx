@@ -13,6 +13,8 @@ import { MARKET_LABEL, MARKET_ORDER, formatDateGroup, formatDateTime } from "./c
 import { MatchCard } from "./components/MatchCard";
 import type { First5MarketKey, First5MinutesData } from "./components/types";
 
+export const dynamic = "force-dynamic";
+
 export default function First5MinutesPage() {
   const [data, setData] = useState<First5MinutesData | null>(null);
   const [loading, setLoading] = useState(true);
