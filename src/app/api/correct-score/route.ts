@@ -42,10 +42,11 @@ import {
   type ExpectedGoalsComponents,
 } from "@/lib/data/attackDefence";
 import { estimateLeagueRho, getRhoForLeague, type RhoEstimate } from "@/lib/data/dixonColes";
-import { buildEloRatings, getElo, type EloTable } from "@/lib/data/elo";
+import { buildEloRatings, getElo, loadMatchesFromEngSoccerData, type EloTable } from "@/lib/data/elo";
 import {
   DEFAULT_SEASONS,
   loadHistoricalMatches,
+  seasonCodes,
   type HistoricalDataset,
 } from "@/lib/data/historical";
 import {
@@ -584,15 +585,47 @@ export async function loadSupercomputerModel(
     return unavailableModel(`no completed matches found (${reasons})`);
   }
 
-  const elo = buildEloRatings(dataset.matches);
+  // Supplement with engsoccerdata when the primary sources are too thin for
+  // meaningful ELO ratings. This ensures promoted sides (Coventry, Hull,
+  // Ipswich) carry real ratings from their Championship seasons.
+  let allMatches = dataset.matches;
+  const MIN_USEFUL = 100;
+  if (dataset.matchCount < MIN_USEFUL) {
+    try {
+      const now = new Date();
+      const seasonList = seasonCodes(now, (options.seasons ?? DEFAULT_SEASONS) + 1);
+      console.info(
+        `[CorrectScore] Historical dataset thin (${dataset.matchCount}), supplementing from engsoccerdata...`,
+      );
+      const engData = await loadMatchesFromEngSoccerData({ seasons: seasonList, maxTier: 2 });
+      if (engData.matches.length > 0) {
+        const seen = new Set(allMatches.map((m) => m.id));
+        const extra = engData.matches.filter((m) => !seen.has(m.id));
+        if (extra.length > 0) {
+          allMatches = [...allMatches, ...extra].sort(
+            (a, b) => new Date(a.matchDate).getTime() - new Date(b.matchDate).getTime(),
+          );
+          console.info(
+            `[CorrectScore] engsoccerdata: merged ${extra.length} additional matches (total ${allMatches.length})`,
+          );
+        }
+      }
+    } catch (error) {
+      console.warn(
+        `[CorrectScore] engsoccerdata supplement failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  const elo = buildEloRatings(allMatches);
   // Exponential time decay (Dixon & Coles' ξ): last season's results carry
   // more weight than a match from two seasons ago, so promoted sides and
   // rebuilt squads are not averaged away over three years.
-  const attackDefence = buildAttackDefenceTable(dataset.matches, leagueSlug, {
+  const attackDefence = buildAttackDefenceTable(allMatches, leagueSlug, {
     halfLifeDays: ATTACK_DEFENCE_HALF_LIFE_DAYS,
     now: new Date(),
   });
-  const rhoEstimate = estimateLeagueRho(leagueSlug, dataset.matches, (match) => {
+  const rhoEstimate = estimateLeagueRho(leagueSlug, allMatches, (match) => {
     const expected = computeMatchExpectedGoals({
       homeTeam: match.homeTeam,
       awayTeam: match.awayTeam,
@@ -611,7 +644,7 @@ export async function loadSupercomputerModel(
     attackDefence,
     rho: rhoEstimate.rho,
     rhoEstimate,
-    matches: dataset.matchCount,
+    matches: allMatches.length,
     seasonsCovered: dataset.seasonsCovered,
     primarySource: dataset.primarySource,
     sources: [
@@ -620,6 +653,9 @@ export async function loadSupercomputerModel(
           .filter((source) => source.added > 0)
           .map((source) => `${source.source} (${source.added})`),
       ),
+      ...(allMatches.length > dataset.matchCount
+        ? [`engsoccerdata (${allMatches.length - dataset.matchCount})`]
+        : []),
     ],
     dataset,
     generatedAt: dataset.generatedAt,
