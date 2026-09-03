@@ -70,7 +70,7 @@ function match(id: string, homeTeam: string, awayTeam: string): CorrectScoreMatc
       scoreline("3-0", 0.031),
     ],
     model: "supercomputer-v2",
-    modelBadge: "🧠 Supercomputer",
+    modelBadge: "Supercomputer",
     simulations: 10000,
     rho: -0.055,
     homeElo: 1720,

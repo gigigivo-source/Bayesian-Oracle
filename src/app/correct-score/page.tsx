@@ -35,10 +35,73 @@ function formatSimulations(count?: number): string {
   return count >= 1000 ? `${Math.round(count / 1000)}k sims` : `${count} sims`;
 }
 
-/** 🧠 Supercomputer when the historical model drove λ, else the plain MC badge. */
+/** Supercomputer when the historical model drove λ, else the plain MC badge. */
 function modelBadge(match: CorrectScoreMatch): string {
-  if (match.modelBadge) return match.modelBadge;
-  return `🧠 Monte Carlo (${formatSimulations(match.simulations)})`;
+  if (match.modelBadge) return match.modelBadge.replace(/^[🧠⚡]\s*/, "");
+  return `Monte Carlo (${formatSimulations(match.simulations)})`;
+}
+
+function TargetIcon({ size = 14 }: { size?: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <circle cx="12" cy="12" r="10" />
+      <circle cx="12" cy="12" r="6" />
+      <circle cx="12" cy="12" r="2" />
+    </svg>
+  );
+}
+
+function RefreshIcon({ size = 14, className = "" }: { size?: number; className?: string }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      className={className}
+    >
+      <path d="M21 2v6h-6" />
+      <path d="M3 12a9 9 0 0 1 15-6.7L21 8" />
+      <path d="M3 22v-6h6" />
+      <path d="M21 12a9 9 0 0 1-15 6.7L3 16" />
+    </svg>
+  );
+}
+
+function BallIcon({ size = 32 }: { size?: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <circle cx="12" cy="12" r="10" />
+      <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+      <path d="M2 12h20" />
+      <path d="M12 2v20" />
+    </svg>
+  );
 }
 
 function ModelBadge({ match }: { match: CorrectScoreMatch }) {
@@ -131,14 +194,15 @@ function ScorelineTile({ scoreline, rank }: { scoreline: Scoreline; rank: number
   );
 }
 
-/** 🎯 Predictor Mode: a single, oversized Top-1 scoreline per match. */
+/** Predictor Mode: a single, oversized Top-1 scoreline per match. */
 function PredictorPick({ match }: { match: CorrectScoreMatch }) {
   const top = match.topScorelines[0];
   if (!top) return null;
   return (
     <div className="flex flex-col items-center gap-3 rounded-2xl border border-amber-400/35 bg-amber-400/[0.08] px-6 py-10 shadow-[0_0_40px_-16px_rgba(245,158,11,0.6)]">
       <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-300/40 bg-amber-400/10 px-3 py-1 text-xs font-bold text-amber-200">
-        🎯 Best Guess
+        <TargetIcon size={14} />
+        Projected Scoreline
       </span>
       <div className="font-mono text-6xl font-black leading-none tracking-tight text-white sm:text-7xl">
         {top.score}
@@ -369,7 +433,7 @@ export default function CorrectScorePage() {
                   }`}
                 />
               </span>
-              {predictorMode ? "🎯 Predictor Mode" : "Full Analysis"}
+              {predictorMode ? "Predictor Mode" : "Full Analysis"}
             </button>
             <Link
               href="/"
@@ -389,7 +453,7 @@ export default function CorrectScorePage() {
               disabled={refreshing}
               className="inline-flex items-center gap-2 rounded-full border border-amber-300/25 bg-gradient-to-r from-amber-500 to-orange-500 px-4 py-2 text-xs font-bold text-white shadow-[0_0_20px_-7px_rgba(245,158,11,0.65)] transition hover:scale-[1.03] disabled:cursor-wait disabled:opacity-60"
             >
-              <span className={refreshing ? "animate-spin" : ""}>↻</span>
+              <RefreshIcon size={14} className={refreshing ? "animate-spin" : ""} />
               {refreshing ? "Refreshing…" : "Refresh"}
             </button>
           </div>
@@ -408,7 +472,7 @@ export default function CorrectScorePage() {
             (xG 40%, season scoring 25%, opponent goals conceded 20%, form 10%, venue advantage 5%) still
             contributes 40% of λ when real pre-match xG is available. Missing inputs are reweighted; a fixture
             with no historical model falls back to that competition&apos;s observed league baseline and is badged
-            🧠 Monte Carlo instead of 🧠 Supercomputer.
+            Monte Carlo instead of Supercomputer.
           </p>
         </div>
 
@@ -448,7 +512,9 @@ export default function CorrectScorePage() {
           </div>
         ) : !error ? (
           <div className={`rounded-3xl p-10 text-center ${GLASS_PANEL}`}>
-            <div className="text-3xl">⚽</div>
+            <div className="flex justify-center text-slate-500">
+              <BallIcon size={32} />
+            </div>
             <h2 className="mt-3 text-lg font-bold text-white">
               {notice ?? "No England Premier League fixtures found"}
             </h2>
