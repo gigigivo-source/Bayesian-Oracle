@@ -314,19 +314,87 @@ describe("GET /api/correct-score", () => {
       new Request("http://localhost:3000/api/correct-score?refresh=true&sims=1000"),
     );
     expect(response.status).toBe(200);
-    const matches = (await response.json()) as CorrectScoreMatch[];
-    expect(Array.isArray(matches)).toBe(true);
-    expect(matches).toHaveLength(2);
-    expect(matches.map((m) => m.fixtureId)).toEqual(["pl-1", "pl-2"]);
-    for (const match of matches) {
+    const body = (await response.json()) as {
+      matches: CorrectScoreMatch[];
+      availableMatchweeks: number[];
+      currentMatchweek: number | null;
+      selectedMatchweek: number | null;
+    };
+    expect(body.matches).toHaveLength(2);
+    expect(body.matches.map((m) => m.fixtureId)).toEqual(["pl-1", "pl-2"]);
+    // Both fixtures kick off within a few days, so they share one synthetic week.
+    expect(body.availableMatchweeks).toHaveLength(1);
+    expect(body.currentMatchweek).toBe(1);
+    expect(body.selectedMatchweek).toBe(1);
+    for (const match of body.matches) {
       expect(match.homeTeam).toBeTruthy();
       expect(match.awayTeam).toBeTruthy();
       expect(match.homeTeam).not.toBe("Unknown");
       expect(match.leagueSlug).toBe("eng.1");
+      expect(match.matchweek).toBe(1);
       expect(match.topScorelines.length).toBeGreaterThan(0);
       expect(match.topScorelines[0].score).toMatch(/^\d+-\d+$/);
       expect(match.topScorelines[0].probability).toBeGreaterThan(0);
     }
+  });
+
+  it("filters the feed to a requested match week and reports the selection", async () => {
+    stubFeed([
+      fixture({
+        id: "pl-3",
+        date: new Date(Date.now() + 86_400_000).toISOString(),
+        statusDetail: "Matchday 3",
+        home: team("Ipswich Town FC", "home"),
+        away: team("Liverpool FC", "away"),
+      }),
+      fixture({
+        id: "pl-4",
+        date: new Date(Date.now() + 2 * 86_400_000).toISOString(),
+        statusDetail: "Matchday 4",
+        home: team("Arsenal FC", "home"),
+        away: team("Chelsea FC", "away"),
+      }),
+    ]);
+
+    const response = await GET(
+      new Request("http://localhost:3000/api/correct-score?refresh=true&sims=1000&matchweek=4"),
+    );
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      matches: CorrectScoreMatch[];
+      availableMatchweeks: number[];
+      selectedMatchweek: number | null;
+    };
+    expect(body.selectedMatchweek).toBe(4);
+    expect(body.availableMatchweeks).toEqual([3, 4]);
+    expect(body.matches).toHaveLength(1);
+    expect(body.matches[0].fixtureId).toBe("pl-4");
+    expect(body.matches[0].matchweek).toBe(4);
+  });
+
+  it("reports when the requested match week has no fixtures", async () => {
+    stubFeed([
+      fixture({
+        id: "pl-5",
+        date: new Date(Date.now() + 86_400_000).toISOString(),
+        statusDetail: "Matchday 3",
+        home: team("Ipswich Town FC", "home"),
+        away: team("Liverpool FC", "away"),
+      }),
+    ]);
+
+    const response = await GET(
+      new Request("http://localhost:3000/api/correct-score?refresh=true&sims=1000&matchweek=2"),
+    );
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      matches: CorrectScoreMatch[];
+      message?: string;
+      selectedMatchweek: number | null;
+    };
+    expect(body.selectedMatchweek).toBe(2);
+    expect(body.matches).toEqual([]);
+    expect(body.message).toBe("No fixtures available for Matchweek 2.");
   });
 
   it("reports why the feed is empty when only anonymous fixtures arrive", async () => {
@@ -382,11 +450,11 @@ describe("GET /api/correct-score", () => {
       new Request("http://localhost:3000/api/correct-score?refresh=true&sims=1000"),
     );
     expect(response.status).toBe(200);
-    const matches = (await response.json()) as CorrectScoreMatch[];
-    expect(matches.map((m) => m.fixtureId)).toEqual(["pl-kept"]);
-    expect(matches[0].homeTeam).toBe("Coventry City");
-    expect(matches[0].awayTeam).toBe("Arsenal");
-    expect(matches[0].leagueSlug).toBe("eng.1");
+    const body = (await response.json()) as { matches: CorrectScoreMatch[] };
+    expect(body.matches.map((m) => m.fixtureId)).toEqual(["pl-kept"]);
+    expect(body.matches[0].homeTeam).toBe("Coventry City");
+    expect(body.matches[0].awayTeam).toBe("Arsenal");
+    expect(body.matches[0].leagueSlug).toBe("eng.1");
   });
 
   it("reports the filter counters when no England Premier League fixture survives", async () => {

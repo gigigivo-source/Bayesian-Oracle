@@ -301,7 +301,8 @@ describe("ScoreDetailOverlay (correct score)", () => {
     expect(text).toContain("ELO 1583");
     expect(text).toContain("ELO 1902");
     expect(text).toContain("England Premier League");
-    expect(text).toContain("🔵 Real");
+    // Data-quality badge is now emoji-free (a coloured dot indicator instead).
+    expect(text).toContain("● Real");
 
     // Expected goals + model metadata.
     expect(text).toContain("1.02");
