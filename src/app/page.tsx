@@ -604,6 +604,39 @@ function Header({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
             <button
               type="button"
               role="menuitem"
+              title="most likely final scorelines from real pre-match statistics"
+              aria-label="Correct Score — most likely final scoreline predictions"
+              onClick={() => {
+                router.push("/correct-score");
+                setMenuOpen(false);
+              }}
+              className={`${MENU_ITEM} w-full px-4 py-3 text-left rounded-xl`}
+            >
+              <div className="flex items-center justify-between">
+                <div className="text-sm font-medium leading-tight">⚽ Correct Score</div>
+                <span className="rounded-full bg-cyan-500/15 px-1.5 py-0.5 font-mono text-[9px] font-bold uppercase tracking-wider text-cyan-300">NEW</span>
+              </div>
+              <div className="text-[11px] mt-0.5 leading-snug text-slate-500">Most likely scorelines from real pre-match stats</div>
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              title="historical accuracy and calibration for correct score predictions"
+              aria-label="Correct Score Backtest — historical model accuracy"
+              onClick={() => {
+                router.push("/correct-score/backtest");
+                setMenuOpen(false);
+              }}
+              className={`${MENU_ITEM} w-full px-4 py-3 text-left rounded-xl`}
+            >
+              <div className="flex items-center justify-between">
+                <div className="text-sm font-medium leading-tight">📊 Correct Score Backtest</div>
+              </div>
+              <div className="text-[11px] mt-0.5 leading-snug text-slate-500">Top 1/3/5 accuracy, MAE &amp; calibration</div>
+            </button>
+            <button
+              type="button"
+              role="menuitem"
               title="positive expected value bets across every source with optimal Kelly stakes"
               aria-label="Profit Maximizer — positive expected value bets across every source with optimal Kelly stakes"
               onClick={() => {
