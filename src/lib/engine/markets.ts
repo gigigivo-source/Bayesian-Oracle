@@ -539,3 +539,634 @@ export class MarketEngine {
     return this.markets;     // TOTAL: 219 + 1 race-corner = 220
   }
 }
+
+// ─── TENNIS MARKET ENGINE (T1–T6) ────────────────────────────────────────────
+//
+// A self-contained tennis probability model feeding the same market-registry
+// pattern as the football families. The chain, from ELO to scoreline:
+//
+//   1. ELO gap (surface-adjusted — clay 1.1×, grass 1.3×, hard 1.0×, see
+//      src/lib/data/elo.ts) → match-win probability P(A).
+//   2. P(A) is inverted through the best-of-N set model → per-set win prob p.
+//      bo3: P = p²(3 − 2p);  bo5: P = p⁴(1 + 4q + 10q²), q = 1 − p.
+//   3. p is inverted through the set model (race to 6, win by 2, tiebreak at
+//      6-6 modelled as one more game) → per-game win prob g.
+//   4. The exact set-score distribution follows combinatorially from g
+//      (6-0 … 6-4, 7-5, 7-6 and mirrors), and the match distribution is a
+//      dynamic program over those set outcomes — giving total-games O/U lines,
+//      set-betting prices and the modal projected scoreline, all analytically.
+//   5. Aces / double faults / break points are Poisson O/U markets on the
+//      player's real per-match baselines (surface split when the sample is
+//      big enough), never on invented numbers.
+//
+// Market families:
+//   T1 Match Winner   — 2 lines (player A / player B)
+//   T2 Total Games    — 3 O/U lines around the expected total
+//   T3 Set Winner     — Set 1 winner (2) + set betting (4 bo3 / 6 bo5)
+//   T4 Aces           — O/U per player (2 lines each) + match total (2 lines)
+//   T5 Double Faults  — same shape as T4
+//   T6 Break Points   — total break points in the match, O/U (2 lines)
+
+import type { TennisSurface, TennisTour } from "../data/sources/tennis";
+import {
+  TENNIS_INITIAL_ELO,
+  expectedScoreTennis,
+  surfaceAdjustedElo,
+  tennisEloPriorFromRank,
+} from "../data/elo";
+
+export type TennisMarketFamily =
+  | "Match Winner"
+  | "Total Games"
+  | "Set Winner"
+  | "Aces"
+  | "Double Faults"
+  | "Break Points";
+
+export interface TennisMarket {
+  id: string;
+  family: TennisMarketFamily;
+  /** Human market name, e.g. "Total Games O/U 22.5". */
+  name: string;
+  /** The side the model backs — "Over 22.5", a player name, "2-1", … */
+  selection: string;
+  /** Probability of the selection, 0–1. */
+  probability: number;
+  /** Fair decimal odds for the selection (1 / probability). */
+  fairOdds: number;
+  /** O/U line when the market has one. */
+  line: number | null;
+  /** Short model justification surfaced by the UI. */
+  detail: string;
+}
+
+// ─── Pure model: sets & games ─────────────────────────────────────────────────
+
+/** P(win a best-of-3/5 match) given the per-set win probability. */
+export function matchProbFromSetProb(setProb: number, bestOf: 3 | 5): number {
+  const p = clamp(setProb, 0, 1);
+  const q = 1 - p;
+  if (bestOf === 5) return p ** 3 * (1 + 3 * q + 6 * q * q);
+  return p * p * (3 - 2 * p);
+}
+
+/** Invert `matchProbFromSetProb` by bisection (monotone in the set prob). */
+export function setWinProbFromMatchProb(matchProb: number, bestOf: 3 | 5): number {
+  const target = clamp(matchProb, 0.0005, 0.9995);
+  let lo = 0.001;
+  let hi = 0.999;
+  for (let i = 0; i < 80; i++) {
+    const mid = (lo + hi) / 2;
+    if (matchProbFromSetProb(mid, bestOf) < target) lo = mid;
+    else hi = mid;
+  }
+  return (lo + hi) / 2;
+}
+
+/** P(win a set) given the per-game win probability (race to 6, TB at 6-6). */
+export function setProbFromGameProb(gameProb: number): number {
+  const g = clamp(gameProb, 0.02, 0.98);
+  const q = 1 - g;
+  // Win 6-b for b = 0…4: the set ends with game #6 for the winner.
+  let prob = 0;
+  for (let b = 0; b <= 4; b++) {
+    prob += binomial(5 + b, b) * g ** 6 * q ** b;
+  }
+  // 5-5 → 7-5 (win both), or 6-6 → tiebreak (modelled as one more game).
+  const p55 = binomial(10, 5) * g ** 5 * q ** 5;
+  prob += p55 * g * g + p55 * 2 * g * q * g;
+  return clamp(prob, 0, 1);
+}
+
+/** Invert `setProbFromGameProb` by bisection. */
+export function gameWinProbFromSetProb(setProb: number): number {
+  const target = clamp(setProb, 0.001, 0.999);
+  let lo = 0.02;
+  let hi = 0.98;
+  for (let i = 0; i < 80; i++) {
+    const mid = (lo + hi) / 2;
+    if (setProbFromGameProb(mid) < target) lo = mid;
+    else hi = mid;
+  }
+  return (lo + hi) / 2;
+}
+
+function binomial(n: number, k: number): number {
+  if (k < 0 || k > n) return 0;
+  let result = 1;
+  for (let i = 1; i <= k; i++) result = (result * (n - k + i)) / i;
+  return result;
+}
+
+/** One possible set score, from player A's perspective. */
+export interface TennisSetOutcome {
+  aGames: number;
+  bGames: number;
+  /** Set decided by a tiebreak (7-6 / 6-7). */
+  tiebreak: boolean;
+  prob: number;
+}
+
+/**
+ * Exact distribution of set scores given A's per-game win probability:
+ * 6-0 … 6-4, 7-5, 7-6 for A and the mirrors for B (14 outcomes, sum = 1).
+ */
+export function setScoreDistribution(gameProb: number): TennisSetOutcome[] {
+  const g = clamp(gameProb, 0.02, 0.98);
+  const q = 1 - g;
+  const outcomes: TennisSetOutcome[] = [];
+  for (let b = 0; b <= 4; b++) {
+    // A wins 6-b: the set ends with A's 6th game; B won b of the first 5+b.
+    const probA = binomial(5 + b, b) * g ** 6 * q ** b;
+    // Mirror: B wins 6-b with the roles of g and q swapped.
+    const probB = binomial(5 + b, b) * q ** 6 * g ** b;
+    outcomes.push({ aGames: 6, bGames: b, tiebreak: false, prob: probA });
+    outcomes.push({ aGames: b, bGames: 6, tiebreak: false, prob: probB });
+  }
+  const p55 = binomial(10, 5) * g ** 5 * q ** 5;
+  const p76Both = p55 * 2 * g * q; // reach 6-6: one game each from 5-5, either order
+  outcomes.push({ aGames: 7, bGames: 5, tiebreak: false, prob: p55 * g * g });
+  outcomes.push({ aGames: 5, bGames: 7, tiebreak: false, prob: p55 * q * q });
+  outcomes.push({ aGames: 7, bGames: 6, tiebreak: true, prob: p76Both * g });
+  outcomes.push({ aGames: 6, bGames: 7, tiebreak: true, prob: p76Both * q });
+  return outcomes;
+}
+
+/** A full match path: the ordered set scores of one realised match. */
+export interface TennisScorelinePath {
+  /** Set scores from A's perspective, e.g. ["6-4", "3-6", "7-6"]. */
+  setScores: string[];
+  setsA: number;
+  setsB: number;
+  totalGames: number;
+  prob: number;
+}
+
+interface TennisDpState {
+  setsA: number;
+  setsB: number;
+  games: number;
+  /** Total probability mass reaching this (sets, games) state. */
+  prob: number;
+  /** Argmax-probability path realisation of the state. */
+  bestPath: TennisSetOutcome[];
+  bestPathProb: number;
+}
+
+export interface TennisMatchDistribution {
+  matchProbA: number;
+  matchProbB: number;
+  /** Set-betting prices: P(final set count A-B). */
+  setBetting: Array<{ setsA: number; setsB: number; prob: number }>;
+  /** P(total games = n) for every reachable total. */
+  totalGames: Array<{ games: number; prob: number }>;
+  expectedTotalGames: number;
+  /** Every terminal path, most likely first (capped). */
+  scorelines: TennisScorelinePath[];
+}
+
+/**
+ * The full match distribution: a dynamic program over the 14 set-score
+ * outcomes. States are (setsA, setsB, totalGames); each state carries its
+ * exact probability mass (for the O/U and set-betting markets) plus the
+ * single most likely path through it (for the projected scoreline).
+ */
+export function matchSetDistribution(setProb: number, bestOf: 3 | 5): TennisMatchDistribution {
+  const gameProb = gameWinProbFromSetProb(setProb);
+  const setOutcomes = setScoreDistribution(gameProb);
+  const setsToWin = bestOf === 5 ? 3 : 2;
+
+  const key = (s: TennisDpState) => `${s.setsA}|${s.setsB}|${s.games}`;
+  let current = new Map<string, TennisDpState>();
+  current.set("0|0|0", { setsA: 0, setsB: 0, games: 0, prob: 1, bestPath: [], bestPathProb: 1 });
+
+  const setBetting = new Map<string, number>();
+  const totalGames = new Map<number, number>();
+  const scorelines: TennisScorelinePath[] = [];
+  let matchProbA = 0;
+
+  while (current.size > 0) {
+    const next = new Map<string, TennisDpState>();
+    for (const state of current.values()) {
+      const finished = state.setsA === setsToWin || state.setsB === setsToWin;
+      if (finished) {
+        matchProbA += state.setsA > state.setsB ? state.prob : 0;
+        const bettingKey = `${state.setsA}|${state.setsB}`;
+        setBetting.set(bettingKey, (setBetting.get(bettingKey) ?? 0) + state.prob);
+        totalGames.set(state.games, (totalGames.get(state.games) ?? 0) + state.prob);
+        scorelines.push({
+          setScores: state.bestPath.map(formatSetFromA),
+          setsA: state.setsA,
+          setsB: state.setsB,
+          totalGames: state.games,
+          prob: state.bestPathProb,
+        });
+        continue;
+      }
+      for (const outcome of setOutcomes) {
+        const setsA = state.setsA + (outcome.aGames > outcome.bGames ? 1 : 0);
+        const setsB = state.setsB + (outcome.aGames < outcome.bGames ? 1 : 0);
+        const games = state.games + outcome.aGames + outcome.bGames;
+        const k = `${setsA}|${setsB}|${games}`;
+        const existing = next.get(k);
+        const pathProb = state.bestPathProb * outcome.prob;
+        if (existing) {
+          existing.prob += state.prob * outcome.prob;
+          if (pathProb > existing.bestPathProb) {
+            existing.bestPath = [...state.bestPath, outcome];
+            existing.bestPathProb = pathProb;
+          }
+        } else {
+          next.set(k, {
+            setsA,
+            setsB,
+            games,
+            prob: state.prob * outcome.prob,
+            bestPath: [...state.bestPath, outcome],
+            bestPathProb: pathProb,
+          });
+        }
+      }
+    }
+    current = next;
+  }
+
+  let expectedTotalGames = 0;
+  for (const [games, prob] of totalGames) expectedTotalGames += games * prob;
+
+  const betting = [...setBetting.entries()].map(([k, prob]) => {
+    const [setsA, setsB] = k.split("|").map(Number);
+    return { setsA, setsB, prob };
+  });
+
+  return {
+    matchProbA,
+    matchProbB: 1 - matchProbA,
+    setBetting: betting,
+    totalGames: [...totalGames.entries()]
+      .map(([games, prob]) => ({ games, prob }))
+      .sort((a, b) => a.games - b.games),
+    expectedTotalGames,
+    scorelines: scorelines.sort((a, b) => b.prob - a.prob).slice(0, 12),
+  };
+}
+
+/** Format one set score from player A's perspective (A's games first). */
+function formatSetFromA(outcome: TennisSetOutcome): string {
+  return `${outcome.aGames}-${outcome.bGames}`;
+}
+
+/**
+ * Render a full match path as the classic winner-first scoreline: each set is
+ * written from the MATCH winner's perspective ("6-4 3-6 7-6" means A won sets
+ * 1 and 3, B won set 2).
+ */
+export function formatScoreline(path: TennisScorelinePath): string {
+  const aWon = path.setsA > path.setsB;
+  const scores = path.setScores.map((set) => {
+    const [first, second] = set.split("-").map(Number);
+    return aWon ? `${first}-${second}` : `${second}-${first}`;
+  });
+  return scores.join(" ");
+}
+
+// ─── Tennis matchup input & prediction output ─────────────────────────────────
+
+export interface TennisPlayerModelInput {
+  name: string;
+  /** Replayed ELO rating (raw — surface adjustment happens here). */
+  elo: number | null;
+  /** How the rating was obtained, surfaced to the UI. */
+  ratingSource: "elo" | "rank-prior" | "default";
+  matchesPlayed: number | null;
+  rank: number | null;
+  /** Real per-match baselines from the completed-match dataset. */
+  acesPerMatch: number | null;
+  doubleFaultsPerMatch: number | null;
+  bpFacedPerMatch: number | null;
+  /** Which slice of history produced the baselines. */
+  baselineSource: "surface" | "overall" | "tour-baseline" | "none";
+}
+
+export interface TennisMatchupInput {
+  tour: TennisTour;
+  tournament: string;
+  surface: TennisSurface | null;
+  round: string | null;
+  date: string;
+  bestOf: 3 | 5;
+  playerA: TennisPlayerModelInput;
+  playerB: TennisPlayerModelInput;
+  /**
+   * Tour-wide per-match base rates (computed from the loaded dataset) used
+   * when a player has no personal history. Null → count markets are skipped.
+   */
+  tourBaselines:
+    | { acesPerMatch: number; doubleFaultsPerMatch: number; bpFacedPerMatch: number }
+    | null;
+}
+
+export interface TennisOULineGroup {
+  scope: string;
+  expected: number | null;
+  basis: string;
+  lines: Array<{ line: number; overProb: number; underProb: number }>;
+}
+
+export interface TennisPrediction {
+  players: { a: string; b: string };
+  surface: TennisSurface | null;
+  bestOf: 3 | 5;
+  matchWinner: {
+    probA: number;
+    probB: number;
+    fairOddsA: number;
+    fairOddsB: number;
+    favorite: string;
+    effectiveEloA: number;
+    effectiveEloB: number;
+    ratingSourceA: TennisPlayerModelInput["ratingSource"];
+    ratingSourceB: TennisPlayerModelInput["ratingSource"];
+  };
+  setWinner: {
+    set1ProbA: number;
+    set1ProbB: number;
+    setBetting: Array<{ score: string; prob: number }>;
+  };
+  totalGames: {
+    expected: number;
+    lines: Array<{ line: number; overProb: number; underProb: number }>;
+    distribution: Array<{ games: number; prob: number }>;
+  };
+  projectedScoreline: string;
+  projectedWinner: string;
+  projectedScorelineProb: number;
+  scorelineTop: Array<{ scoreline: string; prob: number; winner: string }>;
+  aces: TennisOULineGroup[] | null;
+  doubleFaults: TennisOULineGroup[] | null;
+  breakPoints: TennisOULineGroup[] | null;
+  markets: TennisMarket[];
+  notes: string[];
+}
+
+// O/U line ladders around the expected total (the 3 nearest lines are quoted).
+const TOTAL_GAMES_LADDER_BO3 = [15.5, 16.5, 17.5, 18.5, 19.5, 20.5, 21.5, 22.5, 23.5, 24.5, 25.5];
+const TOTAL_GAMES_LADDER_BO5 = [28.5, 30.5, 32.5, 33.5, 35.5, 36.5, 38.5, 39.5, 41.5, 42.5, 44.5];
+
+export class TennisMarketEngine {
+  private counter = 0;
+  private readonly markets: TennisMarket[] = [];
+
+  constructor(private readonly input: TennisMatchupInput) {}
+
+  private market(
+    idPrefix: string,
+    family: TennisMarketFamily,
+    name: string,
+    selection: string,
+    probability: number,
+    line: number | null,
+    detail: string,
+  ): TennisMarket {
+    this.counter++;
+    const p = clamp(probability, 0.001, 0.999);
+    const market: TennisMarket = {
+      id: `${idPrefix}_${this.counter}`,
+      family,
+      name,
+      selection,
+      probability: round(p),
+      fairOdds: round(1 / p, 2),
+      line: line === null ? null : round(line, 1),
+      detail,
+    };
+    this.markets.push(market);
+    return market;
+  }
+
+  private ouLinesFor(expected: number, ladder: number[], count = 3): number[] {
+    const nearest = [...ladder].sort(
+      (a, b) => Math.abs(a - expected) - Math.abs(b - expected),
+    );
+    return nearest.slice(0, count).sort((a, b) => a - b);
+  }
+
+  /** Count-market lines at ⌊λ⌋+0.5 and ⌈λ⌉+0.5 around the expectation. */
+  private countLineGroup(
+    idPrefix: string,
+    family: TennisMarketFamily,
+    scope: string,
+    expected: number | null,
+    basis: string,
+  ): TennisOULineGroup | null {
+    if (expected === null || !Number.isFinite(expected) || expected < 0.05) return null;
+    const lowLine = Math.max(0.5, Math.round(expected) - 0.5);
+    const lines = [lowLine, lowLine + 1].map((line) => {
+      const overProb = poissonOver(line, expected);
+      const isOver = overProb >= 0.5;
+      this.market(
+        idPrefix,
+        family,
+        `${scope} O/U ${line.toFixed(1)}`,
+        isOver ? `Over ${line.toFixed(1)}` : `Under ${line.toFixed(1)}`,
+        Math.max(overProb, 1 - overProb),
+        line,
+        `Poisson(λ=${expected.toFixed(1)}) on the player's real per-match ${family.toLowerCase()} baseline (${basis}).`,
+      );
+      return { line, overProb: round(overProb), underProb: round(1 - overProb) };
+    });
+    return { scope, expected: round(expected, 2), basis, lines };
+  }
+
+  private resolveRating(player: TennisPlayerModelInput): {
+    rating: number;
+    source: TennisPlayerModelInput["ratingSource"];
+  } {
+    if (player.elo !== null && Number.isFinite(player.elo)) {
+      return { rating: player.elo, source: "elo" };
+    }
+    const prior = tennisEloPriorFromRank(player.rank);
+    if (prior !== null) return { rating: prior, source: "rank-prior" };
+    return { rating: TENNIS_INITIAL_ELO, source: "default" };
+  }
+
+  /** Build every market family (T1–T6) and the headline prediction. */
+  predict(): TennisPrediction {
+    const { playerA, playerB, surface, bestOf, tourBaselines } = this.input;
+    const resolvedA = this.resolveRating(playerA);
+    const resolvedB = this.resolveRating(playerB);
+
+    // T1 — Match Winner, from the surface-adjusted ELO expectation.
+    const probA = clamp(expectedScoreTennis(resolvedA.rating, resolvedB.rating, surface), 0.001, 0.999);
+    const probB = 1 - probA;
+    const effectiveEloA = surfaceAdjustedElo(resolvedA.rating, surface);
+    const effectiveEloB = surfaceAdjustedElo(resolvedB.rating, surface);
+    const favorite = probA >= probB ? playerA.name : playerB.name;
+
+    this.market("TENNIS_MW", "Match Winner", "Match Winner", playerA.name, probA, null,
+      `ELO ${Math.round(effectiveEloA)} vs ${Math.round(effectiveEloB)} on ${surface ?? "unknown"} surface (${resolvedA.source === "elo" ? "replayed" : resolvedA.source}).`);
+    this.market("TENNIS_MW", "Match Winner", "Match Winner", playerB.name, probB, null,
+      `ELO ${Math.round(effectiveEloB)} vs ${Math.round(effectiveEloA)} on ${surface ?? "unknown"} surface (${resolvedB.source === "elo" ? "replayed" : resolvedB.source}).`);
+
+    // Sets & games — invert the match probability into the per-set/per-game model.
+    const setProbA = setWinProbFromMatchProb(probA, bestOf);
+    const distribution = matchSetDistribution(setProbA, bestOf);
+
+    // T2 — Total Games O/U.
+    const ladder = bestOf === 5 ? TOTAL_GAMES_LADDER_BO5 : TOTAL_GAMES_LADDER_BO3;
+    const totalLines = this.ouLinesFor(distribution.expectedTotalGames, ladder).map((line) => {
+      const overProb = clamp(
+        distribution.totalGames
+          .filter((entry) => entry.games > line)
+          .reduce((sum, entry) => sum + entry.prob, 0),
+        0.001,
+        0.999,
+      );
+      const isOver = overProb >= 0.5;
+      this.market(
+        "TENNIS_TG",
+        "Total Games",
+        `Total Games O/U ${line.toFixed(1)}`,
+        isOver ? `Over ${line.toFixed(1)}` : `Under ${line.toFixed(1)}`,
+        Math.max(overProb, 1 - overProb),
+        line,
+        `Exact set-score model expects ${distribution.expectedTotalGames.toFixed(1)} games (${bestOf === 5 ? "best-of-5" : "best-of-3"}).`,
+      );
+      return { line, overProb: round(overProb), underProb: round(1 - overProb) };
+    });
+
+    // T3 — Set Winner: set 1 + set betting.
+    this.market("TENNIS_SW", "Set Winner", "Set 1 Winner", playerA.name, setProbA, null,
+      `Per-set win probability inverted from the ${Math.round(probA * 100)}% match-win expectation.`);
+    this.market("TENNIS_SW", "Set Winner", "Set 1 Winner", playerB.name, 1 - setProbA, null,
+      `Per-set win probability inverted from the ${Math.round(probB * 100)}% match-win expectation.`);
+    const setBetting = distribution.setBetting
+      .sort((a, b) => b.prob - a.prob)
+      .map((entry) => {
+        this.market(
+          "TENNIS_SW",
+          "Set Winner",
+          `Set Betting ${entry.setsA}-${entry.setsB}`,
+          `${entry.setsA}-${entry.setsB}`,
+          entry.prob,
+          null,
+          `P(${playerA.name} wins ${entry.setsA}-${entry.setsB}) from the exact set-score distribution.`,
+        );
+        return { score: `${entry.setsA}-${entry.setsB}`, prob: round(entry.prob) };
+      });
+
+    // Projected scoreline — the modal full path, written winner-first.
+    const modal = distribution.scorelines[0];
+    const projectedWinner = modal && modal.setsA > modal.setsB ? playerA.name : playerB.name;
+
+    // T4/T5/T6 — count markets on the real serve baselines.
+    const aces = this.countMarkets("TENNIS_ACE", "Aces", (p) => p.acesPerMatch, tourBaselines?.acesPerMatch ?? null);
+    const doubleFaults = this.countMarkets("TENNIS_DF", "Double Faults", (p) => p.doubleFaultsPerMatch, tourBaselines?.doubleFaultsPerMatch ?? null);
+    const breakPoints = this.countMarkets("TENNIS_BP", "Break Points", (p) => p.bpFacedPerMatch, tourBaselines?.bpFacedPerMatch ?? null);
+
+    const notes: string[] = [
+      `Match-win probability from the surface-adjusted ELO gap (${Math.round(effectiveEloA - effectiveEloB)} points${surface ? ` on ${surface}` : ""}).`,
+      `Per-set ${(setProbA * 100).toFixed(1)}% / ${((1 - setProbA) * 100).toFixed(1)}% from inverting the best-of-${bestOf} model.`,
+    ];
+    if (resolvedA.source !== "elo" || resolvedB.source !== "elo") {
+      notes.push(
+        `Rating priors in use: ${playerA.name} → ${resolvedA.source}, ${playerB.name} → ${resolvedB.source}.`,
+      );
+    }
+    if (!tourBaselines) {
+      notes.push("Serve baselines unavailable (no historical dataset) — aces, double faults and break point markets skipped.");
+    }
+
+    return {
+      players: { a: playerA.name, b: playerB.name },
+      surface,
+      bestOf,
+      matchWinner: {
+        probA: round(probA),
+        probB: round(probB),
+        fairOddsA: round(1 / probA, 2),
+        fairOddsB: round(1 / probB, 2),
+        favorite,
+        effectiveEloA: Math.round(effectiveEloA),
+        effectiveEloB: Math.round(effectiveEloB),
+        ratingSourceA: resolvedA.source,
+        ratingSourceB: resolvedB.source,
+      },
+      setWinner: {
+        set1ProbA: round(setProbA),
+        set1ProbB: round(1 - setProbA),
+        setBetting,
+      },
+      totalGames: {
+        expected: round(distribution.expectedTotalGames, 1),
+        lines: totalLines,
+        distribution: distribution.totalGames.map((entry) => ({
+          games: entry.games,
+          prob: round(entry.prob),
+        })),
+      },
+      projectedScoreline: modal ? formatScoreline(modal) : "",
+      projectedWinner,
+      projectedScorelineProb: modal ? round(modal.prob) : 0,
+      scorelineTop: distribution.scorelines.slice(0, 5).map((path) => ({
+        scoreline: formatScoreline(path),
+        prob: round(path.prob),
+        winner: path.setsA > path.setsB ? playerA.name : playerB.name,
+      })),
+      aces,
+      doubleFaults,
+      breakPoints,
+      markets: this.markets,
+      notes,
+    };
+  }
+
+  /**
+   * Aces / double faults / break points: per-player lines (personal baseline,
+   * surface split when the sample backs it) plus the match total, with the
+   * tour baseline as the labelled fallback for players without history.
+   */
+  private countMarkets(
+    idPrefix: string,
+    family: "Aces" | "Double Faults" | "Break Points",
+    pick: (player: TennisPlayerModelInput) => number | null,
+    tourBaseline: number | null,
+  ): TennisOULineGroup[] | null {
+    if (tourBaseline === null) return null;
+    const groups: TennisOULineGroup[] = [];
+    for (const player of [this.input.playerA, this.input.playerB]) {
+      if (family === "Break Points") continue; // quoted on the match total only
+      const personal = pick(player);
+      const expected = personal ?? tourBaseline;
+      const basis =
+        personal === null
+          ? "tour baseline"
+          : player.baselineSource === "surface"
+            ? "surface split"
+            : player.baselineSource === "overall"
+              ? "career average"
+              : "tour baseline";
+      const group = this.countLineGroup(idPrefix, family, player.name, expected, basis);
+      if (group) groups.push(group);
+    }
+    const total =
+      (pick(this.input.playerA) ?? tourBaseline) + (pick(this.input.playerB) ?? tourBaseline);
+    const totalGroup = this.countLineGroup(
+      idPrefix,
+      family,
+      "Match Total",
+      total,
+      "combined baselines",
+    );
+    if (totalGroup) groups.push(totalGroup);
+    return groups.length > 0 ? groups : null;
+  }
+}
+
+/**
+ * Convenience entry point: build every tennis market family (T1–T6) for one
+ * matchup and return the prediction with the full market registry attached.
+ */
+export function predictTennisMatch(input: TennisMatchupInput): TennisPrediction {
+  return new TennisMarketEngine(input).predict();
+}
