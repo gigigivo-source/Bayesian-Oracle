@@ -1,24 +1,31 @@
-// Unit tests for the tennis data layer (Part 8 — second sport).
+// Unit tests for the tennis data layer.
 //
-// Pure-parser tests only: known CSV/JSON fixtures in, canonical TennisMatch /
-// UpcomingTennisMatch shapes out. No network access here.
+// Pure-parser tests (known CSV/JSON fixtures in, canonical TennisMatch /
+// UpcomingTennisMatch shapes out) plus the network loader with `fetch` stubbed:
+// source priority, the "first success wins" rule and the hard failure when
+// every source is unreachable.
 
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   bestOfForTournament,
   buildTennisPlayerProfiles,
   computeTourBaselines,
+  fetchUpcomingTennisMatches,
   finishFromScore,
   inferSurface,
+  loadTennisDataset,
+  loadTennisMatches,
   normalisePlayerName,
   normaliseSurface,
   parseEspnTennisScoreboard,
+  parseMatchGames,
   parseSackmannTennisCsv,
   parseTennisDataCsv,
   parseTennisDataDate,
   playerNamesMatch,
   surfaceServeBaseline,
   tennisPlayerKey,
+  TENNIS_DATA_UNAVAILABLE,
   type TennisMatch,
   type TennisPlayerProfile,
 } from "./tennis";
@@ -70,6 +77,18 @@ describe("parseSackmannTennisCsv", () => {
     expect(hurkacz?.loserStats.bpSaved).toBe(5);
     expect(hurkacz?.winnerRank).toBe(83);
     expect(hurkacz?.loserRank).toBe(156);
+  });
+
+  it("derives points won on serve from the first/second-serve columns", () => {
+    // Hurkacz as winner vs Wawrinka: 52 + 9 = 61 points won of 90 served.
+    const hurkacz = matches.find((m) => m.winner === "Hubert Hurkacz" && m.loser === "Stan Wawrinka");
+    expect(hurkacz?.winnerStats.servePoints).toBe(90);
+    expect(hurkacz?.winnerStats.servePointsWon).toBe(61);
+    expect(hurkacz?.loserStats.servePoints).toBe(78);
+    expect(hurkacz?.loserStats.servePointsWon).toBe(53);
+    // A row with no serve columns at all stays null (walkover).
+    const walkover = matches.find((m) => m.finish === "walkover");
+    expect(walkover?.winnerStats.servePointsWon).toBeNull();
   });
 
   it("classifies retirements and walkovers and keeps them out of serve stats", () => {
@@ -155,6 +174,7 @@ describe("parseTennisDataCsv", () => {
 
   it("carries no serve stats (the odds layer never fakes them)", () => {
     expect(matches[3].winnerStats.aces).toBeNull();
+    expect(matches[3].winnerStats.servePointsWon).toBeNull();
     expect(matches[3].source).toBe("tennis-data");
   });
 });
@@ -263,8 +283,24 @@ describe("parseEspnTennisScoreboard", () => {
       loser: "B",
       score: "6-4 6-4",
       finish: "completed",
-      winnerStats: { aces: null, doubleFaults: null, servePoints: null, serviceGames: null, bpSaved: null, bpFaced: null },
-      loserStats: { aces: null, doubleFaults: null, servePoints: null, serviceGames: null, bpSaved: null, bpFaced: null },
+      winnerStats: {
+        aces: null,
+        doubleFaults: null,
+        servePoints: null,
+        servePointsWon: null,
+        serviceGames: null,
+        bpSaved: null,
+        bpFaced: null,
+      },
+      loserStats: {
+        aces: null,
+        doubleFaults: null,
+        servePoints: null,
+        servePointsWon: null,
+        serviceGames: null,
+        bpSaved: null,
+        bpFaced: null,
+      },
       odds: null,
       winnerRank: null,
       loserRank: null,
@@ -318,11 +354,14 @@ describe("names, surfaces and formats", () => {
     expect(playerNamesMatch("Jannik Sinner", "Carlos Alcaraz")).toBe(false);
   });
 
-  it("normalises surfaces", () => {
+  it("normalises surfaces, folding indoor/outdoor hard and carpet into hard", () => {
     expect(normaliseSurface("Clay")).toBe("clay");
-    expect(normaliseSurface("Hardcourt")).toBe("hard");
     expect(normaliseSurface("Grass")).toBe("grass");
-    expect(normaliseSurface("Carpet")).toBe("carpet");
+    expect(normaliseSurface("Hard")).toBe("hard");
+    expect(normaliseSurface("Hardcourt")).toBe("hard");
+    expect(normaliseSurface("I-Hard")).toBe("hard");
+    expect(normaliseSurface("O-Hard")).toBe("hard");
+    expect(normaliseSurface("Carpet")).toBe("hard"); // documented fallback
     expect(normaliseSurface("")).toBeNull();
     expect(normaliseSurface(42)).toBeNull();
   });
@@ -337,6 +376,19 @@ describe("names, surfaces and formats", () => {
     expect(bestOfForTournament("Wimbledon", "atp")).toBe(5);
     expect(bestOfForTournament("Wimbledon", "wta")).toBe(3);
     expect(bestOfForTournament("Basel", "atp")).toBe(3);
+  });
+});
+
+describe("parseMatchGames", () => {
+  it("sums the games of a completed set score", () => {
+    expect(parseMatchGames("6-4 6-3")).toBe(19);
+    expect(parseMatchGames("7-6(4) 6-7(2) 7-5")).toBe(38);
+  });
+
+  it("returns null for retirements, walkovers and junk", () => {
+    expect(parseMatchGames("6-3 1-2 RET")).toBeNull();
+    expect(parseMatchGames("W/O")).toBeNull();
+    expect(parseMatchGames("")).toBeNull();
   });
 });
 
@@ -358,6 +410,16 @@ describe("buildTennisPlayerProfiles", () => {
     expect(hurkacz?.wins).toBe(1);
   });
 
+  it("computes serve and return rates from real points", () => {
+    const hurkacz = profiles.get(tennisPlayerKey("Hubert Hurkacz"));
+    // Serve: (37 + 13)/73 as the loser vs Fritz, (52 + 9)/90 as the winner vs Wawrinka.
+    const expectedServe = (37 + 13 + 52 + 9) / (73 + 90);
+    expect(hurkacz?.serveWinRate).toBeCloseTo(expectedServe, 6);
+    // Return: Fritz won 50 + 7 of 76 served, Wawrinka 38 + 15 of 78.
+    const expectedReturn = ((76 - (50 + 7)) + (78 - (38 + 15))) / (76 + 78);
+    expect(hurkacz?.returnWinRate).toBeCloseTo(expectedReturn, 6);
+  });
+
   it("keeps the freshest rank and last played date", () => {
     const fritz = profiles.get(tennisPlayerKey("Taylor Fritz"));
     expect(fritz?.rank).toBe(9);
@@ -371,6 +433,7 @@ describe("buildTennisPlayerProfiles", () => {
     expect(alcaraz?.surface.clay.matches).toBe(1);
     expect(alcaraz?.surface.clay.acesPerMatch).toBe(15);
     expect(alcaraz?.surface.hard.matches).toBe(0);
+    expect(alcaraz?.surface.clay.serveWinRate).toBeCloseTo((55 + 18) / 110, 6);
   });
 });
 
@@ -391,11 +454,33 @@ describe("surfaceServeBaseline", () => {
     doubleFaultsPerMatch: 3,
     bpFacedPerMatch: 6,
     bpSavedPerMatch: 3,
+    serveWinRate: 0.62,
+    returnWinRate: 0.38,
     surface: {
-      clay: { matches: 6, acesPerMatch: 11, doubleFaultsPerMatch: 2.5, bpFacedPerMatch: 7 },
-      grass: { matches: 1, acesPerMatch: 14, doubleFaultsPerMatch: 4, bpFacedPerMatch: 5 },
-      hard: { matches: 0, acesPerMatch: null, doubleFaultsPerMatch: null, bpFacedPerMatch: null },
-      carpet: { matches: 0, acesPerMatch: null, doubleFaultsPerMatch: null, bpFacedPerMatch: null },
+      clay: {
+        matches: 6,
+        acesPerMatch: 11,
+        doubleFaultsPerMatch: 2.5,
+        bpFacedPerMatch: 7,
+        serveWinRate: 0.66,
+        returnWinRate: 0.34,
+      },
+      grass: {
+        matches: 1,
+        acesPerMatch: 14,
+        doubleFaultsPerMatch: 4,
+        bpFacedPerMatch: 5,
+        serveWinRate: 0.71,
+        returnWinRate: 0.29,
+      },
+      hard: {
+        matches: 0,
+        acesPerMatch: null,
+        doubleFaultsPerMatch: null,
+        bpFacedPerMatch: null,
+        serveWinRate: null,
+        returnWinRate: null,
+      },
     },
   };
 
@@ -404,15 +489,18 @@ describe("surfaceServeBaseline", () => {
     expect(clay?.source).toBe("surface");
     expect(clay?.acesPerMatch).toBe(11);
     expect(clay?.doubleFaultsPerMatch).toBe(2.5);
+    expect(clay?.serveWinRate).toBe(0.66);
+    expect(clay?.returnWinRate).toBe(0.34);
   });
 
   it("falls back to the career average below the sample threshold", () => {
     const grass = surfaceServeBaseline(clayProfile, "grass");
     expect(grass?.source).toBe("overall");
     expect(grass?.acesPerMatch).toBe(9); // career average, not the 1-match split
+    expect(grass?.serveWinRate).toBe(0.62);
   });
 
-  it("uses the surface split for the small fixture sample on its surface", () => {
+  it("uses the career split for the small fixture sample on its surface", () => {
     const alcaraz = profiles.get(tennisPlayerKey("Carlos Alcaraz")) ?? null;
     expect(surfaceServeBaseline(alcaraz, "clay")?.source).toBe("overall"); // 1 clay match < 5
   });
@@ -423,7 +511,7 @@ describe("surfaceServeBaseline", () => {
 });
 
 describe("computeTourBaselines", () => {
-  it("averages aces/DFs/BPs across both players of every completed match", () => {
+  it("averages aces/DFs/BPs and serve/return rates over both players", () => {
     const matches = parseSackmannTennisCsv(SACKMANN_CSV, "atp");
     const baselines = computeTourBaselines(matches);
     expect(baselines).not.toBeNull();
@@ -431,10 +519,171 @@ describe("computeTourBaselines", () => {
     // Alcaraz(15)+Sinner(12) → 6 samples, 83 total aces.
     expect(baselines?.matchesSampled).toBe(6);
     expect(baselines?.acesPerMatch).toBeCloseTo(83 / 6, 5);
+    // Serve rate: points won on serve / points served, summed over both sides.
+    const serveWon = (50 + 7) + (37 + 13) + (52 + 9) + (38 + 15) + (55 + 18) + (50 + 16);
+    const servePlayed = 76 + 73 + 90 + 78 + 110 + 100;
+    expect(baselines?.serveWinRate).toBeCloseTo(serveWon / servePlayed, 6);
+    expect(baselines?.returnWinRate).toBeCloseTo(1 - serveWon / servePlayed, 6);
+    // Completed scores: 7-6 7-6 (26), 6-3 3-6 6-3 (27), 6-4 6-4 6-4 (30).
+    expect(baselines?.avgGamesPerMatch).toBeCloseTo((26 + 27 + 30) / 3, 6);
   });
 
   it("returns null when no match carries serve stats", () => {
     const matches = parseTennisDataCsv(TENNIS_DATA_CSV, "atp");
     expect(computeTourBaselines(matches)).toBeNull();
+  });
+});
+
+// ─── Network loader (fetch stubbed) ───────────────────────────────────────────
+
+function csvResponse(text: string): Response {
+  return { ok: true, status: 200, text: async () => text } as unknown as Response;
+}
+
+function httpErrorResponse(status: number): Response {
+  return { ok: false, status, text: async () => "" } as unknown as Response;
+}
+
+describe("loadTennisMatches (source priority)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("falls through to the Kadantte mirror when the canonical repo 404s", async () => {
+    const requested: string[] = [];
+    const logs: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL): Promise<Response> => {
+        const url = String(input);
+        requested.push(url);
+        if (url.includes("JeffSackmann")) return httpErrorResponse(404);
+        if (url.includes("Kadantte")) return csvResponse(SACKMANN_CSV);
+        return httpErrorResponse(500);
+      }),
+    );
+
+    const matches = await loadTennisMatches({ tour: "atp", years: [2026], logger: (m) => logs.push(m) });
+
+    expect(matches).toHaveLength(5);
+    // Priority order respected: the canonical repo is tried first, the mirror second.
+    expect(requested[0]).toContain("JeffSackmann/tennis_atp");
+    expect(requested[1]).toContain("Kadantte/tennis_atp");
+    // First success wins — the odds layer is never requested once the mirror answers.
+    expect(requested.some((url) => url.includes("tennis-data.co.uk"))).toBe(false);
+    // Logging contract from the spec.
+    expect(logs.some((line) => line === "[tennis] Loading atp matches from JeffSackmann/tennis_atp...")).toBe(true);
+    expect(logs.some((line) => line === "[tennis] Loading atp matches from Kadantte/tennis_atp...")).toBe(true);
+    expect(logs.some((line) => line.startsWith("[tennis] Loaded 5 completed matches"))).toBe(true);
+  });
+
+  it("uses the tennis-data.co.uk odds copy only when both CSV mirrors fail", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL): Promise<Response> => {
+        const url = String(input);
+        if (url.includes("tennis-data.co.uk")) return csvResponse(TENNIS_DATA_CSV);
+        return httpErrorResponse(404);
+      }),
+    );
+
+    const dataset = await loadTennisDataset({ tour: "atp", years: [2026], logger: () => {} });
+
+    expect(dataset.matches.length).toBeGreaterThan(0);
+    expect(dataset.matches[0].source).toBe("tennis-data");
+    expect(dataset.sources.find((s) => s.source === "tennis-data")?.ok).toBe(true);
+    expect(dataset.sources.filter((s) => s.ok)).toHaveLength(1);
+  });
+
+  it("loads both tours with tour=all and reports per-tour counts", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (): Promise<Response> => csvResponse(SACKMANN_CSV)),
+    );
+
+    const dataset = await loadTennisDataset({ tour: "all", years: [2026], logger: () => {} });
+    expect(dataset.tourCounts.atp).toBe(5);
+    expect(dataset.tourCounts.wta).toBe(5);
+    expect(dataset.matches).toHaveLength(10);
+  });
+
+  it("filters by surface when requested", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (): Promise<Response> => csvResponse(SACKMANN_CSV)),
+    );
+    const clay = await loadTennisMatches({ tour: "atp", years: [2026], surface: "Clay", logger: () => {} });
+    expect(clay).toHaveLength(1);
+    expect(clay[0].tournament).toBe("Roland Garros");
+  });
+
+  it("returns matches sorted chronologically and de-duplicated", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (): Promise<Response> => csvResponse(SACKMANN_CSV)),
+    );
+    const matches = await loadTennisMatches({ tour: "atp", years: [2026, 2025], logger: () => {} });
+    // Same file for both seasons → de-duplicated by (date, players).
+    expect(matches).toHaveLength(5);
+    expect(matches.map((m) => m.matchDate)).toEqual([...matches.map((m) => m.matchDate)].sort());
+  });
+
+  it("throws the critical error when no source is reachable", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (): Promise<Response> => httpErrorResponse(500)));
+    const logs: string[] = [];
+
+    await expect(
+      loadTennisMatches({ tour: "atp", years: [2026], logger: (m) => logs.push(m) }),
+    ).rejects.toThrow(TENNIS_DATA_UNAVAILABLE);
+
+    expect(logs).toContain(TENNIS_DATA_UNAVAILABLE);
+  });
+});
+
+// ─── ESPN fixture fetch (fetch stubbed) ───────────────────────────────────────
+
+describe("fetchUpcomingTennisMatches", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  beforeEach(() => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL): Promise<Response> => {
+        const url = String(input);
+        if (url.includes("site.api.espn.com") && url.includes("tennis")) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ESPN_BOARD,
+          } as unknown as Response;
+        }
+        return httpErrorResponse(404);
+      }),
+    );
+  });
+
+  it("walks the window one day at a time and de-duplicates competitions", async () => {
+    const matches = await fetchUpcomingTennisMatches("atp", {
+      now: new Date("2026-09-05T00:00:00Z"),
+      days: 2,
+      logger: () => {},
+    });
+    // ESPN returns the whole event for each day queried — ids collapse to 2 singles matches.
+    expect(matches).toHaveLength(2);
+    expect(matches?.map((m) => m.id)).toEqual(["184002", "184001"]);
+    expect(matches?.[0].surface).toBe("hard");
+  });
+
+  it("returns null (never an empty list) when ESPN is unreachable", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (): Promise<Response> => httpErrorResponse(503)));
+    // A different date window so the client cache from the previous test is not reused.
+    const matches = await fetchUpcomingTennisMatches("atp", {
+      days: 1,
+      now: new Date("2026-10-05T00:00:00Z"),
+      logger: () => {},
+    });
+    expect(matches).toBeNull();
   });
 });

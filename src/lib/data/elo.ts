@@ -659,36 +659,49 @@ export async function loadEloTable(
 // ─── Tennis ELO (ATP / WTA) ───────────────────────────────────────────────────
 //
 // The second sport of the supercomputer. Football ratings live in one global
-// pool per league; tennis keeps one pool per tour (ATP and WTA never play each
-// other) and adds the surface as a modifier of the rating GAP:
+// pool per league; tennis keeps one pool per tour (ATP and WTA players never
+// meet) *and* one rating per surface:
 //
-//   · Clay  → 1.1×   — the slow surface keeps more rallies alive, so the
-//                      stronger player's edge is slightly amplified;
-//   · Grass → 1.3×   — the fastest, most serve-dominated surface: breaks are
-//                      scarce and upsets by big servers more common, so a
-//                      rating gap counts for the most;
-//   · Hard  → 1.0×   — the neutral baseline.
+//   · elo_clay, elo_grass, elo_hard — each updated only from matches played on
+//     that surface;
+//   · K = 32 (ATP) / 45 (WTA), ×1.5 for a player's first 10 rated matches on
+//     the surface (the standard new-player convergence boost);
+//   · no home advantage (tennis has no team venues), so the plain expectation
+//     formula is used: E = 1 / (1 + 10^((eloB − eloA) / 400));
+//   · the surface multiplier (clay 1.1× / grass 1.3× / hard 1.0×) is applied
+//     ONLY at prediction time (`surfaceAdjustedElo`), never inside the replay,
+//     so a stored rating is a pure measurement of what happened on court.
+//       · Clay  → 1.1×  slow courts keep rallies alive: the stronger player's
+//                       edge is slightly amplified;
+//       · Grass → 1.3×  the most serve-dominated surface — breaks are scarce
+//                       and a rating gap counts for the most;
+//       · Hard  → 1.0×  the neutral baseline.
 //
-// The modifier scales each player's deviation from the 1500 baseline (see
-// `surfaceAdjustedElo`), which is mathematically identical to scaling the Elo
-// difference by the modifier, and it is applied consistently in both the
-// historical replay (`buildTennisEloTable`) and prediction-time lookups —
-// the same player is "playing like" a 1760 on grass and a 1560 on clay.
-//
-// There is no home advantage in tennis (no team venues), so the plain
-// expectation formula is used; serve edges are handled by the market model.
+// There is no default rating. A player with no replayed match on a surface has
+// `null` there — `getTennisElo` returns null and the API refuses to price the
+// fixture rather than falling back to 1500.
 
 import type { TennisMatch, TennisSurface, TennisTour } from "./sources/tennis";
-import { tennisPlayerKey, playerNamesMatch } from "./sources/tennis";
+import { TENNIS_SURFACES, tennisPlayerKey, playerNamesMatch } from "./sources/tennis";
 
+/** Rating a player *starts* from. Never used as a fallback for a missing one. */
 export const TENNIS_INITIAL_ELO = 1500;
 
-/** Surface modifiers for the tennis ELO expectation (see table above). */
+/** Base K-factor per tour: ATP 32, WTA 45 (the women's tour is more volatile). */
+export const TENNIS_K_FACTORS: Record<TennisTour, number> = { atp: 32, wta: 45 };
+
+/** New players converge faster: K is multiplied by this for the first matches. */
+export const TENNIS_NEW_PLAYER_BOOST = 1.5;
+export const TENNIS_NEW_PLAYER_MATCHES = 10;
+
+/**
+ * Surface multipliers applied to the rating *gap* at prediction time
+ * (see the table in the header comment).
+ */
 export const TENNIS_SURFACE_ELO_MODIFIERS: Record<TennisSurface, number> = {
   clay: 1.1,
   grass: 1.3,
   hard: 1.0,
-  carpet: 1.0, // pre-2009 indoor season — treated as a fast hard court
 };
 
 /** Modifier for a surface; 1.0 when the surface is unknown. */
@@ -699,7 +712,8 @@ export function surfaceEloModifier(surface: TennisSurface | null | undefined): n
 
 /**
  * Effective rating on a surface: the player's distance from the 1500 baseline
- * scaled by the surface modifier (1700 → 1760 on grass, 1560 on clay).
+ * scaled by the surface modifier (1700 → 1760 on grass, 1720 on clay).
+ * Prediction-time only — it never touches the stored rating.
  */
 export function surfaceAdjustedElo(
   rating: number,
@@ -722,13 +736,14 @@ export function expectedScoreTennis(
 }
 
 /**
- * K-factor for one tennis match. Best-of-5 (men's Grand Slam) matches carry
- * more information and move ratings harder; players in their first 10 rated
- * matches converge faster with a ×1.5 boost, the standard new-player rule.
+ * K-factor for one tennis match: 32 on the ATP tour, 45 on the WTA tour, both
+ * ×1.5 while the player is still inside their first 10 rated matches on the
+ * surface being updated.
  */
-export function tennisKFactor(bestOf: 3 | 5 | null, matchesPlayed: number): number {
-  const base = bestOf === 5 ? 45 : 32;
-  return matchesPlayed < 10 ? base * 1.5 : base;
+export function tennisKFactor(tour: TennisTour, matchesPlayed: number): number {
+  const base = TENNIS_K_FACTORS[tour] ?? TENNIS_K_FACTORS.atp;
+  const played = Number.isFinite(matchesPlayed) ? Math.max(0, matchesPlayed) : 0;
+  return played < TENNIS_NEW_PLAYER_MATCHES ? base * TENNIS_NEW_PLAYER_BOOST : base;
 }
 
 export interface TennisEloEntry {
@@ -736,14 +751,15 @@ export interface TennisEloEntry {
   /** Normalised lookup key (see `tennisPlayerKey`). */
   key: string;
   tour: TennisTour;
-  rating: number;
+  /** Surface-specific ratings. `null` = no replayed match on that surface. */
+  ratings: Record<TennisSurface, number | null>;
+  /** Rated matches on each surface — backs `getTennisElo`'s null contract. */
+  surfaceMatches: Record<TennisSurface, number>;
   matchesPlayed: number;
   wins: number;
+  lastPlayed: string | null;
   peak: number;
   trough: number;
-  lastPlayed: string | null;
-  /** Rated matches on each surface — surfaces with history back the modifier. */
-  surfaceMatches: Record<TennisSurface, number>;
 }
 
 export interface TennisEloUpdate {
@@ -759,6 +775,8 @@ export interface TennisEloUpdate {
   expectedWinner: number;
   winnerAfter: number;
   loserAfter: number;
+  /** True when one side's rating on this surface was seeded in this match. */
+  seeded: boolean;
 }
 
 export interface TennisEloTable {
@@ -767,10 +785,12 @@ export interface TennisEloTable {
   matchesProcessed: number;
   /** ISO date of the most recent match folded into the ratings. */
   asOf: string | null;
+  /** Matches skipped because the source did not record a surface. */
+  skippedNoSurface: number;
 }
 
 export function createTennisEloTable(): TennisEloTable {
-  return { players: new Map(), matchesProcessed: 0, asOf: null };
+  return { players: new Map(), matchesProcessed: 0, asOf: null, skippedNoSurface: 0 };
 }
 
 function tennisEntryFor(
@@ -785,22 +805,52 @@ function tennisEntryFor(
     player,
     key: tennisPlayerKey(player),
     tour,
-    rating: TENNIS_INITIAL_ELO,
+    ratings: { clay: null, grass: null, hard: null },
+    surfaceMatches: { clay: 0, grass: 0, hard: 0 },
     matchesPlayed: 0,
     wins: 0,
+    lastPlayed: null,
     peak: TENNIS_INITIAL_ELO,
     trough: TENNIS_INITIAL_ELO,
-    lastPlayed: null,
-    surfaceMatches: { clay: 0, grass: 0, hard: 0, carpet: 0 },
   };
   table.players.set(key, created);
   return created;
 }
 
 /**
- * Fold one completed match into the table. Walkovers and defaults are skipped
- * (no on-court result to learn from); retirements still count — they are
- * official wins. Call in chronological order (`buildTennisEloTable` sorts).
+ * Seed a first rating on a surface from the player's own measured ratings on
+ * the other surfaces (match-weighted). This is a transfer of that player's
+ * real results, not a synthetic default — a debutant with no rating anywhere
+ * starts from the ELO baseline like every ELO system.
+ */
+export function seedSurfaceRating(
+  entry: TennisEloEntry,
+  surface: TennisSurface,
+): { rating: number; seeded: boolean } {
+  const existing = entry.ratings[surface];
+  if (existing !== null) return { rating: existing, seeded: false };
+  let weighted = 0;
+  let weight = 0;
+  for (const other of TENNIS_SURFACES) {
+    if (other === surface) continue;
+    const rating = entry.ratings[other];
+    const matches = entry.surfaceMatches[other];
+    if (rating === null || matches <= 0) continue;
+    weighted += rating * matches;
+    weight += matches;
+  }
+  if (weight > 0) return { rating: weighted / weight, seeded: true };
+  return { rating: TENNIS_INITIAL_ELO, seeded: entry.matchesPlayed === 0 };
+}
+
+/**
+ * Fold one completed match into the table, updating only the rating for the
+ * surface it was played on.
+ *
+ * Walkovers and defaults are skipped (no on-court result to learn from);
+ * retirements still count — they are official wins. Matches with no recorded
+ * surface are skipped as well: a surface-specific rating cannot be updated
+ * from them. Call in chronological order (`buildTennisEloTable` sorts).
  */
 export function applyTennisMatchToElo(
   table: TennisEloTable,
@@ -809,28 +859,39 @@ export function applyTennisMatchToElo(
   if (match.finish === "walkover") return null;
   if (!match.winner || !match.loser) return null;
   if (tennisPlayerKey(match.winner) === tennisPlayerKey(match.loser)) return null;
+  const surface = match.surface;
+  if (!surface) {
+    table.skippedNoSurface++;
+    return null;
+  }
 
   const winner = tennisEntryFor(table, match.tour, match.winner);
   const loser = tennisEntryFor(table, match.tour, match.loser);
-  const kFactor = tennisKFactor(match.bestOf, winner.matchesPlayed);
-  const expectedWinner = expectedScoreTennis(winner.rating, loser.rating, match.surface);
+  const seededWinner = seedSurfaceRating(winner, surface);
+  const seededLoser = seedSurfaceRating(loser, surface);
+  const kFactor = tennisKFactor(match.tour, winner.surfaceMatches[surface]);
 
+  const winnerBefore = seededWinner.rating;
+  const loserBefore = seededLoser.rating;
+  // Plain ELO expectation — the surface multiplier is prediction-time only.
+  const expectedWinner = expectedScore(winnerBefore, loserBefore);
   const delta = kFactor * (1 - expectedWinner);
-  winner.rating += delta;
-  loser.rating -= delta;
+  const winnerAfter = winnerBefore + delta;
+  const loserAfter = loserBefore - delta;
 
-  winner.matchesPlayed++;
-  winner.wins++;
-  winner.peak = Math.max(winner.peak, winner.rating);
-  winner.trough = Math.min(winner.trough, winner.rating);
-  winner.lastPlayed = match.matchDate;
-  loser.matchesPlayed++;
-  loser.peak = Math.max(loser.peak, loser.rating);
-  loser.trough = Math.min(loser.trough, loser.rating);
-  loser.lastPlayed = match.matchDate;
-  if (match.surface) {
-    winner.surfaceMatches[match.surface]++;
-    loser.surfaceMatches[match.surface]++;
+  winner.ratings[surface] = winnerAfter;
+  loser.ratings[surface] = loserAfter;
+
+  for (const [entry, rating, won] of [
+    [winner, winnerAfter, true],
+    [loser, loserAfter, false],
+  ] as const) {
+    entry.matchesPlayed++;
+    if (won) entry.wins++;
+    entry.surfaceMatches[surface]++;
+    entry.lastPlayed = match.matchDate;
+    entry.peak = Math.max(entry.peak, rating);
+    entry.trough = Math.min(entry.trough, rating);
   }
 
   table.matchesProcessed++;
@@ -840,15 +901,16 @@ export function applyTennisMatchToElo(
     winner: match.winner,
     loser: match.loser,
     tournament: match.tournament,
-    surface: match.surface,
+    surface,
     matchDate: match.matchDate,
     bestOf: match.bestOf,
     kFactor,
-    winnerBefore: winner.rating - delta,
-    loserBefore: loser.rating + delta,
+    winnerBefore,
+    loserBefore,
     expectedWinner,
-    winnerAfter: winner.rating,
-    loserAfter: loser.rating,
+    winnerAfter,
+    loserAfter,
+    seeded: seededWinner.seeded || seededLoser.seeded,
   };
 }
 
@@ -879,13 +941,41 @@ export function findTennisEloEntry(
 }
 
 /**
- * Rating prior for a player with no rated history but a known tour rank,
- * mapped on a log scale: #1 ≈ 2100, #10 ≈ 1880, #100 ≈ 1670, #500 ≈ 1520 —
- * roughly where a player of that rank converges after a full season. The
- * prediction layer labels this prior distinctly from a replayed rating.
+ * The tennis `getElo(playerName, surface) → number | null` of the prediction
+ * spec (named `getTennisElo` here because the football `getElo(team, league)`
+ * owns the short name in this module).
+ *
+ * Returns the player's rating on that surface, or `null` when they have no
+ * replayed match on it — there is no default, and callers must treat `null` as
+ * "this player cannot be rated here", not as 1500.
  */
-export function tennisEloPriorFromRank(rank: number | null): number | null {
-  if (rank === null || !Number.isFinite(rank) || rank < 1) return null;
-  const prior = TENNIS_INITIAL_ELO + 600 * (1 - Math.log(rank) / Math.log(600));
-  return Math.round(Math.min(2100, Math.max(1400, prior)));
+export function getTennisElo(
+  table: TennisEloTable,
+  player: string,
+  surface: TennisSurface,
+  tour: TennisTour,
+): number | null {
+  const entry = findTennisEloEntry(table, player, tour);
+  if (!entry) return null;
+  if ((entry.surfaceMatches[surface] ?? 0) <= 0) return null;
+  const rating = entry.ratings[surface];
+  return rating === null || !Number.isFinite(rating) ? null : rating;
+}
+
+/**
+ * Per-match ELO diagnostic required by the prediction spec:
+ * `[elo] Surface: {surface}, players: {home} ({eloHome}) vs {away} ({eloAway})`
+ */
+export function logTennisEloMatchup(
+  surface: TennisSurface | null,
+  home: string,
+  eloHome: number | null,
+  away: string,
+  eloAway: number | null,
+  logger: (message: string) => void = (message) => console.info(message),
+): void {
+  const fmt = (elo: number | null): string => (elo === null ? "null" : String(Math.round(elo)));
+  logger(
+    `[elo] Surface: ${surface ?? "unknown"}, players: ${home} (${fmt(eloHome)}) vs ${away} (${fmt(eloAway)})`,
+  );
 }
