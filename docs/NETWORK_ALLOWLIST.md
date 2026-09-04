@@ -16,15 +16,16 @@ All hosts are HTTPS on port 443.
 |---|---|---|
 | `sportscore.com` | SportScore handler — aggregator priority #1 | no |
 | `v3.football.api-sports.io` | API-Football handler — priority #2 | `API_FOOTBALL_KEY` |
-| `raw.githubusercontent.com` | StatsBomb + GitHubDatasets handlers | no |
+| `raw.githubusercontent.com` | StatsBomb + GitHubDatasets handlers; tennis Sackmann season CSVs (`/api/tennis/predictions`) | no |
 | `a.espncdn.com` | Team/league crests (UI imagery) | no |
-| `site.api.espn.com` | ESPN fixture feed — schedule and event IDs | no |
+| `site.api.espn.com` | ESPN fixture feed — schedule and event IDs; ESPN tennis scoreboard (`/api/tennis/predictions`) | no |
 | `www.thesportsdb.com` | TheSportsDB handler | no (free tier) |
 | `fbref.com` | FBref handler — advanced stats | no |
 | `understat.com` | Understat handler — xG | no |
 | `api.openligadb.de` | OpenLigaDB handler — German football | no |
 | `api.highlightly.com` | Highlightly handler, `/api/highlights` | `HIGHLIGHTLY_KEY` |
 | `worldcup2026-api.vercel.app` | worldcup2026 handler | no |
+| `www.tennis-data.co.uk` | Tennis odds layer — per-tournament CSVs (HTTP, not HTTPS) | no |
 
 ### Secondary hosts
 
@@ -51,6 +52,20 @@ requests. Allowlisting it verbatim would leave several sources blocked:
 | *(absent)* | `site.api.espn.com` | **Missing from the quoted list.** This supplies the fixture feed itself — without it there are no matches to fetch stats for, so the entire app is empty regardless of the other ten hosts. |
 | *(absent)* | `api.highlightly.com` | **Missing.** Note the host is `api.highlightly.com`, not `soccer.highlightly.net`. |
 | *(absent)* | `worldcup2026-api.vercel.app` | **Missing.** |
+
+## Tennis (second sport)
+
+`/api/tennis/predictions` and `/tennis` need three hosts:
+
+| Host | Role |
+|---|---|
+| `raw.githubusercontent.com` | Jeff Sackmann `tennis_atp` / `tennis_wta` season CSVs (results + aces/DFs/BPs). The canonical `JeffSackmann/*` repos went offline mid-2026, so the loader races the maintained mirrors (`Kadantte/tennis_atp`, `jasonmauss/tennis_atp`, …) and takes the highest-priority mirror that answers. |
+| `www.tennis-data.co.uk` | Per-tournament results + betting-odds CSVs (plain HTTP: `http://www.tennis-data.co.uk/{year}/{slug}.csv`, `{year}w/` for the WTA). Every file is optional and fails soft. |
+| `site.api.espn.com` | The tennis singles scoreboard — the source of upcoming ATP/WTA fixtures. |
+
+When all three are blocked the page stays honest: no fixtures are shown, the
+rating tables are empty, and every failed source is listed under "Data source
+status" on the empty state.
 
 ## Verifying
 

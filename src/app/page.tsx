@@ -543,6 +543,23 @@ function Header({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
             <button
               type="button"
               role="menuitem"
+              title="ATP & WTA match predictions — surface-modified ELO, total games, set winner and projected scorelines"
+              aria-label="Tennis Predictions — ATP and WTA match predictions"
+              onClick={() => {
+                router.push("/tennis");
+                setMenuOpen(false);
+              }}
+              className={`${MENU_ITEM} w-full px-4 py-3 text-left rounded-xl`}
+            >
+              <div className="flex items-center justify-between">
+                <div className="text-sm font-medium leading-tight">🎾 Tennis Predictions</div>
+                <span className="rounded-full bg-cyan-500/15 px-1.5 py-0.5 font-mono text-[9px] font-bold uppercase tracking-wider text-cyan-300">NEW</span>
+              </div>
+              <div className="text-[11px] mt-0.5 leading-snug text-slate-500">ATP &amp; WTA — surface ELO, total games, set winner &amp; scorelines</div>
+            </button>
+            <button
+              type="button"
+              role="menuitem"
               onClick={() => {
                 router.push("/performance/modes");
                 setMenuOpen(false);
