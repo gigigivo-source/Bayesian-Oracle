@@ -1,21 +1,25 @@
-// Tests for the tennis ELO section of the rating system: the surface modifier
-// (clay 1.1×, grass 1.3×, hard 1.0×), the per-tour replay and the rank prior.
+// Tests for the tennis ELO section of the rating system: one rating per surface
+// (elo_clay / elo_grass / elo_hard), updated only from matches on that surface,
+// K = 32 ATP / 45 WTA with a new-player boost, and the null contract — a player
+// with no replayed match on a surface has no rating there, not 1500.
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   TENNIS_INITIAL_ELO,
+  TENNIS_K_FACTORS,
   TENNIS_SURFACE_ELO_MODIFIERS,
   applyTennisMatchToElo,
   buildTennisEloTable,
   createTennisEloTable,
   expectedScoreTennis,
   findTennisEloEntry,
+  getTennisElo,
+  logTennisEloMatchup,
   surfaceAdjustedElo,
   surfaceEloModifier,
-  tennisEloPriorFromRank,
   tennisKFactor,
 } from "./elo";
-import type { TennisMatch } from "./sources/tennis";
+import type { TennisMatch, TennisSurface } from "./sources/tennis";
 
 function match(overrides: Partial<TennisMatch> = {}): TennisMatch {
   return {
@@ -30,8 +34,24 @@ function match(overrides: Partial<TennisMatch> = {}): TennisMatch {
     loser: "Player B",
     score: "6-4 6-4",
     finish: "completed",
-    winnerStats: { aces: null, doubleFaults: null, servePoints: null, serviceGames: null, bpSaved: null, bpFaced: null },
-    loserStats: { aces: null, doubleFaults: null, servePoints: null, serviceGames: null, bpSaved: null, bpFaced: null },
+    winnerStats: {
+      aces: null,
+      doubleFaults: null,
+      servePoints: null,
+      servePointsWon: null,
+      serviceGames: null,
+      bpSaved: null,
+      bpFaced: null,
+    },
+    loserStats: {
+      aces: null,
+      doubleFaults: null,
+      servePoints: null,
+      servePointsWon: null,
+      serviceGames: null,
+      bpSaved: null,
+      bpFaced: null,
+    },
     odds: null,
     winnerRank: null,
     loserRank: null,
@@ -40,9 +60,9 @@ function match(overrides: Partial<TennisMatch> = {}): TennisMatch {
   };
 }
 
-describe("surface modifiers", () => {
+describe("surface multipliers", () => {
   it("implements the specified multipliers", () => {
-    expect(TENNIS_SURFACE_ELO_MODIFIERS).toEqual({ clay: 1.1, grass: 1.3, hard: 1.0, carpet: 1.0 });
+    expect(TENNIS_SURFACE_ELO_MODIFIERS).toEqual({ clay: 1.1, grass: 1.3, hard: 1.0 });
     expect(surfaceEloModifier("clay")).toBe(1.1);
     expect(surfaceEloModifier("grass")).toBe(1.3);
     expect(surfaceEloModifier("hard")).toBe(1.0);
@@ -77,11 +97,18 @@ describe("surface modifiers", () => {
 });
 
 describe("tennisKFactor", () => {
-  it("weights best-of-5 higher and boosts new players", () => {
-    expect(tennisKFactor(3, 50)).toBe(32);
-    expect(tennisKFactor(5, 50)).toBe(45);
-    expect(tennisKFactor(3, 5)).toBe(48); // 32 × 1.5
-    expect(tennisKFactor(5, 0)).toBeCloseTo(67.5, 6); // 45 × 1.5
+  it("uses 32 on the ATP tour and 45 on the WTA tour", () => {
+    expect(TENNIS_K_FACTORS).toEqual({ atp: 32, wta: 45 });
+    expect(tennisKFactor("atp", 50)).toBe(32);
+    expect(tennisKFactor("wta", 50)).toBe(45);
+  });
+
+  it("boosts a player's first 10 rated matches on the surface", () => {
+    expect(tennisKFactor("atp", 0)).toBeCloseTo(48, 6); // 32 × 1.5
+    expect(tennisKFactor("atp", 9)).toBeCloseTo(48, 6);
+    expect(tennisKFactor("atp", 10)).toBe(32);
+    expect(tennisKFactor("wta", 0)).toBeCloseTo(67.5, 6); // 45 × 1.5
+    expect(tennisKFactor("wta", 30)).toBe(45);
   });
 });
 
@@ -90,10 +117,9 @@ describe("buildTennisEloTable", () => {
     const table = buildTennisEloTable([match()]);
     const a = table.players.get("atp|player a");
     const b = table.players.get("atp|player b");
-    expect(a && b).toBeDefined();
-    expect(a?.rating ?? 0).toBeGreaterThan(TENNIS_INITIAL_ELO);
-    expect(b?.rating ?? 0).toBeLessThan(TENNIS_INITIAL_ELO);
-    expect((a?.rating ?? 0) + (b?.rating ?? 0)).toBeCloseTo(2 * TENNIS_INITIAL_ELO, 6);
+    expect(a?.ratings.hard ?? 0).toBeGreaterThan(TENNIS_INITIAL_ELO);
+    expect(b?.ratings.hard ?? 0).toBeLessThan(TENNIS_INITIAL_ELO);
+    expect((a?.ratings.hard ?? 0) + (b?.ratings.hard ?? 0)).toBeCloseTo(2 * TENNIS_INITIAL_ELO, 6);
     expect(table.matchesProcessed).toBe(1);
     expect(table.asOf).toBe("2026-01-01T00:00:00Z");
   });
@@ -102,6 +128,12 @@ describe("buildTennisEloTable", () => {
     const table = buildTennisEloTable([match({ finish: "walkover", score: "W/O" })]);
     expect(table.matchesProcessed).toBe(0);
     expect(table.players.size).toBe(0);
+  });
+
+  it("skips matches with no recorded surface instead of guessing one", () => {
+    const table = buildTennisEloTable([match({ surface: null })]);
+    expect(table.matchesProcessed).toBe(0);
+    expect(table.skippedNoSurface).toBe(1);
   });
 
   it("keeps ATP and WTA pools separate", () => {
@@ -114,17 +146,64 @@ describe("buildTennisEloTable", () => {
     expect(table.players.get("atp|player a")).toBeDefined();
   });
 
-  it("counts surface matches per player", () => {
+  it("only touches the rating of the surface the match was played on", () => {
     const table = buildTennisEloTable([
       match({ surface: "clay", matchDate: "2026-04-01T00:00:00Z" }),
-      match({ surface: "clay", matchDate: "2026-04-02T00:00:00Z" }),
-      match({ surface: "grass", matchDate: "2026-06-01T00:00:00Z", winner: "Player B", loser: "Player A" }),
+      match({ surface: "grass", matchDate: "2026-06-01T00:00:00Z" }),
     ]);
     const a = table.players.get("atp|player a");
-    expect(a?.surfaceMatches.clay).toBe(2);
+    const b = table.players.get("atp|player b");
+    // Clay and grass each saw one match; hard saw none → stays null.
+    expect(a?.surfaceMatches.clay).toBe(1);
     expect(a?.surfaceMatches.grass).toBe(1);
-    expect(a?.wins).toBe(2);
-    expect(a?.matchesPlayed).toBe(3);
+    expect(a?.surfaceMatches.hard).toBe(0);
+    expect(a?.ratings.hard).toBeNull();
+    expect(b?.ratings.hard).toBeNull();
+    // The grass update is seeded from the player's own clay rating, so its gap
+    // compounds on top of the clay one instead of restarting from 1500.
+    expect((a?.ratings.grass ?? 0) - (b?.ratings.grass ?? 0)).toBeGreaterThan(
+      (a?.ratings.clay ?? 0) - (b?.ratings.clay ?? 0),
+    );
+  });
+
+  it("rates surfaces independently (a clay win does not lift the grass rating)", () => {
+    const table = buildTennisEloTable([
+      match({ surface: "clay", matchDate: "2026-04-01T00:00:00Z", winner: "Clay Bull", loser: "Clay Bear" }),
+      match({
+        surface: "grass",
+        matchDate: "2026-06-01T00:00:00Z",
+        winner: "Clay Bear",
+        loser: "Grass Bull",
+      }),
+    ]);
+    const bull = table.players.get("atp|clay bull");
+    const bear = table.players.get("atp|clay bear");
+    expect(bull?.ratings.clay ?? 0).toBeGreaterThan(TENNIS_INITIAL_ELO);
+    expect(bull?.ratings.grass ?? 0).toBeLessThan(TENNIS_INITIAL_ELO);
+    // The bear lost on clay and won on grass — the two ratings move apart.
+    expect(bear?.ratings.clay ?? 0).toBeLessThan(bear?.ratings.grass ?? 0);
+  });
+
+  it("seeds a debut surface from the player's own ratings on other surfaces", () => {
+    const table = buildTennisEloTable([
+      match({ surface: "hard", matchDate: "2026-01-01T00:00:00Z", winner: "Strong Player", loser: "Weak Player" }),
+      match({
+        surface: "hard",
+        matchDate: "2026-01-02T00:00:00Z",
+        winner: "Strong Player",
+        loser: "Weak Player",
+      }),
+      match({
+        surface: "clay",
+        matchDate: "2026-04-01T00:00:00Z",
+        winner: "Strong Player",
+        loser: "Fresh Player",
+      }),
+    ]);
+    const strong = table.players.get("atp|strong player");
+    // First clay match: seeded from the (well-earned) hard rating, not from 1500.
+    expect(strong?.ratings.clay ?? 0).toBeGreaterThan(TENNIS_INITIAL_ELO + 20);
+    expect(table.matchesProcessed).toBe(3);
   });
 
   it("replays chronologically regardless of input order", () => {
@@ -132,16 +211,57 @@ describe("buildTennisEloTable", () => {
       match({ matchDate: "2026-06-02T00:00:00Z", winner: "Player B", loser: "Player A" }),
       match({ matchDate: "2026-06-01T00:00:00Z" }),
     ]);
-    // Same net effect as a two-match sequence starting from 1500.
     const manual = createTennisEloTable();
     applyTennisMatchToElo(manual, match({ matchDate: "2026-06-01T00:00:00Z" }));
     applyTennisMatchToElo(
       manual,
       match({ matchDate: "2026-06-02T00:00:00Z", winner: "Player B", loser: "Player A" }),
     );
-    expect(table.players.get("atp|player a")?.rating ?? 0).toBe(
-      manual.players.get("atp|player a")?.rating ?? -1,
+    expect(table.players.get("atp|player a")?.ratings.hard ?? 0).toBe(
+      manual.players.get("atp|player a")?.ratings.hard ?? -1,
     );
+  });
+});
+
+describe("getTennisElo (getElo(playerName, surface))", () => {
+  const table = buildTennisEloTable([
+    match({ surface: "hard", winner: "Frances Tiafoe", loser: "Alexander Zverev" }),
+    match({
+      surface: "clay",
+      matchDate: "2026-02-01T00:00:00Z",
+      winner: "M. Zverev",
+      loser: "Frances Tiafoe",
+    }),
+  ]);
+
+  it("resolves the surface rating of a known player", () => {
+    const hard = getTennisElo(table, "Frances Tiafoe", "hard", "atp");
+    expect(hard).not.toBeNull();
+    expect(hard ?? 0).toBeGreaterThan(TENNIS_INITIAL_ELO);
+  });
+
+  it("returns null on a surface the player has never played", () => {
+    // Tiafoe has a clay match but no grass match in this table.
+    expect(getTennisElo(table, "Frances Tiafoe", "grass", "atp")).toBeNull();
+    expect(getTennisElo(table, "Alexander Zverev", "clay", "atp")).toBeNull();
+  });
+
+  it("returns null for unknown players and wrong tours", () => {
+    expect(getTennisElo(table, "Nobody", "hard", "atp")).toBeNull();
+    expect(getTennisElo(table, "Frances Tiafoe", "hard", "wta")).toBeNull();
+  });
+
+  it("resolves provider spellings fuzzily (ESPN ↔ dataset)", () => {
+    expect(getTennisElo(table, "F. Tiafoe", "hard", "atp")).not.toBeNull();
+    expect(getTennisElo(table, "A. Zverev", "hard", "atp")).not.toBeNull();
+  });
+
+  it("never returns the 1500 default: null means 'no data'", () => {
+    const surfaces: TennisSurface[] = ["clay", "grass", "hard"];
+    for (const surface of surfaces) {
+      const elo = getTennisElo(table, "Unknown Player", surface, "atp");
+      expect(elo).toBeNull();
+    }
   });
 });
 
@@ -167,22 +287,20 @@ describe("findTennisEloEntry", () => {
   });
 });
 
-describe("tennisEloPriorFromRank", () => {
-  it("maps ranks onto the rating scale monotonically", () => {
-    const rank1 = tennisEloPriorFromRank(1);
-    const rank10 = tennisEloPriorFromRank(10);
-    const rank100 = tennisEloPriorFromRank(100);
-    const rank500 = tennisEloPriorFromRank(500);
-    expect(rank1).toBe(2100);
-    expect(rank10 ?? 0).toBeGreaterThan(rank100 ?? 0);
-    expect(rank100 ?? 0).toBeGreaterThan(rank500 ?? 0);
-    expect(tennisEloPriorFromRank(1_000_000)).toBeGreaterThanOrEqual(1400);
-    expect(rank1 ?? 0).toBeGreaterThan(1900);
+describe("logTennisEloMatchup", () => {
+  it("logs the surface and both ratings in the spec's format", () => {
+    const lines: string[] = [];
+    logTennisEloMatchup("clay", "Iga Swiatek", 1650.4, "Elise Mertens", 1520.2, (m) => lines.push(m));
+    expect(lines).toEqual([
+      "[elo] Surface: clay, players: Iga Swiatek (1650) vs Elise Mertens (1520)",
+    ]);
   });
 
-  it("returns null without a usable rank", () => {
-    expect(tennisEloPriorFromRank(null)).toBeNull();
-    expect(tennisEloPriorFromRank(0)).toBeNull();
-    expect(tennisEloPriorFromRank(Number.NaN)).toBeNull();
+  it("logs null ratings literally instead of substituting a default", () => {
+    const logger = vi.fn();
+    logTennisEloMatchup("grass", "A Player", null, "B Player", 1600, logger);
+    expect(logger).toHaveBeenCalledWith(
+      "[elo] Surface: grass, players: A Player (null) vs B Player (1600)",
+    );
   });
 });

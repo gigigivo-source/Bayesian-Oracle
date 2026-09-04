@@ -3,22 +3,24 @@
 // The second sport of the supercomputer, alongside football. Everything the
 // tennis prediction engine consumes is normalised here:
 //
-//   · Completed matches (for the ELO replay and serve-stat baselines)
-//       1. Jeff Sackmann's tennis_atp / tennis_wta CSVs on GitHub — the
-//          canonical per-season match logs (surface, score, aces, double
-//          faults, break points). The canonical repos went offline mid-2026,
-//          so a list of actively-maintained forks is tried in order.
-//       2. tennis-data.co.uk per-tournament CSVs — the odds layer (AvgW/AvgL,
-//          Pinnacle, Bet365) plus a second copy of results by tournament.
-//   · Upcoming fixtures — the ESPN tennis scoreboard (same public feed the
-//     football half of the app already uses), filtered to singles matches
-//     that have not started yet.
+//   · Completed matches (for the surface ELO replay and the serve/return
+//     baselines) — fetched in strict priority order, first success wins:
+//       1. Jeff Sackmann  — raw.githubusercontent.com/JeffSackmann/tennis_atp
+//                           (resp. tennis_wta) `atp_matches_{year}.csv`.
+//       2. Kadantte mirror — the same CSVs from Kadantte/tennis_atp
+//                           (resp. tennis_wta), used when the canonical repos
+//                           are unreachable.
+//       3. tennis-data.co.uk — the odds layer + results copy
+//                           (`{year}/{year}.csv`, `{year}w/{year}w.csv`).
+//   · Upcoming fixtures — the ESPN tennis scoreboard (site.api.espn.com),
+//     filtered to singles matches that have not finished yet.
 //
 // Integrity contract (identical to the football sources): every completed
 // match is a real result from a real source — nothing is simulated. A source
 // that fails is reported in `sources`, never silently replaced. Ratings and
 // serve baselines that cannot be computed from real history are returned as
-// `null` and the engine falls back to clearly-labelled priors.
+// `null`; the engine and the API then refuse to produce the dependent market
+// rather than inventing a number (no TBD players, no ELO 1500, no 6-4 6-4).
 
 import { fetchWithTimeout } from "../http";
 import { resilientJson } from "@/lib/httpClient";
@@ -28,9 +30,17 @@ import { parseCsv } from "./githubDatasets";
 
 export type TennisTour = "atp" | "wta";
 
-export type TennisSurface = "clay" | "grass" | "hard" | "carpet";
+/**
+ * Normalised surfaces. Carpet (the pre-2009 indoor season) is folded into
+ * `hard` — the closest modern equivalent — so the model never has to invent a
+ * rating for a surface nobody plays on any more (see `normaliseSurface`).
+ */
+export type TennisSurface = "clay" | "grass" | "hard";
 
-export type TennisDataSource = "sackmann" | "tennis-data" | "espn";
+export const TENNIS_SURFACES: readonly TennisSurface[] = ["clay", "grass", "hard"] as const;
+
+/** Where a normalised record came from. */
+export type TennisDataSource = "sackmann" | "kadantte" | "tennis-data" | "espn";
 
 /** How the match actually finished — drives which samples feed the model. */
 export type TennisFinish = "completed" | "retired" | "walkover";
@@ -39,7 +49,10 @@ export type TennisFinish = "completed" | "retired" | "walkover";
 export interface TennisServeStats {
   aces: number | null;
   doubleFaults: number | null;
+  /** Total points played on this player's serve (`w_svpt` / `l_svpt`). */
   servePoints: number | null;
+  /** Points won on this player's serve (`w_1stWon + w_2ndWon`). */
+  servePointsWon: number | null;
   serviceGames: number | null;
   bpSaved: number | null;
   bpFaced: number | null;
@@ -49,6 +62,7 @@ const EMPTY_SERVE_STATS: TennisServeStats = {
   aces: null,
   doubleFaults: null,
   servePoints: null,
+  servePointsWon: null,
   serviceGames: null,
   bpSaved: null,
   bpFaced: null,
@@ -93,7 +107,7 @@ export interface UpcomingTennisMatch {
   status: "scheduled" | "live" | "complete";
   /** 3 or 5 — from the ESPN format when present, else tournament rules. */
   bestOf: 3 | 5;
-  /** [first listed player, second listed player] — order is cosmetic. */
+  /** [home/first-listed player, away player]. */
   players: [TennisPlayerRef, TennisPlayerRef];
 }
 
@@ -101,6 +115,19 @@ export interface TennisPlayerRef {
   name: string;
   /** Country code / flag alt text when ESPN provides it. */
   country: string | null;
+}
+
+/** Per-surface split of a player's real serve/return sample. */
+export interface TennisSurfaceSplit {
+  /** Completed matches on the surface with serve-stat coverage. */
+  matches: number;
+  acesPerMatch: number | null;
+  doubleFaultsPerMatch: number | null;
+  bpFacedPerMatch: number | null;
+  /** Points won on serve / points played on serve. */
+  serveWinRate: number | null;
+  /** Return points won / return points played. */
+  returnWinRate: number | null;
 }
 
 /** Per-player baselines derived from the completed-match dataset. */
@@ -118,21 +145,21 @@ export interface TennisPlayerProfile {
   doubleFaultsPerMatch: number | null;
   bpFacedPerMatch: number | null;
   bpSavedPerMatch: number | null;
+  serveWinRate: number | null;
+  returnWinRate: number | null;
   /** Surface-split averages (clay/grass/hard) with their sample sizes. */
-  surface: Record<
-    TennisSurface,
-    {
-      matches: number;
-      acesPerMatch: number | null;
-      doubleFaultsPerMatch: number | null;
-      bpFacedPerMatch: number | null;
-    }
-  >;
+  surface: Record<TennisSurface, TennisSurfaceSplit>;
 }
 
 export interface TennisSourceReport {
+  tour: TennisTour;
   source: string;
+  url: string;
   attempted: boolean;
+  ok: boolean;
+  /** Matches parsed from this source (before de-duplication). */
+  parsed: number;
+  /** Matches that survived de-duplication. */
   added: number;
   note: string;
 }
@@ -201,21 +228,32 @@ export function playerNamesMatch(a: string, b: string): boolean {
   return ia[0] === ib[0];
 }
 
-/** Canonicalise a surface string from any source; null when unrecognised. */
+/**
+ * Canonicalise a surface string from any source.
+ *
+ *   Clay            → clay
+ *   Grass           → grass
+ *   Hard / I-Hard /
+ *   O-Hard / Hardcourt → hard
+ *   Carpet          → hard   (documented fallback — no carpet ratings exist)
+ *
+ * `null` when the surface is missing or unrecognised: the caller must then
+ * refuse the fixture rather than assume a surface.
+ */
 export function normaliseSurface(raw: unknown): TennisSurface | null {
   if (typeof raw !== "string") return null;
-  const s = raw.trim().toLowerCase();
+  const s = raw.trim().toLowerCase().replace(/[\s_-]/g, "");
   if (!s) return null;
   if (s.startsWith("clay")) return "clay";
   if (s.startsWith("grass")) return "grass";
-  if (s.startsWith("hard")) return "hard";
-  if (s.startsWith("carpet")) return "carpet";
+  if (s.includes("hard")) return "hard";
+  if (s.startsWith("carpet")) return "hard"; // documented fallback
   return null;
 }
 
 /**
  * Static surface map for tournaments the ESPN feed names but does not
- * surface-tag. Grand Slams and the big combined events; anything else falls
+ * surface-tag. Grand Slams and the recurring tour events; anything else falls
  * through to inference from the historical dataset.
  */
 const TOURNAMENT_SURFACE_HINTS: Array<[pattern: RegExp, surface: TennisSurface]> = [
@@ -224,24 +262,21 @@ const TOURNAMENT_SURFACE_HINTS: Array<[pattern: RegExp, surface: TennisSurface]>
   [/wimbledon/i, "grass"],
   [/us open/i, "hard"],
   [/indian wells/i, "hard"],
-  [/miami open|^miami$/i, "hard"],
-  [/monte[- ]carlo/i, "clay"],
-  [/madrid open|^madrid$/i, "clay"],
+  [/^miami|miami open/i, "hard"],
+  [/monte[- ]?carlo/i, "clay"],
+  [/^madrid|madrid open/i, "clay"],
   [/italian open|^rome$/i, "clay"],
   [/hamburg/i, "clay"],
   [/cincinnati/i, "hard"],
-  [/canada|montreal|toronto/i, "hard"],
+  [/national bank open|canada|montreal|toronto/i, "hard"],
   [/shanghai/i, "hard"],
   [/paris masters|^paris$/i, "hard"],
-  [/dubai/i, "hard"],
-  [/doha/i, "hard"],
-  [/abu dhabi/i, "hard"],
-  [/rotterdam|iwtela/i, "hard"],
-  [/marseille|open 13/i, "hard"],
-  [/doha|dubai|delray|acapulco/i, "hard"],
-  [/estoril|casablanca|houston|barcelona|estoril|munich|umag|bastad|gstaad|kitzbuhel|umag/i, "clay"],
-  [/queen.?s|halle|eastbourne|mallorca|hertogenbosch|s.?hertogenbosch|stuttgart/i, "grass"],
-  [/vienna|basel|antwerp|tokyo|beijing|seoul|stockholm|almaty|astana/i, "hard"],
+  [/dubai|doha|abu dhabi/i, "hard"],
+  [/rotterdam|marseille|open 13|delray|acapulco|dallas|montpellier/i, "hard"],
+  [/estoril|casablanca|houston|barcelona|munich|umag|bastad|gstaad|kitzbuhel|kitzb[uü]hel|bucharest|santiago|buenos aires|rio de janeiro|cordoba|marrakech|geneva|lyon|belgrade|banja luka/i, "clay"],
+  [/queen.?s|halle|eastbourne|mallorca|hertogenbosch|s.?hertogenbosch|stuttgart|newport|bois-le-duc/i, "grass"],
+  [/vienna|basel|antwerp|tokyo|beijing|seoul|stockholm|almaty|astana|metz|sofia|tel aviv|san diego|seoul|chengdu|zhuhai|hangzhou|brisbane|auckland|adelaide|dallas/i, "hard"],
+  [/atp finals|wta finals|tennis masters cup|year-end championships/i, "hard"],
 ];
 
 /** Infer a tournament's surface from its name, with history as the tiebreak. */
@@ -272,7 +307,7 @@ export function inferSurface(
 
 /** Loose tournament-name equality ("US Open" ≈ "US Open Championships"). */
 function namesTournament(a: string, b: string): boolean {
-  const norm = (s: string) =>
+  const norm = (s: string): string =>
     s
       .toLowerCase()
       .normalize("NFD")
@@ -299,11 +334,13 @@ export function bestOfForTournament(tournament: string, tour: TennisTour): 3 | 5
 
 /**
  * Parse one Jeff Sackmann-format season file
- * (`atp_matches_YYYY.csv` / `wta_matches_YYYY.csv`).
+ * (`atp_matches_YYYY.csv` / `wta_matches_YYYY.csv`, including the Kadantte and
+ * every other mirror of the same layout).
  *
  * Columns used: tourney_id, tourney_name, surface, tourney_level, tourney_date
  * (YYYYMMDD), match_num, winner_name, loser_name, score, best_of, round,
- * w_ace, w_df, w_svpt, w_SvGms, w_bpSaved, w_bpFaced, l_* equivalents.
+ * w_ace, w_df, w_svpt, w_SvGms, w_bpSaved, w_bpFaced, l_* equivalents,
+ * winner_rank, loser_rank.
  */
 export function parseSackmannTennisCsv(csvText: string, tour: TennisTour): TennisMatch[] {
   const rows = parseCsv(csvText, 20_000);
@@ -339,6 +376,13 @@ export function parseSackmannTennisCsv(csvText: string, tour: TennisTour): Tenni
     if (i === undefined) return null;
     const raw = row[i]?.trim();
     return raw ? raw : null;
+  };
+  /** Points won on serve = first-serve points won + second-serve points won. */
+  const pointsWon = (row: string[], first: number | undefined, second: number | undefined): number | null => {
+    const a = num(row, first);
+    const b = num(row, second);
+    if (a === null || b === null) return null;
+    return a + b;
   };
 
   const matches: Array<{ match: TennisMatch; order: number }> = [];
@@ -376,6 +420,7 @@ export function parseSackmannTennisCsv(csvText: string, tour: TennisTour): Tenni
           aces: num(row, idx("w_ace")),
           doubleFaults: num(row, idx("w_df")),
           servePoints: num(row, idx("w_svpt")),
+          servePointsWon: pointsWon(row, idx("w_1stwon"), idx("w_2ndwon")),
           serviceGames: num(row, idx("w_svgms")),
           bpSaved: num(row, idx("w_bpsaved")),
           bpFaced: num(row, idx("w_bpfaced")),
@@ -384,6 +429,7 @@ export function parseSackmannTennisCsv(csvText: string, tour: TennisTour): Tenni
           aces: num(row, idx("l_ace")),
           doubleFaults: num(row, idx("l_df")),
           servePoints: num(row, idx("l_svpt")),
+          servePointsWon: pointsWon(row, idx("l_1stwon"), idx("l_2ndwon")),
           serviceGames: num(row, idx("l_svgms")),
           bpSaved: num(row, idx("l_bpsaved")),
           bpFaced: num(row, idx("l_bpfaced")),
@@ -417,10 +463,10 @@ export function finishFromScore(score: string): TennisFinish {
 // ─── tennis-data.co.uk CSV parser (pure) ──────────────────────────────────────
 
 /**
- * Parse one tennis-data.co.uk per-tournament CSV
- * (`http://www.tennis-data.co.uk/{year}/{slug}.csv`, or `{year}w/` for the
- * WTA tour). This is the odds-bearing layer: AvgW/AvgL (Oddsportal market
- * average) are preferred, then Pinnacle, then Bet365.
+ * Parse one tennis-data.co.uk CSV
+ * (`https://www.tennis-data.co.uk/{year}/{year}.csv`, or `{year}w/{year}w.csv`
+ * for the WTA tour). This is the odds-bearing layer: AvgW/AvgL (Oddsportal
+ * market average) are preferred, then Pinnacle, then Bet365.
  */
 export function parseTennisDataCsv(csvText: string, tour: TennisTour): TennisMatch[] {
   const rows = parseCsv(csvText, 8_000);
@@ -623,7 +669,7 @@ export function parseEspnTennisScoreboard(
         const formatObj = (comp.format as Record<string, unknown> | undefined) ?? {};
         const regulation = (formatObj.regulation as Record<string, unknown> | undefined) ?? {};
         const periods = typeof regulation.periods === "number" ? regulation.periods : null;
-        const bestOf: 3 | 5 = periods === 5 ? 5 : bestOfForTournament(tournament, tour);
+        const bestOf: 3 | 5 = periods === 5 ? 5 : periods === 3 ? 3 : bestOfForTournament(tournament, tour);
 
         upcoming.push({
           id,
@@ -649,12 +695,14 @@ export function parseEspnTennisScoreboard(
 
 // ─── Player profiles (aggregation, pure) ──────────────────────────────────────
 
-function emptySurfaceSplit(): TennisPlayerProfile["surface"] {
+function emptySurfaceSplit(): TennisSurfaceSplit {
   return {
-    clay: { matches: 0, acesPerMatch: null, doubleFaultsPerMatch: null, bpFacedPerMatch: null },
-    grass: { matches: 0, acesPerMatch: null, doubleFaultsPerMatch: null, bpFacedPerMatch: null },
-    hard: { matches: 0, acesPerMatch: null, doubleFaultsPerMatch: null, bpFacedPerMatch: null },
-    carpet: { matches: 0, acesPerMatch: null, doubleFaultsPerMatch: null, bpFacedPerMatch: null },
+    matches: 0,
+    acesPerMatch: null,
+    doubleFaultsPerMatch: null,
+    bpFacedPerMatch: null,
+    serveWinRate: null,
+    returnWinRate: null,
   };
 }
 
@@ -662,23 +710,38 @@ function emptySurfaceSplit(): TennisPlayerProfile["surface"] {
  * Aggregate completed matches into per-player baselines. Only `completed`
  * matches contribute to serve averages (retirements and walkovers have
  * truncated stats); every finish counts for matches-played and the ELO replay.
+ *
+ * `serveWinRate` is (points won on serve / points played on serve) and
+ * `returnWinRate` is (return points won / return points played) — both derived
+ * from the opponent's serve columns, so no number is ever estimated.
  */
 export function buildTennisPlayerProfiles(
   matches: TennisMatch[],
   tour: TennisTour,
 ): Map<string, TennisPlayerProfile> {
-  interface Acc {
-    profile: TennisPlayerProfile;
-    rankDate: string | null;
+  interface Counters {
     aces: number; acesN: number;
     df: number; dfN: number;
     bpFaced: number; bpN: number;
     bpSaved: number; bpSavedN: number;
-    surfaceStats: Record<
-      TennisSurface,
-      { aces: number; acesN: number; df: number; dfN: number; bpFaced: number; bpN: number }
-    >;
+    servePoints: number; servePointsWon: number; serveN: number;
+    returnPoints: number; returnPointsWon: number; returnN: number;
   }
+  interface Acc {
+    profile: TennisPlayerProfile;
+    rankDate: string | null;
+    career: Counters;
+    surfaceStats: Record<TennisSurface, Counters>;
+  }
+
+  const emptyCounters = (): Counters => ({
+    aces: 0, acesN: 0,
+    df: 0, dfN: 0,
+    bpFaced: 0, bpN: 0,
+    bpSaved: 0, bpSavedN: 0,
+    servePoints: 0, servePointsWon: 0, serveN: 0,
+    returnPoints: 0, returnPointsWon: 0, returnN: 0,
+  });
 
   const accs = new Map<string, Acc>();
   const accFor = (player: string): Acc => {
@@ -698,37 +761,55 @@ export function buildTennisPlayerProfiles(
           doubleFaultsPerMatch: null,
           bpFacedPerMatch: null,
           bpSavedPerMatch: null,
-          surface: emptySurfaceSplit(),
+          serveWinRate: null,
+          returnWinRate: null,
+          surface: { clay: emptySurfaceSplit(), grass: emptySurfaceSplit(), hard: emptySurfaceSplit() },
         },
         rankDate: null,
-        aces: 0, acesN: 0,
-        df: 0, dfN: 0,
-        bpFaced: 0, bpN: 0,
-        bpSaved: 0, bpSavedN: 0,
-        surfaceStats: {
-          clay: { aces: 0, acesN: 0, df: 0, dfN: 0, bpFaced: 0, bpN: 0 },
-          grass: { aces: 0, acesN: 0, df: 0, dfN: 0, bpFaced: 0, bpN: 0 },
-          hard: { aces: 0, acesN: 0, df: 0, dfN: 0, bpFaced: 0, bpN: 0 },
-          carpet: { aces: 0, acesN: 0, df: 0, dfN: 0, bpFaced: 0, bpN: 0 },
-        },
+        career: emptyCounters(),
+        surfaceStats: { clay: emptyCounters(), grass: emptyCounters(), hard: emptyCounters() },
       };
       accs.set(key, acc);
     }
     return acc;
   };
 
-  const fold = (acc: Acc, stats: TennisServeStats, surface: TennisSurface | null, won: boolean): void => {
+  /**
+   * Fold one player's side of a completed match. `own` is the player's serve
+   * stats, `opponent` the other side's — the opponent's serve columns are
+   * exactly this player's return sample.
+   */
+  const fold = (
+    acc: Acc,
+    own: TennisServeStats,
+    opponent: TennisServeStats,
+    surface: TennisSurface | null,
+    won: boolean,
+  ): void => {
     acc.profile.matchesPlayed++;
     if (won) acc.profile.wins++;
-    if (stats.aces !== null) { acc.aces += stats.aces; acc.acesN++; }
-    if (stats.doubleFaults !== null) { acc.df += stats.doubleFaults; acc.dfN++; }
-    if (stats.bpFaced !== null) { acc.bpFaced += stats.bpFaced; acc.bpN++; }
-    if (stats.bpSaved !== null) { acc.bpSaved += stats.bpSaved; acc.bpSavedN++; }
-    if (surface) {
-      const s = acc.surfaceStats[surface];
-      if (stats.aces !== null) { s.aces += stats.aces; s.acesN++; }
-      if (stats.doubleFaults !== null) { s.df += stats.doubleFaults; s.dfN++; }
-      if (stats.bpFaced !== null) { s.bpFaced += stats.bpFaced; s.bpN++; }
+    const buckets = [acc.career, ...(surface ? [acc.surfaceStats[surface]] : [])];
+    for (const bucket of buckets) {
+      if (own.aces !== null) { bucket.aces += own.aces; bucket.acesN++; }
+      if (own.doubleFaults !== null) { bucket.df += own.doubleFaults; bucket.dfN++; }
+      if (own.bpFaced !== null) { bucket.bpFaced += own.bpFaced; bucket.bpN++; }
+      if (own.bpSaved !== null) { bucket.bpSaved += own.bpSaved; bucket.bpSavedN++; }
+      if (
+        own.servePoints !== null && own.servePoints > 0 &&
+        own.servePointsWon !== null
+      ) {
+        bucket.servePoints += own.servePoints;
+        bucket.servePointsWon += own.servePointsWon;
+        bucket.serveN++;
+      }
+      if (
+        opponent.servePoints !== null && opponent.servePoints > 0 &&
+        opponent.servePointsWon !== null
+      ) {
+        bucket.returnPoints += opponent.servePoints;
+        bucket.returnPointsWon += opponent.servePoints - opponent.servePointsWon;
+        bucket.returnN++;
+      }
     }
   };
 
@@ -741,6 +822,15 @@ export function buildTennisPlayerProfiles(
     }
   };
 
+  const finalise = (counters: Counters): Omit<TennisSurfaceSplit, "matches"> & { matches: number } => ({
+    matches: Math.max(counters.serveN, counters.returnN, counters.acesN, counters.dfN),
+    acesPerMatch: counters.acesN > 0 ? counters.aces / counters.acesN : null,
+    doubleFaultsPerMatch: counters.dfN > 0 ? counters.df / counters.dfN : null,
+    bpFacedPerMatch: counters.bpN > 0 ? counters.bpFaced / counters.bpN : null,
+    serveWinRate: counters.serveN > 0 ? counters.servePointsWon / counters.servePoints : null,
+    returnWinRate: counters.returnN > 0 ? counters.returnPointsWon / counters.returnPoints : null,
+  });
+
   for (const match of matches) {
     const winnerAcc = accFor(match.winner);
     const loserAcc = accFor(match.loser);
@@ -752,10 +842,10 @@ export function buildTennisPlayerProfiles(
     }
     noteRank(winnerAcc, match.winnerRank, match.matchDate);
     noteRank(loserAcc, match.loserRank, match.matchDate);
-    // Only full-length matches contribute to serve baselines.
+    // Only full-length matches contribute to serve/return baselines.
     if (match.finish === "completed") {
-      fold(winnerAcc, match.winnerStats, match.surface, true);
-      fold(loserAcc, match.loserStats, match.surface, false);
+      fold(winnerAcc, match.winnerStats, match.loserStats, match.surface, true);
+      fold(loserAcc, match.loserStats, match.winnerStats, match.surface, false);
     } else {
       winnerAcc.profile.matchesPlayed++;
       winnerAcc.profile.wins++;
@@ -765,18 +855,15 @@ export function buildTennisPlayerProfiles(
 
   for (const acc of accs.values()) {
     const p = acc.profile;
-    p.acesPerMatch = acc.acesN > 0 ? acc.aces / acc.acesN : null;
-    p.doubleFaultsPerMatch = acc.dfN > 0 ? acc.df / acc.dfN : null;
-    p.bpFacedPerMatch = acc.bpN > 0 ? acc.bpFaced / acc.bpN : null;
-    p.bpSavedPerMatch = acc.bpSavedN > 0 ? acc.bpSaved / acc.bpSavedN : null;
-    for (const surface of ["clay", "grass", "hard", "carpet"] as const) {
-      const s = acc.surfaceStats[surface];
-      p.surface[surface] = {
-        matches: s.acesN + s.dfN > 0 ? Math.max(s.acesN, s.dfN) : 0,
-        acesPerMatch: s.acesN > 0 ? s.aces / s.acesN : null,
-        doubleFaultsPerMatch: s.dfN > 0 ? s.df / s.dfN : null,
-        bpFacedPerMatch: s.bpN > 0 ? s.bpFaced / s.bpN : null,
-      };
+    const career = finalise(acc.career);
+    p.acesPerMatch = career.acesPerMatch;
+    p.doubleFaultsPerMatch = career.doubleFaultsPerMatch;
+    p.bpFacedPerMatch = career.bpFacedPerMatch;
+    p.bpSavedPerMatch = acc.career.bpSavedN > 0 ? acc.career.bpSaved / acc.career.bpSavedN : null;
+    p.serveWinRate = career.serveWinRate;
+    p.returnWinRate = career.returnWinRate;
+    for (const surface of TENNIS_SURFACES) {
+      p.surface[surface] = finalise(acc.surfaceStats[surface]);
     }
   }
 
@@ -785,18 +872,28 @@ export function buildTennisPlayerProfiles(
   return profiles;
 }
 
-/** Surface-aware serve baseline: the surface split when the sample is big enough. */
+/** The projection-relevant slice of a player's profile on one surface. */
+export interface TennisServeBaseline {
+  acesPerMatch: number | null;
+  doubleFaultsPerMatch: number | null;
+  bpFacedPerMatch: number | null;
+  serveWinRate: number | null;
+  returnWinRate: number | null;
+  /** Which slice of real history produced these numbers. */
+  source: "surface" | "overall" | "none";
+  /** Sampled matches behind the split actually used. */
+  matches: number;
+}
+
+/**
+ * Surface-aware serve/return baseline: the surface split when the sample is
+ * big enough, otherwise the career average. Never a synthetic number — every
+ * field stays null when the player has no real sample for it.
+ */
 export function surfaceServeBaseline(
   profile: TennisPlayerProfile | null,
   surface: TennisSurface | null,
-):
-  | {
-      acesPerMatch: number | null;
-      doubleFaultsPerMatch: number | null;
-      bpFacedPerMatch: number | null;
-      source: "surface" | "overall" | "none";
-    }
-  | null {
+): TennisServeBaseline | null {
   if (!profile) return null;
   if (surface) {
     const split = profile.surface[surface];
@@ -807,38 +904,84 @@ export function surfaceServeBaseline(
         acesPerMatch: split.acesPerMatch ?? profile.acesPerMatch,
         doubleFaultsPerMatch: split.doubleFaultsPerMatch ?? profile.doubleFaultsPerMatch,
         bpFacedPerMatch: split.bpFacedPerMatch ?? profile.bpFacedPerMatch,
+        serveWinRate: split.serveWinRate ?? profile.serveWinRate,
+        returnWinRate: split.returnWinRate ?? profile.returnWinRate,
         source: "surface",
+        matches: split.matches,
       };
     }
   }
   if (
     profile.acesPerMatch !== null ||
     profile.doubleFaultsPerMatch !== null ||
-    profile.bpFacedPerMatch !== null
+    profile.bpFacedPerMatch !== null ||
+    profile.serveWinRate !== null ||
+    profile.returnWinRate !== null
   ) {
     return {
       acesPerMatch: profile.acesPerMatch,
       doubleFaultsPerMatch: profile.doubleFaultsPerMatch,
       bpFacedPerMatch: profile.bpFacedPerMatch,
+      serveWinRate: profile.serveWinRate,
+      returnWinRate: profile.returnWinRate,
       source: "overall",
+      matches: profile.matchesPlayed,
     };
   }
-  return { acesPerMatch: null, doubleFaultsPerMatch: null, bpFacedPerMatch: null, source: "none" };
+  return {
+    acesPerMatch: null,
+    doubleFaultsPerMatch: null,
+    bpFacedPerMatch: null,
+    serveWinRate: null,
+    returnWinRate: null,
+    source: "none",
+    matches: 0,
+  };
 }
 
 /** Tour-wide per-player-match base rates for the count markets. */
 export interface TennisTourBaselines {
-  acesPerMatch: number;
-  doubleFaultsPerMatch: number;
-  bpFacedPerMatch: number;
+  acesPerMatch: number | null;
+  doubleFaultsPerMatch: number | null;
+  bpFacedPerMatch: number | null;
+  /** Tour-average serve / return point win rates (real, from the dataset). */
+  serveWinRate: number | null;
+  returnWinRate: number | null;
   /** Completed player-matches with serve stats behind the averages. */
   matchesSampled: number;
+  /** Completed matches (both players) that carried serve stats. */
+  statMatches: number;
+  /**
+   * Real average total games per completed match in the dataset — the scale
+   * factor that turns a per-match aces baseline into a best-of-5 expectation.
+   */
+  avgGamesPerMatch: number | null;
 }
 
 /**
- * Average aces / double faults / break points faced per player-match across
- * the loaded dataset — the labelled fallback for players without personal
- * history, and "no data" (null) when the dataset carries no serve stats.
+ * Total games played in a completed match, parsed from its set score
+ * ("6-4 6-3 7-6(4)" → 32). Returns `null` for retirements, walkovers and
+ * unparseable strings.
+ */
+export function parseMatchGames(score: string): number | null {
+  if (!score) return null;
+  if (finishFromScore(score) !== "completed") return null;
+  let total = 0;
+  let sets = 0;
+  for (const raw of score.split(/\s+/)) {
+    const m = raw.match(/^(\d{1,2})-(\d{1,2})/);
+    if (!m) return null;
+    total += Number(m[1]) + Number(m[2]);
+    sets++;
+  }
+  return sets > 0 ? total : null;
+}
+
+/**
+ * Average aces / double faults / break points faced / serve & return point
+ * rates per player-match across the loaded dataset. Returns `null` when the
+ * dataset carries no serve stats at all — the engine must then fall back to
+ * the pure-ELO path and label itself accordingly.
  */
 export function computeTourBaselines(matches: TennisMatch[]): TennisTourBaselines | null {
   let aces = 0;
@@ -847,87 +990,198 @@ export function computeTourBaselines(matches: TennisMatch[]): TennisTourBaseline
   let dfN = 0;
   let bp = 0;
   let bpN = 0;
+  let servePoints = 0;
+  let servePointsWon = 0;
+  let returnPoints = 0;
+  let returnPointsWon = 0;
+  let pointN = 0;
+  let statMatches = 0;
+  let games = 0;
+  let gamesN = 0;
+
   for (const match of matches) {
     if (match.finish !== "completed") continue;
-    for (const stats of [match.winnerStats, match.loserStats]) {
-      if (stats.aces !== null) {
-        aces += stats.aces;
+    const matchGames = parseMatchGames(match.score);
+    if (matchGames !== null) {
+      games += matchGames;
+      gamesN++;
+    }
+    let counted = false;
+    for (const [own, opponent] of [
+      [match.winnerStats, match.loserStats],
+      [match.loserStats, match.winnerStats],
+    ] as const) {
+      if (own.aces !== null) {
+        aces += own.aces;
         acesN++;
+        counted = true;
       }
-      if (stats.doubleFaults !== null) {
-        df += stats.doubleFaults;
+      if (own.doubleFaults !== null) {
+        df += own.doubleFaults;
         dfN++;
+        counted = true;
       }
-      if (stats.bpFaced !== null) {
-        bp += stats.bpFaced;
+      if (own.bpFaced !== null) {
+        bp += own.bpFaced;
         bpN++;
+        counted = true;
+      }
+      if (
+        own.servePoints !== null && own.servePoints > 0 && own.servePointsWon !== null &&
+        opponent.servePoints !== null && opponent.servePoints > 0 && opponent.servePointsWon !== null
+      ) {
+        servePoints += own.servePoints;
+        servePointsWon += own.servePointsWon;
+        returnPoints += opponent.servePoints;
+        returnPointsWon += opponent.servePoints - opponent.servePointsWon;
+        pointN++;
+        counted = true;
       }
     }
+    if (counted) statMatches++;
   }
-  if (acesN === 0 || dfN === 0 || bpN === 0) return null;
+
+  if (pointN === 0 && acesN === 0) return null;
+
   return {
-    acesPerMatch: aces / acesN,
-    doubleFaultsPerMatch: df / dfN,
-    bpFacedPerMatch: bp / bpN,
+    acesPerMatch: acesN > 0 ? aces / acesN : null,
+    doubleFaultsPerMatch: dfN > 0 ? df / dfN : null,
+    bpFacedPerMatch: bpN > 0 ? bp / bpN : null,
+    serveWinRate: pointN > 0 ? servePointsWon / servePoints : null,
+    returnWinRate: pointN > 0 ? returnPointsWon / returnPoints : null,
     matchesSampled: acesN,
+    statMatches,
+    avgGamesPerMatch: gamesN > 0 ? games / gamesN : null,
   };
 }
 
 // ─── Network: historical layers ───────────────────────────────────────────────
 
 /**
- * Candidate repos for the Sackmann season files, in priority order. The
- * canonical JeffSackmann repos disappeared from GitHub mid-2026; the forks
- * below are actively maintained mirrors of the same CSVs.
+ * The completed-match sources, in strict priority order. The first source that
+ * answers for a given (tour, season) wins; the rest are not even requested
+ * (unless `allSources` is set, which the diagnostics route uses).
  */
-const SACKMANN_REPOS: Record<TennisTour, string[]> = {
-  atp: ["JeffSackmann/tennis_atp", "Kadantte/tennis_atp", "jasonmauss/tennis_atp"],
-  wta: ["JeffSackmann/tennis_wta", "Kadantte/tennis_wta", "jasonmauss/tennis_wta"],
-};
+export interface TennisSourceSpec {
+  id: TennisDataSource;
+  /** Human name used in logs and the source report. */
+  label: (tour: TennisTour) => string;
+  /** URL template for a tour + season; null = source does not cover it. */
+  url: (tour: TennisTour, year: number) => string | null;
+  parse: (csv: string, tour: TennisTour) => TennisMatch[];
+}
 
-const SACKMANN_TIMEOUT_MS = 90_000;
-export const DEFAULT_TENNIS_SEASONS = 2;
-
-/**
- * tennis-data.co.uk per-tournament files — the odds layer. A curated set of
- * the tour's core events (Grand Slams + Masters/1000s + tour finals) keeps the
- * request count bounded; every file is optional and fails soft.
- */
-const TENNIS_DATA_TOURNAMENTS = [
-  "ausopen", "frenchopen", "wimbledon", "usopen",
-  "indianwells", "miami", "montecarlo", "madrid", "rome",
-  "cincinnati", "canada", "shanghai", "paris-tms", "masterscup",
-  "barcelona", "hamburg", "vienna", "basel",
+export const TENNIS_SOURCES: TennisSourceSpec[] = [
+  {
+    // 1 — Jeff Sackmann's canonical per-season match logs (results + aces,
+    //     double faults, break points, serve points).
+    id: "sackmann",
+    label: (tour) => `JeffSackmann/tennis_${tour}`,
+    url: (tour, year) =>
+      `https://raw.githubusercontent.com/JeffSackmann/tennis_${tour}/master/${tour}_matches_${year}.csv`,
+    parse: parseSackmannTennisCsv,
+  },
+  {
+    // 2 — Kadantte's mirror of the same files: the fallback when the canonical
+    //     repos are unreachable (they were for most of 2026).
+    id: "kadantte",
+    label: (tour) => `Kadantte/tennis_${tour}`,
+    url: (tour, year) =>
+      `https://raw.githubusercontent.com/Kadantte/tennis_${tour}/master/${tour}_matches_${year}.csv`,
+    parse: parseSackmannTennisCsv,
+  },
+  {
+    // 3 — tennis-data.co.uk: the odds layer (AvgW/AvgL, Pinnacle, Bet365) plus
+    //     a second copy of the season's results. No serve stats.
+    id: "tennis-data",
+    label: () => "tennis-data.co.uk",
+    url: (tour, year) =>
+      tour === "wta"
+        ? `https://www.tennis-data.co.uk/${year}w/${year}w.csv`
+        : `https://www.tennis-data.co.uk/${year}/${year}.csv`,
+    parse: parseTennisDataCsv,
+  },
 ];
 
-function seasonYears(now: Date, seasons: number): number[] {
+const TENNIS_SOURCE_TIMEOUT_MS = 45_000;
+/** Rolling seasons loaded by default (current season + the two before it). */
+export const DEFAULT_TENNIS_SEASONS = 3;
+
+export interface LoadTennisMatchesOptions {
+  /** Tour to load — `all` loads both (ATP and WTA pools never mix). */
+  tour?: TennisTour | "all";
+  /** Explicit seasons, newest first. Defaults to the last `seasons` years. */
+  years?: number[];
+  /** Optional surface filter (normalised before comparing). */
+  surface?: string | null;
+  /** Reference date for the default season window. */
+  now?: Date;
+  /** Number of rolling seasons when `years` is omitted (default 3, max 6). */
+  seasons?: number;
+  /** Log sink — defaults to console (tests inject a spy). */
+  logger?: (message: string) => void;
+}
+
+export const TENNIS_DATA_UNAVAILABLE =
+  "[tennis] CRITICAL: No data source reachable. Tennis predictions are unavailable.";
+
+/** The API-level message returned with the 503 refusal (Part 4.1 of the spec). */
+export const TENNIS_API_UNAVAILABLE_MESSAGE =
+  "Tennis data unavailable — missing Elo or historical data.";
+
+/**
+ * Thrown when every source for the requested tour(s) failed. It carries the
+ * attempt log so the API can report *why* the data is missing instead of a
+ * bare refusal.
+ */
+export class TennisDataUnavailableError extends Error {
+  readonly sources: TennisSourceReport[];
+
+  constructor(sources: TennisSourceReport[] = []) {
+    super(TENNIS_DATA_UNAVAILABLE);
+    this.name = "TennisDataUnavailableError";
+    this.sources = sources;
+  }
+}
+
+function defaultYears(now: Date, seasons: number): number[] {
   const years: number[] = [];
   for (let i = 0; i < seasons; i++) years.push(now.getUTCFullYear() - i);
   return years;
 }
 
 /**
- * Load the completed-match dataset for one tour. Layer 1 (Sackmann CSVs on
- * GitHub) provides results + serve stats; layer 2 (tennis-data.co.uk) adds the
- * odds-bearing copy of the same seasons. Matches are de-duplicated by id and
- * by (date, players) so the two layers never double-count a match.
+ * Load the completed-match dataset for one tour.
+ *
+ * Sources are tried in priority order per season and the first one that
+ * answers wins, so a dead mirror cannot stall or poison the load. Every
+ * attempt is logged (`[tennis] Loading {tour} matches from {source}...`) and
+ * reported in the returned `sources` list.
+ *
+ * Throws `TENNIS_DATA_UNAVAILABLE` when no source for the requested tour
+ * yields a single match — the caller (API route) must then surface the error
+ * instead of predicting.
  */
-export async function loadTennisMatches(
+async function loadTourDataset(
   tour: TennisTour,
-  options: { seasons?: number; now?: Date; tennisData?: boolean } = {},
+  options: LoadTennisMatchesOptions,
 ): Promise<{ matches: TennisMatch[]; sources: TennisSourceReport[] }> {
   const now = options.now ?? new Date();
-  const seasons = Math.max(1, Math.min(4, options.seasons ?? DEFAULT_TENNIS_SEASONS));
-  const years = seasonYears(now, seasons);
+  const seasons = Math.max(1, Math.min(6, options.seasons ?? DEFAULT_TENNIS_SEASONS));
+  const years = options.years && options.years.length > 0 ? options.years : defaultYears(now, seasons);
+  const log = options.logger ?? ((message: string) => console.info(message));
+  const surfaceFilter = normaliseSurface(options.surface ?? null);
+
   const sources: TennisSourceReport[] = [];
   const byId = new Map<string, TennisMatch>();
   const byPair = new Set<string>();
-  const pairKey = (m: TennisMatch) =>
+  const pairKey = (m: TennisMatch): string =>
     `${m.matchDate.slice(0, 10)}|${[tennisPlayerKey(m.winner), tennisPlayerKey(m.loser)].sort().join("~")}`;
 
   const addMatches = (list: TennisMatch[]): number => {
     let added = 0;
     for (const match of list) {
+      if (surfaceFilter && match.surface !== surfaceFilter) continue;
       const pair = pairKey(match);
       if (byId.has(match.id) || byPair.has(pair)) continue;
       byId.set(match.id, match);
@@ -937,97 +1191,131 @@ export async function loadTennisMatches(
     return added;
   };
 
-  // Layer 1 — Sackmann season files (results + aces/DFs/BPs). Every mirror of
-  // every season is fetched in parallel; per season the highest-priority
-  // mirror that responds wins, so a slow mirror cannot stall the whole load.
-  const sackmannAttempts = await Promise.all(
-    years.map(async (year) => ({
-      year,
-      attempts: await Promise.all(
-        SACKMANN_REPOS[tour].map(async (repo) => {
-          const url = `https://raw.githubusercontent.com/${repo}/master/${tour}_matches_${year}.csv`;
-          const res = await fetchWithTimeout(url, { text: true, timeoutMs: SACKMANN_TIMEOUT_MS });
-          return { repo, res };
-        }),
-      ),
-    })),
-  );
-  for (const { year, attempts } of sackmannAttempts) {
-    let winnerRepo: string | null = null;
-    let winnerCsv: string | null = null;
-    for (const { repo, res } of attempts) {
-      if (res.status === "ok" && typeof res.data === "string" && res.data.length > 100) {
-        winnerRepo = repo;
-        winnerCsv = res.data;
-        break;
+  // Seasons are independent — load them in parallel, sources strictly ordered.
+  await Promise.all(
+    years.map(async (year) => {
+      for (const spec of TENNIS_SOURCES) {
+        const url = spec.url(tour, year);
+        if (!url) continue;
+        const label = spec.label(tour);
+        log(`[tennis] Loading ${tour} matches from ${label}...`);
+        const res = await fetchWithTimeout(url, { text: true, timeoutMs: TENNIS_SOURCE_TIMEOUT_MS });
+        if (res.status !== "ok" || typeof res.data !== "string" || res.data.length < 100) {
+          sources.push({
+            tour,
+            source: spec.id,
+            url,
+            attempted: true,
+            ok: false,
+            parsed: 0,
+            added: 0,
+            note: `${year}: ${describeFailure(res.status, res.httpStatus)}`,
+          });
+          log(`[tennis] ${label} (${year}) → ${res.status}${res.httpStatus !== null ? ` HTTP ${res.httpStatus}` : ""}`);
+          continue; // next source in priority order
+        }
+        const parsed = spec.parse(res.data, tour);
+        const added = addMatches(parsed);
+        sources.push({
+          tour,
+          source: spec.id,
+          url,
+          attempted: true,
+          ok: true,
+          parsed: parsed.length,
+          added,
+          note: `${year}: ${parsed.length} parsed, ${added} new`,
+        });
+        log(`[tennis] ${label} (${year}) → ok: ${parsed.length} parsed, ${added} new matches`);
+        break; // first successful source for this season wins
       }
-    }
-    if (winnerRepo !== null && winnerCsv !== null) {
-      const matches = parseSackmannTennisCsv(winnerCsv, tour);
-      const added = addMatches(matches);
-      sources.push({
-        source: `sackmann:${winnerRepo}`,
-        attempted: true,
-        added,
-        note: `${year} season: ${matches.length} parsed, ${added} new (${attempts.length - 1} lower-priority mirror(s) skipped)`,
-      });
-    } else {
-      sources.push({
-        source: `sackmann:${tour}`,
-        attempted: true,
-        added: 0,
-        note: `no mirror reachable for ${year}: ${attempts
-          .map(({ repo, res }) => `${repo} → ${res.status}`)
-          .join(", ")}`,
-      });
-    }
-  }
-
-  // Layer 2 — tennis-data.co.uk (odds). The per-tournament files are small and
-  // independent, so they are fetched in parallel (bounded chunks) for the
-  // current season only. Every file is optional and fails soft.
-  if (options.tennisData !== false) {
-    const year = years[0];
-    const dir = tour === "wta" ? `${year}w` : `${year}`;
-    const results = await Promise.all(
-      TENNIS_DATA_TOURNAMENTS.map(async (slug) => {
-        const url = `http://www.tennis-data.co.uk/${dir}/${slug}.csv`;
-        const res = await fetchWithTimeout(url, { text: true, timeoutMs: 15_000 });
-        return res.status === "ok" && typeof res.data === "string" && res.data.length > 100
-          ? parseTennisDataCsv(res.data, tour)
-          : null;
-      }),
-    );
-    let added = 0;
-    let fetched = 0;
-    for (const list of results) {
-      if (list === null) continue;
-      fetched++;
-      added += addMatches(list);
-    }
-    sources.push({
-      source: "tennis-data.co.uk",
-      attempted: true,
-      added,
-      note: `${fetched}/${TENNIS_DATA_TOURNAMENTS.length} tournament files for ${year} (odds layer)`,
-    });
-  }
+    }),
+  );
 
   const matches = [...byId.values()].sort((a, b) => a.matchDate.localeCompare(b.matchDate));
   return { matches, sources };
+}
+
+function describeFailure(status: string, httpStatus: number | null): string {
+  return httpStatus !== null ? `${status} (HTTP ${httpStatus})` : status;
+}
+
+/**
+ * Load completed matches (Part 1.4 of the tennis spec).
+ *
+ * Returns the normalised `TennisMatch[]` — players, surface, score, rankings,
+ * serve stats and odds where the source carries them. Throws
+ * `TENNIS_DATA_UNAVAILABLE` when every source fails.
+ */
+export async function loadTennisMatches(
+  options: LoadTennisMatchesOptions = {},
+): Promise<TennisMatch[]> {
+  const dataset = await loadTennisDataset(options);
+  return dataset.matches;
+}
+
+/**
+ * Same load as `loadTennisMatches`, but with the per-source report the API
+ * uses for its data-status badge and diagnostics payload.
+ */
+export async function loadTennisDataset(
+  options: LoadTennisMatchesOptions = {},
+): Promise<{
+  matches: TennisMatch[];
+  sources: TennisSourceReport[];
+  /** Per-tour match counts, for the UI status badge. */
+  tourCounts: Record<TennisTour, number>;
+}> {
+  const tour = options.tour ?? "all";
+  const tours: TennisTour[] = tour === "all" ? ["atp", "wta"] : [tour];
+  const log = options.logger ?? ((message: string) => console.info(message));
+
+  const results = await Promise.all(tours.map((t) => loadTourDataset(t, options)));
+  const matches: TennisMatch[] = [];
+  const sources: TennisSourceReport[] = [];
+  const tourCounts: Record<TennisTour, number> = { atp: 0, wta: 0 };
+
+  results.forEach((result, i) => {
+    matches.push(...result.matches);
+    sources.push(...result.sources);
+    tourCounts[tours[i]] = result.matches.length;
+  });
+
+  matches.sort((a, b) => a.matchDate.localeCompare(b.matchDate));
+
+  if (matches.length === 0) {
+    log(TENNIS_DATA_UNAVAILABLE);
+    throw new TennisDataUnavailableError(sources);
+  }
+
+  log(
+    `[tennis] Loaded ${matches.length} completed matches ` +
+      (tours.length > 1
+        ? `(ATP ${tourCounts.atp}, WTA ${tourCounts.wta})`
+        : `(${tours[0].toUpperCase()})`),
+  );
+  return { matches, sources, tourCounts };
 }
 
 // ─── Network: ESPN upcoming fixtures ──────────────────────────────────────────
 
 const ESPN_TENNIS_BASE = "https://site.api.espn.com/apis/site/v2/sports/tennis";
 
-/** Fetch the ESPN scoreboard for a date window (YYYYMMDD-YYYYMMDD). */
-async function fetchEspnTennisBoard(
+/**
+ * Fetch the ESPN scoreboard for one day (YYYYMMDD).
+ *
+ * ESPN's tennis scoreboard ignores the `YYYYMMDD-YYYYMMDD` range form (it
+ * returns an empty `events` array), so the window is walked one day at a time
+ * and the results are de-duplicated by competition id: a day inside a slam
+ * returns that event's whole draw, so this doubles as the "next few rounds"
+ * fetch.
+ */
+async function fetchEspnTennisDay(
   tour: TennisTour,
-  datesParam: string,
+  date: string,
   history: TennisMatch[],
 ): Promise<UpcomingTennisMatch[] | null> {
-  const url = `${ESPN_TENNIS_BASE}/${tour}/scoreboard?dates=${datesParam}&limit=1000`;
+  const url = `${ESPN_TENNIS_BASE}/${tour}/scoreboard?dates=${date}`;
   const json = await resilientJson<unknown>(url, { cacheTtlMs: 120_000, retries: 1 });
   if (!json) return null;
   return parseEspnTennisScoreboard(json, tour, history);
@@ -1035,21 +1323,47 @@ async function fetchEspnTennisBoard(
 
 /**
  * Fetch upcoming singles matches for one tour over the next `days` days
- * (starting yesterday so late-night sessions that are imminent are visible).
- * Returns `null` when ESPN is unreachable — the caller reports it honestly.
+ * (starting yesterday so late-night sessions already underway are visible).
+ * Returns `null` when ESPN is unreachable — the caller reports it honestly and
+ * refuses to predict.
  */
 export async function fetchUpcomingTennisMatches(
   tour: TennisTour,
-  options: { days?: number; now?: Date; history?: TennisMatch[] } = {},
+  options: { days?: number; now?: Date; history?: TennisMatch[]; logger?: (message: string) => void } = {},
 ): Promise<UpcomingTennisMatch[] | null> {
   const now = options.now ?? new Date();
-  const days = Math.max(1, Math.min(7, options.days ?? 3));
-  const start = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-  const end = new Date(now.getTime() + days * 24 * 60 * 60 * 1000);
+  const days = Math.max(1, Math.min(5, options.days ?? 3));
+  const log = options.logger ?? ((message: string) => console.info(message));
   const fmt = (d: Date): string =>
     `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, "0")}${String(d.getUTCDate()).padStart(2, "0")}`;
 
-  const matches = await fetchEspnTennisBoard(tour, `${fmt(start)}-${fmt(end)}`, options.history ?? []);
-  if (!matches) return null;
+  const dates: string[] = [];
+  for (let i = -1; i < days; i++) {
+    dates.push(fmt(new Date(now.getTime() + i * 24 * 60 * 60 * 1000)));
+  }
+
+  log(`[tennis] Loading ${tour} upcoming fixtures from ESPN (${dates.length} days)...`);
+  const boards = await Promise.all(dates.map((date) => fetchEspnTennisDay(tour, date, options.history ?? [])));
+
+  const seen = new Set<string>();
+  const matches: UpcomingTennisMatch[] = [];
+  let reachable = false;
+  for (const board of boards) {
+    if (board === null) continue;
+    reachable = true;
+    for (const match of board) {
+      const key = `${match.id}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      matches.push(match);
+    }
+  }
+  if (!reachable) {
+    log(`[tennis] ESPN ${tour} scoreboard unreachable`);
+    return null;
+  }
+
+  matches.sort((a, b) => a.date.localeCompare(b.date) || a.id.localeCompare(b.id));
+  log(`[tennis] ESPN ${tour}: ${matches.length} singles fixtures`);
   return matches;
 }

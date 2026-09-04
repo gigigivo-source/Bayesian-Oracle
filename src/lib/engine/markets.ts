@@ -540,45 +540,52 @@ export class MarketEngine {
   }
 }
 
-// ─── TENNIS MARKET ENGINE (T1–T6) ────────────────────────────────────────────
+// ─── TENNIS MARKET ENGINE ────────────────────────────────────────────────────
 //
 // A self-contained tennis probability model feeding the same market-registry
 // pattern as the football families. The chain, from ELO to scoreline:
 //
-//   1. ELO gap (surface-adjusted — clay 1.1×, grass 1.3×, hard 1.0×, see
-//      src/lib/data/elo.ts) → match-win probability P(A).
-//   2. P(A) is inverted through the best-of-N set model → per-set win prob p.
-//      bo3: P = p²(3 − 2p);  bo5: P = p⁴(1 + 4q + 10q²), q = 1 − p.
-//   3. p is inverted through the set model (race to 6, win by 2, tiebreak at
-//      6-6 modelled as one more game) → per-game win prob g.
-//   4. The exact set-score distribution follows combinatorially from g
-//      (6-0 … 6-4, 7-5, 7-6 and mirrors), and the match distribution is a
-//      dynamic program over those set outcomes — giving total-games O/U lines,
-//      set-betting prices and the modal projected scoreline, all analytically.
-//   5. Aces / double faults / break points are Poisson O/U markets on the
-//      player's real per-match baselines (surface split when the sample is
-//      big enough), never on invented numbers.
+//   1. Surface ELO (elo_clay / elo_grass / elo_hard — see src/lib/data/elo.ts)
+//      → match-win probability with the surface multiplier applied to the gap:
+//      P = 1 / (1 + 10^((elo_away − elo_home) / 400)).
+//   2. The two players' real serve / return point rates (surface split when the
+//      sample backs it) are combined into "P(A wins a point on A's serve)" via
+//      a log-odds blend around the tour average — the point-by-point layer.
+//   3. Those point probabilities are pushed through an exact dynamic program
+//      for a service game (deuce included), then for a set (alternating
+//      service, tiebreak at 6-6), then for the match (best-of-3/5).
+//   4. The set-score distribution feeds Total Games O/U, the set-betting
+//      prices, the modal projected scoreline and the top-5 scorelines — all
+//      analytically, no simulation.
+//   5. A calibration step shifts the point probabilities (a single δ) until the
+//      serve model reproduces the ELO match probability, so the *level* comes
+//      from ELO and the *shape* from the players' real serve/return numbers.
+//      With no serve data anywhere in the dataset the model degrades to the
+//      pure-ELO inversion (match → set → game → set scores) and says so.
 //
-// Market families:
-//   T1 Match Winner   — 2 lines (player A / player B)
-//   T2 Total Games    — 3 O/U lines around the expected total
-//   T3 Set Winner     — Set 1 winner (2) + set betting (4 bo3 / 6 bo5)
-//   T4 Aces           — O/U per player (2 lines each) + match total (2 lines)
-//   T5 Double Faults  — same shape as T4
-//   T6 Break Points   — total break points in the match, O/U (2 lines)
+// Refusals (no defaults, ever):
+//   · a player without a real surface ELO → `predictTennisMatch` throws;
+//   · a player without a personal aces / double-fault baseline → that count
+//     market is `null` instead of being priced off the tour average;
+//   · every prediction carries `dataQuality: "real" | "mixed"`, never
+//     "synthetic".
 
-import type { TennisSurface, TennisTour } from "../data/sources/tennis";
+import type {
+  TennisSurface,
+  TennisTour,
+  TennisTourBaselines,
+} from "../data/sources/tennis";
 import {
-  TENNIS_INITIAL_ELO,
   expectedScoreTennis,
+  logTennisEloMatchup,
   surfaceAdjustedElo,
-  tennisEloPriorFromRank,
 } from "../data/elo";
 
 export type TennisMarketFamily =
   | "Match Winner"
   | "Total Games"
   | "Set Winner"
+  | "Correct Score"
   | "Aces"
   | "Double Faults"
   | "Break Points";
@@ -588,7 +595,7 @@ export interface TennisMarket {
   family: TennisMarketFamily;
   /** Human market name, e.g. "Total Games O/U 22.5". */
   name: string;
-  /** The side the model backs — "Over 22.5", a player name, "2-1", … */
+  /** The side the model backs — "Over 22.5", a player name, "6-4 6-3", … */
   selection: string;
   /** Probability of the selection, 0–1. */
   probability: number;
@@ -600,7 +607,201 @@ export interface TennisMarket {
   detail: string;
 }
 
-// ─── Pure model: sets & games ─────────────────────────────────────────────────
+/** Thrown when the engine is asked to price a match it cannot rate honestly. */
+export class TennisModelError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TennisModelError";
+  }
+}
+
+// ─── Point / game / set primitives (pure) ─────────────────────────────────────
+
+const clampProb = (p: number): number => Math.min(0.9999, Math.max(0.0001, p));
+
+export function logit(p: number): number {
+  return Math.log(clampProb(p) / (1 - clampProb(p)));
+}
+
+export function logistic(x: number): number {
+  return 1 / (1 + Math.exp(-x));
+}
+
+/**
+ * P(A wins a point on A's serve) from A's serve rate and B's return rate.
+ *
+ * Log-odds blend around the tour baseline:
+ *   logit(P) = logit(serveA) + logit(1 − returnB) − logit(baseServe)
+ * Both inputs are real measured rates; the baseline is the tour average, so an
+ * average server against an average returner returns exactly the baseline.
+ */
+export function combineServeReturn(
+  serverServeWinRate: number,
+  returnerReturnWinRate: number,
+  baseServeWinRate: number,
+): number {
+  const s = clampProb(serverServeWinRate);
+  const r = clampProb(returnerReturnWinRate);
+  const base = clampProb(baseServeWinRate);
+  return logistic(logit(s) + logit(1 - r) - logit(base));
+}
+
+/**
+ * P(server wins the game) from P(server wins a point), by dynamic program over
+ * the game's point states (0-0 … 40-40), with deuce solved analytically:
+ *   P(deuce) = p² / (1 − 2pq)
+ */
+export function serviceGameWinProb(pointProb: number): number {
+  const p = clampProb(pointProb);
+  const q = 1 - p;
+  const fromDeuce = (p * p) / (1 - 2 * p * q);
+  const memo = new Map<string, number>();
+  const rec = (a: number, b: number): number => {
+    if (a >= 4 && a - b >= 2) return 1;
+    if (b >= 4 && b - a >= 2) return 0;
+    if (a === 3 && b === 3) return fromDeuce;
+    const key = `${a}|${b}`;
+    const cached = memo.get(key);
+    if (cached !== undefined) return cached;
+    const value = p * rec(a + 1, b) + q * rec(a, b + 1);
+    memo.set(key, value);
+    return value;
+  };
+  return rec(0, 0);
+}
+
+/**
+ * P(A wins the tiebreak) by dynamic program over the point states.
+ * A serves the first point, then the service alternates every two points; from
+ * 6-6 onwards the "win by two" state is solved analytically.
+ */
+export function tiebreakWinProb(pPointAServe: number, pPointBServe: number): number {
+  const pOnA = clampProb(pPointAServe); // A serving: P(A wins the point)
+  const pOnB = 1 - clampProb(pPointBServe); // B serving: P(A wins the point)
+  const aServes = (pointsPlayed: number): boolean => {
+    const next = pointsPlayed + 1;
+    if (next === 1) return true;
+    return Math.floor((next - 2) / 2) % 2 === 1;
+  };
+  /** Win-by-two state value for a tie at `diff = a − b` points (|diff| ≤ 1). */
+  const pBar = (pOnA + pOnB) / 2;
+  const qBar = 1 - pBar;
+  const tie = (pBar * pBar) / (pBar * pBar + qBar * qBar);
+  const memo = new Map<string, number>();
+  const rec = (a: number, b: number): number => {
+    if (a >= 7 && a - b >= 2) return 1;
+    if (b >= 7 && b - a >= 2) return 0;
+    if (a >= 6 && b >= 6) {
+      const diff = a - b;
+      if (diff === 0) return tie;
+      if (diff === 1) return pBar + qBar * tie;
+      if (diff === -1) return pBar * tie;
+    }
+    const played = a + b;
+    const key = `${a}|${b}`;
+    const cached = memo.get(key);
+    if (cached !== undefined) return cached;
+    const p = aServes(played) ? pOnA : pOnB;
+    const value = p * rec(a + 1, b) + (1 - p) * rec(a, b + 1);
+    memo.set(key, value);
+    return value;
+  };
+  return rec(0, 0);
+}
+
+/** One possible set score, from player A's perspective. */
+export interface TennisSetOutcome {
+  aGames: number;
+  bGames: number;
+  /** Set decided by a tiebreak (7-6 / 6-7). */
+  tiebreak: boolean;
+  prob: number;
+}
+
+/** Set-score distribution for one choice of who serves the opening game. */
+function setOutcomesForFirstServer(
+  holdA: number,
+  holdB: number,
+  tiebreakProb: number,
+  aServesFirst: boolean,
+): Map<string, { aGames: number; bGames: number; tiebreak: boolean; prob: number }> {
+  const cache = new Map<string, Map<string, number>>();
+  const key = (a: number, b: number, tiebreak: boolean): string =>
+    `${a}-${b}:${tiebreak ? 1 : 0}`;
+
+  const rec = (a: number, b: number, aServing: boolean): Map<string, number> => {
+    if ((a >= 6 && a - b >= 2) || (b >= 6 && b - a >= 2)) {
+      return new Map([[key(a, b, false), 1]]);
+    }
+    if (a === 6 && b === 6) {
+      return new Map([
+        [key(7, 6, true), tiebreakProb],
+        [key(6, 7, true), 1 - tiebreakProb],
+      ]);
+    }
+    const stateKey = `${a}|${b}|${aServing ? 1 : 0}`;
+    const cached = cache.get(stateKey);
+    if (cached) return cached;
+
+    const pHold = aServing ? holdA : holdB;
+    const serverWon = rec(aServing ? a + 1 : a, aServing ? b : b + 1, !aServing);
+    const receiverWon = rec(aServing ? a : a + 1, aServing ? b + 1 : b, !aServing);
+    const merged = new Map<string, number>();
+    for (const [k, v] of serverWon) merged.set(k, (merged.get(k) ?? 0) + pHold * v);
+    for (const [k, v] of receiverWon) merged.set(k, (merged.get(k) ?? 0) + (1 - pHold) * v);
+    cache.set(stateKey, merged);
+    return merged;
+  };
+
+  const raw = rec(0, 0, aServesFirst);
+  const parsed = new Map<string, { aGames: number; bGames: number; tiebreak: boolean; prob: number }>();
+  for (const [k, prob] of raw) {
+    const [score, tb] = k.split(":");
+    const [aGames, bGames] = score.split("-").map(Number);
+    parsed.set(k, { aGames, bGames, tiebreak: tb === "1", prob });
+  }
+  return parsed;
+}
+
+/**
+ * Exact distribution of set scores from the two players' service point
+ * probabilities: 6-0 … 6-4, 7-5, 7-6 and the mirrors (14 outcomes, sum = 1),
+ * averaged over who serves first (that alternates set by set).
+ */
+export function setOutcomeDistribution(
+  pPointAServe: number,
+  pPointBServe: number,
+): TennisSetOutcome[] {
+  const holdA = serviceGameWinProb(pPointAServe);
+  const holdB = serviceGameWinProb(pPointBServe);
+  const tiebreak = tiebreakWinProb(pPointAServe, pPointBServe);
+  const aFirst = setOutcomesForFirstServer(holdA, holdB, tiebreak, true);
+  const bFirst = setOutcomesForFirstServer(holdA, holdB, tiebreak, false);
+
+  const merged = new Map<string, TennisSetOutcome>();
+  for (const [k, outcome] of aFirst) {
+    merged.set(k, { ...outcome, prob: outcome.prob / 2 });
+  }
+  for (const [k, outcome] of bFirst) {
+    const existing = merged.get(k);
+    merged.set(
+      k,
+      existing
+        ? { ...existing, prob: existing.prob + outcome.prob / 2 }
+        : { ...outcome, prob: outcome.prob / 2 },
+    );
+  }
+  return [...merged.values()].sort(
+    (a, b) => b.aGames - a.aGames || a.bGames - b.bGames,
+  );
+}
+
+/** P(A wins a set) from the set-score distribution. */
+export function setWinProbFromOutcomes(outcomes: TennisSetOutcome[]): number {
+  let prob = 0;
+  for (const outcome of outcomes) if (outcome.aGames > outcome.bGames) prob += outcome.prob;
+  return clamp(prob, 0, 1);
+}
 
 /** P(win a best-of-3/5 match) given the per-set win probability. */
 export function matchProbFromSetProb(setProb: number, bestOf: 3 | 5): number {
@@ -623,16 +824,17 @@ export function setWinProbFromMatchProb(matchProb: number, bestOf: 3 | 5): numbe
   return (lo + hi) / 2;
 }
 
-/** P(win a set) given the per-game win probability (race to 6, TB at 6-6). */
+/**
+ * Classic single-parameter set model (used only when the dataset carries no
+ * serve/return data at all): P(win a set) from the per-game win probability.
+ */
 export function setProbFromGameProb(gameProb: number): number {
   const g = clamp(gameProb, 0.02, 0.98);
   const q = 1 - g;
-  // Win 6-b for b = 0…4: the set ends with game #6 for the winner.
   let prob = 0;
   for (let b = 0; b <= 4; b++) {
     prob += binomial(5 + b, b) * g ** 6 * q ** b;
   }
-  // 5-5 → 7-5 (win both), or 6-6 → tiebreak (modelled as one more game).
   const p55 = binomial(10, 5) * g ** 5 * q ** 5;
   prob += p55 * g * g + p55 * 2 * g * q * g;
   return clamp(prob, 0, 1);
@@ -658,33 +860,22 @@ function binomial(n: number, k: number): number {
   return result;
 }
 
-/** One possible set score, from player A's perspective. */
-export interface TennisSetOutcome {
-  aGames: number;
-  bGames: number;
-  /** Set decided by a tiebreak (7-6 / 6-7). */
-  tiebreak: boolean;
-  prob: number;
-}
-
 /**
- * Exact distribution of set scores given A's per-game win probability:
- * 6-0 … 6-4, 7-5, 7-6 for A and the mirrors for B (14 outcomes, sum = 1).
+ * Set-score distribution from a single per-game win probability — the
+ * serve-data-free fallback (14 outcomes, sum = 1).
  */
 export function setScoreDistribution(gameProb: number): TennisSetOutcome[] {
   const g = clamp(gameProb, 0.02, 0.98);
   const q = 1 - g;
   const outcomes: TennisSetOutcome[] = [];
   for (let b = 0; b <= 4; b++) {
-    // A wins 6-b: the set ends with A's 6th game; B won b of the first 5+b.
     const probA = binomial(5 + b, b) * g ** 6 * q ** b;
-    // Mirror: B wins 6-b with the roles of g and q swapped.
     const probB = binomial(5 + b, b) * q ** 6 * g ** b;
     outcomes.push({ aGames: 6, bGames: b, tiebreak: false, prob: probA });
     outcomes.push({ aGames: b, bGames: 6, tiebreak: false, prob: probB });
   }
   const p55 = binomial(10, 5) * g ** 5 * q ** 5;
-  const p76Both = p55 * 2 * g * q; // reach 6-6: one game each from 5-5, either order
+  const p76Both = p55 * 2 * g * q;
   outcomes.push({ aGames: 7, bGames: 5, tiebreak: false, prob: p55 * g * g });
   outcomes.push({ aGames: 5, bGames: 7, tiebreak: false, prob: p55 * q * q });
   outcomes.push({ aGames: 7, bGames: 6, tiebreak: true, prob: p76Both * g });
@@ -721,22 +912,22 @@ export interface TennisMatchDistribution {
   /** P(total games = n) for every reachable total. */
   totalGames: Array<{ games: number; prob: number }>;
   expectedTotalGames: number;
-  /** Every terminal path, most likely first (capped). */
+  /** Every terminal path, most likely first. */
   scorelines: TennisScorelinePath[];
 }
 
 /**
- * The full match distribution: a dynamic program over the 14 set-score
- * outcomes. States are (setsA, setsB, totalGames); each state carries its
- * exact probability mass (for the O/U and set-betting markets) plus the
- * single most likely path through it (for the projected scoreline).
+ * The full match distribution: a dynamic program over the set-score outcomes.
+ * States are (setsA, setsB, totalGames); each state carries its exact
+ * probability mass (for the O/U and set-betting markets) plus the single most
+ * likely path through it (for the projected scoreline).
  */
-export function matchSetDistribution(setProb: number, bestOf: 3 | 5): TennisMatchDistribution {
-  const gameProb = gameWinProbFromSetProb(setProb);
-  const setOutcomes = setScoreDistribution(gameProb);
+export function matchDistribution(
+  outcomes: TennisSetOutcome[],
+  bestOf: 3 | 5,
+): TennisMatchDistribution {
   const setsToWin = bestOf === 5 ? 3 : 2;
-
-  const key = (s: TennisDpState) => `${s.setsA}|${s.setsB}|${s.games}`;
+  const key = (s: TennisDpState): string => `${s.setsA}|${s.setsB}|${s.games}`;
   let current = new Map<string, TennisDpState>();
   current.set("0|0|0", { setsA: 0, setsB: 0, games: 0, prob: 1, bestPath: [], bestPathProb: 1 });
 
@@ -763,7 +954,7 @@ export function matchSetDistribution(setProb: number, bestOf: 3 | 5): TennisMatc
         });
         continue;
       }
-      for (const outcome of setOutcomes) {
+      for (const outcome of outcomes) {
         const setsA = state.setsA + (outcome.aGames > outcome.bGames ? 1 : 0);
         const setsB = state.setsB + (outcome.aGames < outcome.bGames ? 1 : 0);
         const games = state.games + outcome.aGames + outcome.bGames;
@@ -807,11 +998,18 @@ export function matchSetDistribution(setProb: number, bestOf: 3 | 5): TennisMatc
       .map(([games, prob]) => ({ games, prob }))
       .sort((a, b) => a.games - b.games),
     expectedTotalGames,
-    scorelines: scorelines.sort((a, b) => b.prob - a.prob).slice(0, 12),
+    scorelines: scorelines.sort((a, b) => b.prob - a.prob),
   };
 }
 
-/** Format one set score from player A's perspective (A's games first). */
+/** Convenience: the classic (serve-data-free) match distribution. */
+export function matchDistributionFromSetProb(
+  setProb: number,
+  bestOf: 3 | 5,
+): TennisMatchDistribution {
+  return matchDistribution(setScoreDistribution(gameWinProbFromSetProb(setProb)), bestOf);
+}
+
 function formatSetFromA(outcome: TennisSetOutcome): string {
   return `${outcome.aGames}-${outcome.bGames}`;
 }
@@ -830,22 +1028,78 @@ export function formatScoreline(path: TennisScorelinePath): string {
   return scores.join(" ");
 }
 
-// ─── Tennis matchup input & prediction output ─────────────────────────────────
+/** The same path written from player A's perspective (A-B per set). */
+export function formatScorelineFromA(path: TennisScorelinePath): string {
+  return path.setScores.join(" ");
+}
+
+// ─── Serve/return model ───────────────────────────────────────────────────────
+
+export interface TennisServeModel {
+  /** "serve-elo" = real serve/return data; "elo-only" = ELO inversion. */
+  mode: "serve-elo" | "elo-only";
+  /** P(home wins a service point) after calibration. */
+  pointProbHomeServe: number | null;
+  pointProbAwayServe: number | null;
+  /** P(hold serve) per player. */
+  holdHome: number | null;
+  holdAway: number | null;
+  setProbHome: number;
+  /** Log-odds shift applied to the point probabilities (calibration). */
+  shift: number | null;
+  outcomes: TennisSetOutcome[];
+}
+
+function setProbFromPointProbs(pHome: number, pAway: number): number {
+  return setWinProbFromOutcomes(setOutcomeDistribution(pHome, pAway));
+}
+
+/**
+ * Solve the log-odds shift δ that makes the serve model reproduce the ELO
+ * match probability: A's service point probability moves up by δ, B's moves
+ * down by δ. Monotone in δ, so bisection is exact enough at 60 iterations.
+ */
+export function solveServeShift(
+  pHome: number,
+  pAway: number,
+  targetMatchProb: number,
+  bestOf: 3 | 5,
+): number {
+  const target = clamp(targetMatchProb, 0.001, 0.999);
+  const matchProbAt = (delta: number): number =>
+    matchProbFromSetProb(
+      setProbFromPointProbs(logistic(logit(pHome) + delta), logistic(logit(pAway) - delta)),
+      bestOf,
+    );
+  let lo = -3;
+  let hi = 3;
+  for (let i = 0; i < 60; i++) {
+    const mid = (lo + hi) / 2;
+    if (matchProbAt(mid) < target) lo = mid;
+    else hi = mid;
+  }
+  return (lo + hi) / 2;
+}
+
+// ─── Matchup input & prediction output ────────────────────────────────────────
 
 export interface TennisPlayerModelInput {
   name: string;
-  /** Replayed ELO rating (raw — surface adjustment happens here). */
+  country?: string | null;
+  /** Surface-specific ELO from the replay. `null` ⇒ the match cannot be priced. */
   elo: number | null;
-  /** How the rating was obtained, surfaced to the UI. */
-  ratingSource: "elo" | "rank-prior" | "default";
-  matchesPlayed: number | null;
   rank: number | null;
+  matchesPlayed: number | null;
+  /** Rated matches on this surface (sample size behind the ELO). */
+  surfaceMatches: number | null;
   /** Real per-match baselines from the completed-match dataset. */
   acesPerMatch: number | null;
   doubleFaultsPerMatch: number | null;
   bpFacedPerMatch: number | null;
-  /** Which slice of history produced the baselines. */
-  baselineSource: "surface" | "overall" | "tour-baseline" | "none";
+  serveWinRate: number | null;
+  returnWinRate: number | null;
+  /** Which slice of real history produced the baselines. */
+  baselineSource: "surface" | "overall" | "none";
 }
 
 export interface TennisMatchupInput {
@@ -855,67 +1109,88 @@ export interface TennisMatchupInput {
   round: string | null;
   date: string;
   bestOf: 3 | 5;
-  playerA: TennisPlayerModelInput;
-  playerB: TennisPlayerModelInput;
-  /**
-   * Tour-wide per-match base rates (computed from the loaded dataset) used
-   * when a player has no personal history. Null → count markets are skipped.
-   */
-  tourBaselines:
-    | { acesPerMatch: number; doubleFaultsPerMatch: number; bpFacedPerMatch: number }
-    | null;
+  home: TennisPlayerModelInput;
+  away: TennisPlayerModelInput;
+  /** Real tour-level rates (fallback shape, never a fabricated number). */
+  tourBaselines: TennisTourBaselines | null;
 }
 
-export interface TennisOULineGroup {
-  scope: string;
-  expected: number | null;
-  basis: string;
+export interface TennisLineGroup {
+  expected: number;
+  /** `"over_22.5"` → probability, exactly the API's probability map. */
+  probabilities: Record<string, number>;
   lines: Array<{ line: number; overProb: number; underProb: number }>;
+  /** Where the expectation came from, surfaced in the UI. */
+  basis: string;
+}
+
+export interface TennisCountSide extends TennisLineGroup {
+  scope: "home" | "away";
+  /** Player the group belongs to. */
+  name: string;
 }
 
 export interface TennisPrediction {
-  players: { a: string; b: string };
+  home: string;
+  away: string;
   surface: TennisSurface | null;
   bestOf: 3 | 5;
   matchWinner: {
-    probA: number;
-    probB: number;
-    fairOddsA: number;
-    fairOddsB: number;
-    favorite: string;
-    effectiveEloA: number;
-    effectiveEloB: number;
-    ratingSourceA: TennisPlayerModelInput["ratingSource"];
-    ratingSourceB: TennisPlayerModelInput["ratingSource"];
+    home: number;
+    away: number;
+    fairOddsHome: number;
+    fairOddsAway: number;
+    favourite: string;
+    /** Raw surface ELO used. */
+    eloHome: number;
+    eloAway: number;
+    /** Surface-multiplied effective ratings. */
+    surfaceEloHome: number;
+    surfaceEloAway: number;
   };
+  totalGames: TennisLineGroup;
   setWinner: {
-    set1ProbA: number;
-    set1ProbB: number;
+    /** P(win set k | the set is played) — identical per set under the model. */
+    sets: Array<{ set: number; home: number; away: number }>;
     setBetting: Array<{ score: string; prob: number }>;
   };
-  totalGames: {
-    expected: number;
-    lines: Array<{ line: number; overProb: number; underProb: number }>;
-    distribution: Array<{ games: number; prob: number }>;
-  };
+  /** Final set-count distribution, e.g. { "2-0": 0.52, "2-1": 0.28, … }. */
+  scoreDistribution: Record<string, number>;
+  /** Most likely scoreline, written winner-first ("6-4 6-3"). */
   projectedScoreline: string;
+  /** The same scoreline written from the home player's perspective. */
+  projectedScorelineHomeFirst: string;
   projectedWinner: string;
   projectedScorelineProb: number;
-  scorelineTop: Array<{ scoreline: string; prob: number; winner: string }>;
-  aces: TennisOULineGroup[] | null;
-  doubleFaults: TennisOULineGroup[] | null;
-  breakPoints: TennisOULineGroup[] | null;
+  topScorelines: Array<{ score: string; prob: number; winner: string }>;
+  aces: { home: TennisCountSide; away: TennisCountSide } | null;
+  doubleFaults: { home: TennisCountSide; away: TennisCountSide } | null;
+  breakPoints: TennisLineGroup | null;
+  /** "real" = every input measured; "mixed" = some tour-level inputs. */
+  dataQuality: "real" | "mixed" | "synthetic";
+  model: {
+    mode: TennisServeModel["mode"];
+    pointProbHomeServe: number | null;
+    pointProbAwayServe: number | null;
+    holdHome: number | null;
+    holdAway: number | null;
+    setProbHome: number;
+    shift: number | null;
+    expectedServiceGamesHome: number | null;
+    expectedServiceGamesAway: number | null;
+  };
   markets: TennisMarket[];
   notes: string[];
 }
 
 // O/U line ladders around the expected total (the 3 nearest lines are quoted).
-const TOTAL_GAMES_LADDER_BO3 = [15.5, 16.5, 17.5, 18.5, 19.5, 20.5, 21.5, 22.5, 23.5, 24.5, 25.5];
+const TOTAL_GAMES_LADDER_BO3 = [16.5, 17.5, 18.5, 19.5, 20.5, 21.5, 22.5, 23.5, 24.5, 25.5, 26.5];
 const TOTAL_GAMES_LADDER_BO5 = [28.5, 30.5, 32.5, 33.5, 35.5, 36.5, 38.5, 39.5, 41.5, 42.5, 44.5];
 
 export class TennisMarketEngine {
   private counter = 0;
   private readonly markets: TennisMarket[] = [];
+  private readonly notes: string[] = [];
 
   constructor(private readonly input: TennisMatchupInput) {}
 
@@ -951,95 +1226,211 @@ export class TennisMarketEngine {
     return nearest.slice(0, count).sort((a, b) => a - b);
   }
 
-  /** Count-market lines at ⌊λ⌋+0.5 and ⌈λ⌉+0.5 around the expectation. */
-  private countLineGroup(
+  /** Build the O/U group (probabilities map + structured lines) for a total. */
+  private totalGroup(
     idPrefix: string,
     family: TennisMarketFamily,
     scope: string,
-    expected: number | null,
+    expected: number,
+    ladder: number[],
     basis: string,
-  ): TennisOULineGroup | null {
-    if (expected === null || !Number.isFinite(expected) || expected < 0.05) return null;
-    const lowLine = Math.max(0.5, Math.round(expected) - 0.5);
-    const lines = [lowLine, lowLine + 1].map((line) => {
-      const overProb = poissonOver(line, expected);
-      const isOver = overProb >= 0.5;
+    detailFor: (line: number, overProb: number) => string,
+    overProbFor: (line: number) => number,
+    count = 3,
+    register = true,
+  ): TennisLineGroup {
+    const lines = this.ouLinesFor(expected, ladder, count).map((line) => {
+      const overProb = clamp(overProbFor(line), 0.001, 0.999);
+      if (register) {
+        this.market(
+          idPrefix,
+          family,
+          `${scope} O/U ${line.toFixed(1)}`,
+          `Over ${line.toFixed(1)}`,
+          overProb,
+          line,
+          detailFor(line, overProb),
+        );
+        this.market(
+          idPrefix,
+          family,
+          `${scope} O/U ${line.toFixed(1)}`,
+          `Under ${line.toFixed(1)}`,
+          1 - overProb,
+          line,
+          detailFor(line, overProb),
+        );
+      }
+      return { line, overProb: round(overProb), underProb: round(1 - overProb) };
+    });
+    const probabilities: Record<string, number> = {};
+    for (const line of lines) {
+      probabilities[`over_${line.line.toFixed(1)}`] = line.overProb;
+      probabilities[`under_${line.line.toFixed(1)}`] = line.underProb;
+    }
+    return { expected: round(expected, 2), probabilities, lines, basis };
+  }
+
+  /**
+   * Aces / double faults for one player: Poisson lines around the player's own
+   * baseline, scaled by how long the match is expected to run relative to the
+   * dataset's average match. `null` when the player has no personal sample.
+   */
+  private countSide(
+    idPrefix: string,
+    family: "Aces" | "Double Faults",
+    scope: "home" | "away",
+    player: TennisPlayerModelInput,
+    perMatch: number | null,
+    expectedTotalGames: number,
+    baselineGames: number | null,
+  ): TennisCountSide | null {
+    if (perMatch === null || !Number.isFinite(perMatch) || perMatch < 0.05) return null;
+    const scale =
+      baselineGames && baselineGames > 1 ? expectedTotalGames / baselineGames : 1;
+    const expected = perMatch * scale;
+    const basis =
+      player.baselineSource === "surface"
+        ? "surface split"
+        : player.baselineSource === "overall"
+          ? "career average"
+          : "personal average";
+    // Markets are registered only once BOTH sides are priced: a half-priced
+    // count market (one player's real baseline, the other's missing) would be
+    // a synthetic number wearing a real one's clothes.
+    const group = this.totalGroup(
+      idPrefix,
+      family,
+      `${player.name} ${family}`,
+      expected,
+      countLadder(expected),
+      basis,
+      () =>
+        `Poisson(λ=${expected.toFixed(1)}) on ${player.name}'s real per-match ${family.toLowerCase()} baseline (${basis}${scale !== 1 ? `, ×${scale.toFixed(2)} match length` : ""}).`,
+      (line) => poissonOver(line, expected),
+      2,
+      false,
+    );
+    return { ...group, scope, name: player.name };
+  }
+
+  /** Register the Over/Under markets of an already-priced count group. */
+  private registerCountGroup(
+    idPrefix: string,
+    family: "Aces" | "Double Faults",
+    group: TennisCountSide,
+  ): void {
+    for (const line of group.lines) {
+      const detail =
+        `Poisson(λ=${group.expected.toFixed(1)}) on ${group.name}'s real per-match ` +
+        `${family.toLowerCase()} baseline (${group.basis}).`;
       this.market(
         idPrefix,
         family,
-        `${scope} O/U ${line.toFixed(1)}`,
-        isOver ? `Over ${line.toFixed(1)}` : `Under ${line.toFixed(1)}`,
-        Math.max(overProb, 1 - overProb),
-        line,
-        `Poisson(λ=${expected.toFixed(1)}) on the player's real per-match ${family.toLowerCase()} baseline (${basis}).`,
+        `${group.name} ${family} O/U ${line.line.toFixed(1)}`,
+        `Over ${line.line.toFixed(1)}`,
+        line.overProb,
+        line.line,
+        detail,
       );
-      return { line, overProb: round(overProb), underProb: round(1 - overProb) };
-    });
-    return { scope, expected: round(expected, 2), basis, lines };
-  }
-
-  private resolveRating(player: TennisPlayerModelInput): {
-    rating: number;
-    source: TennisPlayerModelInput["ratingSource"];
-  } {
-    if (player.elo !== null && Number.isFinite(player.elo)) {
-      return { rating: player.elo, source: "elo" };
+      this.market(
+        idPrefix,
+        family,
+        `${group.name} ${family} O/U ${line.line.toFixed(1)}`,
+        `Under ${line.line.toFixed(1)}`,
+        line.underProb,
+        line.line,
+        detail,
+      );
     }
-    const prior = tennisEloPriorFromRank(player.rank);
-    if (prior !== null) return { rating: prior, source: "rank-prior" };
-    return { rating: TENNIS_INITIAL_ELO, source: "default" };
   }
 
-  /** Build every market family (T1–T6) and the headline prediction. */
+  /** Build every market family and the headline prediction. */
   predict(): TennisPrediction {
-    const { playerA, playerB, surface, bestOf, tourBaselines } = this.input;
-    const resolvedA = this.resolveRating(playerA);
-    const resolvedB = this.resolveRating(playerB);
+    const { home, away, surface, bestOf, tourBaselines } = this.input;
 
-    // T1 — Match Winner, from the surface-adjusted ELO expectation.
-    const probA = clamp(expectedScoreTennis(resolvedA.rating, resolvedB.rating, surface), 0.001, 0.999);
-    const probB = 1 - probA;
-    const effectiveEloA = surfaceAdjustedElo(resolvedA.rating, surface);
-    const effectiveEloB = surfaceAdjustedElo(resolvedB.rating, surface);
-    const favorite = probA >= probB ? playerA.name : playerB.name;
+    // ── Refusal: a match cannot be priced without a real rating for both.
+    if (home.elo === null || away.elo === null) {
+      throw new TennisModelError(
+        `Tennis prediction requires a real surface ELO for both players (${home.name}: ${home.elo}, ${away.name}: ${away.elo}).`,
+      );
+    }
+    const eloHome = home.elo;
+    const eloAway = away.elo;
+    logTennisEloMatchup(surface, home.name, eloHome, away.name, eloAway);
 
-    this.market("TENNIS_MW", "Match Winner", "Match Winner", playerA.name, probA, null,
-      `ELO ${Math.round(effectiveEloA)} vs ${Math.round(effectiveEloB)} on ${surface ?? "unknown"} surface (${resolvedA.source === "elo" ? "replayed" : resolvedA.source}).`);
-    this.market("TENNIS_MW", "Match Winner", "Match Winner", playerB.name, probB, null,
-      `ELO ${Math.round(effectiveEloB)} vs ${Math.round(effectiveEloA)} on ${surface ?? "unknown"} surface (${resolvedB.source === "elo" ? "replayed" : resolvedB.source}).`);
+    // ── T1 Match Winner: the surface-multiplied ELO expectation.
+    const probHome = clamp(expectedScoreTennis(eloHome, eloAway, surface), 0.001, 0.999);
+    const probAway = 1 - probHome;
+    const surfaceEloHome = surfaceAdjustedElo(eloHome, surface);
+    const surfaceEloAway = surfaceAdjustedElo(eloAway, surface);
+    const favourite = probHome >= probAway ? home.name : away.name;
 
-    // Sets & games — invert the match probability into the per-set/per-game model.
-    const setProbA = setWinProbFromMatchProb(probA, bestOf);
-    const distribution = matchSetDistribution(setProbA, bestOf);
+    this.market(
+      "TENNIS_MW",
+      "Match Winner",
+      "Match Winner",
+      home.name,
+      probHome,
+      null,
+      `Surface ELO ${Math.round(eloHome)} vs ${Math.round(eloAway)} on ${surface ?? "unknown"} (effective ${Math.round(surfaceEloHome)} vs ${Math.round(surfaceEloAway)}).`,
+    );
+    this.market(
+      "TENNIS_MW",
+      "Match Winner",
+      "Match Winner",
+      away.name,
+      probAway,
+      null,
+      `Surface ELO ${Math.round(eloAway)} vs ${Math.round(eloHome)} on ${surface ?? "unknown"} (effective ${Math.round(surfaceEloAway)} vs ${Math.round(surfaceEloHome)}).`,
+    );
 
-    // T2 — Total Games O/U.
+    // ── Serve/return layer → set-score distribution.
+    const baseServe = tourBaselines?.serveWinRate ?? null;
+    const serveModel = this.buildServeModel(probHome, baseServe);
+    const distribution = matchDistribution(serveModel.outcomes, bestOf);
+    const setProbHome = serveModel.setProbHome;
+
+    // ── T2 Total Games O/U.
     const ladder = bestOf === 5 ? TOTAL_GAMES_LADDER_BO5 : TOTAL_GAMES_LADDER_BO3;
-    const totalLines = this.ouLinesFor(distribution.expectedTotalGames, ladder).map((line) => {
-      const overProb = clamp(
+    const totalGames = this.totalGroup(
+      "TENNIS_TG",
+      "Total Games",
+      "Total Games",
+      distribution.expectedTotalGames,
+      ladder,
+      "exact set-score model",
+      (line, overProb) =>
+        `Exact set-score distribution: ${distribution.expectedTotalGames.toFixed(1)} games expected, P(over ${line.toFixed(1)}) = ${(overProb * 100).toFixed(1)}%.`,
+      (line) =>
         distribution.totalGames
           .filter((entry) => entry.games > line)
           .reduce((sum, entry) => sum + entry.prob, 0),
-        0.001,
-        0.999,
-      );
-      const isOver = overProb >= 0.5;
-      this.market(
-        "TENNIS_TG",
-        "Total Games",
-        `Total Games O/U ${line.toFixed(1)}`,
-        isOver ? `Over ${line.toFixed(1)}` : `Under ${line.toFixed(1)}`,
-        Math.max(overProb, 1 - overProb),
-        line,
-        `Exact set-score model expects ${distribution.expectedTotalGames.toFixed(1)} games (${bestOf === 5 ? "best-of-5" : "best-of-3"}).`,
-      );
-      return { line, overProb: round(overProb), underProb: round(1 - overProb) };
-    });
+    );
 
-    // T3 — Set Winner: set 1 + set betting.
-    this.market("TENNIS_SW", "Set Winner", "Set 1 Winner", playerA.name, setProbA, null,
-      `Per-set win probability inverted from the ${Math.round(probA * 100)}% match-win expectation.`);
-    this.market("TENNIS_SW", "Set Winner", "Set 1 Winner", playerB.name, 1 - setProbA, null,
-      `Per-set win probability inverted from the ${Math.round(probB * 100)}% match-win expectation.`);
+    // ── T3 Set Winner + set betting.
+    const sets: Array<{ set: number; home: number; away: number }> = [];
+    for (let set = 1; set <= bestOf; set++) {
+      sets.push({ set, home: round(setProbHome), away: round(1 - setProbHome) });
+    }
+    this.market(
+      "TENNIS_SW",
+      "Set Winner",
+      "Set 1 Winner",
+      home.name,
+      setProbHome,
+      null,
+      `Per-set win probability from the ${bestOf === 5 ? "best-of-5" : "best-of-3"} model anchored on ELO.`,
+    );
+    this.market(
+      "TENNIS_SW",
+      "Set Winner",
+      "Set 1 Winner",
+      away.name,
+      1 - setProbHome,
+      null,
+      `Per-set win probability from the ${bestOf === 5 ? "best-of-5" : "best-of-3"} model anchored on ELO.`,
+    );
     const setBetting = distribution.setBetting
       .sort((a, b) => b.prob - a.prob)
       .map((entry) => {
@@ -1050,122 +1441,290 @@ export class TennisMarketEngine {
           `${entry.setsA}-${entry.setsB}`,
           entry.prob,
           null,
-          `P(${playerA.name} wins ${entry.setsA}-${entry.setsB}) from the exact set-score distribution.`,
+          `P(${home.name} wins the match ${entry.setsA}-${entry.setsB} in sets).`,
         );
         return { score: `${entry.setsA}-${entry.setsB}`, prob: round(entry.prob) };
       });
 
-    // Projected scoreline — the modal full path, written winner-first.
-    const modal = distribution.scorelines[0];
-    const projectedWinner = modal && modal.setsA > modal.setsB ? playerA.name : playerB.name;
+    // ── Score distribution & projected scoreline.
+    const scoreDistribution: Record<string, number> = {};
+    for (const entry of [...setBetting].sort((a, b) => b.prob - a.prob)) {
+      scoreDistribution[entry.score] = entry.prob;
+    }
 
-    // T4/T5/T6 — count markets on the real serve baselines.
-    const aces = this.countMarkets("TENNIS_ACE", "Aces", (p) => p.acesPerMatch, tourBaselines?.acesPerMatch ?? null);
-    const doubleFaults = this.countMarkets("TENNIS_DF", "Double Faults", (p) => p.doubleFaultsPerMatch, tourBaselines?.doubleFaultsPerMatch ?? null);
-    const breakPoints = this.countMarkets("TENNIS_BP", "Break Points", (p) => p.bpFacedPerMatch, tourBaselines?.bpFacedPerMatch ?? null);
+    /**
+     * Terminal paths are merged by rendered scoreline: "7-6 7-6 7-6" won by
+     * either player is the same scoreline for the projection, so the two
+     * mirror paths (one per winner) are summed instead of listed twice.
+     */
+    const merged = new Map<
+      string,
+      { score: string; prob: number; winner: string; totalGames: number; homeFirst: string }
+    >();
+    for (const path of distribution.scorelines) {
+      const score = formatScoreline(path);
+      const winner = path.setsA > path.setsB ? home.name : away.name;
+      const existing = merged.get(score);
+      if (existing) {
+        existing.prob += path.prob;
+        if (winner === home.name && existing.winner !== home.name && path.prob > 0) {
+          // Keep the side with the larger share of the scoreline's mass.
+          existing.winner = home.name;
+          existing.homeFirst = formatScorelineFromA(path);
+        }
+      } else {
+        merged.set(score, {
+          score,
+          prob: path.prob,
+          winner,
+          totalGames: path.totalGames,
+          homeFirst: formatScorelineFromA(path),
+        });
+      }
+    }
+    const topScorelines = [...merged.values()].sort((a, b) => b.prob - a.prob).slice(0, 5);
+    const modal = topScorelines[0];
 
-    const notes: string[] = [
-      `Match-win probability from the surface-adjusted ELO gap (${Math.round(effectiveEloA - effectiveEloB)} points${surface ? ` on ${surface}` : ""}).`,
-      `Per-set ${(setProbA * 100).toFixed(1)}% / ${((1 - setProbA) * 100).toFixed(1)}% from inverting the best-of-${bestOf} model.`,
-    ];
-    if (resolvedA.source !== "elo" || resolvedB.source !== "elo") {
-      notes.push(
-        `Rating priors in use: ${playerA.name} → ${resolvedA.source}, ${playerB.name} → ${resolvedB.source}.`,
+    // ── T4 Correct Score.
+    for (const entry of topScorelines) {
+      this.market(
+        "TENNIS_CS",
+        "Correct Score",
+        `Correct Score ${entry.score}`,
+        `${entry.winner} ${entry.score}`,
+        entry.prob,
+        null,
+        `Exact set-score probability (${entry.totalGames} games, both winners of this scoreline merged).`,
       );
     }
-    if (!tourBaselines) {
-      notes.push("Serve baselines unavailable (no historical dataset) — aces, double faults and break point markets skipped.");
+
+    // ── T5/T6 Aces & double faults (personal baselines only).
+    const baselineGames = tourBaselines?.avgGamesPerMatch ?? null;
+    const acesHome = this.countSide(
+      "TENNIS_ACE",
+      "Aces",
+      "home",
+      home,
+      home.acesPerMatch,
+      distribution.expectedTotalGames,
+      baselineGames,
+    );
+    const acesAway = this.countSide(
+      "TENNIS_ACE",
+      "Aces",
+      "away",
+      away,
+      away.acesPerMatch,
+      distribution.expectedTotalGames,
+      baselineGames,
+    );
+    const dfHome = this.countSide(
+      "TENNIS_DF",
+      "Double Faults",
+      "home",
+      home,
+      home.doubleFaultsPerMatch,
+      distribution.expectedTotalGames,
+      baselineGames,
+    );
+    const dfAway = this.countSide(
+      "TENNIS_DF",
+      "Double Faults",
+      "away",
+      away,
+      away.doubleFaultsPerMatch,
+      distribution.expectedTotalGames,
+      baselineGames,
+    );
+    // Only price the family when BOTH sides have a real personal baseline.
+    const aces = acesHome && acesAway ? { home: acesHome, away: acesAway } : null;
+    const doubleFaults = dfHome && dfAway ? { home: dfHome, away: dfAway } : null;
+    if (acesHome && acesAway) {
+      this.registerCountGroup("TENNIS_ACE", "Aces", acesHome);
+      this.registerCountGroup("TENNIS_ACE", "Aces", acesAway);
+    }
+    if (dfHome && dfAway) {
+      this.registerCountGroup("TENNIS_DF", "Double Faults", dfHome);
+      this.registerCountGroup("TENNIS_DF", "Double Faults", dfAway);
     }
 
+    let breakPoints: TennisLineGroup | null = null;
+    if (home.bpFacedPerMatch !== null && away.bpFacedPerMatch !== null) {
+      const expected =
+        (home.bpFacedPerMatch + away.bpFacedPerMatch) *
+        (baselineGames && baselineGames > 1 ? distribution.expectedTotalGames / baselineGames : 1);
+      breakPoints = this.totalGroup(
+        "TENNIS_BP",
+        "Break Points",
+        "Break Points Faced",
+        expected,
+        countLadder(expected),
+        "combined baselines",
+        () => `Poisson(λ=${expected.toFixed(1)}) on both players' real break-points-faced baselines.`,
+        (line) => poissonOver(line, expected),
+        2,
+      );
+    }
+
+    // ── Notes & data quality.
+    this.notes.push(
+      `Match-win probability from the surface ELO gap (${Math.round(eloHome - eloAway)} points${surface ? ` on ${surface}` : ""}).`,
+      `Per-set ${(setProbHome * 100).toFixed(1)}% / ${((1 - setProbHome) * 100).toFixed(1)}% from the ${bestOf === 5 ? "best-of-5" : "best-of-3"} model.`,
+    );
+    if (serveModel.mode === "serve-elo") {
+      this.notes.push(
+        `Point-by-point model from real serve/return rates (home serve ${(home.serveWinRate ?? tourBaselines?.serveWinRate ?? 0) * 100} → ${((serveModel.pointProbHomeServe ?? 0) * 100).toFixed(1)}% per service point), calibrated to the ELO match probability.`,
+      );
+    } else {
+      this.notes.push(
+        "No serve/return data in the loaded dataset — the set-score distribution is the pure-ELO inversion.",
+      );
+    }
+    if (serveModel.mode === "serve-elo" && (home.serveWinRate === null || away.serveWinRate === null)) {
+      this.notes.push(
+        `Serve/return rates missing for ${home.serveWinRate === null ? home.name : away.name} — the tour average (real, from the same dataset) supplies the shape.`,
+      );
+    }
+    if (aces === null) {
+      this.notes.push(
+        "Aces market skipped: at least one player has no real aces baseline in the loaded dataset.",
+      );
+    }
+    if (doubleFaults === null) {
+      this.notes.push(
+        "Double-faults market skipped: at least one player has no real double-fault baseline in the loaded dataset.",
+      );
+    }
+
+    const dataQuality: TennisPrediction["dataQuality"] =
+      serveModel.mode === "serve-elo" &&
+      home.serveWinRate !== null &&
+      away.serveWinRate !== null &&
+      aces !== null &&
+      doubleFaults !== null
+        ? "real"
+        : "mixed";
+
+    const expectedServiceGames =
+      serveModel.holdHome === null
+        ? null
+        : round(distribution.expectedTotalGames / 2, 1);
+
     return {
-      players: { a: playerA.name, b: playerB.name },
+      home: home.name,
+      away: away.name,
       surface,
       bestOf,
       matchWinner: {
-        probA: round(probA),
-        probB: round(probB),
-        fairOddsA: round(1 / probA, 2),
-        fairOddsB: round(1 / probB, 2),
-        favorite,
-        effectiveEloA: Math.round(effectiveEloA),
-        effectiveEloB: Math.round(effectiveEloB),
-        ratingSourceA: resolvedA.source,
-        ratingSourceB: resolvedB.source,
+        home: round(probHome),
+        away: round(probAway),
+        fairOddsHome: round(1 / probHome, 2),
+        fairOddsAway: round(1 / probAway, 2),
+        favourite,
+        eloHome: Math.round(eloHome),
+        eloAway: Math.round(eloAway),
+        surfaceEloHome: Math.round(surfaceEloHome),
+        surfaceEloAway: Math.round(surfaceEloAway),
       },
-      setWinner: {
-        set1ProbA: round(setProbA),
-        set1ProbB: round(1 - setProbA),
-        setBetting,
-      },
-      totalGames: {
-        expected: round(distribution.expectedTotalGames, 1),
-        lines: totalLines,
-        distribution: distribution.totalGames.map((entry) => ({
-          games: entry.games,
-          prob: round(entry.prob),
-        })),
-      },
-      projectedScoreline: modal ? formatScoreline(modal) : "",
-      projectedWinner,
+      totalGames,
+      setWinner: { sets, setBetting },
+      scoreDistribution,
+      projectedScoreline: modal?.score ?? "",
+      projectedScorelineHomeFirst: modal?.homeFirst ?? "",
+      projectedWinner: modal?.winner ?? "",
       projectedScorelineProb: modal ? round(modal.prob) : 0,
-      scorelineTop: distribution.scorelines.slice(0, 5).map((path) => ({
-        scoreline: formatScoreline(path),
-        prob: round(path.prob),
-        winner: path.setsA > path.setsB ? playerA.name : playerB.name,
+      topScorelines: topScorelines.map((entry) => ({
+        score: entry.score,
+        prob: round(entry.prob),
+        winner: entry.winner,
       })),
       aces,
       doubleFaults,
       breakPoints,
+      dataQuality,
+      model: {
+        mode: serveModel.mode,
+        pointProbHomeServe:
+          serveModel.pointProbHomeServe === null ? null : round(serveModel.pointProbHomeServe),
+        pointProbAwayServe:
+          serveModel.pointProbAwayServe === null ? null : round(serveModel.pointProbAwayServe),
+        holdHome: serveModel.holdHome === null ? null : round(serveModel.holdHome),
+        holdAway: serveModel.holdAway === null ? null : round(serveModel.holdAway),
+        setProbHome: round(setProbHome),
+        shift: serveModel.shift === null ? null : round(serveModel.shift, 3),
+        expectedServiceGamesHome: expectedServiceGames,
+        expectedServiceGamesAway: expectedServiceGames,
+      },
       markets: this.markets,
-      notes,
+      notes: this.notes,
     };
   }
 
   /**
-   * Aces / double faults / break points: per-player lines (personal baseline,
-   * surface split when the sample backs it) plus the match total, with the
-   * tour baseline as the labelled fallback for players without history.
+   * Serve/return layer.
+   *
+   * Both players' real point rates (surface split, then career, then the tour
+   * average) are combined into per-service point probabilities, then shifted by
+   * a single δ so the resulting match probability equals the ELO anchor. When
+   * the dataset carries no serve/return data at all the classic ELO inversion
+   * (match → set → game → set scores) is used and labelled "elo-only".
    */
-  private countMarkets(
-    idPrefix: string,
-    family: "Aces" | "Double Faults" | "Break Points",
-    pick: (player: TennisPlayerModelInput) => number | null,
-    tourBaseline: number | null,
-  ): TennisOULineGroup[] | null {
-    if (tourBaseline === null) return null;
-    const groups: TennisOULineGroup[] = [];
-    for (const player of [this.input.playerA, this.input.playerB]) {
-      if (family === "Break Points") continue; // quoted on the match total only
-      const personal = pick(player);
-      const expected = personal ?? tourBaseline;
-      const basis =
-        personal === null
-          ? "tour baseline"
-          : player.baselineSource === "surface"
-            ? "surface split"
-            : player.baselineSource === "overall"
-              ? "career average"
-              : "tour baseline";
-      const group = this.countLineGroup(idPrefix, family, player.name, expected, basis);
-      if (group) groups.push(group);
+  private buildServeModel(probHome: number, baseServe: number | null): TennisServeModel {
+    const { home, away, bestOf } = this.input;
+    const homeServe = home.serveWinRate ?? baseServe;
+    const awayReturn = away.returnWinRate ?? (baseServe === null ? null : 1 - baseServe);
+    const awayServe = away.serveWinRate ?? baseServe;
+    const homeReturn = home.returnWinRate ?? (baseServe === null ? null : 1 - baseServe);
+
+    if (
+      baseServe === null ||
+      homeServe === null ||
+      awayServe === null ||
+      awayReturn === null ||
+      homeReturn === null
+    ) {
+      // No serve/return data anywhere → pure-ELO inversion.
+      const setProbHome = setWinProbFromMatchProb(probHome, bestOf);
+      return {
+        mode: "elo-only",
+        pointProbHomeServe: null,
+        pointProbAwayServe: null,
+        holdHome: null,
+        holdAway: null,
+        setProbHome,
+        shift: null,
+        outcomes: setScoreDistribution(gameWinProbFromSetProb(setProbHome)),
+      };
     }
-    const total =
-      (pick(this.input.playerA) ?? tourBaseline) + (pick(this.input.playerB) ?? tourBaseline);
-    const totalGroup = this.countLineGroup(
-      idPrefix,
-      family,
-      "Match Total",
-      total,
-      "combined baselines",
-    );
-    if (totalGroup) groups.push(totalGroup);
-    return groups.length > 0 ? groups : null;
+
+    const pHomeRaw = combineServeReturn(homeServe, awayReturn, baseServe);
+    const pAwayRaw = combineServeReturn(awayServe, homeReturn, baseServe);
+    const shift = solveServeShift(pHomeRaw, pAwayRaw, probHome, bestOf);
+    const pHome = logistic(logit(pHomeRaw) + shift);
+    const pAway = logistic(logit(pAwayRaw) - shift);
+    const outcomes = setOutcomeDistribution(pHome, pAway);
+    return {
+      mode: "serve-elo",
+      pointProbHomeServe: pHome,
+      pointProbAwayServe: pAway,
+      holdHome: serviceGameWinProb(pHome),
+      holdAway: serviceGameWinProb(pAway),
+      setProbHome: setWinProbFromOutcomes(outcomes),
+      shift,
+      outcomes,
+    };
   }
 }
 
+/** Count-market ladder: the lines either side of the expectation. */
+function countLadder(expected: number): number[] {
+  const low = Math.max(0.5, Math.round(expected) - 0.5);
+  return [low, low + 1, low + 2, low + 3];
+}
+
 /**
- * Convenience entry point: build every tennis market family (T1–T6) for one
- * matchup and return the prediction with the full market registry attached.
+ * Convenience entry point: build every tennis market family for one matchup
+ * and return the prediction with the full market registry attached.
  */
 export function predictTennisMatch(input: TennisMatchupInput): TennisPrediction {
   return new TennisMarketEngine(input).predict();

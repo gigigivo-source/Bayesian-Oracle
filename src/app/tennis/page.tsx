@@ -2,23 +2,23 @@
 
 // ĞIGI GIVØ — Tennis Predictions (ATP / WTA).
 //
-// The second sport of the supercomputer: upcoming singles matches priced by
-// the surface-modified ELO model (clay 1.1× / grass 1.3× / hard 1.0×) through
-// the exact set-score distribution. Every card carries the Match Winner
-// probability, Total Games O/U, Set Winner markets, the projected scoreline
-// and the serve-stat markets (Aces, Double Faults, Break Points) built from
-// the players' real per-match baselines.
+// The second sport of the supercomputer: upcoming singles matches priced by the
+// surface-specific ELO model (elo_clay / elo_grass / elo_hard) pushed through
+// the exact point-by-point service-game → set → match dynamic program.
+//
+// The page is deliberately dumb about data: it renders exactly what
+// /api/tennis/predictions returns, shows the 🟢/🔴 data-status badge, and when
+// the API refuses (503 / `error`) it shows the error state and nothing else —
+// no placeholder cards, no TBD players, no default scorelines.
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { TennisPrediction } from "@/lib/engine/markets";
 import {
   CARD_ACCENT_ORDER,
   CARD_GLASS,
   CARD_GLASS_SKIN,
   CHIP,
   CHIP_ON_AMBER,
-  CHIP_ON_CYAN,
   GLASS_TEXT_SHADOW,
   NAV_PILL,
   NAV_PILL_OFF,
@@ -30,50 +30,120 @@ import {
 
 // ─── Types (page-local mirror of /api/tennis/predictions) ────────────────────
 
-type Surface = "clay" | "grass" | "hard" | "carpet";
+type Surface = "clay" | "grass" | "hard";
 type Tour = "atp" | "wta";
+type DataQuality = "real" | "mixed" | "synthetic";
 
 interface PredictedPlayer {
   name: string;
   country: string | null;
-  rating: number;
-  ratingSource: "elo" | "rank-prior" | "default";
+  elo: number;
+  eloBySurface: Record<Surface, number | null>;
+  surfaceMatches: number;
   matchesPlayed: number | null;
   rank: number | null;
+  serveWinRate: number | null;
+  returnWinRate: number | null;
   acesPerMatch: number | null;
   doubleFaultsPerMatch: number | null;
   bpFacedPerMatch: number | null;
-  baselineSource: "surface" | "overall" | "tour-baseline" | "none";
+  baselineSource: "surface" | "overall" | "none";
+}
+
+interface TennisLine {
+  line: number;
+  overProb: number;
+  underProb: number;
+}
+
+interface LineGroup {
+  expected: number;
+  probabilities: Record<string, number>;
+  lines: TennisLine[];
+  basis: string;
+}
+
+interface CountSide extends LineGroup {
+  scope: "home" | "away";
 }
 
 interface PredictedMatch {
   id: string;
   tour: Tour;
   tournament: string;
-  surface: Surface | null;
   round: string | null;
+  surface: Surface;
+  bestOf: 3 | 5;
   date: string;
   venue: string | null;
   status: "scheduled" | "live" | "complete";
-  bestOf: 3 | 5;
-  players: [PredictedPlayer, PredictedPlayer];
-  prediction: TennisPrediction;
+  dataQuality: DataQuality;
+  home: PredictedPlayer;
+  away: PredictedPlayer;
+  matchWinner: {
+    home: number;
+    away: number;
+    fairOddsHome: number;
+    fairOddsAway: number;
+    favourite: string;
+    eloHome: number;
+    eloAway: number;
+    surfaceEloHome: number;
+    surfaceEloAway: number;
+  };
+  totalGames: LineGroup;
+  setWinner: {
+    sets: Array<{ set: number; home: number; away: number }>;
+    setBetting: Array<{ score: string; prob: number }>;
+  };
+  scoreDistribution: Record<string, number>;
+  projectedScoreline: string;
+  projectedScorelineHomeFirst: string;
+  projectedWinner: string;
+  topScorelines: Array<{ score: string; prob: number; winner: string }>;
+  aces: { home: CountSide; away: CountSide } | null;
+  doubleFaults: { home: CountSide; away: CountSide } | null;
+  model: {
+    mode: "serve-elo" | "elo-only";
+    pointProbHomeServe: number | null;
+    pointProbAwayServe: number | null;
+    holdHome: number | null;
+    holdAway: number | null;
+    setProbHome: number;
+    shift: number | null;
+  };
+  notes: string[];
+}
+
+interface TourStatus {
+  ok: boolean;
+  matches: number;
+  playersRated: number;
+  matchesRated: number;
+  asOf: string | null;
+  fixtures: number | null;
+  error: string | null;
+  sources: Array<{ source: string; url: string; ok: boolean; parsed: number; added: number; note: string }>;
 }
 
 interface TennisResponse {
   generatedAt: string;
   filters: { surface: string | null; tour: string; limit: number; days: number };
-  ratings: Record<
-    string,
-    {
-      asOf: string | null;
-      matchesProcessed: number;
-      playersRated: number;
-    } | undefined
-  >;
-  sources: Array<{ tour?: string; source: string; ok?: boolean; attempted?: boolean; added?: number; note: string }>;
+  dataStatus: Record<string, TourStatus | undefined>;
   count: number;
+  total: number;
   matches: PredictedMatch[];
+  unavailable: Array<{
+    tournament: string;
+    home: string;
+    away: string;
+    eloHome: number | null;
+    eloAway: number | null;
+    reason: string;
+  }>;
+  unavailableCount: number;
+  error?: string;
+  details?: string;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -82,7 +152,12 @@ const SURFACE_STYLES: Record<Surface, { label: string; badge: string; dot: strin
   clay: { label: "Clay", badge: "bg-orange-500/15 text-orange-300 ring-1 ring-orange-400/40", dot: "bg-orange-400" },
   grass: { label: "Grass", badge: "bg-emerald-500/15 text-emerald-300 ring-1 ring-emerald-400/40", dot: "bg-emerald-400" },
   hard: { label: "Hard", badge: "bg-cyan-500/15 text-cyan-300 ring-1 ring-cyan-400/40", dot: "bg-cyan-400" },
-  carpet: { label: "Carpet", badge: "bg-slate-500/15 text-slate-300 ring-1 ring-slate-400/40", dot: "bg-slate-400" },
+};
+
+const QUALITY_STYLES: Record<DataQuality, { label: string; badge: string }> = {
+  real: { label: "Real", badge: "bg-emerald-500/15 text-emerald-300 ring-1 ring-emerald-400/40" },
+  mixed: { label: "Mixed", badge: "bg-amber-500/15 text-amber-300 ring-1 ring-amber-400/40" },
+  synthetic: { label: "Synthetic", badge: "bg-rose-500/15 text-rose-300 ring-1 ring-rose-400/40" },
 };
 
 function pct(value: number): string {
@@ -91,6 +166,19 @@ function pct(value: number): string {
 
 function pctLabel(value: number): string {
   return `${Math.round(value * 100)}%`;
+}
+
+function num(value: number, dp = 1): string {
+  if (!Number.isFinite(value)) return "—";
+  return value.toFixed(dp);
+}
+
+function rate(value: number | null): string {
+  return value === null ? "n/a" : `${Math.round(value * 1000) / 10}%`;
+}
+
+function shortName(name: string): string {
+  return name.split(" ").slice(-1)[0] ?? name;
 }
 
 function formatDate(value: string): string {
@@ -123,12 +211,6 @@ function formatDayLabel(value: string): string {
   if (key === today.toISOString().slice(0, 10)) return `Today · ${base}`;
   if (key === tomorrow.toISOString().slice(0, 10)) return `Tomorrow · ${base}`;
   return base;
-}
-
-function ratingBadge(source: PredictedPlayer["ratingSource"]): string | null {
-  if (source === "elo") return null;
-  if (source === "rank-prior") return "rank prior";
-  return "unrated";
 }
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
@@ -186,16 +268,124 @@ function MarketSection({
   );
 }
 
+function PlayerRail({
+  player,
+  side,
+  favourite,
+  winProb,
+}: {
+  player: PredictedPlayer;
+  side: "home" | "away";
+  favourite: boolean;
+  winProb: number;
+}) {
+  const align = side === "home" ? "text-right" : "text-left";
+  return (
+    <div className={`min-w-0 ${align}`}>
+      <div className="truncate text-sm font-bold text-white">
+        {side === "home" ? (
+          <>
+            {player.name}
+            {favourite && <span className="ml-1.5 text-amber-400" aria-label="favourite">★</span>}
+          </>
+        ) : (
+          <>
+            {favourite && <span className="mr-1.5 text-amber-400" aria-label="favourite">★</span>}
+            {player.name}
+          </>
+        )}
+      </div>
+      <div
+        className={`mt-0.5 flex flex-wrap items-center gap-1.5 text-[10px] text-slate-500 ${
+          side === "home" ? "justify-end" : ""
+        }`}
+      >
+        {player.country && <span className="font-mono">{player.country}</span>}
+        {player.rank !== null && <span className="font-mono">#{player.rank}</span>}
+        <span
+          className="font-mono text-slate-300"
+          title={`ELO ${player.elo} on this surface — ${player.surfaceMatches} rated matches`}
+        >
+          ELO {player.elo}
+        </span>
+        <span className="font-mono" title="Match win probability">
+          {pctLabel(winProb)}
+        </span>
+      </div>
+      <div
+        className={`mt-1 flex flex-wrap items-center gap-1.5 text-[10px] text-slate-500 ${
+          side === "home" ? "justify-end" : ""
+        }`}
+      >
+        <span title="Points won on serve / points played on serve">
+          serve {rate(player.serveWinRate)}
+        </span>
+        <span title="Return points won / return points played">
+          return {rate(player.returnWinRate)}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function CountMarket({
+  title,
+  accent,
+  home,
+  away,
+  homeName,
+  awayName,
+}: {
+  title: string;
+  accent: string;
+  home: CountSide | null;
+  away: CountSide | null;
+  homeName: string;
+  awayName: string;
+}) {
+  if (!home || !away) {
+    return (
+      <MarketSection title={title} accent={accent}>
+        <div className="text-[11px] text-slate-500">
+          Not priced — no real {title.toLowerCase()} baseline for one of these players in the
+          loaded dataset.
+        </div>
+      </MarketSection>
+    );
+  }
+  return (
+    <MarketSection title={title} accent={accent}>
+      {[home, away].map((group) => (
+        <div key={group.scope}>
+          <div className="text-[10px] font-mono text-slate-500">
+            {group.scope === "home" ? homeName : awayName} · λ {num(group.expected)} ({group.basis})
+          </div>
+          {group.lines.map((line) => (
+            <SplitBar
+              key={`${group.scope}-${line.line}`}
+              leftLabel={`O ${line.line.toFixed(1)}`}
+              leftProb={line.overProb}
+              rightLabel={`U ${line.line.toFixed(1)}`}
+              rightProb={line.underProb}
+            />
+          ))}
+        </div>
+      ))}
+    </MarketSection>
+  );
+}
+
 /** One upcoming match with every market family of the tennis engine. */
 function TennisMatchCard({ match, accentIndex }: { match: PredictedMatch; accentIndex: number }) {
-  const [playerA, playerB] = match.players;
-  const prediction = match.prediction;
-  const surface = match.surface ? SURFACE_STYLES[match.surface] : null;
+  const [playerHome, playerAway] = [match.home, match.away];
+  const surface = SURFACE_STYLES[match.surface];
   const accent = CARD_ACCENT_ORDER[accentIndex % CARD_ACCENT_ORDER.length];
   const isLive = match.status === "live";
+  const quality = QUALITY_STYLES[match.dataQuality];
 
-  const winner = prediction.matchWinner;
-  const favoriteIsA = winner.probA >= winner.probB;
+  const winner = match.matchWinner;
+  const favouriteIsHome = winner.home >= winner.away;
+  const totalLines = match.totalGames.lines;
 
   return (
     <article className={`${CARD_GLASS} ${CARD_GLASS_SKIN[accent]} ${GLASS_TEXT_SHADOW} p-4 sm:p-5`}>
@@ -206,14 +396,15 @@ function TennisMatchCard({ match, accentIndex }: { match: PredictedMatch; accent
             <span className="rounded-full bg-white/[0.06] px-2 py-0.5 font-mono text-[10px] font-bold uppercase tracking-wider text-slate-300">
               {match.tour.toUpperCase()}
             </span>
-            {surface && (
-              <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider ${surface.badge}`}>
-                <span className={`h-1.5 w-1.5 rounded-full ${surface.dot}`} aria-hidden="true" />
-                {surface.label}
-              </span>
-            )}
+            <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider ${surface.badge}`}>
+              <span className={`h-1.5 w-1.5 rounded-full ${surface.dot}`} aria-hidden="true" />
+              {surface.label}
+            </span>
             <span className="rounded-full bg-white/[0.06] px-2 py-0.5 font-mono text-[10px] font-bold uppercase tracking-wider text-slate-400">
               Bo{match.bestOf}
+            </span>
+            <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider ${quality.badge}`}>
+              {quality.label}
             </span>
             {isLive && (
               <span className="animate-pulse rounded-full bg-rose-500/20 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-rose-300 ring-1 ring-rose-400/40">
@@ -237,77 +428,39 @@ function TennisMatchCard({ match, accentIndex }: { match: PredictedMatch; accent
             Projected score
           </div>
           <div className="font-mono text-xl font-extrabold leading-tight text-white">
-            {prediction.projectedScoreline}
+            {match.projectedScoreline || "—"}
           </div>
           <div className="text-[10px] text-slate-400">
-            {prediction.projectedWinner} · {pct(prediction.projectedScorelineProb)}
+            {match.projectedWinner}
           </div>
         </div>
       </header>
 
       {/* ── Players + Match Winner probability ── */}
-      <div className="mb-4 grid grid-cols-[1fr_auto_1fr] items-center gap-2 sm:gap-4">
-        <div className="min-w-0 text-right">
-          <div className="truncate text-sm font-bold text-white">
-            {playerA.name}
-            {favoriteIsA && <span className="ml-1.5 text-amber-400" aria-label="favourite">★</span>}
-          </div>
-          <div className="mt-0.5 flex flex-wrap items-center justify-end gap-1.5 text-[10px] text-slate-500">
-            {playerA.country && <span className="font-mono">{playerA.country}</span>}
-            {playerA.rank !== null && <span className="font-mono">#{playerA.rank}</span>}
-            <span className="font-mono" title={`ELO ${playerA.rating} (${playerA.ratingSource})`}>
-              ELO {playerA.rating}
-            </span>
-            {ratingBadge(playerA.ratingSource) && (
-              <span className="rounded bg-slate-800 px-1 py-px text-[9px] uppercase tracking-wide text-slate-400">
-                {ratingBadge(playerA.ratingSource)}
-              </span>
-            )}
-          </div>
-        </div>
+      <div className="mb-3 grid grid-cols-[1fr_auto_1fr] items-center gap-2 sm:gap-4">
+        <PlayerRail player={playerHome} side="home" favourite={favouriteIsHome} winProb={winner.home} />
         <div className="text-center">
           <div className="font-mono text-2xl font-extrabold text-white">
-            {pctLabel(winner.probA)}
+            {pctLabel(winner.home)}
             <span className="mx-1 text-sm text-slate-500">/</span>
-            {pctLabel(winner.probB)}
+            {pctLabel(winner.away)}
           </div>
           <div className="text-[9px] font-mono uppercase tracking-widest text-slate-500">
             match winner
           </div>
         </div>
-        <div className="min-w-0 text-left">
-          <div className="truncate text-sm font-bold text-white">
-            {favoriteIsA ? "" : <span className="mr-1.5 text-amber-400" aria-label="favourite">★</span>}
-            {playerB.name}
-          </div>
-          <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[10px] text-slate-500">
-            {playerB.country && <span className="font-mono">{playerB.country}</span>}
-            {playerB.rank !== null && <span className="font-mono">#{playerB.rank}</span>}
-            <span className="font-mono" title={`ELO ${playerB.rating} (${playerB.ratingSource})`}>
-              ELO {playerB.rating}
-            </span>
-            {ratingBadge(playerB.ratingSource) && (
-              <span className="rounded bg-slate-800 px-1 py-px text-[9px] uppercase tracking-wide text-slate-400">
-                {ratingBadge(playerB.ratingSource)}
-              </span>
-            )}
-          </div>
-        </div>
+        <PlayerRail player={playerAway} side="away" favourite={!favouriteIsHome} winProb={winner.away} />
       </div>
       <div className="mb-4">
         <SplitBar
-          leftLabel={playerA.name}
-          leftProb={winner.probA}
-          rightLabel={playerB.name}
-          rightProb={winner.probB}
+          leftLabel={shortName(playerHome.name)}
+          leftProb={winner.home}
+          rightLabel={shortName(playerAway.name)}
+          rightProb={winner.away}
         />
         <div className="mt-1.5 flex items-center justify-between text-[10px] font-mono text-slate-500">
-          <span>
-            fair odds {playerA.name.split(" ").pop()}: {winner.fairOddsA.toFixed(2)}
-          </span>
-          <span>
-            {playerB.name.split(" ").pop()}: {winner.fairOddsB.toFixed(2)}
-          </span>
+          <span>fair odds {shortName(playerHome.name)}: {winner.fairOddsHome.toFixed(2)}</span>
+          <span>{shortName(playerAway.name)}: {winner.fairOddsAway.toFixed(2)}</span>
         </div>
       </div>
 
@@ -315,9 +468,9 @@ function TennisMatchCard({ match, accentIndex }: { match: PredictedMatch; accent
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
         <MarketSection title="Total Games O/U" accent="text-cyan-300">
           <div className="text-[11px] font-mono text-slate-400">
-            Expected total: <span className="font-bold text-white">{prediction.totalGames.expected.toFixed(1)}</span> games
+            Expected total: <span className="font-bold text-white">{num(match.totalGames.expected)}</span> games
           </div>
-          {prediction.totalGames.lines.map((line) => (
+          {totalLines.map((line) => (
             <SplitBar
               key={line.line}
               leftLabel={`Over ${line.line.toFixed(1)}`}
@@ -329,107 +482,106 @@ function TennisMatchCard({ match, accentIndex }: { match: PredictedMatch; accent
         </MarketSection>
 
         <MarketSection title="Set Winner" accent="text-violet-300">
-          <div className="text-[11px] font-mono text-slate-400">Set 1 winner</div>
-          <SplitBar
-            leftLabel={playerA.name.split(" ").pop() ?? "A"}
-            leftProb={prediction.setWinner.set1ProbA}
-            rightLabel={playerB.name.split(" ").pop() ?? "B"}
-            rightProb={prediction.setWinner.set1ProbB}
-          />
+          {/* Sets are i.i.d. under the model: set 1 is the headline price and
+              every later set carries the same probability if it is played. */}
+          {match.setWinner.sets.slice(0, 1).map((set) => (
+            <SplitBar
+              key={set.set}
+              leftLabel={`Set 1 ${shortName(playerHome.name)}`}
+              leftProb={set.home}
+              rightLabel={shortName(playerAway.name)}
+              rightProb={set.away}
+            />
+          ))}
+          {match.setWinner.sets.length > 1 && (
+            <div className="text-[10px] font-mono text-slate-500">
+              {match.setWinner.sets.length - 1} further set{match.setWinner.sets.length > 2 ? "s" : ""} (if
+              played): {pctLabel(match.setWinner.sets[1].home)} / {pctLabel(match.setWinner.sets[1].away)}
+            </div>
+          )}
           <div className="flex flex-wrap gap-1.5 pt-1">
-            {prediction.setWinner.setBetting.map((betting) => (
+            {match.setWinner.setBetting.map((betting) => (
               <span
                 key={betting.score}
                 className="rounded-md bg-slate-800/80 px-2 py-1 font-mono text-[10px] text-slate-300"
-                title={`${prediction.players.a}–${prediction.players.b} set betting`}
+                title={`${playerHome.name} wins ${betting.score} in sets`}
               >
-                <span className="font-bold text-white">{betting.score}</span>{" "}
-                {pct(betting.prob)}
+                <span className="font-bold text-white">{betting.score}</span> {pct(betting.prob)}
               </span>
             ))}
           </div>
         </MarketSection>
 
-        <MarketSection title="Aces O/U" accent="text-emerald-300">
-          {prediction.aces === null ? (
-            <div className="text-[11px] text-slate-500">No serve baselines available.</div>
-          ) : (
-            prediction.aces.map((group) => (
-              <div key={group.scope}>
-                <div className="text-[10px] font-mono text-slate-500">
-                  {group.scope} · λ {group.expected?.toFixed(1)} ({group.basis})
-                </div>
-                {group.lines.map((line) => (
-                  <SplitBar
-                    key={`${group.scope}-${line.line}`}
-                    leftLabel={`O ${line.line.toFixed(1)}`}
-                    leftProb={line.overProb}
-                    rightLabel={`U ${line.line.toFixed(1)}`}
-                    rightProb={line.underProb}
-                  />
-                ))}
+        <CountMarket
+          title="Aces O/U"
+          accent="text-emerald-300"
+          home={match.aces?.home ?? null}
+          away={match.aces?.away ?? null}
+          homeName={shortName(playerHome.name)}
+          awayName={shortName(playerAway.name)}
+        />
+
+        <CountMarket
+          title="Double Faults O/U"
+          accent="text-rose-300"
+          home={match.doubleFaults?.home ?? null}
+          away={match.doubleFaults?.away ?? null}
+          homeName={shortName(playerHome.name)}
+          awayName={shortName(playerAway.name)}
+        />
+      </div>
+
+      {/* ── Score distribution + top scorelines ── */}
+      <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
+        <MarketSection title="Score Distribution" accent="text-sky-300">
+          <div className="flex flex-wrap gap-1.5">
+            {Object.entries(match.scoreDistribution).map(([score, prob]) => (
+              <span
+                key={score}
+                className="rounded-md border border-white/[0.06] bg-slate-900/60 px-2 py-1 font-mono text-[10px] text-slate-300"
+                title={`${playerHome.name} ${score} in sets`}
+              >
+                <span className="font-bold text-white">{score}</span> {pct(prob)}
+              </span>
+            ))}
+          </div>
+        </MarketSection>
+
+        <MarketSection title="Top Scorelines" accent="text-amber-300">
+          <div className="space-y-1">
+            {match.topScorelines.map((entry) => (
+              <div
+                key={`${entry.score}-${entry.winner}`}
+                className="flex items-center justify-between gap-2 font-mono text-[11px]"
+              >
+                <span className="truncate text-slate-300">
+                  <span className="font-bold text-white">{entry.score}</span>{" "}
+                  <span className="text-slate-500">{entry.winner}</span>
+                </span>
+                <span className="text-slate-400">{pct(entry.prob)}</span>
               </div>
-            ))
-          )}
-        </MarketSection>
-
-        <MarketSection title="Double Faults & Break Points" accent="text-rose-300">
-          {prediction.doubleFaults === null && prediction.breakPoints === null ? (
-            <div className="text-[11px] text-slate-500">No serve baselines available.</div>
-          ) : (
-            <>
-              {prediction.doubleFaults?.map((group) => (
-                <div key={`df-${group.scope}`}>
-                  <div className="text-[10px] font-mono text-slate-500">
-                    DF · {group.scope} · λ {group.expected?.toFixed(1)}
-                  </div>
-                  {group.lines.map((line) => (
-                    <SplitBar
-                      key={`df-${group.scope}-${line.line}`}
-                      leftLabel={`O ${line.line.toFixed(1)}`}
-                      leftProb={line.overProb}
-                      rightLabel={`U ${line.line.toFixed(1)}`}
-                      rightProb={line.underProb}
-                    />
-                  ))}
-                </div>
-              ))}
-              {prediction.breakPoints?.map((group) => (
-                <div key={`bp-${group.scope}`}>
-                  <div className="text-[10px] font-mono text-slate-500">
-                    Break points · {group.scope} · λ {group.expected?.toFixed(1)}
-                  </div>
-                  {group.lines.map((line) => (
-                    <SplitBar
-                      key={`bp-${group.scope}-${line.line}`}
-                      leftLabel={`O ${line.line.toFixed(1)}`}
-                      leftProb={line.overProb}
-                      rightLabel={`U ${line.line.toFixed(1)}`}
-                      rightProb={line.underProb}
-                    />
-                  ))}
-                </div>
-              ))}
-            </>
-          )}
+            ))}
+          </div>
         </MarketSection>
       </div>
 
-      {/* ── Most likely scorelines ── */}
-      <div className="mt-3 flex flex-wrap items-center gap-1.5">
-        <span className="text-[9px] font-mono uppercase tracking-widest text-slate-500">
-          Top scorelines
-        </span>
-        {prediction.scorelineTop.slice(0, 4).map((entry) => (
-          <span
-            key={`${entry.scoreline}-${entry.winner}`}
-            className="rounded-md border border-white/[0.06] bg-slate-900/60 px-2 py-0.5 font-mono text-[10px] text-slate-300"
-            title={`${entry.winner} to win`}
-          >
-            {entry.scoreline} <span className="text-slate-500">{pct(entry.prob)}</span>
-          </span>
-        ))}
-      </div>
+      {/* ── Model diagnostics ── */}
+      <details className="mt-3">
+        <summary className="cursor-pointer text-[10px] font-mono uppercase tracking-widest text-slate-500">
+          Model trace
+        </summary>
+        <ul className="mt-2 space-y-1 text-[10px] font-mono leading-relaxed text-slate-500">
+          {match.notes.map((note) => (
+            <li key={note}>· {note}</li>
+          ))}
+          <li>
+            · Per service point: {rate(match.model.pointProbHomeServe)} /{" "}
+            {rate(match.model.pointProbAwayServe)} → hold {rate(match.model.holdHome)} /{" "}
+            {rate(match.model.holdAway)}
+          </li>
+          <li>· Mode: {match.model.mode}</li>
+        </ul>
+      </details>
     </article>
   );
 }
@@ -448,6 +600,37 @@ const SURFACE_FILTERS: Array<{ id: "" | Surface; label: string }> = [
   { id: "clay", label: "Clay" },
   { id: "grass", label: "Grass" },
 ];
+
+/** 🔴 badge: shown whenever the page has nothing honest to display. */
+function DataUnavailableBadge() {
+  return (
+    <div
+      className="inline-flex flex-wrap items-center gap-2 rounded-full bg-rose-500/10 px-3 py-1.5 text-[11px] font-semibold text-rose-300 ring-1 ring-rose-400/30"
+      role="status"
+    >
+      <span aria-hidden="true">🔴</span>
+      Data unavailable: Tennis predictions are currently unavailable.
+    </div>
+  );
+}
+
+function DataStatusBadge({ data }: { data: TennisResponse }) {
+  const tours = Object.entries(data.dataStatus ?? {}).filter(([, status]) => Boolean(status));
+  const loaded = tours.filter(([, status]) => status?.ok && (status.matches ?? 0) > 0);
+  const label = loaded
+    .map(([tour, status]) => `${tour.toUpperCase()} (${status?.matches.toLocaleString()} matches)`)
+    .join(", ");
+
+  if (label) {
+    return (
+      <div className="inline-flex flex-wrap items-center gap-2 rounded-full bg-emerald-500/10 px-3 py-1.5 text-[11px] font-semibold text-emerald-300 ring-1 ring-emerald-400/30">
+        <span aria-hidden="true">🟢</span>
+        Data loaded: {label}
+      </div>
+    );
+  }
+  return <DataUnavailableBadge />;
+}
 
 export default function TennisPage() {
   const [tour, setTour] = useState<"both" | Tour>("both");
@@ -472,13 +655,19 @@ export default function TennisPage() {
       const response = await fetch(`/api/tennis/predictions?${params.toString()}`, {
         cache: "no-store",
       });
-      const payload = (await response.json()) as TennisResponse & { error?: string };
-      if (!response.ok) throw new Error(payload.error ?? `HTTP ${response.status}`);
+      const payload = (await response.json()) as TennisResponse;
+      if (!response.ok || payload.error) {
+        throw new Error(
+          payload.error ?? `Tennis predictions are currently unavailable (HTTP ${response.status}).`,
+        );
+      }
       if (seq !== fetchSeq.current) return; // a newer filter change superseded this fetch
       setData(payload);
     } catch (reason) {
       if (seq !== fetchSeq.current) return;
-      setError(reason instanceof Error ? reason.message : "Unable to load tennis predictions.");
+      setError(
+        reason instanceof Error ? reason.message : "Tennis predictions are currently unavailable.",
+      );
     } finally {
       if (seq === fetchSeq.current) setLoading(false);
     }
@@ -508,7 +697,7 @@ export default function TennisPage() {
     return [...groups.entries()].sort(([a], [b]) => a.localeCompare(b));
   }, [data]);
 
-  const ratedTours = data ? Object.keys(data.ratings ?? {}) : [];
+  const errorState = error ?? data?.error ?? null;
 
   return (
     <main className="min-h-screen bg-[#05070d] px-4 py-6 text-slate-100 sm:px-6 lg:px-8">
@@ -517,17 +706,16 @@ export default function TennisPage() {
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
             <div className={`${CHIP} ${CHIP_ON_AMBER} mb-3 inline-flex px-3 py-1.5 text-[11px] font-bold uppercase tracking-wider`}>
-              🎾 ATP / WTA · surface-modified ELO
+              🎾 ATP / WTA · surface-specific ELO
             </div>
             <h1 className="text-3xl font-extrabold tracking-tight text-white sm:text-4xl">
               Tennis Predictions
             </h1>
             <p className="mt-2 max-w-3xl text-sm text-slate-400 sm:text-base">
-              Upcoming singles matches priced by the tennis supercomputer: ELO
-              with surface modifiers (clay 1.1×, grass 1.3×, hard 1.0×), an
-              exact set-score model for Total Games and Set Winner markets, and
-              Poisson serve-stat markets (Aces, Double Faults, Break Points)
-              from each player&apos;s real baseline.
+              Upcoming singles matches priced from real ATP/WTA history: a separate ELO per
+              surface (clay 1.1×, grass 1.3×, hard 1.0×), a point-by-point service-game model
+              built on each player&apos;s real serve/return rates, and an exact dynamic program
+              for Total Games, Set Winner, correct score and the serve-stat markets.
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -536,7 +724,10 @@ export default function TennisPage() {
             </Link>
             <button
               type="button"
-              onClick={() => void load(tour, surface)}
+              onClick={() => {
+                loadedFiltersRef.current = "";
+                void load(tour, surface);
+              }}
               disabled={loading}
               className={`${OUTLINE_NEUTRAL} inline-flex items-center gap-1.5 rounded-full border px-4 py-2 text-xs font-semibold hover:bg-white/10 disabled:opacity-60`}
               aria-label="Refresh tennis predictions"
@@ -580,33 +771,29 @@ export default function TennisPage() {
           ))}
         </div>
 
-        {/* ── Status line ── */}
-        {data && (
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] font-mono text-slate-500">
-            <span>
-              {data.count} match{data.count === 1 ? "" : "es"}
-              {data.filters.surface ? ` on ${data.filters.surface}` : ""}
-            </span>
-            {ratedTours.map((tourKey) => (
-              <span key={tourKey}>
-                {tourKey.toUpperCase()}: {data.ratings[tourKey]?.playersRated ?? 0} players rated
-                {" · "}
-                {data.ratings[tourKey]?.matchesProcessed ?? 0} matches
-              </span>
-            ))}
-            <span>updated {new Date(data.generatedAt).toUTCString().slice(5, 22)} UTC</span>
-          </div>
-        )}
+        {/* ── Data status badge ── */}
+        {data && !data.error && <DataStatusBadge data={data} />}
 
-        {/* ── Error ── */}
-        {error && (
-          <div className="rounded-2xl border border-rose-500/30 bg-rose-500/10 p-4 text-sm text-rose-200" role="alert">
-            {error}
+        {/* ── Error / unavailable state ── */}
+        {errorState && (
+          <div className="rounded-2xl border border-rose-500/30 bg-rose-500/10 p-6 text-center" role="alert">
+            <div className="mb-3 flex justify-center">
+              <DataUnavailableBadge />
+            </div>
+            <div className="text-3xl" aria-hidden="true">🎾</div>
+            <h2 className="mt-3 text-lg font-bold text-rose-100">
+              Tennis predictions are currently unavailable. Please check back later.
+            </h2>
+            {data?.details && (
+              <p className="mx-auto mt-2 max-w-2xl font-mono text-[11px] text-rose-200/70">
+                {data.details}
+              </p>
+            )}
           </div>
         )}
 
         {/* ── Loading skeleton ── */}
-        {loading && !data && (
+        {loading && !data && !errorState && (
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
             {Array.from({ length: 4 }).map((_, i) => (
               <div key={i} className="animate-pulse rounded-2xl border border-white/[0.06] bg-slate-900/50 p-5">
@@ -628,8 +815,8 @@ export default function TennisPage() {
           </div>
         )}
 
-        {/* ── Matches by day ── */}
-        {!loading && !error && grouped.length === 0 && (
+        {/* ── Empty state (data loaded, nothing scheduled) ── */}
+        {!loading && !errorState && data && grouped.length === 0 && (
           <div className="rounded-2xl border border-white/[0.08] bg-slate-900/40 p-8 text-center">
             <div className="text-3xl" aria-hidden="true">🎾</div>
             <h2 className="mt-3 text-lg font-bold text-white">
@@ -637,20 +824,18 @@ export default function TennisPage() {
               {tour === "both" ? "" : ` on the ${tour.toUpperCase()} tour`}
             </h2>
             <p className="mx-auto mt-2 max-w-md text-sm text-slate-400">
-              The ESPN singles scoreboard has no scheduled matches in the next
-              few days for this filter. Try another surface or tour — or check
-              back after the next draw release.
+              The ESPN singles scoreboard has no scheduled matches in the next few days for this
+              filter. Try another surface or tour — or check back after the next draw release.
             </p>
-            {data && data.sources.length > 0 && (
+            {data.unavailableCount > 0 && (
               <details className="mx-auto mt-4 max-w-lg text-left">
                 <summary className="cursor-pointer text-[11px] font-mono uppercase tracking-widest text-slate-500">
-                  Data source status
+                  {data.unavailableCount} fixture(s) not priced
                 </summary>
                 <ul className="mt-2 space-y-1 text-[11px] font-mono text-slate-500">
-                  {data.sources.slice(0, 10).map((source, i) => (
-                    <li key={`${source.source}-${i}`}>
-                      {source.tour ? `${source.tour}: ` : ""}
-                      {source.source} — {source.note}
+                  {data.unavailable.slice(0, 10).map((entry) => (
+                    <li key={`${entry.tournament}-${entry.home}-${entry.away}`}>
+                      {entry.home} vs {entry.away} — {entry.reason}
                     </li>
                   ))}
                 </ul>
@@ -659,38 +844,40 @@ export default function TennisPage() {
           </div>
         )}
 
-        {grouped.map(([day, matches]) => (
-          <section key={day} aria-label={formatDayLabel(day)}>
-            <div className="mb-3 flex items-center gap-2">
-              <h2 className="text-sm font-bold text-white">{formatDayLabel(`${day}T00:00:00Z`)}</h2>
-              <span className="rounded-full bg-white/[0.06] px-2 py-0.5 font-mono text-[10px] text-slate-400">
-                {matches.length}
-              </span>
-            </div>
-            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-              {matches.map((match, i) => (
-                <TennisMatchCard key={match.id} match={match} accentIndex={i} />
-              ))}
-            </div>
-          </section>
-        ))}
+        {/* ── Matches by day ── */}
+        {!errorState &&
+          grouped.map(([day, matches]) => (
+            <section key={day} aria-label={formatDayLabel(day)}>
+              <div className="mb-3 flex items-center gap-2">
+                <h2 className="text-sm font-bold text-white">{formatDayLabel(`${day}T00:00:00Z`)}</h2>
+                <span className="rounded-full bg-white/[0.06] px-2 py-0.5 font-mono text-[10px] text-slate-400">
+                  {matches.length}
+                </span>
+              </div>
+              <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                {matches.map((match, i) => (
+                  <TennisMatchCard key={match.id} match={match} accentIndex={i} />
+                ))}
+              </div>
+            </section>
+          ))}
 
         {/* ── Footer ── */}
         <footer className="border-t border-white/[0.06] pt-4 text-[11px] leading-relaxed text-slate-500">
           <p>
-            Model: surface-modified ELO (clay 1.1×, grass 1.3×, hard 1.0×) →
-            per-set and per-game win probabilities → exact set-score
-            distribution for Total Games, Set Winner and projected scorelines.
-            Aces, double faults and break-point lines are Poisson markets on
-            real per-match baselines (surface split where the sample backs it).
-            Ratings without replayed history use a labelled rank prior — never
-            an invented number.
+            Model: one ELO per surface (replayed only from matches on that surface, K = 32 ATP /
+            45 WTA with a new-player boost) → real serve/return point rates → exact
+            service-game, set and best-of-N dynamic programs for Total Games, Set Winner, correct
+            score and the projected scoreline. Aces and double-fault lines are Poisson markets on
+            each player&apos;s own baseline — a market is skipped, never guessed, when that
+            baseline is missing.
           </p>
           <p className="mt-2">
-            Data: Jeff Sackmann tennis_atp / tennis_wta match logs (GitHub
-            mirrors), tennis-data.co.uk results &amp; odds files, and the ESPN
-            tennis scoreboard for fixtures. Predictions are probabilistic
-            estimates, not guarantees.
+            Data: Jeff Sackmann tennis_atp / tennis_wta match logs (Kadantte mirror when the
+            canonical repos are down), tennis-data.co.uk odds files, and the ESPN tennis
+            scoreboard for fixtures. No prediction is produced without a real rating for both
+            players on the match surface. Predictions are probabilistic estimates, not
+            guarantees.
           </p>
         </footer>
       </div>
