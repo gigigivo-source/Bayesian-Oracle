@@ -16,8 +16,14 @@
 //      read off the simulation, not the analytic grid.
 //
 // The legacy xG-weighted composite is retained and blended with the structural
-// λ when both are available (see `STRUCTURAL_MODEL_WEIGHT`), so the upgrade
-// adds information rather than discarding the xG signal.
+// λ when both are available (see `DEFAULT_TUNING.structuralWeight`), so the
+// upgrade adds information rather than discarding the xG signal.
+//
+// The three dials that shape the published grid — the structural/legacy blend,
+// the model temperature and the ELO league K-factor — are set by
+// `DEFAULT_TUNING` below. Their values come from the parameter sweep in
+// `backtest/route.ts` (`?sweep=1`), which replays the last three Premier League
+// seasons and ranks every combination by Top-1 accuracy.
 //
 // The route reuses the app's next-seven-day fixture feed and the canonical
 // multi-source stats aggregator. Missing match-level data is never presented as
@@ -36,13 +42,18 @@ import {
   buildAttackDefenceTable,
   blendExpectedGoals,
   computeMatchExpectedGoals,
-  STRUCTURAL_MODEL_WEIGHT,
   STRUCTURAL_WEIGHT_WITHOUT_XG,
   type AttackDefenceTable,
   type ExpectedGoalsComponents,
 } from "@/lib/data/attackDefence";
 import { estimateLeagueRho, getRhoForLeague, type RhoEstimate } from "@/lib/data/dixonColes";
-import { buildEloRatings, getElo, loadMatchesFromEngSoccerData, type EloTable } from "@/lib/data/elo";
+import {
+  buildEloRatings,
+  getElo,
+  K_FACTORS,
+  loadMatchesFromEngSoccerData,
+  type EloTable,
+} from "@/lib/data/elo";
 import {
   DEFAULT_SEASONS,
   loadHistoricalMatches,
@@ -73,6 +84,56 @@ const MIN_SIMULATIONS = 1_000;
 const MAX_SIMULATIONS = 50_000;
 /** Identifier reported to the UI and stored with the prediction. */
 export const MODEL_VERSION = "supercomputer-v2";
+
+// ─── Tuned model parameters ───────────────────────────────────────────────────
+
+/**
+ * The three parameters the correct-score backtest sweeps.
+ *
+ * · `structuralWeight` — share of λ taken from the structural (attack/defence
+ *   + ELO) model; the remainder comes from the legacy composite.
+ * · `temperature`      — λ is multiplied by T before the Dixon–Coles grid is
+ *   built, and the grid is then re-calibrated as p^(1/T) (see monteCarlo.ts).
+ *   T < 1 favours the low scorelines that actually win Top-1.
+ * · `eloElasticity`    — how fast ratings react to results: the ELO K-factor
+ *   applied to league matches in the chronological replay (20 / 30 / 40 on the
+ *   same scale as `K_FACTORS`).
+ */
+export interface CorrectScoreTuning {
+  structuralWeight: number;
+  temperature: number;
+  eloElasticity: number;
+}
+
+/**
+ * Defaults used by the live model. Chosen by `GET /api/correct-score/backtest?sweep=1`
+ * — a 4 × 4 × 3 grid over the last three complete Premier League seasons plus
+ * the current one, ranked by Top-1 accuracy (ties broken by Top-3, then
+ * Brier). Re-run the sweep (`npx tsx scripts/sweep-correct-score.ts`) and
+ * update these when the historical archive changes materially.
+ *
+ * Sweep on 2026-09-05 — openfootball archive, 2023-24 → 2026-27 (1,160
+ * results, 1,114 replayed after the 40-match warm-up), 10,000 sims/fixture:
+ *
+ *   winner  0.6 / 0.95 / 20 → Top-1 11.67% · Top-3 30.97% · Brier 0.9381
+ *   before  0.8 / 1.00 / 30 → Top-1 10.05% · Top-3 30.25% · Brier 0.9391
+ *
+ * The same combination won a second run limited to 2024-25 → 2026-27 at
+ * 2,000 sims (10.68% vs 9.59%), so the pick is stable across window and
+ * simulation depth rather than a single-run fluke.
+ */
+export const DEFAULT_TUNING: CorrectScoreTuning = {
+  structuralWeight: 0.6,
+  temperature: 0.95,
+  eloElasticity: 20,
+};
+
+/** The values the model shipped with before the sweep, kept for before/after reporting. */
+export const LEGACY_TUNING: CorrectScoreTuning = {
+  structuralWeight: STRUCTURAL_WEIGHT_WITHOUT_XG,
+  temperature: 1,
+  eloElasticity: K_FACTORS.league,
+};
 /** This feature is restricted to the Premier League; every other league is ignored. */
 const PREMIER_LEAGUE_SLUG = "eng.1";
 /** Canonical label shown on the page and used in diagnostics. */
@@ -200,6 +261,10 @@ export interface CorrectScoreMatch {
   eloDelta: number | null;
   /** Weight the structural model carried in the final λ (0 = legacy only). */
   structuralWeight: number;
+  /** Model temperature the grid was built with (1 = none). */
+  temperature: number;
+  /** ELO league K-factor behind `homeElo` / `awayElo`. */
+  eloElasticity: number;
   structuralComponents: ExpectedGoalsComponents | null;
   markets: MonteCarloMarkets | null;
   /** Historical layers that fed the model, for the transparency line. */
@@ -617,7 +682,7 @@ export async function loadSupercomputerModel(
     }
   }
 
-  const elo = buildEloRatings(allMatches);
+  const elo = buildEloRatings(allMatches, { kFactors: { league: DEFAULT_TUNING.eloElasticity } });
   // Exponential time decay (Dixon & Coles' ξ): last season's results carry
   // more weight than a match from two seasons ago, so promoted sides and
   // rebuilt squads are not averaged away over three years.
@@ -693,21 +758,21 @@ export interface ResolvedExpectedGoals {
 }
 
 /**
- * How much of λ comes from the structural model, given what the legacy
- * composite actually has to offer.
+ * How much of λ comes from the structural model.
  *
- * The only legacy field the structural model cannot reproduce is pre-match xG:
- * season scoring, goals conceded and recent form are all strict subsets of the
- * venue-split attack/defence parameters, which are built from the same results
- * but split by venue. So the legacy composite keeps 40% of the weight when
- * both teams carry real xG, and only 20% when it is running on season averages
- * alone — otherwise the upgrade would spend 40% of λ re-deriving information it
- * already has, in a cruder form.
+ * Synthetic inputs carry no team signal at all, so the structural model takes
+ * the whole weight. Otherwise the blend is the backtest-tuned
+ * `DEFAULT_TUNING.structuralWeight`: season scoring, goals conceded and recent
+ * form are strict subsets of the venue-split attack/defence parameters, so the
+ * legacy composite only adds information through pre-match xG, and the sweep
+ * found the model wants most of λ from the structural side either way.
  */
-export function structuralWeightFor(inputs: CorrectScoreModelInputs): number {
+export function structuralWeightFor(
+  inputs: CorrectScoreModelInputs,
+  tuning: CorrectScoreTuning = DEFAULT_TUNING,
+): number {
   if (inputs.dataQuality === "Synthetic") return 1;
-  const xgAvailable = inputs.home.xg !== null && inputs.away.xg !== null;
-  return xgAvailable ? STRUCTURAL_MODEL_WEIGHT : STRUCTURAL_WEIGHT_WITHOUT_XG;
+  return tuning.structuralWeight;
 }
 
 /**
@@ -721,8 +786,11 @@ export function structuralWeightFor(inputs: CorrectScoreModelInputs): number {
 export interface ExpectedGoalsOverrides {
   /** Override `structuralWeightFor` (used by the backtest for ablation). */
   structuralWeight?: number;
-  /** Override `ELO_GOAL_ELASTICITY`. */
-  eloElasticity?: number;
+  /**
+   * Override `ELO_GOAL_ELASTICITY` (how far a rating gap moves λ). Distinct
+   * from `CorrectScoreTuning.eloElasticity`, which is the replay K-factor.
+   */
+  eloGoalElasticity?: number;
 }
 
 export function resolveExpectedGoals(
@@ -756,7 +824,7 @@ export function resolveExpectedGoals(
     table: model.attackDefence,
     eloHome: homeElo,
     eloAway: awayElo,
-    eloElasticity: overrides.eloElasticity,
+    eloElasticity: overrides.eloGoalElasticity,
   });
   const structuralWeight = overrides.structuralWeight ?? structuralWeightFor(inputs);
 
@@ -798,7 +866,13 @@ export function buildCorrectScorePrediction(
     homeLambda: expected.homeExpectedGoals,
     awayLambda: expected.awayExpectedGoals,
     rho,
-    options: { simulations, maxGoals, method, topScorelines: TOP_SCORELINES },
+    options: {
+      simulations,
+      maxGoals,
+      method,
+      topScorelines: TOP_SCORELINES,
+      temperature: DEFAULT_TUNING.temperature,
+    },
   });
 
   const topScorelines: CorrectScoreline[] = simulation.topScorelines.map((scoreline) => ({
@@ -842,6 +916,8 @@ export function buildCorrectScorePrediction(
     awayElo: expected.awayElo === null ? null : round(expected.awayElo, 0),
     eloDelta: expected.eloDelta === null ? null : round(expected.eloDelta, 0),
     structuralWeight: expected.structuralWeight,
+    temperature: simulation.temperature,
+    eloElasticity: DEFAULT_TUNING.eloElasticity,
     structuralComponents: expected.components,
     markets: simulation.markets,
     modelSources: model?.sources ?? [],
