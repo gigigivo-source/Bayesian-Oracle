@@ -30,7 +30,6 @@ import {
 import {
   buildTennisEloTable,
   findTennisEloEntry,
-  tennisEloPriorFromRank,
   type TennisEloTable,
 } from "@/lib/data/elo";
 import { predictTennisMatch, type TennisPrediction } from "@/lib/engine/markets";
@@ -161,21 +160,11 @@ function toModelPlayer(
   const entry = findTennisEloEntry(model.elo, name, model.tour);
   const profile = findProfile(model, name);
 
-  let rating: number;
-  let ratingSource: TennisPredictedPlayer["ratingSource"];
-  if (entry && entry.matchesPlayed > 0) {
-    rating = entry.rating;
-    ratingSource = "elo";
-  } else {
-    const prior = tennisEloPriorFromRank(profile?.rank ?? null);
-    if (prior !== null) {
-      rating = prior;
-      ratingSource = "rank-prior";
-    } else {
-      rating = 1500;
-      ratingSource = "default";
-    }
+  if (!entry || !surface || entry.surfaceMatches[surface] === 0) {
+    throw new Error(`Tennis data unavailable — missing Elo or historical data. Players: ${name} (null)`);
   }
+  const rating = entry.rating;
+  const ratingSource: TennisPredictedPlayer["ratingSource"] = "elo";
 
   const baseline = surfaceServeBaseline(profile ?? null, surface);
   const tour = model.baselines;
@@ -227,7 +216,16 @@ export async function GET(request: Request) {
     );
   }
 
-  const model = await getTennisModel(2);
+  let model: TennisModelCache;
+  try {
+    model = await getTennisModel(2);
+  } catch (error) {
+    console.error(error);
+    return Response.json(
+      { error: "Tennis data unavailable — missing Elo or historical data.", details: error instanceof Error ? error.message : "Historical source failure" },
+      { status: 503 },
+    );
+  }
   const matches: TennisPredictedMatch[] = [];
   const sources: Array<Record<string, unknown>> = [];
 

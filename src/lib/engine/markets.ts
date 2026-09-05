@@ -985,9 +985,7 @@ export class TennisMarketEngine {
     if (player.elo !== null && Number.isFinite(player.elo)) {
       return { rating: player.elo, source: "elo" };
     }
-    const prior = tennisEloPriorFromRank(player.rank);
-    if (prior !== null) return { rating: prior, source: "rank-prior" };
-    return { rating: TENNIS_INITIAL_ELO, source: "default" };
+    throw new Error(`Tennis data unavailable: missing Elo for ${player.name}`);
   }
 
   /** Build every market family (T1–T6) and the headline prediction. */
@@ -1135,6 +1133,7 @@ export class TennisMarketEngine {
     if (tourBaseline === null) return null;
     const groups: TennisOULineGroup[] = [];
     for (const player of [this.input.playerA, this.input.playerB]) {
+      if (pick(player) === null) return null;
       if (family === "Break Points") continue; // quoted on the match total only
       const personal = pick(player);
       const expected = personal ?? tourBaseline;

@@ -580,6 +580,11 @@ export default function TennisPage() {
           ))}
         </div>
 
+        {/* ── Data status ── */}
+        <div className={`rounded-xl border px-4 py-3 text-sm ${error ? "border-rose-500/30 bg-rose-500/10 text-rose-200" : data ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-200" : "border-white/10 bg-white/[0.03] text-slate-400"}`} role="status">
+          {error ? "🔴 Data unavailable: Tennis predictions are currently unavailable." : data ? "🟢 Data loaded: real ATP/WTA historical data" : "Loading real tennis data…"}
+        </div>
+
         {/* ── Status line ── */}
         {data && (
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] font-mono text-slate-500">
@@ -601,7 +606,7 @@ export default function TennisPage() {
         {/* ── Error ── */}
         {error && (
           <div className="rounded-2xl border border-rose-500/30 bg-rose-500/10 p-4 text-sm text-rose-200" role="alert">
-            {error}
+            Tennis predictions are currently unavailable. Please check back later.
           </div>
         )}
 
