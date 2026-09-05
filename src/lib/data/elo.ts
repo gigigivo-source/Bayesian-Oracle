@@ -119,6 +119,23 @@ export interface EloBuildOptions {
   keepHistory?: number;
   /** Register the result as the table `getElo` falls back to. Default true. */
   activate?: boolean;
+  /**
+   * Override one or more K-factors, e.g. `{ league: 40 }`. Anything omitted
+   * keeps the `K_FACTORS` default. This is the dial the correct-score
+   * parameter sweep tunes; the live model passes its tuned league K here.
+   */
+  kFactors?: Partial<Record<MatchImportance, number>>;
+}
+
+/** K-factor for a match, honouring any per-importance override. */
+export function kFactorFor(
+  importance: MatchImportance,
+  overrides?: Partial<Record<MatchImportance, number>>,
+): number {
+  const override = overrides?.[importance];
+  return typeof override === "number" && Number.isFinite(override) && override > 0
+    ? override
+    : K_FACTORS[importance];
 }
 
 // ─── Match classification ─────────────────────────────────────────────────────
@@ -203,12 +220,17 @@ function entryFor(table: EloTable, leagueSlug: string, team: string): EloEntry {
  * Fold one completed match into the table. Call in chronological order — the
  * replay is path-dependent by construction, so `buildEloRatings` sorts first.
  */
-export function applyMatchToElo(table: EloTable, match: HistoricalMatch, keepHistory = 200): EloUpdate | null {
+export function applyMatchToElo(
+  table: EloTable,
+  match: HistoricalMatch,
+  keepHistory = 200,
+  kFactors?: Partial<Record<MatchImportance, number>>,
+): EloUpdate | null {
   if (!match.homeTeam || !match.awayTeam) return null;
   if (teamsMatch(match.homeTeam, match.awayTeam)) return null;
 
   const importance = classifyMatch(match);
-  const kFactor = K_FACTORS[importance];
+  const kFactor = kFactorFor(importance, kFactors);
   const home = entryFor(table, match.leagueSlug, match.homeTeam);
   const away = entryFor(table, match.leagueSlug, match.awayTeam);
 
@@ -261,7 +283,7 @@ export function buildEloRatings(
   const ordered = [...matches].sort(
     (left, right) => new Date(left.matchDate).getTime() - new Date(right.matchDate).getTime(),
   );
-  for (const match of ordered) applyMatchToElo(table, match, options.keepHistory ?? 200);
+  for (const match of ordered) applyMatchToElo(table, match, options.keepHistory ?? 200, options.kFactors);
   if (options.activate !== false) setActiveEloTable(table);
   return table;
 }

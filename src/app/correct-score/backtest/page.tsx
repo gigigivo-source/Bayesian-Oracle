@@ -57,6 +57,8 @@ interface BacktestResponse {
   days: number;
   model: string;
   dataSource: string;
+  /** Tuned parameters the replay used (set from the backtest sweep). */
+  tuning?: { structuralWeight: number; temperature: number; eloElasticity: number };
   overall: BacktestMetrics;
   byLeague: LeagueResult[];
   matches: MatchLog[];
@@ -270,7 +272,14 @@ export default function CorrectScoreBacktestPage() {
             <section aria-labelledby="summary-heading">
               <div className="mb-3 flex items-end justify-between">
                 <h2 id="summary-heading" className="font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-slate-400">Summary metrics</h2>
-                <span className="text-[10px] text-slate-600">Last {data.days} days</span>
+                <span className="text-[10px] text-slate-600">
+                  {data.tuning ? (
+                    <span className="mr-3 font-mono" title="Structural weight · temperature · ELO league K (tuned by the parameter sweep)">
+                      w={data.tuning.structuralWeight.toFixed(2)} · T={data.tuning.temperature.toFixed(2)} · K={data.tuning.eloElasticity}
+                    </span>
+                  ) : null}
+                  Last {data.days} days
+                </span>
               </div>
               <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
                 <MetricCard label="Matches Tested" value={data.overall.matchesTested.toLocaleString("en-GB")} hint="finished fixtures replayed" />

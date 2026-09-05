@@ -17,6 +17,14 @@
 // `overall` reports the supercomputer (so the existing dashboard shows the
 // upgraded numbers) and `baseline` / `comparison` carry the old model and the
 // per-metric deltas.
+//
+// PARAMETER SWEEP (`?sweep=1`). The same leakage-free replay, run over the
+// last three Premier League seasons for every combination of
+//   structuralWeight ∈ {0.6, 0.7, 0.8, 0.9}
+//   temperature      ∈ {0.80, 0.85, 0.90, 0.95}
+//   eloElasticity    ∈ {20, 30, 40}   (ELO league K-factor)
+// reporting Top-1, Top-3 and Brier for each and the best combination first.
+// `DEFAULT_TUNING` in ../route.ts is set from that winner.
 
 import { fetchScoreboard, type FixtureLite, type TeamLite } from "@/lib/espn";
 import { getAnchors } from "@/lib/engine/statisticalAnchors";
@@ -24,6 +32,7 @@ import {
   ATTACK_DEFENCE_HALF_LIFE_DAYS,
   buildAttackDefenceTable,
   computeMatchExpectedGoals,
+  type AttackDefenceTable,
 } from "@/lib/data/attackDefence";
 import { estimateRhoDetailed, type RhoEstimate } from "@/lib/data/dixonColes";
 import { applyMatchToElo, createEloTable, getElo } from "@/lib/data/elo";
@@ -37,12 +46,15 @@ import { DEFAULT_SIMULATIONS, simulateMatch } from "@/lib/data/monteCarlo";
 import {
   calculateExpectedGoals,
   confidenceForProbability,
+  DEFAULT_TUNING,
+  LEGACY_TUNING,
   MODEL_VERSION,
   resolveExpectedGoals,
   scorelineProbabilities,
   type CorrectScoreline,
   type CorrectScoreModelInputs,
   type CorrectScoreTeamInputs,
+  type CorrectScoreTuning,
   type DataQuality,
   type SupercomputerModel,
 } from "../route";
@@ -62,6 +74,19 @@ const BASELINE_MODEL = "correct-score-poisson-v1";
 /** This feature is restricted to the Premier League; every other league is ignored. */
 const PREMIER_LEAGUE_SLUG = "eng.1";
 const NO_PREMIER_LEAGUE_MESSAGE = "No Premier League matches available for backtesting.";
+/**
+ * Sweep archive: the last three *complete* Premier League seasons plus the
+ * current partial one. `seasonCodes` counts the season in progress, so four
+ * rolling codes are needed to reach back three full seasons.
+ */
+const SWEEP_SEASONS = 4;
+/** Replay window wide enough to admit every fixture the sweep archive holds. */
+const SWEEP_DAYS = SWEEP_SEASONS * 365 + 60;
+/** No headline cap for the sweep — every fixture with enough prior history is replayed. */
+const SWEEP_MAX_MATCHES = 5_000;
+/** `?sims=` bounds for the sweep. Default is the live model's `DEFAULT_SIMULATIONS`. */
+const SWEEP_MIN_SIMULATIONS = 500;
+const SWEEP_MAX_SIMULATIONS = 50_000;
 
 export interface CalibrationBucket {
   label: string;
@@ -143,6 +168,8 @@ export interface CorrectScoreBacktestResponse {
   model: string;
   baselineModel: string;
   dataSource: string;
+  /** Parameters the supercomputer was replayed with (the live defaults). */
+  tuning: CorrectScoreTuning;
   /** Supercomputer metrics — what the dashboard's headline cards show. */
   overall: BacktestMetrics;
   /** The pre-upgrade model, scored on exactly the same fixtures. */
@@ -153,6 +180,42 @@ export interface CorrectScoreBacktestResponse {
   /** Historical layers that fed the replay, with per-layer match counts. */
   historySources: Array<{ source: string; attempted: boolean; added: number; note: string }>;
   /** Present when no Premier League historical matches were available to replay. */
+  message?: string;
+}
+
+/** One parameter combination's score card from the sweep. */
+export interface SweepResult {
+  params: CorrectScoreTuning;
+  matchesTested: number;
+  top1Accuracy: number;
+  top3Accuracy: number;
+  brierScore: number;
+}
+
+export interface CorrectScoreSweepResponse {
+  generatedAt: string;
+  model: string;
+  /** Replay window in days. */
+  days: number;
+  /** Rolling season codes loaded (three complete seasons + the current one). */
+  seasons: number;
+  /** Monte Carlo draws per fixture per combination. */
+  simulations: number;
+  /** Fixtures every combination was scored on. */
+  matchesTested: number;
+  /** Kickoff range of the archive that was replayed. */
+  window: { from: string | null; to: string | null };
+  grid: { structuralWeight: number[]; temperature: number[]; eloElasticity: number[] };
+  /** Winner by Top-1 accuracy (ties: Top-3, then Brier); null when nothing was replayed. */
+  best: SweepResult | null;
+  /** `DEFAULT_TUNING` scored on the same fixtures — what the live model publishes. */
+  current: SweepResult | null;
+  /** The pre-sweep defaults scored on the same fixtures, for the before/after. */
+  legacy: SweepResult | null;
+  /** Every combination, best first. */
+  results: SweepResult[];
+  historySources: Array<{ source: string; attempted: boolean; added: number; note: string }>;
+  elapsedMs: number;
   message?: string;
 }
 
@@ -170,6 +233,7 @@ interface CacheEntry {
 }
 
 const cache = new Map<number, CacheEntry>();
+const sweepCache = new Map<number, { at: number; data: CorrectScoreSweepResponse }>();
 
 function round(value: number, decimals = 4): number {
   const factor = 10 ** decimals;
@@ -315,12 +379,13 @@ function gridFromSimulation(
   rho: number,
   simulations: number,
   dataQuality: DataQuality,
+  temperature?: number,
 ): CorrectScoreline[] {
   const simulation = simulateMatch({
     homeLambda,
     awayLambda,
     rho,
-    options: { simulations, maxGoals: MAX_GOALS },
+    options: { simulations, maxGoals: MAX_GOALS, temperature },
   });
   return simulation.scorelines
     .filter((scoreline) => scoreline.homeGoals <= MAX_GOALS && scoreline.awayGoals <= MAX_GOALS)
@@ -487,11 +552,12 @@ function compareMetrics(baseline: BacktestMetrics, supercomputer: BacktestMetric
 async function fetchHistoricalFixtures(
   days: number,
   force: boolean,
+  seasons: number = DEFAULT_SEASONS,
 ): Promise<{ matches: HistoricalMatch[]; sources: CorrectScoreBacktestResponse["historySources"] }> {
   const now = new Date();
   const dataset = await loadHistoricalMatches({
     leagueSlug: PREMIER_LEAGUE_SLUG,
-    seasons: DEFAULT_SEASONS,
+    seasons,
     lookbackDays: days + HISTORY_WARMUP_DAYS,
     force,
     now,
@@ -560,36 +626,51 @@ async function fetchHistoricalFixtures(
   return { matches: collected, sources };
 }
 
+// ─── Replay ───────────────────────────────────────────────────────────────────
+
 /**
- * Replay every target fixture with both engines.
- *
- * ELO is applied incrementally in chronological order, and the attack/defence
- * table plus ρ are rebuilt from the strictly-prior slice for each fixture, so
- * no fixture is ever predicted with information from after its own kickoff.
+ * Everything about one target fixture that does not depend on the tuning
+ * parameters: the strictly-prior slice, the attack/defence table and ρ built
+ * from it, the legacy inputs and the baseline grid. Computed once per fixture
+ * and shared across every parameter combination, so the sweep costs 48 × (ELO
+ * replay + Monte Carlo) rather than 48 × (table + ρ + Monte Carlo).
  */
-export function evaluateHistoricalMatches(
-  history: HistoricalMatch[],
-  options: {
-    days: number;
-    maxMatches?: number;
-    simulations?: number;
-    now?: Date;
-    /** Override the structural/legacy λ blend, for sensitivity analysis. */
-    structuralWeight?: number;
-    /** Ablation switch: drop the ELO modulation from λ. Default true. */
-    useElo?: boolean;
-    /** Override the ELO → λ elasticity. */
-    eloElasticity?: number;
-    /** Half-life (days) of the exponential match weighting; null disables decay. */
-    halfLifeDays?: number | null;
-  } = { days: DEFAULT_DAYS },
-): { evaluations: Evaluation[]; targets: HistoricalMatch[] } {
+interface PreparedFixture {
+  target: HistoricalMatch;
+  fixture: ReturnType<typeof fixtureShim>;
+  inputs: CorrectScoreModelInputs;
+  attackDefence: AttackDefenceTable;
+  rhoEstimate: RhoEstimate;
+  priorMatches: number;
+  baselineExpected: { homeExpectedGoals: number; awayExpectedGoals: number };
+  baselineScorelines: CorrectScoreline[];
+}
+
+export interface ReplayOptions {
+  days: number;
+  maxMatches?: number;
+  simulations?: number;
+  now?: Date;
+  /** Override the structural/legacy λ blend, for sensitivity analysis. */
+  structuralWeight?: number;
+  /** Ablation switch: drop the ELO modulation from λ. Default true. */
+  useElo?: boolean;
+  /** ELO league K-factor for the chronological replay (`CorrectScoreTuning.eloElasticity`). */
+  eloElasticity?: number;
+  /** Override the ELO → λ goal elasticity (`ELO_GOAL_ELASTICITY`). */
+  eloGoalElasticity?: number;
+  /** Model temperature applied to λ and the grid; see monteCarlo.ts. */
+  temperature?: number;
+  /** Half-life (days) of the exponential match weighting; null disables decay. */
+  halfLifeDays?: number | null;
+}
+
+/** Pick the fixtures to replay: newest `maxMatches` inside the window, in kickoff order. */
+function selectTargets(history: HistoricalMatch[], options: ReplayOptions): HistoricalMatch[] {
   const now = options.now ?? new Date();
   const maxMatches = options.maxMatches ?? MAX_MATCHES;
-  const simulations = options.simulations ?? DEFAULT_SIMULATIONS;
   const cutoff = now.getTime() - options.days * 86_400_000;
-
-  const targets = history
+  return history
     .filter((match) => {
       const kickoff = new Date(match.matchDate).getTime();
       return kickoff >= cutoff && kickoff <= now.getTime();
@@ -598,20 +679,16 @@ export function evaluateHistoricalMatches(
     .slice(0, maxMatches)
     // Chronological order for the incremental ELO replay.
     .sort((left, right) => new Date(left.matchDate).getTime() - new Date(right.matchDate).getTime());
+}
 
-  const evaluations: Evaluation[] = [];
-  const elo = createEloTable();
-  let applied = 0;
-
+/** Build the parameter-independent state for every target (see `PreparedFixture`). */
+function prepareFixtures(
+  history: HistoricalMatch[],
+  targets: HistoricalMatch[],
+  options: ReplayOptions,
+): PreparedFixture[] {
+  const prepared: PreparedFixture[] = [];
   for (const target of targets) {
-    // Fold in every match that finished before this kickoff. `history` is
-    // chronological, so a single forward cursor keeps this O(n) overall.
-    const kickoff = new Date(target.matchDate).getTime();
-    while (applied < history.length && new Date(history[applied].matchDate).getTime() < kickoff) {
-      applyMatchToElo(elo, history[applied], 0);
-      applied++;
-    }
-
     const prior = matchesBefore(history, target.matchDate).filter((match) => match.id !== target.id);
     if (prior.length < MIN_PRIOR_MATCHES) continue;
 
@@ -631,7 +708,62 @@ export function evaluateHistoricalMatches(
       });
       return { homeLambda: expected.homeExpectedGoals, awayLambda: expected.awayExpectedGoals };
     };
-    const rhoEstimate: RhoEstimate = estimateRhoDetailed(prior, lambdaFor);
+    const rhoEstimate = estimateRhoDetailed(prior, lambdaFor);
+
+    const fixture = fixtureShim(target);
+    const inputs = prematchInputs(target, prior);
+    const baselineExpected = calculateExpectedGoals(inputs);
+    const baselineScorelines = scorelineProbabilities(
+      baselineExpected.homeExpectedGoals,
+      baselineExpected.awayExpectedGoals,
+      MAX_GOALS,
+      inputs.dataQuality,
+    );
+
+    prepared.push({
+      target,
+      fixture,
+      inputs,
+      attackDefence,
+      rhoEstimate,
+      priorMatches: prior.length,
+      baselineExpected,
+      baselineScorelines,
+    });
+  }
+  return prepared;
+}
+
+/**
+ * Score every prepared fixture under one parameter set.
+ *
+ * ELO is replayed incrementally in chronological order with the requested
+ * league K-factor; the attack/defence table and ρ come from the strictly-prior
+ * slice prepared for each fixture, so no fixture is ever predicted with
+ * information from after its own kickoff.
+ */
+function evaluatePrepared(
+  history: HistoricalMatch[],
+  prepared: PreparedFixture[],
+  options: ReplayOptions,
+): Evaluation[] {
+  const now = options.now ?? new Date();
+  const simulations = options.simulations ?? DEFAULT_SIMULATIONS;
+  const kFactors =
+    options.eloElasticity === undefined ? undefined : { league: options.eloElasticity };
+  const evaluations: Evaluation[] = [];
+  const elo = createEloTable();
+  let applied = 0;
+
+  for (const entry of prepared) {
+    const { target, fixture, inputs, attackDefence, rhoEstimate } = entry;
+    // Fold in every match that finished before this kickoff. `history` is
+    // chronological, so a single forward cursor keeps this O(n) overall.
+    const kickoff = new Date(target.matchDate).getTime();
+    while (applied < history.length && new Date(history[applied].matchDate).getTime() < kickoff) {
+      applyMatchToElo(elo, history[applied], 0, kFactors);
+      applied++;
+    }
 
     const model: SupercomputerModel = {
       available: true,
@@ -641,7 +773,7 @@ export function evaluateHistoricalMatches(
       attackDefence,
       rho: rhoEstimate.rho,
       rhoEstimate,
-      matches: prior.length,
+      matches: entry.priorMatches,
       seasonsCovered: [],
       primarySource: "backtest replay",
       sources: ["backtest replay"],
@@ -649,13 +781,10 @@ export function evaluateHistoricalMatches(
       generatedAt: now.toISOString(),
     };
 
-    const fixture = fixtureShim(target);
-    const inputs = prematchInputs(target, prior);
     const expected = resolveExpectedGoals(fixture, inputs, model, {
       structuralWeight: options.structuralWeight,
-      eloElasticity: options.eloElasticity,
+      eloGoalElasticity: options.eloGoalElasticity,
     });
-    const baselineExpected = calculateExpectedGoals(inputs);
 
     const scorelines = gridFromSimulation(
       expected.homeExpectedGoals,
@@ -663,13 +792,9 @@ export function evaluateHistoricalMatches(
       model.rho,
       simulations,
       inputs.dataQuality,
+      options.temperature,
     );
-    const baselineScorelines = scorelineProbabilities(
-      baselineExpected.homeExpectedGoals,
-      baselineExpected.awayExpectedGoals,
-      MAX_GOALS,
-      inputs.dataQuality,
-    );
+    const { baselineScorelines, baselineExpected } = entry;
 
     const actualScore = `${target.homeGoals}-${target.awayGoals}`;
     const rankIn = (grid: CorrectScoreline[]): number | null => {
@@ -711,7 +836,7 @@ export function evaluateHistoricalMatches(
         rho: rhoEstimate.rho,
         homeExpectedGoals: round(expected.homeExpectedGoals, 3),
         awayExpectedGoals: round(expected.awayExpectedGoals, 3),
-        priorMatches: prior.length,
+        priorMatches: entry.priorMatches,
         baselineTop1: baselineScorelines[0].score,
         baselineTop1Probability: baselineScorelines[0].probability,
         baselineTop3,
@@ -728,8 +853,98 @@ export function evaluateHistoricalMatches(
 
   // The UI lists the newest fixtures first.
   evaluations.sort((left, right) => new Date(right.log.date).getTime() - new Date(left.log.date).getTime());
+  return evaluations;
+}
+
+/**
+ * Replay every target fixture with both engines under one parameter set.
+ *
+ * Tuning parameters default to `DEFAULT_TUNING` — the same values the live
+ * route publishes with — so the headline backtest always measures the model
+ * users actually see. Pass explicit overrides for ablation or the sweep.
+ */
+export function evaluateHistoricalMatches(
+  history: HistoricalMatch[],
+  options: ReplayOptions = { days: DEFAULT_DAYS },
+): { evaluations: Evaluation[]; targets: HistoricalMatch[] } {
+  const targets = selectTargets(history, options);
+  const prepared = prepareFixtures(history, targets, options);
+  const evaluations = evaluatePrepared(history, prepared, {
+    ...options,
+    structuralWeight: options.structuralWeight ?? DEFAULT_TUNING.structuralWeight,
+    temperature: options.temperature ?? DEFAULT_TUNING.temperature,
+    eloElasticity: options.eloElasticity ?? DEFAULT_TUNING.eloElasticity,
+  });
   return { evaluations, targets };
 }
+
+// ─── Parameter sweep ──────────────────────────────────────────────────────────
+
+/** The grid the sweep walks: 4 × 4 × 3 = 48 combinations. */
+export const SWEEP_GRID = {
+  structuralWeight: [0.6, 0.7, 0.8, 0.9],
+  temperature: [0.8, 0.85, 0.9, 0.95],
+  eloElasticity: [20, 30, 40],
+} as const;
+
+/** Every combination of the sweep grid, in grid order. */
+export function sweepCombinations(): CorrectScoreTuning[] {
+  const output: CorrectScoreTuning[] = [];
+  for (const structuralWeight of SWEEP_GRID.structuralWeight) {
+    for (const temperature of SWEEP_GRID.temperature) {
+      for (const eloElasticity of SWEEP_GRID.eloElasticity) {
+        output.push({ structuralWeight, temperature, eloElasticity });
+      }
+    }
+  }
+  return output;
+}
+
+/**
+ * Sweep ranking: Top-1 accuracy first — the metric the tuning exists to
+ * improve — then Top-3, then Brier (lower is better). Deterministic on ties so
+ * the same replay always names the same winner.
+ */
+export function compareSweepResults(left: SweepResult, right: SweepResult): number {
+  return (
+    right.top1Accuracy - left.top1Accuracy ||
+    right.top3Accuracy - left.top3Accuracy ||
+    left.brierScore - right.brierScore ||
+    left.params.structuralWeight - right.params.structuralWeight ||
+    left.params.temperature - right.params.temperature ||
+    left.params.eloElasticity - right.params.eloElasticity
+  );
+}
+
+/**
+ * Score every combination in `SWEEP_GRID` on the same prepared fixtures and
+ * return the results sorted best-first. `simulations` is deliberately low by
+ * default: the stratified sampler's marginals are exact, so 2,000 draws rank
+ * the grid the same way 10,000 do at a fifth of the cost.
+ */
+export function runParameterSweep(
+  history: HistoricalMatch[],
+  options: ReplayOptions,
+  combinations: CorrectScoreTuning[] = sweepCombinations(),
+): { results: SweepResult[]; matchesTested: number } {
+  const targets = selectTargets(history, options);
+  const prepared = prepareFixtures(history, targets, options);
+  const results: SweepResult[] = combinations.map((params) => {
+    const evaluations = evaluatePrepared(history, prepared, { ...options, ...params });
+    const metrics = computeMetrics(evaluations, "supercomputer");
+    return {
+      params,
+      matchesTested: metrics.matchesTested,
+      top1Accuracy: metrics.top1Accuracy,
+      top3Accuracy: metrics.top3Accuracy,
+      brierScore: metrics.brierScore,
+    };
+  });
+  results.sort(compareSweepResults);
+  return { results, matchesTested: prepared.length };
+}
+
+// ─── Route ────────────────────────────────────────────────────────────────────
 
 async function runBacktest(days: number, force: boolean): Promise<CorrectScoreBacktestResponse> {
   const { matches, sources } = await fetchHistoricalFixtures(days, force);
@@ -766,6 +981,7 @@ async function runBacktest(days: number, force: boolean): Promise<CorrectScoreBa
     baselineModel: BASELINE_MODEL,
     dataSource:
       "Historical fixture archive (database → GitHub datasets → openfootball → ESPN); chronological pre-match rolling team statistics",
+    tuning: DEFAULT_TUNING,
     overall,
     baseline,
     comparison: compareMetrics(baseline, overall),
@@ -776,12 +992,103 @@ async function runBacktest(days: number, force: boolean): Promise<CorrectScoreBa
   };
 }
 
+/**
+ * The parameter sweep. Replays the last three complete Premier League seasons
+ * plus the current one (every completed fixture the archive holds, not the
+ * 300-match headline cap) under all 48 combinations and reports them
+ * best-first, plus the current and pre-sweep defaults scored the same way so
+ * the improvement is visible at a glance.
+ */
+async function runSweep(simulations: number, force: boolean): Promise<CorrectScoreSweepResponse> {
+  const startedAt = Date.now();
+  const { matches, sources } = await fetchHistoricalFixtures(SWEEP_DAYS, force, SWEEP_SEASONS);
+  console.info(
+    `[CorrectScoreBacktest] sweep: ${matches.length} ${PREMIER_LEAGUE_SLUG} fixture(s) loaded, ` +
+      `${sweepCombinations().length} combinations × ${simulations} sims`,
+  );
+
+  const options: ReplayOptions = {
+    days: SWEEP_DAYS,
+    maxMatches: SWEEP_MAX_MATCHES,
+    simulations,
+  };
+  const { results, matchesTested } = runParameterSweep(matches, options);
+  const [current] = runParameterSweep(matches, options, [DEFAULT_TUNING]).results;
+  const [legacy] = runParameterSweep(matches, options, [LEGACY_TUNING]).results;
+  const best = results[0] ?? null;
+
+  const dates = matches.map((match) => match.matchDate).sort();
+  return {
+    generatedAt: new Date().toISOString(),
+    model: `${MODEL_VERSION} (ELO + Attack/Defence + Dixon-Coles + Monte Carlo)`,
+    days: SWEEP_DAYS,
+    seasons: SWEEP_SEASONS,
+    simulations,
+    matchesTested,
+    window: { from: dates[0] ?? null, to: dates[dates.length - 1] ?? null },
+    grid: {
+      structuralWeight: [...SWEEP_GRID.structuralWeight],
+      temperature: [...SWEEP_GRID.temperature],
+      eloElasticity: [...SWEEP_GRID.eloElasticity],
+    },
+    best,
+    current,
+    legacy,
+    results,
+    historySources: sources,
+    elapsedMs: Date.now() - startedAt,
+    ...(matchesTested ? {} : { message: NO_PREMIER_LEAGUE_MESSAGE }),
+  };
+}
+
 function requestedDays(request: Request): number {
   const value = Number(new URL(request.url).searchParams.get("days"));
   return Math.round(clamp(Number.isFinite(value) && value > 0 ? value : DEFAULT_DAYS, 7, 90));
 }
 
+function sweepRequested(request: Request): boolean {
+  const value = new URL(request.url).searchParams.get("sweep");
+  return value === "1" || value === "true";
+}
+
+/** `?sims=N` — per-fixture draws for the sweep; lower it to trade fidelity for speed. */
+function requestedSweepSimulations(request: Request): number {
+  const value = Number(new URL(request.url).searchParams.get("sims"));
+  return Math.round(
+    clamp(
+      Number.isFinite(value) && value > 0 ? value : DEFAULT_SIMULATIONS,
+      SWEEP_MIN_SIMULATIONS,
+      SWEEP_MAX_SIMULATIONS,
+    ),
+  );
+}
+
+async function respondSweep(request: Request, force: boolean): Promise<Response> {
+  const simulations = requestedSweepSimulations(request);
+  const cached = sweepCache.get(simulations);
+  if (!force && cached && Date.now() - cached.at < CACHE_TTL_MS) {
+    return Response.json(cached.data, {
+      headers: { "Cache-Control": "no-store", "X-Correct-Score-Backtest-Cache": "HIT" },
+    });
+  }
+  try {
+    const data = await runSweep(simulations, force);
+    sweepCache.set(simulations, { at: Date.now(), data });
+    return Response.json(data, {
+      headers: { "Cache-Control": "no-store", "X-Correct-Score-Backtest-Cache": "MISS" },
+    });
+  } catch (error) {
+    console.error("[CorrectScoreBacktest] sweep failed", error);
+    return Response.json(
+      { error: error instanceof Error ? error.message : "Unable to run correct-score parameter sweep" },
+      { status: 503 },
+    );
+  }
+}
+
 async function respond(request: Request, force: boolean): Promise<Response> {
+  if (sweepRequested(request)) return respondSweep(request, force);
+
   const days = requestedDays(request);
   if (!force) {
     const cached = cache.get(days);
@@ -807,6 +1114,7 @@ async function respond(request: Request, force: boolean): Promise<Response> {
   }
 }
 
+/** `?sweep=1` runs the parameter sweep instead of the headline backtest (`?sims=` optional). */
 export async function GET(request: Request): Promise<Response> {
   return respond(request, false);
 }

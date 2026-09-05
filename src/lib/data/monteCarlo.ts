@@ -22,6 +22,15 @@
 //
 // Draws are seeded from the model inputs, so the same λ's always produce the
 // same published scorelines and the backtest is reproducible run to run.
+//
+// TEMPERATURE. An optional `temperature` T (default 1 = off) is applied in two
+// places, both tuned by the correct-score parameter sweep:
+//   1. λ_home, λ_away are multiplied by T before the grid is built, so T < 1
+//      shrinks expected goals and shifts probability mass toward the low
+//      scorelines that win Top-1 far more often than the Poisson mean implies;
+//   2. the resulting grid is re-calibrated as p_i^(1/T) / Σ p_j^(1/T), so
+//      T < 1 also sharpens the distribution (a better Brier when the model's
+//      ranking is right more often than its probabilities admit).
 
 import { hashString, seededRng } from "@/lib/engine/stats";
 import { dixonColesGrid, dixonColesTau } from "./dixonColes";
@@ -45,6 +54,38 @@ export interface MonteCarloOptions {
   rng?: () => number;
   /** How many scorelines to put in `topScorelines`. Default 10. */
   topScorelines?: number;
+  /**
+   * Model temperature, see the header. 1 disables both effects. Clamped to
+   * `TEMPERATURE_RANGE`; non-finite values fall back to 1.
+   */
+  temperature?: number;
+}
+
+/** Sane bounds for `temperature`; anything outside is clamped. */
+export const TEMPERATURE_RANGE = { min: 0.5, max: 1.5 } as const;
+
+/** Normalise a requested temperature to a usable value (1 when absent). */
+export function resolveTemperature(value: number | undefined | null): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return 1;
+  return Math.max(TEMPERATURE_RANGE.min, Math.min(TEMPERATURE_RANGE.max, value));
+}
+
+/**
+ * Temperature-calibrate a probability vector in place: p_i ← p_i^(1/T) / Σ p_j^(1/T).
+ * T = 1 is the identity; a vector with no mass is left untouched.
+ */
+export function temperProbabilities(probabilities: Float64Array | number[], temperature: number): void {
+  const t = resolveTemperature(temperature);
+  if (t === 1) return;
+  const exponent = 1 / t;
+  let total = 0;
+  for (let i = 0; i < probabilities.length; i++) {
+    const value = probabilities[i] > 0 ? probabilities[i] ** exponent : 0;
+    probabilities[i] = value;
+    total += value;
+  }
+  if (total <= 0) return;
+  for (let i = 0; i < probabilities.length; i++) probabilities[i] /= total;
 }
 
 export interface SimulatedScoreline {
@@ -83,6 +124,8 @@ export interface MonteCarloResult {
   homeLambda: number;
   awayLambda: number;
   rho: number;
+  /** Temperature the grid was built with (1 = none). */
+  temperature: number;
   /** Grid bound actually sampled (≥ `maxGoals`). */
   sampledMaxGoals: number;
   /** Top N scorelines, most probable first. */
@@ -139,12 +182,20 @@ export function sampledGridBound(maxGoals: number, homeLambda: number, awayLambd
   return Math.max(maxGoals, DEFAULT_MAX_GOALS, sixSigma);
 }
 
-function defaultSeed(homeLambda: number, awayLambda: number, rho: number, method: SimulationMethod): number {
+function defaultSeed(
+  homeLambda: number,
+  awayLambda: number,
+  rho: number,
+  method: SimulationMethod,
+  temperature: number,
+): number {
   const rounded = [
     Math.round(homeLambda * 1000),
     Math.round(awayLambda * 1000),
     Math.round(rho * 1000),
     method,
+    // Kept out of the key at T = 1 so pre-temperature seeds are unchanged.
+    ...(temperature === 1 ? [] : [Math.round(temperature * 1000)]),
   ].join("|");
   return hashString(rounded);
 }
@@ -165,10 +216,12 @@ export function simulateMatch(input: MatchSimulationInput): MonteCarloResult {
   const simulations = Math.max(1, Math.round(options.simulations ?? DEFAULT_SIMULATIONS));
   const reportedMaxGoals = Math.max(0, Math.round(options.maxGoals ?? DEFAULT_MAX_GOALS));
   const method = options.method ?? "stratified";
-  const homeLambda = Math.max(Number.EPSILON, input.homeLambda);
-  const awayLambda = Math.max(Number.EPSILON, input.awayLambda);
+  const temperature = resolveTemperature(options.temperature);
+  // Temperature effect 1: shrink (or stretch) λ before the grid is built.
+  const homeLambda = Math.max(Number.EPSILON, input.homeLambda * temperature);
+  const awayLambda = Math.max(Number.EPSILON, input.awayLambda * temperature);
   const rho = Number.isFinite(input.rho) ? input.rho : 0;
-  const seed = options.seed ?? defaultSeed(homeLambda, awayLambda, rho, method);
+  const seed = options.seed ?? defaultSeed(homeLambda, awayLambda, rho, method, temperature);
   const rng = options.rng ?? seededRng(seed);
 
   const sampledMaxGoals = sampledGridBound(reportedMaxGoals, homeLambda, awayLambda);
@@ -227,6 +280,13 @@ export function simulateMatch(input: MatchSimulationInput): MonteCarloResult {
     }
   }
 
+  // Temperature effect 2: re-calibrate both the sampled and the analytic
+  // distributions with the same exponent, so they stay directly comparable.
+  const sampled = new Float64Array(cellCount);
+  for (let i = 0; i < cellCount; i++) sampled[i] = counts[i] / simulations;
+  temperProbabilities(sampled, temperature);
+  temperProbabilities(analytic, temperature);
+
   const scorelines: SimulatedScoreline[] = [];
   const markets: MonteCarloMarkets = {
     homeWin: 0,
@@ -253,7 +313,7 @@ export function simulateMatch(input: MatchSimulationInput): MonteCarloResult {
       // distribution, so its probabilities sum to 1 and callers scoring a
       // Brier over the grid are not silently missing near-zero cells.
       const count = counts[at];
-      const probability = count / simulations;
+      const probability = sampled[at];
       const total = homeGoals + awayGoals;
 
       scorelines.push({
@@ -314,6 +374,7 @@ export function simulateMatch(input: MatchSimulationInput): MonteCarloResult {
     homeLambda,
     awayLambda,
     rho,
+    temperature,
     sampledMaxGoals,
     topScorelines: scorelines.slice(0, Math.max(1, options.topScorelines ?? TOP_SCORELINES)),
     scorelines,
@@ -335,12 +396,21 @@ export function analyticScorelines(
   awayLambda: number,
   rho: number,
   maxGoals: number,
+  temperature = 1,
 ): SimulatedScoreline[] {
-  const grid = dixonColesGrid(homeLambda, awayLambda, rho, maxGoals);
+  const t = resolveTemperature(temperature);
+  const grid = dixonColesGrid(
+    Math.max(Number.EPSILON, homeLambda * t),
+    Math.max(Number.EPSILON, awayLambda * t),
+    rho,
+    maxGoals,
+  );
   const total = grid.gridProbability > 0 ? grid.gridProbability : 1;
+  const probabilities = grid.cells.map((cell) => cell.probability / total);
+  temperProbabilities(probabilities, t);
   return grid.cells
-    .map((cell) => {
-      const probability = Math.round((cell.probability / total) * 1e6) / 1e6;
+    .map((cell, index) => {
+      const probability = Math.round(probabilities[index] * 1e6) / 1e6;
       return {
         score: `${cell.homeGoals}-${cell.awayGoals}`,
         homeGoals: cell.homeGoals,
