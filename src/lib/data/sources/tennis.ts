@@ -937,6 +937,7 @@ export async function loadTennisMatches(
     return added;
   };
 
+  console.info(`[tennis] Loading ${tour} matches from Jeff Sackmann/Kadantte...`);
   // Layer 1 — Sackmann season files (results + aces/DFs/BPs). Every mirror of
   // every season is fetched in parallel; per season the highest-priority
   // mirror that responds wins, so a slow mirror cannot stall the whole load.
@@ -1014,6 +1015,9 @@ export async function loadTennisMatches(
   }
 
   const matches = [...byId.values()].sort((a, b) => a.matchDate.localeCompare(b.matchDate));
+  if (matches.length === 0) {
+    throw new Error("[tennis] CRITICAL: No data source reachable. Tennis predictions are unavailable.");
+  }
   return { matches, sources };
 }
 
