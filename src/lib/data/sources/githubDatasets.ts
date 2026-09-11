@@ -262,18 +262,31 @@ export const githubDatasetsSource: SourceHandler = {
       .map((u) => u.trim())
       .filter(Boolean);
     const targets = urls.length ? urls : DEFAULT_URLS;
+    let searchedAnyDataset = false;
 
     for (const url of targets) {
       const res = await ctx.http(url, {
         timeoutMs: Math.max(ctx.timeoutMs, 20_000),
         text: true,
       });
-      if (res.status !== "ok" || typeof res.data !== "string") continue;
+      if (res.status !== "ok" || typeof res.data !== "string") {
+        // Distinguish "dataset unreachable" from "dataset searched, match
+        // absent" — the former is an environment problem, the latter a
+        // coverage gap.
+        ctx.log(`[GitHubDatasets] Dataset fetch failed (${res.status}) for ${url} — skipping this dataset.`);
+        continue;
+      }
+      searchedAnyDataset = true;
+      // The CSV carries no ESPN ids — the match is located by its own format:
+      // date + team names inside the dataset rows.
       const payload = normaliseFootballCsv(res.data, match);
       const hasAny =
         Object.values(payload.home).some((v) => v !== null) ||
         Object.values(payload.away).some((v) => v !== null);
       if (hasAny) return payload;
+    }
+    if (searchedAnyDataset) {
+      ctx.log(`[GitHubDatasets] Match not found for ${match.date.slice(0, 10)} ${match.homeTeam} vs ${match.awayTeam}.`);
     }
     return null;
   },

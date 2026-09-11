@@ -22,6 +22,15 @@
 // "no data" and "egress blocked" look identical downstream (both yield a
 // synthetic-baseline match), so the trace must tell them apart; see
 // docs/NETWORK_ALLOWLIST.md and GET /api/diagnostics/connectivity.
+//
+// At the end of EVERY walk a summary line is logged and stored for
+// GET /api/diagnostics/data-sources (diagnostics.perSourceFailures):
+//
+//   [aggregator] eng.1:401879288 — 11 sources tried.
+//     Failed: API-Football (403), FBref (403), TheSportsDB (no key), … → SYNTHETIC
+//
+// so a silent synthetic fallback can never happen again: every skipped or
+// failed source is named with its exact reason.
 
 import { fetchWithTimeout, type HttpResult } from "./http";
 import { SOURCE_HANDLERS } from "./sources";
@@ -72,10 +81,13 @@ const DEFAULT_PRIORITY: StatSourceName[] = [
  * Env vars that gate a source. Used ONLY to explain why `available()` returned
  * false — "key missing (API_FOOTBALL_KEY)" vs "not applicable to this league"
  * are two completely different failures with two completely different fixes.
+ *
+ * Note: TheSportsDB is deliberately NOT listed — the handler falls back to
+ * the public free test key "3" when THESPORTSDB_KEY is unset, so a missing
+ * env var is a rate-limit situation, never a hard skip.
  */
 const SOURCE_ENV_REQUIREMENTS: Partial<Record<StatSourceName, string[]>> = {
   "API-Football": ["API_FOOTBALL_KEY", "FOOTBALL_API_KEY"],
-  "TheSportsDB": ["THESPORTSDB_KEY"],
   "Highlightly": ["HIGHLIGHTLY_KEY"],
   "datafc": ["DATAFCC_ENDPOINT"],
 };
@@ -145,6 +157,80 @@ export interface StatsFetchResult {
   attempts: SourceAttempt[];
   /** Which source filled each home/away field (observability). */
   fieldSources: Partial<Record<StatKey, string>>;
+}
+
+// ─── Diagnostics (per-source health + last-walk failure trace) ───────────────
+
+/**
+ * One source's failure from the LAST walk, compact enough to embed in the API
+ * response (diagnostics.perSourceFailures) and in the end-of-walk log line.
+ */
+export interface SourceFailureRecord {
+  source: string;
+  /** Machine-readable cause (see SourceAttempt.reason). */
+  reason: string;
+  /** Compact label for logs/UI: "403", "no key", "not covered", … */
+  short: string;
+  /** Human-readable detail (the exact reason this source produced nothing). */
+  detail: string;
+  /** Real HTTP status when the failure involved a response, else null. */
+  httpStatus: number | null;
+  /** ISO timestamp of the attempt. */
+  at: string;
+}
+
+/** Per-source health as observed by the aggregator in THIS process. */
+export interface SourceHealthRecord {
+  source: string;
+  priority: number;
+  registered: boolean;
+  requiresEnv: string[];
+  /** null = unkeyed source; false = required env var(s) unset. */
+  keyPresent: boolean | null;
+  coolingDown: boolean;
+  lastAttemptAt: string | null;
+  lastSuccessAt: string | null;
+  lastSuccessFields: number | null;
+  lastFailureAt: string | null;
+  lastFailureReason: string | null;
+  lastFailureShort: string | null;
+  lastFailureHttpStatus: number | null;
+  /**
+   * Last time ANY HTTP response (any status — even 403/404) was received from
+   * the host: proof the host answered, as opposed to a blocked egress path.
+   */
+  lastReachableAt: string | null;
+}
+
+/** Snapshot of the aggregator's observability state (the debug endpoint). */
+export interface AggregatorDiagnostics {
+  lastWalkAt: string | null;
+  lastCacheKey: string | null;
+  lastOutcome: "real-data" | "synthetic" | null;
+  lastPrimarySource: string | null;
+  lastFieldCount: number | null;
+  /** Failures recorded during the last walk — exposed as diagnostics.perSourceFailures. */
+  perSourceFailures: SourceFailureRecord[];
+  sources: SourceHealthRecord[];
+}
+
+/** Compact label for a failed attempt — drives the "Source (reason)" log list. */
+function shortReason(a: SourceAttempt): string {
+  const httpStatus = a.http?.find((c) => c.httpStatus !== null)?.httpStatus ?? null;
+  switch (a.reason) {
+    case "key-missing": return "no key";
+    case "cooldown": return "cooldown";
+    case "not-applicable": return "not covered";
+    case "no-handler": return "no handler";
+    case "no-requests": return "id unresolved";
+    case "timeout": return "timeout";
+    case "network-error": return "network error";
+    case "rate-limited": return httpStatus === 403 ? "403 rate limit" : "rate-limited";
+    case "handler-threw": return "threw";
+    case "http-error": return httpStatus !== null ? String(httpStatus) : "http error";
+    case "empty-payload": return "no data";
+    default: return a.status;
+  }
 }
 
 // ─── Merge helpers ────────────────────────────────────────────────────────────
@@ -289,6 +375,28 @@ export class StatsAggregator {
   private cooldowns: Map<string, number> = new Map();
   private cache: Map<string, { data: CanonicalMatchStats; expires: number }> = new Map();
 
+  /** Per-source health observed in this process (unix ms timestamps). */
+  private health: Map<string, {
+    lastAttemptAt: number;
+    lastSuccessAt: number;
+    lastSuccessFields: number;
+    lastFailureAt: number;
+    lastFailureReason: string;
+    lastFailureShort: string;
+    lastFailureHttpStatus: number | null;
+    lastReachableAt: number;
+  }> = new Map();
+
+  /** The most recent full walk (drives diagnostics.perSourceFailures). */
+  private lastWalk: {
+    at: string;
+    cacheKey: string;
+    outcome: "real-data" | "synthetic";
+    primarySource: string | null;
+    fieldCount: number;
+    perSourceFailures: SourceFailureRecord[];
+  } | null = null;
+
   private readonly handlers: Partial<Record<StatSourceName, SourceHandler>>;
   private readonly sourceTimeoutMs: number;
   private readonly cooldownMs: number;
@@ -382,6 +490,76 @@ export class StatsAggregator {
     }
   }
 
+  /**
+   * Full observability snapshot for the diagnostics endpoint: per-source
+   * health (last success / last failure / last reachability) plus the
+   * perSourceFailures trace of the most recent walk. No network involved.
+   */
+  diagnostics(): AggregatorDiagnostics {
+    const iso = (ms: number): string | null => (ms > 0 ? new Date(ms).toISOString() : null);
+    const now = Date.now();
+    return {
+      lastWalkAt: this.lastWalk?.at ?? null,
+      lastCacheKey: this.lastWalk?.cacheKey ?? null,
+      lastOutcome: this.lastWalk?.outcome ?? null,
+      lastPrimarySource: this.lastWalk?.primarySource ?? null,
+      lastFieldCount: this.lastWalk?.fieldCount ?? null,
+      perSourceFailures: this.lastWalk?.perSourceFailures ?? [],
+      sources: this.sourcePriority.map((source, i) => {
+        const name = source as StatSourceName;
+        const h = this.health.get(source);
+        const requires = SOURCE_ENV_REQUIREMENTS[name] ?? [];
+        return {
+          source,
+          priority: i + 1,
+          registered: Boolean(this.handlers[name]),
+          requiresEnv: requires,
+          keyPresent: requires.length
+            ? requires.some((v) => (process.env[v] ?? "").trim().length > 0)
+            : null,
+          coolingDown: this.isCoolingDown(source, now),
+          lastAttemptAt: iso(h?.lastAttemptAt ?? 0),
+          lastSuccessAt: iso(h?.lastSuccessAt ?? 0),
+          lastSuccessFields: h && h.lastSuccessAt > 0 ? h.lastSuccessFields : null,
+          lastFailureAt: iso(h?.lastFailureAt ?? 0),
+          lastFailureReason: h && h.lastFailureAt > 0 ? h.lastFailureReason : null,
+          lastFailureShort: h && h.lastFailureAt > 0 ? h.lastFailureShort : null,
+          lastFailureHttpStatus: h && h.lastFailureAt > 0 ? h.lastFailureHttpStatus : null,
+          lastReachableAt: iso(h?.lastReachableAt ?? 0),
+        };
+      }),
+    };
+  }
+
+  /** Record one attempt into the per-source health map. */
+  private recordAttempt(a: SourceAttempt): void {
+    const nowMs = Date.now();
+    const h = this.health.get(a.source) ?? {
+      lastAttemptAt: 0,
+      lastSuccessAt: 0,
+      lastSuccessFields: 0,
+      lastFailureAt: 0,
+      lastFailureReason: "",
+      lastFailureShort: "",
+      lastFailureHttpStatus: null as number | null,
+      lastReachableAt: 0,
+    };
+    h.lastAttemptAt = nowMs;
+    const httpStatus = a.http?.find((c) => c.httpStatus !== null)?.httpStatus ?? null;
+    if (a.fields > 0) {
+      h.lastSuccessAt = nowMs;
+      h.lastSuccessFields = a.fields;
+    } else {
+      h.lastFailureAt = nowMs;
+      h.lastFailureReason = a.reason ?? a.status;
+      h.lastFailureShort = shortReason(a);
+      h.lastFailureHttpStatus = httpStatus;
+    }
+    // ANY response (even 403/404) proves the host answered.
+    if (httpStatus !== null) h.lastReachableAt = nowMs;
+    this.health.set(a.source, h);
+  }
+
   clearCache(key?: string): void {
     if (key) this.cache.delete(key);
     else this.cache.clear();
@@ -421,6 +599,14 @@ export class StatsAggregator {
       timeoutMs: this.sourceTimeoutMs,
       now: () => Date.now(),
       log: (message) => this.logSink(`[stats:${source}] ${message}`),
+      reportRateLimit: (reason) => {
+        tracker.rateLimited = true;
+        this.logSink(
+          `[stats:${source}] rate limit detected${reason ? ` (${reason})` : ""} — ` +
+          `cooldown armed for ${Math.round(this.cooldownMs / 60_000)}min; ` +
+          `previously merged results will be served from cache meanwhile`,
+        );
+      },
     };
   }
 
@@ -467,6 +653,11 @@ export class StatsAggregator {
     if (!opts.force) {
       const hit = this.cache.get(key);
       if (hit && Date.now() < hit.expires) {
+        const ttlLeftS = Math.max(0, Math.round((hit.expires - Date.now()) / 1000));
+        this.logSink(
+          `[aggregator] ${match.leagueSlug}:${match.eventId} — cache hit ` +
+          `(source ${hit.data.metadata.source}, ${nonNullFieldCount(hit.data)} fields, ${ttlLeftS}s left) — no sources tried`,
+        );
         return { stats: hit.data, cacheKey: key, attempts: [], fieldSources: {} };
       }
     }
@@ -579,7 +770,7 @@ export class StatsAggregator {
         `[stats] ${key} — no source contributed any field → SYNTHETIC BASELINE | ${verdict} | ` +
         `attempts ${attempts.map((a) => `${a.source}=${a.status}${a.reason ? `:${a.reason}` : ""}`).join(", ") || "no sources"}`,
       );
-      return { stats: null, cacheKey: key, attempts, fieldSources };
+      return this.finishWalk(match, key, attempts, null, null, 0, fieldSources);
     }
 
     stats.metadata.source = this.primarySource(contributions, priority);
@@ -594,11 +785,70 @@ export class StatsAggregator {
     this.cache.set(key, { data: stats, expires: Date.now() + this.cacheTtlMs });
     this.pruneCache();
 
+    const fieldCount = nonNullFieldCount(stats);
     this.logSink(
-      `[stats] ${key} → source ${stats.metadata.source} | fields ${nonNullFieldCount(stats)}/${TOTAL_STAT_SLOTS} | ` +
+      `[stats] ${key} → source ${stats.metadata.source} | fields ${fieldCount}/${TOTAL_STAT_SLOTS} | ` +
       `sources ${(stats.metadata.sources ?? []).join("+") || stats.metadata.source} | ` +
       `attempts ${attempts.map((a) => `${a.source}=${a.status}${a.fields ? `(${a.fields})` : ""}`).join(", ")}`,
     );
+
+    return this.finishWalk(match, key, attempts, stats, stats.metadata.source, fieldCount, fieldSources);
+  }
+
+  /**
+   * End-of-walk bookkeeping + the summary log that MUST appear at the end of
+   * every aggregator call:
+   *
+   *   [aggregator] eng.1:401879288 — 11 sources tried. Failed: API-Football (403),
+   *     FBref (403), TheSportsDB (no key), … → SYNTHETIC
+   *   [aggregator] eng.1:401879288 — 11 sources tried. Failed: StatsBomb (no data)
+   *     → source API-Football (52 fields)
+   *
+   * Every failed source carries its exact reason; the same trace is stored in
+   * `diagnostics.perSourceFailures` for the API response.
+   */
+  private finishWalk(
+    match: MatchStatsQuery,
+    key: string,
+    attempts: SourceAttempt[],
+    stats: CanonicalMatchStats | null,
+    primarySource: string | null,
+    fieldCount: number,
+    fieldSources: Partial<Record<StatKey, string>>,
+  ): StatsFetchResult {
+    for (const attempt of attempts) this.recordAttempt(attempt);
+
+    const at = new Date().toISOString();
+    const perSourceFailures: SourceFailureRecord[] = attempts
+      .filter((a) => a.fields === 0)
+      .map((a) => ({
+        source: a.source,
+        reason: a.reason ?? a.status,
+        short: shortReason(a),
+        detail: a.detail ?? "",
+        httpStatus: a.http?.find((c) => c.httpStatus !== null)?.httpStatus ?? null,
+        at,
+      }));
+
+    const failedPart = perSourceFailures.length
+      ? `Failed: ${perSourceFailures.map((f) => `${f.source} (${f.short})`).join(", ")}`
+      : "no failures";
+    const outcome = stats
+      ? `source ${primarySource ?? "unknown"} (${fieldCount} fields)`
+      : "SYNTHETIC";
+    this.logSink(
+      `[aggregator] ${match.leagueSlug}:${match.eventId} — ${attempts.length} sources tried. ` +
+      `${failedPart} → ${outcome}`,
+    );
+
+    this.lastWalk = {
+      at,
+      cacheKey: key,
+      outcome: stats ? "real-data" : "synthetic",
+      primarySource: stats ? (primarySource ?? null) : null,
+      fieldCount: stats ? fieldCount : 0,
+      perSourceFailures,
+    };
 
     return { stats, cacheKey: key, attempts, fieldSources };
   }

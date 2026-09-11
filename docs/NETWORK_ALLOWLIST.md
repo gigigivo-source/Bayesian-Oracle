@@ -27,6 +27,25 @@ All hosts are HTTPS on port 443.
 | `worldcup2026-api.vercel.app` | worldcup2026 handler | no |
 | `www.tennis-data.co.uk` | Tennis odds layer — per-tournament CSVs (HTTP, not HTTPS) | no |
 
+### `api.highlightly.com` unreachable
+
+If the Highlightly handler logs
+
+```
+[Highlightly] Host unreachable — check network allowlist.
+```
+
+then egress to `api.highlightly.com` is blocked in this environment (DNS /
+TLS / firewall). It is an **environment** problem, not a data problem: the
+handler skips gracefully and the rest of the source chain keeps going. Add
+`api.highlightly.com` to the allowlist (table above) and confirm with
+
+```bash
+curl -s localhost:3000/api/diagnostics/data-sources | jq '.sources[] | select(.source=="Highlightly")'
+```
+
+which shows the live probe outcome, the key state and the last attempt time.
+
 ### Secondary hosts
 
 Referenced by non-aggregator routes; allowlist them if you use those features.
@@ -77,3 +96,15 @@ curl -s localhost:3000/api/diagnostics/connectivity | jq '.summary, .blockedHost
 `blockedHosts` is still firewalled. A host counts as reachable if it answers at
 all — `404`, `429` and `5xx` all prove the connection succeeded; only
 `network-error` and `timeout` indicate a block.
+
+For the source-level view (which source last succeeded, which failed and
+**why** — the same data the end-of-walk `[aggregator]` log line prints), use
+the per-source health endpoint:
+
+```bash
+curl -s localhost:3000/api/diagnostics/data-sources | \
+  jq '.summary, (.sources[] | {source, status, reachable, keyValid, lastSuccessAt, lastFailureShort})'
+```
+
+`diagnostics.perSourceFailures` in the same response carries the exact
+per-source failure reasons of the aggregator's most recent walk.

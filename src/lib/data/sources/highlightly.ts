@@ -57,10 +57,26 @@ export const highlightlySource: SourceHandler = {
     const key = ctx.env("HIGHLIGHTLY_KEY");
     if (!key) return null;
 
-    const res = await ctx.http(`${BASE}/matches/${encodeURIComponent(match.eventId)}`, {
+    const url = `${BASE}/matches/${encodeURIComponent(match.eventId)}`;
+    const res = await ctx.http(url, {
       headers: { "x-api-key": key },
       timeoutMs: ctx.timeoutMs,
     });
+
+    // Network failures are an ENVIRONMENT problem (egress allowlist), not a
+    // data problem — say so explicitly, then skip gracefully.
+    if (res.status === "network-error") {
+      ctx.log("[Highlightly] Host unreachable — check network allowlist.");
+      return null;
+    }
+    if (res.status === "timeout") {
+      ctx.log(`[Highlightly] Host ${url} timed out after ${ctx.timeoutMs}ms — check network allowlist / egress latency.`);
+      return null;
+    }
+    if (res.status === "http-error" && (res.httpStatus === 401 || res.httpStatus === 403)) {
+      ctx.log(`[Highlightly] HTTP ${res.httpStatus} — HIGHLIGHTLY_KEY was rejected by api.highlightly.com; check the key in .env.local.`);
+      return null;
+    }
     if (res.status !== "ok") return null;
 
     const root = asRecord(res.data);

@@ -21,6 +21,14 @@ export interface SourceContext {
   now: () => number;
   /** Log a line through the aggregator's log sink. */
   log: (message: string) => void;
+  /**
+   * Tell the aggregator this source was rate-limited — even when the provider
+   * signals it with a 403 (e.g. API-Football's daily quota) instead of a 429.
+   * Arms the rate-limit cooldown so the source backs off while previously
+   * merged results are served from cache. Optional so hand-built test
+   * contexts keep working.
+   */
+  reportRateLimit?: (reason?: string) => void;
 }
 
 /**
