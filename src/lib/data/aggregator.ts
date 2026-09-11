@@ -413,9 +413,15 @@ export class StatsAggregator {
     this.logSink = opts.log ?? ((m) => console.log(m));
   }
 
-  /** Deterministic cache key for a match. */
+  /**
+   * Deterministic cache key for a match. The match STATE is part of the key:
+   * a "pre" entry holds historical team AVERAGES, while an "in"/"post" entry
+   * holds the actual per-match stats — the two must never shadow each other
+   * inside the 2h TTL (a pre-match walk cached before kickoff must not be
+   * served as "the match stats" to settlement after the final whistle).
+   */
   cacheKey(match: MatchStatsQuery): string {
-    return `stats:${match.leagueSlug}:${match.eventId}`;
+    return `stats:${match.leagueSlug}:${match.eventId}${match.state ? `:${match.state}` : ""}`;
   }
 
   /** Read a fresh cached result without fetching (used by the settlement engine). */

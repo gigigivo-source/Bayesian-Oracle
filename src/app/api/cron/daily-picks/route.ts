@@ -852,6 +852,9 @@ function statsQueryForFixture(fx: FixtureLite) {
     homeTeam: fx.home.name,
     awayTeam: fx.away.name,
     date: fx.date,
+    // Upcoming picks have no match statistics yet — sources use historical
+    // team stats for them; settlement re-fetches post-match real stats.
+    state: fx.state,
   };
 }
 

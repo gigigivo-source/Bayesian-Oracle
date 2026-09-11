@@ -78,6 +78,9 @@ async function resolveStats(result: MatchResult): Promise<CanonicalMatchStats | 
     homeTeam: result.homeName,
     awayTeam: result.awayName,
     date: result.date,
+    // Settlement rows are finished matches — per-match stats only, and the
+    // cache key is state-aware, so this must match the settle engine's key.
+    state: "post" as const,
   };
   return statsAggregator.peek(query) ?? statsAggregator.fetch(query);
 }

@@ -1713,6 +1713,9 @@ async function fetchPrematchStats(fx: FixtureLite, force: boolean): Promise<Cano
         homeTeam: fx.home.name,
         awayTeam: fx.away.name,
         date: fx.date,
+        // Upcoming match: per-match stats do not exist yet — the API-Football
+        // source routes to historical team stats (season corner averages).
+        state: fx.state,
       },
       { force },
     );

@@ -457,10 +457,19 @@ const TOP10_UNAVAILABLE_REASON = "No reliable prediction available — data qual
  * and a complete per-match canonical payload is Real. Historical-only fields
  * are intentionally not part of this gate because the aggregator itself does
  * not require them before it can call a result real.
+ *
+ * Match-state aware: for UPCOMING fixtures the payload is built from
+ * historical team statistics, and `cleanSheet` — a match OUTCOME — cannot
+ * exist before kickoff. Requiring it would make "Real" unreachable pre-match,
+ * so it is excluded from the completeness gate when state is "pre".
  */
-function classifyStatsDataQuality(stats: CanonicalMatchStats | null): PredictionDataQuality {
+function classifyStatsDataQuality(
+  stats: CanonicalMatchStats | null,
+  state?: "pre" | "in" | "post" | null,
+): PredictionDataQuality {
   if (!stats) return "Synthetic";
-  const perMatchSlots = (MATCH_STAT_FIELDS.length + BOOLEAN_FIELDS.length) * 2;
+  const booleanSlots = state === "pre" ? 0 : BOOLEAN_FIELDS.length * 2;
+  const perMatchSlots = MATCH_STAT_FIELDS.length * 2 + booleanSlots;
   return nonNullFieldCount(stats) >= perMatchSlots ? "Real" : "Mixed";
 }
 
@@ -783,7 +792,9 @@ async function handlePost(req: Request): Promise<Response> {
       homeTeam: fixture.home.name,
       awayTeam: fixture.away.name,
       date: fixture.date,
+      state: fixture.state,
     }),
+    fixture.state,
   );
 
   // ── Value bet detection (per mode; markets differ per ranking) ───────────────

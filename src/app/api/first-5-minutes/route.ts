@@ -828,12 +828,15 @@ async function fetchPrematchStats(
 ): Promise<CanonicalMatchStats | null> {
   // Per-match query: league + event id + both team names + kickoff date.
   // The aggregator's own [stats] log shows the walk for exactly this key.
+  // state="pre" tells keyed sources to use historical team stats — upcoming
+  // fixtures have no per-match statistics yet.
   const query = {
     leagueSlug: fx.leagueSlug,
     eventId: fx.id,
     homeTeam: fx.home.name,
     awayTeam: fx.away.name,
     date: fx.date,
+    state: fx.state,
   };
   try {
     return await withTimeout(
