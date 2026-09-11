@@ -219,6 +219,9 @@ export async function runEngineFromRealWithProfiles(
         homeTeam:   fx.home.name,
         awayTeam:   fx.away.name,
         date:       fx.date,
+        // Pre-match fixtures have no match statistics yet — sources route to
+        // historical team stats instead of an empty /fixtures/statistics call.
+        state:      fx.state,
       }),
       new Promise<null>((resolve) => setTimeout(() => resolve(null), 25_000)),
     ]);

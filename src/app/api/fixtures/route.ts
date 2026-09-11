@@ -1320,6 +1320,9 @@ async function attachStatsToFixtures(
       homeTeam: fx.home.name,
       awayTeam: fx.away.name,
       date: fx.date,
+      // Upcoming fixtures have no match statistics — sources use historical
+      // team stats for them; finished matches keep per-match stats.
+      state: fx.state,
     };
     const peeked = statsAggregator.peek(query);
     let canonical = peeked;

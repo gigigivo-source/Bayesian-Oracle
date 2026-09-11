@@ -79,6 +79,9 @@ function peekStats(fx: FixtureLite) {
     homeTeam: fx.home.name,
     awayTeam: fx.away.name,
     date: fx.date,
+    // The cache key is state-aware — the peek must use the same state the
+    // oracle's fetch used or it silently misses.
+    state: fx.state,
   });
 }
 

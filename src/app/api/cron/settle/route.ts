@@ -113,6 +113,8 @@ async function refreshPendingPerformanceRows(force = false): Promise<number> {
               homeTeam: fx.home.name,
               awayTeam: fx.away.name,
               date: fx.date,
+              // Settlement: per-match stats only (fx.state is "post").
+              state: fx.state,
             })
             .catch(() => null),
         );
@@ -665,6 +667,8 @@ export async function settleFeaturePicks(force = false): Promise<FeatureSettlePa
           homeTeam: result.homeName,
           awayTeam: result.awayName,
           date: result.date,
+          // Settlement rows are finished matches: per-match stats only.
+          state: "post" as const,
         };
         statsCache.set(
           statsKey,

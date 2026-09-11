@@ -2410,6 +2410,9 @@ export async function runOracleWithStandings(
         homeTeam: fixture.home.name,
         awayTeam: fixture.away.name,
         date: fixture.date,
+        // Pre-match fixtures have no match statistics yet — sources route to
+        // historical team stats instead of an empty /fixtures/statistics call.
+        state: fixture.state,
       },
       opts?.statsPriority?.length ? { priority: opts.statsPriority } : undefined,
     )
@@ -2462,6 +2465,9 @@ export async function runOracleAllModesWithStandings(
         homeTeam: fixture.home.name,
         awayTeam: fixture.away.name,
         date: fixture.date,
+        // Pre-match fixtures have no match statistics yet — sources route to
+        // historical team stats instead of an empty /fixtures/statistics call.
+        state: fixture.state,
       },
       opts?.statsPriority?.length ? { priority: opts.statsPriority } : undefined,
     )

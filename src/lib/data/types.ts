@@ -112,6 +112,17 @@ export interface MatchStatsQuery {
   homeTeam: string;
   awayTeam: string;
   date: string;       // ISO date string (YYYY-MM-DD or full ISO timestamp)
+  /**
+   * Match state from the fixture feed ("pre" | "in" | "post"), when known.
+   * Sources use it to pick the right data: UPCOMING matches have no match
+   * statistics yet (providers only publish stats for live/finished matches),
+   * so keyed sources like API-Football build pre-match queries from
+   * historical team statistics (/teams/statistics + last-10 form) instead of
+   * /fixtures/statistics. Finished matches keep using per-match stats.
+   * Omitted = unknown — sources decide defensively (match stats first,
+   * historical fallback only when they come back empty).
+   */
+  state?: "pre" | "in" | "post" | null;
 }
 
 // ─── Field enumeration (drives merging, capability matrix, coverage) ──────────

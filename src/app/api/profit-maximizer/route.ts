@@ -592,6 +592,10 @@ function rankingStatsQuery(fx: FixtureLite) {
     homeTeam: fx.home.name,
     awayTeam: fx.away.name,
     date: fx.date,
+    // Must match the state the oracle's aggregator fetch used — the cache key
+    // is state-aware so pre-match average entries and real match stats never
+    // shadow each other.
+    state: fx.state,
   };
 }
 

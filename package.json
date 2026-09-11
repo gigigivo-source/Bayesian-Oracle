@@ -9,7 +9,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "validate:stats": "tsx scripts/validate-stats.ts"
+    "validate:stats": "tsx scripts/validate-stats.ts",
+    "verify:prematch": "tsx scripts/verify-prematch.ts"
   },
   "dependencies": {
     "@sindicuab/sofascore-api": "^0.1.7",

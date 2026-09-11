@@ -1267,6 +1267,9 @@ async function fetchCanonicalStats(
     homeTeam: fixture.home.name,
     awayTeam: fixture.away.name,
     date: fixture.date,
+    // Upcoming match: per-match stats do not exist yet — keyed sources use
+    // historical team stats (season averages) for the prediction.
+    state: fixture.state,
   };
   return withTimeout(
     statsAggregator.fetch(query, { force }).catch(() => null),
