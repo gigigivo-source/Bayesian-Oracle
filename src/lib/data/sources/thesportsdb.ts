@@ -1,7 +1,11 @@
 // ĞIGI GIVØ — TheSportsDB normaliser (free tier key).
 //
 // Endpoint: https://www.thesportsdb.com/api/v1/json/{key}/events.php?id={eventId}
-// Key:      THESPORTSDB_KEY via env (default public test key "3").
+// Key:      THESPORTSDB_KEY via env. When unset, the handler falls back to the
+//           public free test key "3" (rate-limited) and logs it once so the
+//           free-tier behaviour is visible in the trace. Sign up for a free
+//           key at https://www.thesportsdb.com/api.php and set
+//           THESPORTSDB_KEY in .env.local to lift the rate limit.
 //
 // Maps goals and any per-event stat fields the payload carries (shots, corners,
 // cards, fouls, saves). TheSportsDB's event objects are sparse, so most of
@@ -12,6 +16,26 @@ import { asArray, asNumber, asNumberLoose, asRecord, asString, namesMatch } from
 import type { MatchStatsQuery, PartialTeamStats, SourcePayload, StatField, StatKey } from "../types";
 
 const BASE = "https://www.thesportsdb.com/api/v1/json";
+
+/** Public free test key — used when THESPORTSDB_KEY is not set. Rate-limited. */
+export const FREE_TEST_KEY = "3";
+
+let freeKeyNoticeLogged = false;
+
+function resolveKey(ctx: { env: (name: string) => string; log: (m: string) => void }): string {
+  const key = ctx.env("THESPORTSDB_KEY");
+  if (key) return key;
+  if (!freeKeyNoticeLogged) {
+    freeKeyNoticeLogged = true;
+    ctx.log("[TheSportsDB] Using free test key (rate-limited). Set THESPORTSDB_KEY in .env.local (free signup: https://www.thesportsdb.com/api.php) to lift the limit.");
+  }
+  return FREE_TEST_KEY;
+}
+
+/** Reset the free-key notice (tests). */
+export function resetTheSportsDbNotice(): void {
+  freeKeyNoticeLogged = false;
+}
 
 export const THESPORTSDB_CAPABILITIES: StatField[] = [
   "goals", "goalsConceded", "cleanSheet", "shots", "corners", "yellowCards",
@@ -38,13 +62,13 @@ export const thesportsdbSource: SourceHandler = {
   name: "TheSportsDB",
   capabilities: THESPORTSDB_CAPABILITIES,
 
-  available: (_match, ctx) => {
-    const key = ctx.env("THESPORTSDB_KEY");
-    return key.length > 0;
-  },
+  // Always applicable: the public free test key "3" is the documented default
+  // when THESPORTSDB_KEY is unset, so this source is never skipped for a
+  // missing key (it may be rate-limited, but that is a backoff, not a skip).
+  available: () => true,
 
   async fetch(match, ctx): Promise<SourcePayload | null> {
-    const key = ctx.env("THESPORTSDB_KEY");
+    const key = resolveKey(ctx);
     const base = `${BASE}/${key}`;
 
     let eventId: string | null = null;

@@ -13,6 +13,22 @@ export const WORLDCUP2026_CAPABILITIES: StatField[] = [
   "goals", "goalsConceded", "cleanSheet",
 ];
 
+/**
+ * ESPN league slugs this feed actually covers. It is a community fixture feed
+ * scoped to the 2026 FIFA World Cup (and the qualifiers it tracks) — querying
+ * it with a domestic-league match always 404s, so we gate on the league slug
+ * and skip every other competition with a clear log instead of burning a
+ * request.
+ */
+export const COVERED_LEAGUES: ReadonlySet<string> = new Set([
+  "fifa.world",       // ESPN slug for the FIFA World Cup tournament
+  "fifa.worldcup",    // defensive alias
+]);
+
+export function leagueCovered(leagueSlug: string): boolean {
+  return COVERED_LEAGUES.has(leagueSlug);
+}
+
 function extractGoals(node: unknown): { home: number; away: number } | null {
   const rec = asRecord(node);
   if (!rec) return null;
@@ -39,9 +55,19 @@ export const worldcup2026Source: SourceHandler = {
   name: "worldcup2026",
   capabilities: WORLDCUP2026_CAPABILITIES,
 
-  available: () => true,
+  // Gate on covered leagues (no network): only the World Cup feed exists in
+  // this source, so every other league is skipped before a request is made.
+  available: (match, ctx) => {
+    if (leagueCovered(match.leagueSlug)) return true;
+    ctx.log(`[worldcup2026] League not covered — skipping.`);
+    return false;
+  },
 
   async fetch(match, ctx): Promise<SourcePayload | null> {
+    if (!leagueCovered(match.leagueSlug)) {
+      ctx.log(`[worldcup2026] League not covered — skipping.`);
+      return null;
+    }
     const res = await ctx.http(`${BASE}/matches/${encodeURIComponent(match.eventId)}`, {
       timeoutMs: ctx.timeoutMs,
     });

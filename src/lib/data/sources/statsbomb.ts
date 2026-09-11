@@ -24,6 +24,21 @@ import type { MatchStatsQuery, PartialTeamStats, SourcePayload, StatField } from
 
 const BASE = "https://raw.githubusercontent.com/statsbomb/open-data/master/data";
 
+/**
+ * ESPN slug → StatsBomb open-data competition_id (top-5 domestic only).
+ * The open-data repo is mostly historical domestic + international data; the
+ * league hint narrows the match lookup to the right competition so recent
+ * matches in uncovered leagues are skipped fast instead of scanning every
+ * season of every competition.
+ */
+const LEAGUE_COMPETITIONS: Record<string, number> = {
+  "eng.1": 2,  // Barclays Premier League
+  "esp.1": 1,  // La Liga
+  "ger.1": 3,  // Bundesliga
+  "ita.1": 4,  // Serie A
+  "fra.1": 5,  // Ligue 1
+};
+
 export const STATSBOMB_CAPABILITIES: StatField[] = [
   "goals", "xg", "xgPerShot", "shots", "shotsOnTarget", "shotsOffTarget",
   "blockedShots", "corners", "goalKicks", "throwIns", "freeKicks", "penalties",
@@ -231,6 +246,16 @@ interface ResolvedStatsBombMatch {
   awayName: string;
 }
 
+/**
+ * Discriminated outcome so the skip log can tell "the repo was searched and
+ * does not contain this match" (genuine not-found) apart from "we could not
+ * even reach the repo" (environment failure).
+ */
+type ResolveOutcome =
+  | { status: "found"; match: ResolvedStatsBombMatch }
+  | { status: "not-found" }
+  | { status: "lookup-failed"; detail: string };
+
 function sameDay(a: string | null, b: string): boolean {
   if (!a) return true;
   return a.slice(0, 10) === b.slice(0, 10);
@@ -239,11 +264,17 @@ function sameDay(a: string | null, b: string): boolean {
 async function resolveMatch(
   match: MatchStatsQuery,
   ctx: SourceContext,
-): Promise<ResolvedStatsBombMatch | null> {
+): Promise<ResolveOutcome> {
   const comps = await ctx.http(`${BASE}/competitions.json`, { timeoutMs: ctx.timeoutMs });
-  if (comps.status !== "ok") return null;
+  if (comps.status !== "ok") {
+    return { status: "lookup-failed", detail: `competitions catalogue fetch failed (${comps.status})` };
+  }
 
   const year = Number(match.date.slice(0, 4)) || new Date().getFullYear();
+  // Narrow to the league's own competition when we know it — the open-data
+  // repo is mostly historical domestic + international data, so scanning every
+  // competition's every season is how most recent matches end up "not found".
+  const hintedCompetition = LEAGUE_COMPETITIONS[match.leagueSlug];
   const candidates: Array<{ competition: number; season: number }> = [];
   for (const c of asArray(comps.data)) {
     const rec = asRecord(c);
@@ -251,6 +282,7 @@ async function resolveMatch(
     const season = asNumber(rec?.season_id);
     const seasonName = asString(rec?.season_name) ?? "";
     if (competition == null || season == null) continue;
+    if (hintedCompetition != null && competition !== hintedCompetition) continue;
     const parts = seasonName.split("/").map((s) => s.trim());
     const matchesYear = parts.some((n) => {
       const y = Number(n);
@@ -258,6 +290,12 @@ async function resolveMatch(
     });
     if (matchesYear) candidates.push({ competition, season });
   }
+
+  // No season of the hinted competition covers this year → the open-data repo
+  // (static, mostly historical) simply does not carry it. Do NOT widen back to
+  // a full scan: that is the slow path for every recent match in a
+  // competition the repo stopped updating. Return null and let fetch() skip
+  // gracefully with a clear log.
 
   for (const { competition, season } of candidates.slice(0, 12)) {
     const res = await ctx.http(`${BASE}/matches/${competition}/${season}.json`, {
@@ -273,10 +311,13 @@ async function resolveMatch(
       if (!homeName || !awayName || matchId == null) continue;
       if (!namesMatch(homeName, match.homeTeam) || !namesMatch(awayName, match.awayTeam)) continue;
       if (!sameDay(date, match.date)) continue;
-      return { matchId, homeName, awayName };
+      return { status: "found", match: { matchId, homeName, awayName } };
     }
   }
-  return null;
+  // The catalogue was read and every candidate season searched (or none of
+  // the hinted competition's seasons cover this year): the repo genuinely does
+  // not contain this match.
+  return { status: "not-found" };
 }
 
 export const statsbombSource: SourceHandler = {
@@ -286,18 +327,29 @@ export const statsbombSource: SourceHandler = {
   available: () => true,
 
   async fetch(match, ctx): Promise<SourcePayload | null> {
-    const resolved = await resolveMatch(match, ctx);
-    if (!resolved) return null;
+    const outcome = await resolveMatch(match, ctx);
+    if (outcome.status !== "found") {
+      if (outcome.status === "lookup-failed") {
+        ctx.log(`[StatsBomb] Open-data lookup failed (${outcome.detail}) — check network allowlist for raw.githubusercontent.com; skipping.`);
+      } else {
+        // StatsBomb open data is mostly historical; most current Premier League
+        // (and other) matches are simply not in the repo. Skip gracefully with
+        // a clear log so the aggregator trace can distinguish "not in repo"
+        // from "network failure" or "parse failure".
+        ctx.log(`[StatsBomb] Match ${match.eventId} not in StatsBomb open data — skipping.`);
+      }
+      return null;
+    }
 
-    const eventsRes = await ctx.http(`${BASE}/events/${resolved.matchId}.json`, {
+    const eventsRes = await ctx.http(`${BASE}/events/${outcome.match.matchId}.json`, {
       timeoutMs: ctx.timeoutMs,
     });
     if (eventsRes.status !== "ok") return null;
 
     const payload = normaliseStatsBombEvents(
       asArray(eventsRes.data),
-      resolved.homeName,
-      resolved.awayName,
+      outcome.match.homeName,
+      outcome.match.awayName,
     );
     const hasAny =
       Object.values(payload.home).some((v) => v !== null) ||

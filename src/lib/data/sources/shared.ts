@@ -79,7 +79,8 @@ const NAME_STOPWORDS = new Set([
   "soccer", "united", "city", "town", "wanderers", "athletic", "rangers",
 ]);
 
-function normalizeName(s: string): string {
+/** Normalise a team name (lowercase, accents stripped, alphanumerics only). */
+export function normalizeName(s: string): string {
   return s
     .toLowerCase()
     .normalize("NFD")
@@ -123,4 +124,37 @@ export function pct(numerator: number, denominator: number, dp = 2): number | nu
     return null;
   }
   return roundTo((numerator / denominator) * 100, dp);
+}
+
+// ─── Error diagnostics ────────────────────────────────────────────────────────
+
+/**
+ * Fetch the raw response body of an already-failed request, for error
+ * diagnostics ONLY (e.g. printing the exact API-Football 403 body so an
+ * operator can tell expired key / plan restriction / rate limit apart).
+ *
+ * Called on error paths only — it never adds latency to successful fetches.
+ * Returns the (truncated) body text, or null when the host cannot be reached
+ * at all (in which case the network error is the more useful log line).
+ */
+export async function fetchErrorBody(
+  url: string,
+  headers: Record<string, string> = {},
+  timeoutMs = 8_000,
+): Promise<string | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      headers: { "User-Agent": "Mozilla/5.0 (compatible; GigiGivo/1.0)", ...headers },
+      signal: controller.signal,
+      cache: "no-store",
+    });
+    const text = await res.text();
+    return text.slice(0, 1_000);
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
 }
