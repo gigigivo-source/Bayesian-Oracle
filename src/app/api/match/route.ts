@@ -9,6 +9,8 @@ import { evaluateLeg } from "@/lib/settlement/evaluate";
 import { searchFixture, getMultiBookOdds } from "@/lib/apiFootball";
 import { LEAGUE_MAP } from "@/lib/leagues";
 import { withMonitoring } from "@/lib/monitoring";
+import { simulateMatch } from "@/lib/data/monteCarlo";
+import { getRhoForLeague } from "@/lib/data/dixonColes";
 
 export const dynamic = "force-dynamic";
 
@@ -393,6 +395,163 @@ function computeValueBets(
   );
 }
 
+// ─── Predicted winner + expected scoreline (Monte Carlo) ─────────────────────
+
+/** Predicted 1X2 outcome label surfaced above the Top 10 markets. */
+export type PredictedWinner = "Home Win" | "Draw" | "Away Win";
+
+/**
+ * Additive enrichment for the Top 10 view. Derived from the existing Monte
+ * Carlo simulation over the engine's goal lambdas — ranking logic and market
+ * generation are untouched.
+ */
+export interface MatchPredictionExtras {
+  winningTeam: PredictedWinner;
+  winningTeamProbability: number;
+  expectedScoreline: string;
+  expectedScorelineProbability: number;
+  /** "Synthetic" when the engine ran in fallback mode, otherwise "Real". */
+  dataQuality: "Real" | "Synthetic";
+}
+
+function round4(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.round(Math.min(1, Math.max(0, value)) * 10000) / 10000;
+}
+
+function finiteLambda(value: unknown, fallback: number): number {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+    return Math.min(5, Math.max(0.05, value));
+  }
+  return fallback;
+}
+
+/**
+ * Fallback when Monte Carlo is unavailable: read the model's own 1X2 and
+ * Correct Score markets (analytic Poisson) so the banner still matches the
+ * model's output.
+ */
+function fallbackExtrasFromMarkets(
+  prediction: EngineResult,
+  fixture: FixtureLite,
+  dataQuality: "Real" | "Synthetic",
+): MatchPredictionExtras {
+  const homeName = fixture.home.name;
+  const awayName = fixture.away.name;
+  const markets = prediction.markets ?? [];
+
+  const findHit = (predicate: (name: string) => boolean): number | null => {
+    const hit = markets.find((m) => predicate(m.name))?.hitRate;
+    return typeof hit === "number" && Number.isFinite(hit) ? hit : null;
+  };
+
+  const pHome =
+    findHit((n) => n === `Match Result: ${homeName} Win`) ?? 0.33;
+  const pDraw = findHit((n) => n === "Match Result: Draw") ?? 0.33;
+  const pAway =
+    findHit((n) => n === `Match Result: ${awayName} Win`) ?? 0.34;
+
+  let winningTeam: PredictedWinner = "Home Win";
+  let winningTeamProbability = pHome;
+  if (pDraw >= pHome && pDraw >= pAway) {
+    winningTeam = "Draw";
+    winningTeamProbability = pDraw;
+  } else if (pAway >= pHome && pAway >= pDraw) {
+    winningTeam = "Away Win";
+    winningTeamProbability = pAway;
+  }
+
+  let expectedScoreline = "1-1";
+  let expectedScorelineProbability = 0;
+  for (const m of markets) {
+    if (!m.name.startsWith("Correct Score ")) continue;
+    const score = m.name.replace("Correct Score ", "");
+    if (!/^\d+-\d+$/.test(score)) continue;
+    if (m.hitRate > expectedScorelineProbability) {
+      expectedScoreline = score;
+      expectedScorelineProbability = m.hitRate;
+    }
+  }
+
+  return {
+    winningTeam,
+    winningTeamProbability: round4(winningTeamProbability),
+    expectedScoreline,
+    expectedScorelineProbability: round4(expectedScorelineProbability),
+    dataQuality,
+  };
+}
+
+/**
+ * Run the existing Monte Carlo simulation (Dixon–Coles corrected, stratified
+ * 10k draws) over the engine's goal lambdas and read off the predicted
+ * winner + most likely scoreline. Purely additive — the input prediction is
+ * never mutated; a new object is returned.
+ */
+function enrichPredictionWithMonteCarlo(
+  prediction: EngineResult,
+  fixture: FixtureLite,
+): EngineResult & MatchPredictionExtras {
+  const completeness = prediction.match?.dataCompletenessScore ?? 100;
+  const dataQuality: "Real" | "Synthetic" =
+    prediction.match?.fallbackMode === true || completeness < 45
+      ? "Synthetic"
+      : "Real";
+
+  try {
+    const homeLambda = finiteLambda(
+      prediction.lambdas?.["λ Home Goals"] ?? prediction.deepStats?.homeXg,
+      1.35,
+    );
+    const awayLambda = finiteLambda(
+      prediction.lambdas?.["λ Away Goals"] ?? prediction.deepStats?.awayXg,
+      1.15,
+    );
+    const rho = getRhoForLeague(fixture.leagueSlug);
+
+    const simulation = simulateMatch({
+      homeLambda,
+      awayLambda,
+      rho,
+      options: {
+        simulations: 10_000,
+        maxGoals: 5,
+        method: "stratified",
+        topScorelines: 10,
+      },
+    });
+
+    const pHome = simulation.markets.homeWin;
+    const pDraw = simulation.markets.draw;
+    const pAway = simulation.markets.awayWin;
+
+    let winningTeam: PredictedWinner = "Home Win";
+    let winningTeamProbability = pHome;
+    if (pDraw >= pHome && pDraw >= pAway) {
+      winningTeam = "Draw";
+      winningTeamProbability = pDraw;
+    } else if (pAway >= pHome && pAway >= pDraw) {
+      winningTeam = "Away Win";
+      winningTeamProbability = pAway;
+    }
+
+    const top = simulation.topScorelines[0];
+    const extras: MatchPredictionExtras = {
+      winningTeam,
+      winningTeamProbability: round4(winningTeamProbability),
+      expectedScoreline: top?.score ?? "1-1",
+      expectedScorelineProbability: round4(top?.probability ?? 0),
+      dataQuality,
+    };
+    return { ...prediction, ...extras };
+  } catch {
+    return {
+      ...prediction,
+      ...fallbackExtrasFromMarkets(prediction, fixture, dataQuality),
+    };
+  }
+}
+
 async function handlePost(req: Request): Promise<Response> {
   // Ranking mode: ?ranking=A|B|C|D|all — A = Classic 11-factor, B = 12-Factor,
   // C = Hybrid (A+B averaged), D = Consensus, "all" returns every mode in a single response.
@@ -457,17 +616,29 @@ async function handlePost(req: Request): Promise<Response> {
     boxscores.set(mode, await persistAndEvaluate(fixture, pred, mode, vbs));
   }
 
+  // ── Monte Carlo enrichment (additive, response-only) ────────────────────────
+  // Ranking + markets are already finalised + persisted above; this only
+  // attaches winningTeam / expectedScoreline derived from the same goal λ
+  // via the existing Monte Carlo simulation. The input predictions are never
+  // mutated.
+  const enrichedByMode = new Map<RankingMode, EngineResult & MatchPredictionExtras>();
+  for (const mode of modes) {
+    const pred = predictions.get(mode);
+    if (!pred) continue;
+    enrichedByMode.set(mode, enrichPredictionWithMonteCarlo(pred, fixture));
+  }
+
   // ── ?ranking=all — return every mode in a single payload ────────────────────
   if (isAll) {
     const rankings = {} as Record<RankingMode, {
-      prediction: EngineResult;
+      prediction: EngineResult & Partial<MatchPredictionExtras>;
       boxscore: Record<string, number> | null;
       valueBets: ValueBet[];
       rankingMode: RankingMode;
     }>;
     for (const mode of modes) {
       rankings[mode] = {
-        prediction:  predictions.get(mode)!,
+        prediction:  enrichedByMode.get(mode) ?? predictions.get(mode)!,
         boxscore:    boxscores.get(mode) ?? null,
         valueBets:   valueBetsByMode.get(mode) ?? [],
         rankingMode: mode,
@@ -482,12 +653,12 @@ async function handlePost(req: Request): Promise<Response> {
     });
   }
 
-  // ── Single-mode response (legacy shape, unchanged) ──────────────────────────
+  // ── Single-mode response (legacy shape + additive Monte Carlo extras) ───────
   const singleMode = modes[0];
   return Response.json({
     fixture,
     summary,
-    prediction: predictions.get(singleMode),
+    prediction: enrichedByMode.get(singleMode) ?? predictions.get(singleMode),
     boxscore:   boxscores.get(singleMode) ?? null,
     bookOdds,
     valueBets:  valueBetsByMode.get(singleMode) ?? [],

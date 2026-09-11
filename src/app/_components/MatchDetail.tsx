@@ -5,7 +5,7 @@ import type { EngineResult, Market, DeepStatsVector } from "@/lib/engine/types";
 import type { FixtureLite, MatchSummary, TeamForm } from "@/lib/espn";
 import type { BookmakerOdds } from "@/lib/engine/value";
 import { ConfidenceBar, GradeBadge, MarketTable, Section, TeamBadge } from "./ui";
-import { EventIcon, OutcomeBadge } from "./Icons";
+import { EventIcon, IconTrophy, OutcomeBadge } from "./Icons";
 import { CHIP, CHIP_OFF, CHIP_ON_AMBER, CHIP_ON_EMERALD, CHIP_ON_ROSE, OUTLINE_NEUTRAL } from "./design";
 
 function getActualStat(
@@ -114,6 +114,236 @@ function RankingFactorsToggle({ market }: { market: Market }) {
   );
 }
 
+// ─── Top 10 prediction banner (predicted winner + expected scoreline) ─────────
+
+function formatProbPct(prob: number): string {
+  if (!Number.isFinite(prob)) return "—";
+  return `${(Math.min(1, Math.max(0, prob)) * 100).toFixed(1)}%`;
+}
+
+function winnerDisplayName(
+  winningTeam: PredictedWinnerLabel,
+  fixture: FixtureLite,
+): string {
+  if (winningTeam === "Home Win") return fixture.home.name;
+  if (winningTeam === "Away Win") return fixture.away.name;
+  return "Draw";
+}
+
+function dataQualityBadgeClass(quality: "Real" | "Mixed" | "Synthetic"): string {
+  if (quality === "Real") {
+    return "border-emerald-500/40 bg-emerald-500/15 text-emerald-300";
+  }
+  if (quality === "Mixed") {
+    return "border-cyan-500/40 bg-cyan-500/15 text-cyan-300";
+  }
+  return "border-amber-500/40 bg-amber-500/15 text-amber-300";
+}
+
+/** Small scoreboard SVG icon (no emojis) for the expected-score tile. */
+function ScoreboardIcon({ size = 18 }: { size?: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="text-cyan-300"
+      aria-hidden="true"
+    >
+      <rect x="2" y="4" width="20" height="13" rx="2" />
+      <line x1="12" y1="4" x2="12" y2="17" />
+      <line x1="6.5" y1="9" x2="9.5" y2="9" />
+      <line x1="6.5" y1="12.5" x2="9.5" y2="12.5" />
+      <line x1="14.5" y1="9" x2="17.5" y2="9" />
+      <line x1="14.5" y1="12.5" x2="17.5" y2="12.5" />
+      <line x1="8" y1="17" x2="8" y2="20" />
+      <line x1="16" y1="17" x2="16" y2="20" />
+    </svg>
+  );
+}
+
+interface BannerPrediction {
+  winningTeam: PredictedWinnerLabel;
+  winningTeamProbability: number;
+  expectedScoreline: string;
+  expectedScorelineProbability: number;
+  dataQuality: "Real" | "Mixed" | "Synthetic";
+}
+
+/**
+ * Client-side fallback for cached payloads that predate the Monte Carlo
+ * extras: read the model's own 1X2 + Correct Score markets so the banner
+ * still matches the model's output. Preferred values always come from the
+ * API (`winningTeam` / `expectedScoreline`).
+ */
+function fallbackBannerFromMarkets(
+  result: EnrichedEngineResult,
+  fixture: FixtureLite,
+): BannerPrediction | null {
+  const markets = result.markets ?? [];
+  if (markets.length === 0) return null;
+
+  const hitFor = (name: string): number | null => {
+    const hit = markets.find((m) => m.name === name)?.hitRate;
+    return typeof hit === "number" && Number.isFinite(hit) ? hit : null;
+  };
+
+  const pHome = hitFor(`Match Result: ${fixture.home.name} Win`);
+  const pDraw = hitFor("Match Result: Draw");
+  const pAway = hitFor(`Match Result: ${fixture.away.name} Win`);
+  if (pHome === null && pDraw === null && pAway === null) return null;
+
+  const h = pHome ?? 0;
+  const d = pDraw ?? 0;
+  const a = pAway ?? 0;
+  let winningTeam: PredictedWinnerLabel = "Home Win";
+  let winningTeamProbability = h;
+  if (d >= h && d >= a) {
+    winningTeam = "Draw";
+    winningTeamProbability = d;
+  } else if (a >= h && a >= d) {
+    winningTeam = "Away Win";
+    winningTeamProbability = a;
+  }
+
+  let expectedScoreline = "1-1";
+  let expectedScorelineProbability = 0;
+  for (const m of markets) {
+    if (!m.name.startsWith("Correct Score ")) continue;
+    const score = m.name.replace("Correct Score ", "");
+    if (!/^\d+-\d+$/.test(score)) continue;
+    if (m.hitRate > expectedScorelineProbability) {
+      expectedScoreline = score;
+      expectedScorelineProbability = m.hitRate;
+    }
+  }
+  if (expectedScorelineProbability <= 0) return null;
+
+  const dataQuality: BannerPrediction["dataQuality"] =
+    result.dataQuality ?? (result.match?.fallbackMode ? "Synthetic" : "Real");
+
+  return {
+    winningTeam,
+    winningTeamProbability,
+    expectedScoreline,
+    expectedScorelineProbability,
+    dataQuality,
+  };
+}
+
+function resolveBannerPrediction(
+  result: EnrichedEngineResult,
+  fixture: FixtureLite,
+): BannerPrediction | null {
+  const hasApiExtras =
+    (result.winningTeam === "Home Win" ||
+      result.winningTeam === "Draw" ||
+      result.winningTeam === "Away Win") &&
+    typeof result.winningTeamProbability === "number" &&
+    Number.isFinite(result.winningTeamProbability) &&
+    typeof result.expectedScoreline === "string" &&
+    /^\d+-\d+$/.test(result.expectedScoreline) &&
+    typeof result.expectedScorelineProbability === "number" &&
+    Number.isFinite(result.expectedScorelineProbability);
+  if (hasApiExtras) {
+    return {
+      winningTeam: result.winningTeam as PredictedWinnerLabel,
+      winningTeamProbability: result.winningTeamProbability as number,
+      expectedScoreline: result.expectedScoreline as string,
+      expectedScorelineProbability: result.expectedScorelineProbability as number,
+      dataQuality:
+        result.dataQuality ?? (result.match?.fallbackMode ? "Synthetic" : "Real"),
+    };
+  }
+  return fallbackBannerFromMarkets(result, fixture);
+}
+
+/**
+ * Header banner above the Top 10 market list: predicted winner + expected
+ * correct score at a glance. Glass-morphism dark theme with amber/gold
+ * accents; SVG icons only (no emojis).
+ */
+function Top10PredictionBanner({
+  result,
+  fixture,
+}: {
+  result: EnrichedEngineResult;
+  fixture: FixtureLite;
+}) {
+  const banner = resolveBannerPrediction(result, fixture);
+  if (!banner) return null;
+
+  const winnerName = winnerDisplayName(banner.winningTeam, fixture);
+
+  return (
+    <div className="mb-4 overflow-hidden rounded-xl border border-amber-400/30 bg-gradient-to-r from-slate-900/90 via-slate-900/70 to-amber-950/30 shadow-lg shadow-black/30 backdrop-blur-xl">
+      <div className="h-px bg-gradient-to-r from-transparent via-amber-400/60 to-transparent" />
+      <div className="flex items-center justify-between gap-2 px-4 pt-3">
+        <span className="font-mono text-[10px] font-bold uppercase tracking-widest text-amber-300/80">
+          Model Prediction
+        </span>
+        <span
+          className={`rounded-full border px-2.5 py-0.5 font-mono text-[10px] font-bold uppercase tracking-wider ${dataQualityBadgeClass(banner.dataQuality)}`}
+          title={
+            banner.dataQuality === "Real"
+              ? "Prediction grounded in real match data"
+              : banner.dataQuality === "Mixed"
+                ? "Prediction grounded in partially available real data"
+                : "Prediction from league-average fallback (limited real data)"
+          }
+        >
+          {banner.dataQuality}
+        </span>
+      </div>
+      <div className="grid grid-cols-1 gap-3 p-4 pt-2 sm:grid-cols-2 sm:items-stretch">
+        <div className="flex items-center gap-3 rounded-lg border border-white/[0.08] bg-white/[0.03] p-3">
+          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-amber-400/40 bg-amber-400/10">
+            <IconTrophy size={18} />
+          </span>
+          <div className="min-w-0">
+            <div className="font-mono text-[11px] uppercase tracking-wider text-slate-400">
+              Predicted Winner
+            </div>
+            <div className="truncate text-lg font-extrabold text-slate-100 sm:text-xl">
+              {winnerName}{" "}
+              <span className="font-mono text-base font-bold text-amber-300 sm:text-lg">
+                ({formatProbPct(banner.winningTeamProbability)})
+              </span>
+            </div>
+            <div className="font-mono text-[10px] text-slate-500">
+              {banner.winningTeam} · Monte Carlo 1X2
+            </div>
+          </div>
+        </div>
+        <div className="flex items-center gap-3 rounded-lg border border-white/[0.08] bg-white/[0.03] p-3">
+          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-cyan-400/40 bg-cyan-400/10">
+            <ScoreboardIcon size={18} />
+          </span>
+          <div className="min-w-0">
+            <div className="font-mono text-[11px] uppercase tracking-wider text-slate-400">
+              Expected Score
+            </div>
+            <div className="font-mono text-lg font-extrabold text-slate-100 sm:text-xl">
+              {banner.expectedScoreline}{" "}
+              <span className="text-base font-bold text-cyan-300 sm:text-lg">
+                ({formatProbPct(banner.expectedScorelineProbability)})
+              </span>
+            </div>
+            <div className="font-mono text-[10px] text-slate-500">
+              Most likely scoreline · Monte Carlo
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 interface ValueBetData {
   market: { name: string; selection: string; hitRate: number; family: string };
   oracleProbability: number;
@@ -128,9 +358,25 @@ interface ValueBetData {
 
 type RankingMode = 'A' | 'B' | 'C' | 'D';
 
+/** Predicted 1X2 outcome label from the Monte Carlo enrichment. */
+type PredictedWinnerLabel = "Home Win" | "Draw" | "Away Win";
+
+/**
+ * Engine result plus the additive Monte Carlo extras attached by
+ * `/api/match` (winningTeam / expectedScoreline). All extras are optional so
+ * cached payloads from before the upgrade still render via the market fallback.
+ */
+interface EnrichedEngineResult extends EngineResult {
+  winningTeam?: PredictedWinnerLabel;
+  winningTeamProbability?: number;
+  expectedScoreline?: string;
+  expectedScorelineProbability?: number;
+  dataQuality?: "Real" | "Mixed" | "Synthetic";
+}
+
 /** A single ranking mode's prediction, plus its mode-specific value bets / boxscore. */
 interface RankingPayload {
-  prediction: EngineResult;
+  prediction: EnrichedEngineResult;
   boxscore: Record<string, number> | null;
   valueBets: ValueBetData[];
 }
@@ -603,6 +849,9 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
                   : "Every pick contains rationale: Why Qualified · Why Selected · Why Outcome is Possible"
               }
             >
+              {!consecutiveView ? (
+                <Top10PredictionBanner result={result} fixture={fixture} />
+              ) : null}
               <MarketTable
                 markets={consecutiveView ? consecutiveMarkets : result.top10}
                 showDeepExplanation={true}
