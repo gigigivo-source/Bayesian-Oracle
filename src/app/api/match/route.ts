@@ -11,6 +11,8 @@ import { LEAGUE_MAP } from "@/lib/leagues";
 import { withMonitoring } from "@/lib/monitoring";
 import { simulateMatch } from "@/lib/data/monteCarlo";
 import { getRhoForLeague } from "@/lib/data/dixonColes";
+import { statsAggregator } from "@/lib/data/aggregator";
+import { MATCH_STAT_FIELDS, BOOLEAN_FIELDS, nonNullFieldCount, type CanonicalMatchStats } from "@/lib/data/types";
 
 export const dynamic = "force-dynamic";
 
@@ -395,23 +397,44 @@ function computeValueBets(
   );
 }
 
-// ─── Predicted winner + expected scoreline (Monte Carlo) ─────────────────────
+// ─── Top 10 Criteria + Monte Carlo response enrichment ───────────────────────
 
-/** Predicted 1X2 outcome label surfaced above the Top 10 markets. */
+/** Predicted 1X2 outcome label surfaced by both prediction banners. */
 export type PredictedWinner = "Home Win" | "Draw" | "Away Win";
+export type PredictionDataQuality = "Real" | "Mixed" | "Synthetic";
+
+export interface Top10CriteriaPrediction {
+  winner: PredictedWinner | null;
+  winnerProbability: number | null;
+  scoreline: string | null;
+  scorelineProbability: number | null;
+  dataQuality: PredictionDataQuality | null;
+  available: boolean;
+  reason: string | null;
+}
+
+export interface MonteCarloPrediction {
+  winner: PredictedWinner;
+  winnerProbability: number;
+  scoreline: string;
+  scorelineProbability: number;
+  dataQuality: PredictionDataQuality;
+}
 
 /**
- * Additive enrichment for the Top 10 view. Derived from the existing Monte
- * Carlo simulation over the engine's goal lambdas — ranking logic and market
- * generation are untouched.
+ * Additive response fields. The legacy flat Monte Carlo fields are retained
+ * below for cached clients; the nested objects are the explicit API contract
+ * consumed by the match-detail panel.
  */
 export interface MatchPredictionExtras {
   winningTeam: PredictedWinner;
   winningTeamProbability: number;
   expectedScoreline: string;
   expectedScorelineProbability: number;
-  /** "Synthetic" when the engine ran in fallback mode, otherwise "Real". */
+  /** Existing Monte Carlo quality label. */
   dataQuality: "Real" | "Synthetic";
+  top10Criteria?: Top10CriteriaPrediction;
+  monteCarlo?: MonteCarloPrediction;
 }
 
 function round4(value: number): number {
@@ -424,6 +447,141 @@ function finiteLambda(value: unknown, fallback: number): number {
     return Math.min(5, Math.max(0.05, value));
   }
   return fallback;
+}
+
+const TOP10_UNAVAILABLE_REASON = "No reliable prediction available — data quality insufficient.";
+
+/**
+ * Classify the exact canonical stats object consumed by the selector. A null
+ * result is the aggregator's synthetic baseline; a partial merge is Mixed;
+ * and a complete per-match canonical payload is Real. Historical-only fields
+ * are intentionally not part of this gate because the aggregator itself does
+ * not require them before it can call a result real.
+ */
+function classifyStatsDataQuality(stats: CanonicalMatchStats | null): PredictionDataQuality {
+  if (!stats) return "Synthetic";
+  const perMatchSlots = (MATCH_STAT_FIELDS.length + BOOLEAN_FIELDS.length) * 2;
+  return nonNullFieldCount(stats) >= perMatchSlots ? "Real" : "Mixed";
+}
+
+function emptyTop10Criteria(
+  reason: string,
+  dataQuality: PredictionDataQuality | null = null,
+): Top10CriteriaPrediction {
+  return {
+    winner: null,
+    winnerProbability: null,
+    scoreline: null,
+    scorelineProbability: null,
+    dataQuality,
+    available: false,
+    reason,
+  };
+}
+
+function marketRankValue(
+  m: EngineResult["markets"][number],
+  rankingMode: RankingMode,
+): number {
+  if (typeof m.compositeScore === "number" && Number.isFinite(m.compositeScore)) {
+    // Consensus D stores average rank position, where lower is better. The
+    // other modes store a higher-is-better composite score.
+    return rankingMode === "D" ? -m.compositeScore : m.compositeScore;
+  }
+  return m.hitRate;
+}
+
+function topRankedMarket(
+  markets: EngineResult["markets"],
+  predicate: (market: EngineResult["markets"][number]) => boolean,
+  rankingMode: RankingMode,
+): EngineResult["markets"][number] | null {
+  return [...markets]
+    .filter((market) => !market.rejected && predicate(market))
+    .sort((a, b) => {
+      const scoreDelta = marketRankValue(b, rankingMode) - marketRankValue(a, rankingMode);
+      if (Math.abs(scoreDelta) > 1e-9) return scoreDelta;
+      const hitDelta = b.hitRate - a.hitRate;
+      if (Math.abs(hitDelta) > 1e-9) return hitDelta;
+      return a.id.localeCompare(b.id);
+    })[0] ?? null;
+}
+
+function outcomeForMarket(
+  market: EngineResult["markets"][number],
+  fixture: FixtureLite,
+): PredictedWinner | null {
+  if (market.name === `Match Result: ${fixture.home.name} Win`) return "Home Win";
+  if (market.name === "Match Result: Draw") return "Draw";
+  if (market.name === `Match Result: ${fixture.away.name} Win`) return "Away Win";
+  return null;
+}
+
+function isCorrectScoreMarket(market: EngineResult["markets"][number]): boolean {
+  return /^Correct Score \d+-\d+$/.test(market.name);
+}
+
+/**
+ * Read the final selector output, not a second λ/simulation, for the Top 10
+ * banner. The selector has already applied the 12-factor composite, confidence
+ * gate, verifiability filter, and safety net. Correct-score markets are
+ * settled by the final real fixture score, so they are read from the same
+ * selector-scored market pool when the legacy Top-10 verifiability list keeps
+ * them out of its ten display slots.
+ */
+function buildTop10Criteria(
+  prediction: EngineResult,
+  fixture: FixtureLite,
+  dataQuality: PredictionDataQuality,
+  rankingMode: RankingMode,
+): Top10CriteriaPrediction {
+  if (dataQuality === "Synthetic") {
+    return emptyTop10Criteria(
+      "Stats aggregator returned no real match statistics; the data-quality gate requires real data.",
+      dataQuality,
+    );
+  }
+
+  // An empty Top-10 is the selector's explicit confidence/hard-gate failure.
+  if (prediction.top10.length === 0 || prediction.top1.length === 0) {
+    return emptyTop10Criteria(
+      prediction.match.fallbackMode
+        ? "The confidence and data-quality gates rejected this match."
+        : "The confidence, verifiability, or safety gates rejected this match.",
+      dataQuality,
+    );
+  }
+
+  // Prefer the already-finalised Top-10 order. If the outcome family was not
+  // one of the ten diverse slots, use the selector-scored pool (the same
+  // composite/factors) rather than calculating an independent probability.
+  const outcome = prediction.top10.find((market) => outcomeForMarket(market, fixture))
+    ?? topRankedMarket(prediction.markets, (market) => outcomeForMarket(market, fixture) !== null, rankingMode);
+  const scoreline = prediction.top10.find(isCorrectScoreMarket)
+    ?? topRankedMarket(prediction.markets, isCorrectScoreMarket, rankingMode);
+
+  if (!outcome) {
+    return emptyTop10Criteria("No match-outcome market survived the Top 10 gates.", dataQuality);
+  }
+  if (!scoreline) {
+    return emptyTop10Criteria("No correct-score market survived the Top 10 gates.", dataQuality);
+  }
+
+  const winner = outcomeForMarket(outcome, fixture);
+  const scorelineMatch = scoreline.name.match(/^Correct Score (\d+-\d+)$/);
+  if (!winner || !scorelineMatch) {
+    return emptyTop10Criteria(TOP10_UNAVAILABLE_REASON, dataQuality);
+  }
+
+  return {
+    winner,
+    winnerProbability: round4(outcome.hitRate),
+    scoreline: scorelineMatch[1],
+    scorelineProbability: round4(scoreline.hitRate),
+    dataQuality,
+    available: true,
+    reason: null,
+  };
 }
 
 /**
@@ -491,6 +649,7 @@ function fallbackExtrasFromMarkets(
 function enrichPredictionWithMonteCarlo(
   prediction: EngineResult,
   fixture: FixtureLite,
+  top10Criteria: Top10CriteriaPrediction,
 ): EngineResult & MatchPredictionExtras {
   const completeness = prediction.match?.dataCompletenessScore ?? 100;
   const dataQuality: "Real" | "Synthetic" =
@@ -542,12 +701,29 @@ function enrichPredictionWithMonteCarlo(
       expectedScoreline: top?.score ?? "1-1",
       expectedScorelineProbability: round4(top?.probability ?? 0),
       dataQuality,
+      top10Criteria,
+      monteCarlo: {
+        winner: winningTeam,
+        winnerProbability: round4(winningTeamProbability),
+        scoreline: top?.score ?? "1-1",
+        scorelineProbability: round4(top?.probability ?? 0),
+        dataQuality,
+      },
     };
     return { ...prediction, ...extras };
   } catch {
+    const fallback = fallbackExtrasFromMarkets(prediction, fixture, dataQuality);
     return {
       ...prediction,
-      ...fallbackExtrasFromMarkets(prediction, fixture, dataQuality),
+      ...fallback,
+      top10Criteria,
+      monteCarlo: {
+        winner: fallback.winningTeam,
+        winnerProbability: fallback.winningTeamProbability,
+        scoreline: fallback.expectedScoreline,
+        scorelineProbability: fallback.expectedScorelineProbability,
+        dataQuality: fallback.dataQuality,
+      },
     };
   }
 }
@@ -596,6 +772,20 @@ async function handlePost(req: Request): Promise<Response> {
     predictions.set(mode, await runEngineForMode(fixture, summary, liveStats, mode));
   }
 
+  // The engine has just consumed this exact aggregator cache entry for the
+  // Top-10 factors. Reading it back avoids a second stats source or a banner-
+  // only quality calculation; a null peek is the same synthetic fallback the
+  // engine saw when no canonical source contributed data.
+  const statsDataQuality = classifyStatsDataQuality(
+    statsAggregator.peek({
+      leagueSlug: fixture.leagueSlug,
+      eventId: fixture.id,
+      homeTeam: fixture.home.name,
+      awayTeam: fixture.away.name,
+      date: fixture.date,
+    }),
+  );
+
   // ── Value bet detection (per mode; markets differ per ranking) ───────────────
   const valueBetsByMode = new Map<RankingMode, ValueBet[]>();
   for (const mode of modes) {
@@ -625,7 +815,8 @@ async function handlePost(req: Request): Promise<Response> {
   for (const mode of modes) {
     const pred = predictions.get(mode);
     if (!pred) continue;
-    enrichedByMode.set(mode, enrichPredictionWithMonteCarlo(pred, fixture));
+    const top10Criteria = buildTop10Criteria(pred, fixture, statsDataQuality, mode);
+    enrichedByMode.set(mode, enrichPredictionWithMonteCarlo(pred, fixture, top10Criteria));
   }
 
   // ── ?ranking=all — return every mode in a single payload ────────────────────
@@ -644,21 +835,33 @@ async function handlePost(req: Request): Promise<Response> {
         rankingMode: mode,
       };
     }
+    const defaultPrediction = enrichedByMode.get(rankingMode) ?? predictions.get(rankingMode);
     return Response.json({
       fixture,
       summary,
       bookOdds,
       multiBookOdds,
       rankings,
+      // The UI consumes the per-mode copies above. These default-B aliases keep
+      // the response contract convenient for non-mode-aware API consumers.
+      top10Criteria: defaultPrediction && "top10Criteria" in defaultPrediction
+        ? defaultPrediction.top10Criteria
+        : null,
+      monteCarlo: defaultPrediction && "monteCarlo" in defaultPrediction
+        ? defaultPrediction.monteCarlo
+        : null,
     });
   }
 
   // ── Single-mode response (legacy shape + additive Monte Carlo extras) ───────
   const singleMode = modes[0];
+  const singlePrediction = enrichedByMode.get(singleMode) ?? predictions.get(singleMode);
   return Response.json({
     fixture,
     summary,
-    prediction: enrichedByMode.get(singleMode) ?? predictions.get(singleMode),
+    prediction: singlePrediction,
+    top10Criteria: enrichedByMode.get(singleMode)?.top10Criteria ?? null,
+    monteCarlo: enrichedByMode.get(singleMode)?.monteCarlo ?? null,
     boxscore:   boxscores.get(singleMode) ?? null,
     bookOdds,
     valueBets:  valueBetsByMode.get(singleMode) ?? [],
