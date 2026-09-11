@@ -114,7 +114,27 @@ function RankingFactorsToggle({ market }: { market: Market }) {
   );
 }
 
-// ─── Top 10 prediction banner (predicted winner + expected scoreline) ─────────
+// ─── Match prediction banner (Top 10 Criteria + Monte Carlo) ────────────────
+
+type PredictionDataQuality = "Real" | "Mixed" | "Synthetic";
+
+type Top10CriteriaPrediction = {
+  winner: PredictedWinnerLabel | null;
+  winnerProbability: number | null;
+  scoreline: string | null;
+  scorelineProbability: number | null;
+  dataQuality: PredictionDataQuality | null;
+  available: boolean;
+  reason: string | null;
+};
+
+type MonteCarloPrediction = {
+  winner: PredictedWinnerLabel;
+  winnerProbability: number;
+  scoreline: string;
+  scorelineProbability: number;
+  dataQuality: PredictionDataQuality;
+};
 
 function formatProbPct(prob: number): string {
   if (!Number.isFinite(prob)) return "—";
@@ -130,7 +150,7 @@ function winnerDisplayName(
   return "Draw";
 }
 
-function dataQualityBadgeClass(quality: "Real" | "Mixed" | "Synthetic"): string {
+function dataQualityBadgeClass(quality: PredictionDataQuality): string {
   if (quality === "Real") {
     return "border-emerald-500/40 bg-emerald-500/15 text-emerald-300";
   }
@@ -167,24 +187,10 @@ function ScoreboardIcon({ size = 18 }: { size?: number }) {
   );
 }
 
-interface BannerPrediction {
-  winningTeam: PredictedWinnerLabel;
-  winningTeamProbability: number;
-  expectedScoreline: string;
-  expectedScorelineProbability: number;
-  dataQuality: "Real" | "Mixed" | "Synthetic";
-}
-
-/**
- * Client-side fallback for cached payloads that predate the Monte Carlo
- * extras: read the model's own 1X2 + Correct Score markets so the banner
- * still matches the model's output. Preferred values always come from the
- * API (`winningTeam` / `expectedScoreline`).
- */
-function fallbackBannerFromMarkets(
+function fallbackMonteCarloFromMarkets(
   result: EnrichedEngineResult,
   fixture: FixtureLite,
-): BannerPrediction | null {
+): MonteCarloPrediction | null {
   const markets = result.markets ?? [];
   if (markets.length === 0) return null;
 
@@ -201,72 +207,152 @@ function fallbackBannerFromMarkets(
   const h = pHome ?? 0;
   const d = pDraw ?? 0;
   const a = pAway ?? 0;
-  let winningTeam: PredictedWinnerLabel = "Home Win";
-  let winningTeamProbability = h;
+  let winner: PredictedWinnerLabel = "Home Win";
+  let winnerProbability = h;
   if (d >= h && d >= a) {
-    winningTeam = "Draw";
-    winningTeamProbability = d;
+    winner = "Draw";
+    winnerProbability = d;
   } else if (a >= h && a >= d) {
-    winningTeam = "Away Win";
-    winningTeamProbability = a;
+    winner = "Away Win";
+    winnerProbability = a;
   }
 
-  let expectedScoreline = "1-1";
-  let expectedScorelineProbability = 0;
-  for (const m of markets) {
-    if (!m.name.startsWith("Correct Score ")) continue;
-    const score = m.name.replace("Correct Score ", "");
+  let scoreline = "1-1";
+  let scorelineProbability = 0;
+  for (const market of markets) {
+    if (!market.name.startsWith("Correct Score ")) continue;
+    const score = market.name.replace("Correct Score ", "");
     if (!/^\d+-\d+$/.test(score)) continue;
-    if (m.hitRate > expectedScorelineProbability) {
-      expectedScoreline = score;
-      expectedScorelineProbability = m.hitRate;
+    if (market.hitRate > scorelineProbability) {
+      scoreline = score;
+      scorelineProbability = market.hitRate;
     }
   }
-  if (expectedScorelineProbability <= 0) return null;
-
-  const dataQuality: BannerPrediction["dataQuality"] =
-    result.dataQuality ?? (result.match?.fallbackMode ? "Synthetic" : "Real");
+  if (scorelineProbability <= 0) return null;
 
   return {
-    winningTeam,
-    winningTeamProbability,
-    expectedScoreline,
-    expectedScorelineProbability,
-    dataQuality,
+    winner,
+    winnerProbability,
+    scoreline,
+    scorelineProbability,
+    dataQuality: result.dataQuality ?? (result.match?.fallbackMode ? "Synthetic" : "Real"),
   };
 }
 
-function resolveBannerPrediction(
+function resolveMonteCarloPrediction(
   result: EnrichedEngineResult,
   fixture: FixtureLite,
-): BannerPrediction | null {
-  const hasApiExtras =
-    (result.winningTeam === "Home Win" ||
-      result.winningTeam === "Draw" ||
-      result.winningTeam === "Away Win") &&
+): MonteCarloPrediction | null {
+  const nested = result.monteCarlo;
+  if (
+    nested &&
+    (nested.winner === "Home Win" || nested.winner === "Draw" || nested.winner === "Away Win") &&
+    typeof nested.winnerProbability === "number" &&
+    typeof nested.scoreline === "string" &&
+    /^\d+-\d+$/.test(nested.scoreline) &&
+    typeof nested.scorelineProbability === "number"
+  ) {
+    return nested;
+  }
+
+  if (
+    (result.winningTeam === "Home Win" || result.winningTeam === "Draw" || result.winningTeam === "Away Win") &&
     typeof result.winningTeamProbability === "number" &&
-    Number.isFinite(result.winningTeamProbability) &&
     typeof result.expectedScoreline === "string" &&
     /^\d+-\d+$/.test(result.expectedScoreline) &&
-    typeof result.expectedScorelineProbability === "number" &&
-    Number.isFinite(result.expectedScorelineProbability);
-  if (hasApiExtras) {
+    typeof result.expectedScorelineProbability === "number"
+  ) {
     return {
-      winningTeam: result.winningTeam as PredictedWinnerLabel,
-      winningTeamProbability: result.winningTeamProbability as number,
-      expectedScoreline: result.expectedScoreline as string,
-      expectedScorelineProbability: result.expectedScorelineProbability as number,
-      dataQuality:
-        result.dataQuality ?? (result.match?.fallbackMode ? "Synthetic" : "Real"),
+      winner: result.winningTeam,
+      winnerProbability: result.winningTeamProbability,
+      scoreline: result.expectedScoreline,
+      scorelineProbability: result.expectedScorelineProbability,
+      dataQuality: result.dataQuality ?? (result.match?.fallbackMode ? "Synthetic" : "Real"),
     };
   }
-  return fallbackBannerFromMarkets(result, fixture);
+
+  return fallbackMonteCarloFromMarkets(result, fixture);
+}
+
+function resolveTop10Criteria(result: EnrichedEngineResult): Top10CriteriaPrediction {
+  if (result.top10Criteria) return result.top10Criteria;
+  return {
+    winner: null,
+    winnerProbability: null,
+    scoreline: null,
+    scorelineProbability: null,
+    dataQuality: null,
+    available: false,
+    reason: "Top 10 Criteria is unavailable for this cached response.",
+  };
+}
+
+function PredictionCards({
+  winner,
+  winnerProbability,
+  scoreline,
+  scorelineProbability,
+  fixture,
+  footerWinner,
+  footerScore,
+}: {
+  winner: PredictedWinnerLabel;
+  winnerProbability: number;
+  scoreline: string;
+  scorelineProbability: number;
+  fixture: FixtureLite;
+  footerWinner: string;
+  footerScore: string;
+}) {
+  const winnerName = winnerDisplayName(winner, fixture);
+  return (
+    <div className="grid grid-cols-1 gap-3 p-4 pt-2 sm:grid-cols-2 sm:items-stretch">
+      <div className="flex items-center gap-3 rounded-lg border border-white/[0.08] bg-white/[0.03] p-3">
+        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-amber-400/40 bg-amber-400/10">
+          <IconTrophy size={18} />
+        </span>
+        <div className="min-w-0">
+          <div className="font-mono text-[11px] uppercase tracking-wider text-slate-400">
+            Predicted Winner
+          </div>
+          <div className="truncate text-lg font-extrabold text-slate-100 sm:text-xl">
+            {winnerName}{" "}
+            <span className="font-mono text-base font-bold text-amber-300 sm:text-lg">
+              ({formatProbPct(winnerProbability)})
+            </span>
+          </div>
+          <div className="font-mono text-[10px] text-slate-500">
+            {winner} · {footerWinner}
+          </div>
+        </div>
+      </div>
+      <div className="flex items-center gap-3 rounded-lg border border-white/[0.08] bg-white/[0.03] p-3">
+        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-cyan-400/40 bg-cyan-400/10">
+          <ScoreboardIcon size={18} />
+        </span>
+        <div className="min-w-0">
+          <div className="font-mono text-[11px] uppercase tracking-wider text-slate-400">
+            Expected Score
+          </div>
+          <div className="font-mono text-lg font-extrabold text-slate-100 sm:text-xl">
+            {scoreline}{" "}
+            <span className="text-base font-bold text-cyan-300 sm:text-lg">
+              ({formatProbPct(scorelineProbability)})
+            </span>
+          </div>
+          <div className="font-mono text-[10px] text-slate-500">
+            Most likely scoreline · {footerScore}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 /**
- * Header banner above the Top 10 market list: predicted winner + expected
- * correct score at a glance. Glass-morphism dark theme with amber/gold
- * accents; SVG icons only (no emojis).
+ * Two stacked model sections. Top 10 Criteria is selector-backed; Monte Carlo
+ * remains the existing raw simulation output and is never used as a fallback
+ * for the criteria values.
  */
 function Top10PredictionBanner({
   result,
@@ -275,71 +361,72 @@ function Top10PredictionBanner({
   result: EnrichedEngineResult;
   fixture: FixtureLite;
 }) {
-  const banner = resolveBannerPrediction(result, fixture);
-  if (!banner) return null;
+  const criteria = resolveTop10Criteria(result);
+  const monteCarlo = resolveMonteCarloPrediction(result, fixture);
+  if (!monteCarlo) return null;
 
-  const winnerName = winnerDisplayName(banner.winningTeam, fixture);
+  const badgeQuality = criteria.dataQuality ?? monteCarlo.dataQuality;
+  const qualityTitle =
+    badgeQuality === "Real"
+      ? "Prediction grounded in real match data"
+      : badgeQuality === "Mixed"
+        ? "Prediction grounded in partially available real data"
+        : "Prediction from league-average fallback (limited real data)";
 
   return (
     <div className="mb-4 overflow-hidden rounded-xl border border-amber-400/30 bg-gradient-to-r from-slate-900/90 via-slate-900/70 to-amber-950/30 shadow-lg shadow-black/30 backdrop-blur-xl">
       <div className="h-px bg-gradient-to-r from-transparent via-amber-400/60 to-transparent" />
       <div className="flex items-center justify-between gap-2 px-4 pt-3">
         <span className="font-mono text-[10px] font-bold uppercase tracking-widest text-amber-300/80">
-          Model Prediction
+          MODEL PREDICTION
         </span>
         <span
-          className={`rounded-full border px-2.5 py-0.5 font-mono text-[10px] font-bold uppercase tracking-wider ${dataQualityBadgeClass(banner.dataQuality)}`}
-          title={
-            banner.dataQuality === "Real"
-              ? "Prediction grounded in real match data"
-              : banner.dataQuality === "Mixed"
-                ? "Prediction grounded in partially available real data"
-                : "Prediction from league-average fallback (limited real data)"
-          }
+          className={`rounded-full border px-2.5 py-0.5 font-mono text-[10px] font-bold uppercase tracking-wider ${dataQualityBadgeClass(badgeQuality)}`}
+          title={qualityTitle}
         >
-          {banner.dataQuality}
+          {badgeQuality}
         </span>
       </div>
-      <div className="grid grid-cols-1 gap-3 p-4 pt-2 sm:grid-cols-2 sm:items-stretch">
-        <div className="flex items-center gap-3 rounded-lg border border-white/[0.08] bg-white/[0.03] p-3">
-          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-amber-400/40 bg-amber-400/10">
-            <IconTrophy size={18} />
-          </span>
-          <div className="min-w-0">
-            <div className="font-mono text-[11px] uppercase tracking-wider text-slate-400">
-              Predicted Winner
-            </div>
-            <div className="truncate text-lg font-extrabold text-slate-100 sm:text-xl">
-              {winnerName}{" "}
-              <span className="font-mono text-base font-bold text-amber-300 sm:text-lg">
-                ({formatProbPct(banner.winningTeamProbability)})
-              </span>
-            </div>
-            <div className="font-mono text-[10px] text-slate-500">
-              {banner.winningTeam} · Monte Carlo 1X2
+
+      <section className="border-b border-amber-300/15 px-1 pb-1" aria-labelledby="top10-criteria-heading">
+        <div className="px-3 pt-3 font-mono text-[10px] font-bold uppercase tracking-widest text-amber-300">
+          <span id="top10-criteria-heading">TOP 10 CRITERIA</span>
+        </div>
+        {criteria.available && criteria.winner && criteria.scoreline &&
+          criteria.winnerProbability !== null && criteria.scorelineProbability !== null ? (
+          <PredictionCards
+            winner={criteria.winner}
+            winnerProbability={criteria.winnerProbability}
+            scoreline={criteria.scoreline}
+            scorelineProbability={criteria.scorelineProbability}
+            fixture={fixture}
+            footerWinner="12-factor selector"
+            footerScore="Top 10 selector"
+          />
+        ) : (
+          <div className="m-3 rounded-lg border border-slate-700/70 bg-slate-950/35 p-4 text-center">
+            <div className="font-semibold text-slate-300">No reliable prediction available — data quality insufficient.</div>
+            <div className="mt-1 font-mono text-[10px] leading-relaxed text-slate-500">
+              {criteria.reason ?? "The Top 10 gates did not produce a reliable outcome."}
             </div>
           </div>
+        )}
+      </section>
+
+      <section aria-labelledby="monte-carlo-heading">
+        <div className="px-4 pt-3 font-mono text-[10px] font-bold uppercase tracking-widest text-slate-400">
+          <span id="monte-carlo-heading">MONTE CARLO</span>
         </div>
-        <div className="flex items-center gap-3 rounded-lg border border-white/[0.08] bg-white/[0.03] p-3">
-          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-cyan-400/40 bg-cyan-400/10">
-            <ScoreboardIcon size={18} />
-          </span>
-          <div className="min-w-0">
-            <div className="font-mono text-[11px] uppercase tracking-wider text-slate-400">
-              Expected Score
-            </div>
-            <div className="font-mono text-lg font-extrabold text-slate-100 sm:text-xl">
-              {banner.expectedScoreline}{" "}
-              <span className="text-base font-bold text-cyan-300 sm:text-lg">
-                ({formatProbPct(banner.expectedScorelineProbability)})
-              </span>
-            </div>
-            <div className="font-mono text-[10px] text-slate-500">
-              Most likely scoreline · Monte Carlo
-            </div>
-          </div>
-        </div>
-      </div>
+        <PredictionCards
+          winner={monteCarlo.winner}
+          winnerProbability={monteCarlo.winnerProbability}
+          scoreline={monteCarlo.scoreline}
+          scorelineProbability={monteCarlo.scorelineProbability}
+          fixture={fixture}
+          footerWinner="Monte Carlo 1X2"
+          footerScore="Monte Carlo"
+        />
+      </section>
     </div>
   );
 }
@@ -372,6 +459,8 @@ interface EnrichedEngineResult extends EngineResult {
   expectedScoreline?: string;
   expectedScorelineProbability?: number;
   dataQuality?: "Real" | "Mixed" | "Synthetic";
+  top10Criteria?: Top10CriteriaPrediction;
+  monteCarlo?: MonteCarloPrediction;
 }
 
 /** A single ranking mode's prediction, plus its mode-specific value bets / boxscore. */
