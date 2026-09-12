@@ -53,10 +53,6 @@ function toDate(d: Date | string): Date {
   return d instanceof Date ? d : new Date(d);
 }
 
-function hoursBetween(a: Date, b: Date): number {
-  return Math.abs(a.getTime() - b.getTime()) / (1000 * 60 * 60);
-}
-
 function getMondayCat(date: Date): string {
   // Convert to CAT (UTC+2) then get Monday
   // CAT = UTC+2, so add 2 hours to UTC to get CAT date
@@ -89,43 +85,19 @@ export function getWeekStartForLegs(legs: VaLeg[]): string {
 }
 
 export function buildTickets(legs: VaLeg[]): VaTicket[] {
-  if (legs.length < 3) return [];
+  if (legs.length < 3) {
+    const best = legs.length === 0 ? 0 : legs.reduce((acc, l) => acc * l.bookmakerOdds, 1);
+    // If we have <3 legs, best is still product but we cap display to 2 decimals
+    // When legs <3, product of available legs is the best achievable; if 0 legs best is 0
+    console.log(`[VA] No ticket built: ${legs.length} legs available, best combined odds ${best.toFixed(2)}`);
+    return [];
+  }
 
   // Sort legs by EV descending
   const sorted = [...legs].sort((a, b) => b.ev - a.ev);
 
   const tickets: VaTicket[] = [];
-  const usedLegIndices = new Set<number>(); // indices in sorted array that have been used
-
-  // Helper to check if a leg can be added to current ticket
-  function canAddToTicket(ticketLegs: VaLeg[], candidate: VaLeg): boolean {
-    // One leg per match — no duplicate event_id
-    if (ticketLegs.some((l) => l.eventId === candidate.eventId)) return false;
-    // No two legs from same stat_family
-    if (ticketLegs.some((l) => l.statFamily === candidate.statFamily)) return false;
-    // Team uniqueness — no team appears in more than one leg of same ticket
-    const candidateTeams = [candidate.homeTeam.toLowerCase(), candidate.awayTeam.toLowerCase()];
-    for (const existing of ticketLegs) {
-      const existingTeams = [existing.homeTeam.toLowerCase(), existing.awayTeam.toLowerCase()];
-      for (const ct of candidateTeams) {
-        if (existingTeams.includes(ct)) return false;
-      }
-    }
-    return true;
-  }
-
-  function kickoffSpreadOk(ticketLegs: VaLeg[]): boolean {
-    if (ticketLegs.length < 2) return true; // need at least 2 to check, but final requirement is at least one leg 3h apart
-    // Check if at least one leg is at least 3 hours apart from the others
-    // Meaning: max - min >= 3h OR there exists a pair with >=3h gap
-    const dates = ticketLegs.map((l) => toDate(l.kickoff));
-    for (let i = 0; i < dates.length; i++) {
-      for (let j = i + 1; j < dates.length; j++) {
-        if (hoursBetween(dates[i], dates[j]) >= 3) return true;
-      }
-    }
-    return false;
-  }
+  const usedLegIndices = new Set<number>();
 
   function computeTicketStats(ticketLegs: VaLeg[]): {
     combinedOdds: number;
@@ -138,10 +110,7 @@ export function buildTickets(legs: VaLeg[]): VaTicket[] {
     const combinedProbability = ticketLegs.reduce((acc, l) => acc * l.modelProbability, 1);
     const combinedEv = combinedProbability * combinedOdds - 1;
     const kellyScore = combinedOdds > 1 ? combinedEv / (combinedOdds - 1) : 0;
-    const stakePercent = Math.min(0.5 * kellyScore * 100, 2); // as percent, capped at 2%
-    // Actually spec says stake_percent = 0.5 * kelly_score, capped at 2%
-    // kelly_score is already a fraction, so 0.5*kelly_score is fraction, capped at 0.02 -> as percent 2%
-    // We'll store as percent value (e.g. 1.5 means 1.5%)
+    const stakePercent = Math.min(0.5 * kellyScore * 100, 2);
     return {
       combinedOdds,
       combinedProbability,
@@ -151,118 +120,62 @@ export function buildTickets(legs: VaLeg[]): VaTicket[] {
     };
   }
 
-  // Main building loop
-  let remaining = sorted.filter((_, idx) => !usedLegIndices.has(idx));
+  let bestCombinedOdds = 0;
 
-  while (remaining.length >= 3) {
+  // Helper to count remaining legs
+  const remainingCount = () => sorted.filter((_, idx) => !usedLegIndices.has(idx)).length;
+
+  while (remainingCount() >= 3) {
     const currentTicket: VaLeg[] = [];
+    let combinedOdds = 1;
 
-    // Try to fill ticket up to 4 legs
+    // Greedy fill from sorted EV order
     for (let i = 0; i < sorted.length && currentTicket.length < 4; i++) {
       if (usedLegIndices.has(i)) continue;
       const candidate = sorted[i];
-      if (!canAddToTicket(currentTicket, candidate)) continue;
+      if (currentTicket.some((l) => l.eventId === candidate.eventId)) continue;
 
-      // Tentatively add and check combined odds constraint
-      const tentative = [...currentTicket, candidate];
-      const stats = computeTicketStats(tentative);
-      if (stats.combinedOdds > 4.5) {
-        // If adding would exceed 4.5, skip unless we have less than 3 legs and this is the only option
-        // For 3-leg preferred, we want target 3.0-4.5, prefer ~3.5
-        // If currentTicket has 2 legs and adding this would exceed 4.5, we still might need to try other candidates
+      const tentative = combinedOdds * candidate.bookmakerOdds;
+      if (tentative > 4.5) {
         continue;
       }
 
-      // Add candidate
       currentTicket.push(candidate);
+      combinedOdds = tentative;
+
+      // Stop when ticket has 3 legs and combined odds are >= 3.0
+      if (currentTicket.length === 3 && combinedOdds >= 3.0) {
+        break;
+      }
+      // If we have 4 legs, stop regardless (max 4)
+      if (currentTicket.length === 4) {
+        break;
+      }
     }
 
-    // Validate ticket
+    // If we couldn't fill at least 3 legs, no further tickets possible
     if (currentTicket.length < 3) {
-      // Cannot form valid ticket with remaining legs
+      // Update best with whatever we managed (if 1-2 legs)
+      if (currentTicket.length > 0) {
+        const curBest = currentTicket.reduce((acc, l) => acc * l.bookmakerOdds, 1);
+        if (curBest > bestCombinedOdds) bestCombinedOdds = curBest;
+      }
       break;
     }
 
-    // Check kickoff spread
-    if (!kickoffSpreadOk(currentTicket)) {
-      // Try to find replacement that satisfies spread
-      // Look for an unused leg that would give spread
-      let foundSpread = false;
-      for (let i = 0; i < sorted.length; i++) {
-        if (usedLegIndices.has(i)) continue;
-        if (currentTicket.includes(sorted[i])) continue;
-        const candidate = sorted[i];
-        // Try replacing each leg in ticket with candidate
-        for (let j = 0; j < currentTicket.length; j++) {
-          const trial = [...currentTicket];
-          trial[j] = candidate;
-          // Check constraints for trial
-          let valid = true;
-          for (let k = 0; k < trial.length; k++) {
-            for (let l = k + 1; l < trial.length; l++) {
-              if (trial[k].eventId === trial[l].eventId) valid = false;
-              if (trial[k].statFamily === trial[l].statFamily) valid = false;
-              const teamsK = [trial[k].homeTeam.toLowerCase(), trial[k].awayTeam.toLowerCase()];
-              const teamsL = [trial[l].homeTeam.toLowerCase(), trial[l].awayTeam.toLowerCase()];
-              if (teamsK.some((t) => teamsL.includes(t))) valid = false;
-            }
-          }
-          if (!valid) continue;
-          if (kickoffSpreadOk(trial)) {
-            // Accept replacement
-            currentTicket[j] = candidate;
-            foundSpread = true;
-            break;
-          }
-        }
-        if (foundSpread) break;
-      }
-      if (!foundSpread) {
-        // If still no spread, discard this ticket attempt and break to avoid infinite loop
-        // Mark current ticket's legs as used? No, we should try different combination
-        // For simplicity, if spread fails, we break the outer loop after marking first leg as used to progress
-        // But spec says "Kickoff spread — at least one leg must kick off at least 3 hours apart from the others"
-        // So we must enforce. If we cannot enforce, we skip this ticket.
-        // To avoid deadlock, remove the first leg from remaining and continue.
-        const firstIdx = sorted.findIndex((l) => l === currentTicket[0]);
-        if (firstIdx !== -1) usedLegIndices.add(firstIdx);
-        remaining = sorted.filter((_, idx) => !usedLegIndices.has(idx));
-        continue;
-      }
-    }
+    const stats = computeTicketStats(currentTicket);
+    if (stats.combinedOdds > bestCombinedOdds) bestCombinedOdds = stats.combinedOdds;
 
-    // Compute final stats and check combined odds target 3.0-4.5
-    const finalStats = computeTicketStats(currentTicket);
-    if (finalStats.combinedOdds < 3.0) {
-      // Try to add a 4th leg if under 3.0 and we have space
-      if (currentTicket.length === 3) {
-        for (let i = 0; i < sorted.length; i++) {
-          if (usedLegIndices.has(i)) continue;
-          if (currentTicket.includes(sorted[i])) continue;
-          const candidate = sorted[i];
-          if (!canAddToTicket(currentTicket, candidate)) continue;
-          const tentative = [...currentTicket, candidate];
-          if (!kickoffSpreadOk(tentative)) continue;
-          const tentativeStats = computeTicketStats(tentative);
-          if (tentativeStats.combinedOdds >= 3.0 && tentativeStats.combinedOdds <= 4.5) {
-            currentTicket.push(candidate);
-            break;
-          }
-        }
-      }
-      // Recompute after possible 4th leg
-      const recomputed = computeTicketStats(currentTicket);
-      if (recomputed.combinedOdds < 3.0) {
-        // If still below 3.0, discard and mark first leg as used to move forward
-        const firstIdx = sorted.findIndex((l) => l === currentTicket[0]);
-        if (firstIdx !== -1) usedLegIndices.add(firstIdx);
-        remaining = sorted.filter((_, idx) => !usedLegIndices.has(idx));
-        continue;
-      }
+    // Must be within 3.0 - 4.5; otherwise this ticket cannot be committed
+    if (stats.combinedOdds < 3.0 || stats.combinedOdds > 4.5) {
+      // Combined odds never reach 3.0 (or exceeded) — cannot build more tickets with this greedy approach
+      // If we have at least 3 legs but odds <3.0, we attempted to add a 4th within loop; if still <3.0, we break.
+      // To avoid infinite loop, break outer loop. Any remaining legs would also fail similarly.
+      // If tickets already built, we stop and log built; if none built, we log no ticket.
+      break;
     }
 
     // Commit ticket
-    const committedStats = computeTicketStats(currentTicket);
     const weekStart = getWeekStartForLegs(currentTicket);
 
     const ticketLegs: VaTicketLeg[] = currentTicket.map((l) => ({
@@ -284,11 +197,11 @@ export function buildTickets(legs: VaLeg[]): VaTicket[] {
       scanId: currentTicket[0].scanId,
       weekStart,
       legs: ticketLegs,
-      combinedOdds: committedStats.combinedOdds,
-      combinedProbability: committedStats.combinedProbability,
-      combinedEv: committedStats.combinedEv,
-      kellyScore: committedStats.kellyScore,
-      stakePercent: committedStats.stakePercent,
+      combinedOdds: stats.combinedOdds,
+      combinedProbability: stats.combinedProbability,
+      combinedEv: stats.combinedEv,
+      kellyScore: stats.kellyScore,
+      stakePercent: stats.stakePercent,
       isRecommended: false,
       isReferenceOnly: false,
     });
@@ -298,8 +211,66 @@ export function buildTickets(legs: VaLeg[]): VaTicket[] {
       const idx = sorted.findIndex((l) => l === leg);
       if (idx !== -1) usedLegIndices.add(idx);
     }
+  }
 
-    remaining = sorted.filter((_, idx) => !usedLegIndices.has(idx));
+  if (tickets.length === 0) {
+    // Compute best combined odds for logging if still 0
+    if (bestCombinedOdds === 0) {
+      // Fallback: best product of up to 3 distinct eventIds from sorted that doesn't exceed 4.5
+      // Find the best achievable ticket-like combination respecting event_id uniqueness and <=4.5
+      // Greedy best: take top distinct legs until product exceeds 4.5 or we have 3
+      let fallbackOdds = 1;
+      let distinctCount = 0;
+      const seenEvents = new Set<string>();
+      for (const leg of sorted) {
+        if (seenEvents.has(leg.eventId)) continue;
+        const tentative = fallbackOdds * leg.bookmakerOdds;
+        if (tentative > 4.5) continue;
+        fallbackOdds = tentative;
+        seenEvents.add(leg.eventId);
+        distinctCount++;
+        if (distinctCount === 3) break;
+      }
+      // If we couldn't get 3 distinct within 4.5, just take product of first 3 distinct regardless of cap
+      if (distinctCount < 3) {
+        const distinct: VaLeg[] = [];
+        const seen2 = new Set<string>();
+        for (const leg of sorted) {
+          if (seen2.has(leg.eventId)) continue;
+          seen2.add(leg.eventId);
+          distinct.push(leg);
+          if (distinct.length === 3) break;
+        }
+        if (distinct.length > 0) {
+          fallbackOdds = distinct.reduce((acc, l) => acc * l.bookmakerOdds, 1);
+        } else {
+          fallbackOdds = 0;
+        }
+      }
+      // Also compare with product of top 3 distinct regardless — take max
+      const distinct3: VaLeg[] = [];
+      const seen3 = new Set<string>();
+      for (const leg of sorted) {
+        if (seen3.has(leg.eventId)) continue;
+        seen3.add(leg.eventId);
+        distinct3.push(leg);
+        if (distinct3.length === 3) break;
+      }
+      if (distinct3.length === 3) {
+        const prod = distinct3.reduce((acc, l) => acc * l.bookmakerOdds, 1);
+        // Choose the larger of fallback and prod that is more representative of best attempt
+        // But if prod <=4.5 and fallback was limited, keep fallback; otherwise use prod
+        if (prod > fallbackOdds && prod <= 4.5) bestCombinedOdds = prod;
+        else if (fallbackOdds > 0) bestCombinedOdds = fallbackOdds;
+        else bestCombinedOdds = prod;
+      } else if (distinct3.length > 0) {
+        bestCombinedOdds = distinct3.reduce((acc, l) => acc * l.bookmakerOdds, 1);
+      } else {
+        bestCombinedOdds = fallbackOdds;
+      }
+    }
+    console.log(`[VA] No ticket built: ${legs.length} legs available, best combined odds ${bestCombinedOdds.toFixed(2)}`);
+    return [];
   }
 
   // Sort by kelly_score descending
@@ -327,6 +298,8 @@ export function buildTickets(legs: VaLeg[]): VaTicket[] {
 
   // Re-sort by kelly descending for final output
   tickets.sort((a, b) => b.kellyScore - a.kellyScore);
+
+  console.log(`[VA] Built ${tickets.length} tickets from ${legs.length} qualified legs`);
 
   return tickets;
 }
