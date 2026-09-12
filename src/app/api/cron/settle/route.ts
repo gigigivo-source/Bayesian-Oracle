@@ -159,6 +159,65 @@ function performanceStatusLabel(outcome: string): string {
   }
 }
 
+/**
+ * Row-level outcome for a fully settled performance_log row, derived from its
+ * hits vs misses counters. Returns null while the row must stay 'pending'
+ * (still has unsettled markets, or nothing was ever decided).
+ */
+function performanceRowOutcome(
+  hits: number,
+  misses: number,
+): "win" | "loss" | "push" | null {
+  if (hits + misses === 0) return null;
+  if (hits > misses) return "win";
+  if (misses > hits) return "loss";
+  return hits > 0 ? "push" : null;
+}
+
+/**
+ * One-time backfill for stale row-level outcomes: rows the settlement engine
+ * already evaluated (pending = 0, hits/misses populated) but whose `outcome`
+ * column never moved off the 'pending' default — the UI reads `outcome`, so
+ * those finished matches wrongly display as PENDING. Idempotent: re-runs find
+ * zero stale rows once every settled row is stamped.
+ *
+ * Exported for tests — the cron sweeps it through runAllLeagueSettlement().
+ */
+export async function backfillStalePerformanceOutcomes(
+  force = false,
+): Promise<{ stamped: number; win: number; loss: number; push: number }> {
+  const tallies = { stamped: 0, win: 0, loss: 0, push: 0 };
+  const stale = await db
+    .select()
+    .from(performanceLog)
+    .where(and(eq(performanceLog.outcome, "pending"), eq(performanceLog.pending, 0)))
+    .limit(SWEEP_LIMIT(force));
+  for (const row of stale) {
+    // Feature pre-match rows (pending 0, hits 0, misses 0) settle through the
+    // feature pass instead — performanceRowOutcome returns null for 0/0, so
+    // they are deliberately left as 'pending' here.
+    const outcome = performanceRowOutcome(row.hits, row.misses);
+    if (!outcome) continue;
+    try {
+      // Guarded write: only stamp rows still 'pending' so a concurrent run
+      // can never settle the same row twice.
+      await db
+        .update(performanceLog)
+        .set({ outcome })
+        .where(and(eq(performanceLog.id, row.id), eq(performanceLog.outcome, "pending")));
+      tallies.stamped++;
+      tallies[outcome]++;
+    } catch {
+      // best-effort per row
+    }
+  }
+  console.log(
+    `[Settle][backfill] Stamped ${tallies.stamped} stale outcome rows ` +
+      `(${tallies.win} win, ${tallies.loss} loss, ${tallies.push} push).`,
+  );
+  return tallies;
+}
+
 /** Exported for tests — the cron sweeps it through runAllLeagueSettlement(). */
 export async function refreshPendingPerformanceRows(force = false): Promise<PerformanceRefreshResult> {
   // Feature-agnostic by design. The only gate on this pass is the per-row
@@ -330,10 +389,18 @@ export async function refreshPendingPerformanceRows(force = false): Promise<Perf
       const pending = detail.filter((p) => p.outcome === "PENDING" || !p.outcome).length;
       const decided = hits + misses;
 
+      // Once every market is settled, stamp the ROW-level outcome so the UI
+      // (which reads `outcome`) stops showing the finished match as PENDING.
+      // Untouched while markets are still open or nothing was decided.
+      const rowOutcome = pending === 0 ? performanceRowOutcome(hits, misses) : null;
+      const stampOutcome =
+        rowOutcome && (row.outcome ?? "pending") === "pending" ? { outcome: rowOutcome } : {};
+
       await db.update(performanceLog).set({
         top10Detail: detail,
         hits, misses, pending,
         accuracy: decided > 0 ? hits / decided : row.accuracy,
+        ...stampOutcome,
       }).where(eq(performanceLog.id, row.id));
       const resolved = Math.max(0, row.pending - pending);
       result.resolved += resolved;
@@ -1198,6 +1265,15 @@ async function runAllLeagueSettlement(force = false): Promise<SettleSweepSummary
     failures.push(`performance refresh: ${err instanceof Error ? err.message : String(err)}`);
   }
   const refreshedPerformanceRows = performanceRefresh.resolved;
+
+  // 4b) One-time backfill for stale row-level outcomes: rows already settled
+  // (pending = 0, hits/misses populated) whose `outcome` never moved off the
+  // 'pending' default. Idempotent — later runs stamp zero rows.
+  try {
+    await backfillStalePerformanceOutcomes(force);
+  } catch (err) {
+    failures.push(`stale outcome backfill: ${err instanceof Error ? err.message : String(err)}`);
+  }
 
   // 5) Legacy league field backfill.
   let legacyBackfill = { performanceRows: 0, valueBetRows: 0, slipRows: 0 };
