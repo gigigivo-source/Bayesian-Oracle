@@ -17,7 +17,9 @@
 //      the FULL multi-source boxscore, and marking any market no source can
 //      provide VOID (stake returned) once the match is older than the 24h
 //      settlement grace window, so finished matches never keep markets stuck
-//      in PENDING indefinitely;
+//      in PENDING indefinitely. This pass is feature-agnostic: it sweeps every
+//      row with unsettled markets, regular ranking-mode rows (feature IS NULL)
+//      included — the `feature` column never gates which rows get processed;
 //   4. backfills leagueSlug / competitionName on legacy performance rows so
 //      the league dashboard has full transparency across old + new data.
 //
@@ -96,6 +98,41 @@ function fixtureFromPerformanceRow(row: typeof performanceLog.$inferSelect): Fix
   };
 }
 
+/**
+ * Rebuild a post-match fixture from a summary-first lookup result, for legacy
+ * rows whose own `leagueSlug` is NULL / namespaced / stale. The summary-first
+ * provider (PR #103/#104) indexes the match by event id AND "Home vs Away" and
+ * derives the ESPN slug FROM THE MATCH, so it can supply the slug the row is
+ * missing — dropping such a row on the floor would leave its markets pending
+ * forever, which is exactly what the 24h grace pass exists to prevent.
+ */
+function fixtureFromResult(
+  row: typeof performanceLog.$inferSelect,
+  lookedUp: MatchResult,
+): FixtureLite {
+  const homeName = lookedUp.homeName || row.homeTeam;
+  const awayName = lookedUp.awayName || row.awayTeam;
+  return {
+    id:          lookedUp.eventId || row.eventId,
+    leagueSlug:  lookedUp.leagueSlug,
+    leagueName:  row.competitionName ?? row.league,
+    date:        `${lookedUp.date || row.matchDate}T00:00:00Z`,
+    state:       "post",
+    statusDetail: "Match Finished",
+    venue:       null,
+    neutralSite: false,
+    home: {
+      id: "", name: homeName, shortName: homeName, abbrev: homeName.slice(0, 3),
+      logo: null, color: null, score: String(lookedUp.homeScore), homeAway: "home",
+    },
+    away: {
+      id: "", name: awayName, shortName: awayName, abbrev: awayName.slice(0, 3),
+      logo: null, color: null, score: String(lookedUp.awayScore), homeAway: "away",
+    },
+    odds: null,
+  };
+}
+
 // ─── Task 1: refresh performance_log rows with still-pending stat markets ────
 
 export interface PerformanceRefreshResult {
@@ -124,12 +161,35 @@ function performanceStatusLabel(outcome: string): string {
 
 /** Exported for tests — the cron sweeps it through runAllLeagueSettlement(). */
 export async function refreshPendingPerformanceRows(force = false): Promise<PerformanceRefreshResult> {
+  // Feature-agnostic by design. The only gate on this pass is the per-row
+  // `pending` market counter, so it sweeps EVERY row that still has unsettled
+  // Top-10 markets — ranking-mode rows (feature IS NULL, the vast majority)
+  // and dedicated feature rows ('corners' / 'first5') alike. `feature` is
+  // carried in the projection purely so the log below can break the sweep down
+  // by pick family; it is deliberately NOT part of the WHERE clause. Rows whose
+  // market family needs different evaluation are separated further down, in the
+  // settlement logic, never here in the row selection.
   const rows = await db
     .select()
     .from(performanceLog)
     .where(gt(performanceLog.pending, 0))
     .limit(SWEEP_LIMIT(force));
   const result: PerformanceRefreshResult = { resolved: 0, voided: 0, win: 0, loss: 0, push: 0, matches: 0 };
+
+  // Debug: the exact sweep size plus its feature breakdown, so a run that
+  // refreshes nothing can be told apart at a glance — "no pending rows to
+  // sweep" vs "rows found, but every one bailed out further down the loop".
+  const byFeature = rows.reduce<Record<string, number>>((acc, row) => {
+    const key = row.feature ?? "regular (feature=NULL)";
+    acc[key] = (acc[key] ?? 0) + 1;
+    return acc;
+  }, {});
+  console.log(
+    `[Settle][refresh] Found ${rows.length} pending performance rows to refresh` +
+      (rows.length > 0
+        ? ` — ${Object.entries(byFeature).map(([feature, n]) => `${feature}: ${n}`).join(", ")}`
+        : ""),
+  );
   const resolvedByLeague: Record<string, number> = {};
 
   // Resolve every pending match's FINAL SCORE through the fixed summary-first
@@ -164,11 +224,26 @@ export async function refreshPendingPerformanceRows(force = false): Promise<Perf
       console.log(`[Settle][refresh] Fetching result for ${row.matchLabel} (event ${row.eventId})`);
       const lookedUp = resultsProvider?.find(row.eventId, row.matchLabel);
 
-      const fx = fixtureFromPerformanceRow(row);
-      if (!fx) continue;
+      // Prefer the row's own fixture; fall back to one rebuilt from the
+      // summary-first result when the row carries no usable leagueSlug. Either
+      // way a row is only skipped with a logged reason — never silently.
+      let fx = fixtureFromPerformanceRow(row);
+      if (!fx && lookedUp) fx = fixtureFromResult(row, lookedUp);
+      if (!fx) {
+        console.log(
+          `[Settle][refresh] Skipped ${row.matchLabel} (event ${row.eventId}) — no leagueSlug on the row ` +
+          `and the summary-first lookup has no result for this match yet`,
+        );
+        continue;
+      }
       const rankingMode = (row.rankingMode as RankingMode) || "B";
       const pred = await runOracleWithStandings(fx, { rankingMode });
-      if (!pred) continue;
+      if (!pred) {
+        console.log(
+          `[Settle][refresh] Skipped ${row.matchLabel} (event ${row.eventId}) — oracle returned no prediction`,
+        );
+        continue;
+      }
 
       // The real final score + league slug come from the summary-first lookup.
       // When the provider cannot see the match (not finished anywhere yet, or
@@ -879,6 +954,14 @@ export async function settleFeaturePicks(force = false): Promise<FeatureSettlePa
 
       for (const pick of picks) {
         try {
+          // Market-family separation lives HERE, in the settlement logic — not
+          // in the row-selection query. Only the dedicated feature families are
+          // evaluated by this pass. A row with no feature (the ranking-mode
+          // rows, feature IS NULL) must never be settled as a feature pick: it
+          // belongs to the ranking-mode passes and the performance refresh, and
+          // letting it fall through below would leave `outcome` unresolved and
+          // wrongly VOID it once the stats grace elapsed.
+          if (pick.feature !== "corners" && pick.feature !== "first5") continue;
           const market = pick.market ?? "";
           const selection = pick.selection ?? "";
           let outcome: "WIN" | "LOSS" | "PUSH" | "VOID" | null = null;
@@ -1044,6 +1127,19 @@ export interface SettleSweepSummary {
 }
 
 async function countPendingRows(): Promise<number> {
+  // Two performance_log terms, two different notions of "pending":
+  //   · `performance`   — rows with unsettled Top-10 markets (the `pending`
+  //                       market counter > 0). Covers regular ranking-mode rows
+  //                       (feature IS NULL) AND feature rows; this is the count
+  //                       the refresh pass sweeps.
+  //   · `featurePicks`  — dedicated feature rows whose ROW-level `outcome`
+  //                       column is still 'pending'. That column is only ever
+  //                       stamped by the feature pass and the sure-corners
+  //                       verify endpoint, so it is meaningless for regular
+  //                       rows — filtering on it alone here would either
+  //                       double-count settled feature rows or, if the feature
+  //                       clause were dropped, count every regular row ever
+  //                       written. Keep both terms.
   const [daily, value, slips, performance, featurePicks] = await Promise.all([
     db.select({ value: count() }).from(dailyPicks).where(eq(dailyPicks.status, "pending")),
     db.select({ value: count() }).from(valueBetLog).where(eq(valueBetLog.outcome, "pending")),
