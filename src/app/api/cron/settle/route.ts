@@ -41,14 +41,18 @@ import { resolveSureCornerOutcome } from "@/lib/settlement/sureCornerOutcomes";
 import type { CanonicalMatchStats } from "@/lib/data/types";
 import { resilientJson } from "@/lib/httpClient";
 import {
-  fetchEspnBoxscore,
   lookupMultiSourceResult,
   resultFromFixture,
   statsToBoxscore,
 } from "../daily-picks/route";
 import { GET as fixturesGET } from "@/app/api/fixtures/route";
 import { statsAggregator } from "@/lib/data/aggregator";
-import { getSettlementBoxscore } from "@/lib/settlement/results";
+import {
+  fetchSettlementResults,
+  getSettlementBoxscore,
+  type ResultsProvider,
+  type SettlementQueues,
+} from "@/lib/settlement/results";
 import { canonicalLeagueSlug } from "@/lib/leaguePriority";
 import { evaluateFinishedMatch } from "@/lib/engine";
 import { runOracleWithStandings } from "@/lib/engine/oracle";
@@ -128,31 +132,84 @@ export async function refreshPendingPerformanceRows(force = false): Promise<Perf
   const result: PerformanceRefreshResult = { resolved: 0, voided: 0, win: 0, loss: 0, push: 0, matches: 0 };
   const resolvedByLeague: Record<string, number> = {};
 
+  // Resolve every pending match's FINAL SCORE through the fixed summary-first
+  // lookup — the same fetchSettlementResults PR #103 rewrote — instead of the
+  // old scoreboard-only path (which read the row's own stored score and asked
+  // ESPN under the row's stored league slug). Each performance row is fed in
+  // as a daily-pick-shaped probe so the provider indexes the match by event id
+  // AND "Home vs Away" label, with the ESPN slug derived FROM THE MATCH
+  // (competition name first, stored slug second). That is the piece that makes
+  // a Champions League row resolve as `uefa.champions` even when its stored
+  // slug is stale, namespaced, "all" or blank.
+  let resultsProvider: ResultsProvider | null = null;
+  try {
+    resultsProvider = await fetchSettlementResults({
+      accumulators: [],
+      valueBets: [],
+      dailyPicks: rows.map((row) => ({
+        id: row.id,
+        eventId: row.eventId,
+        leagueSlug: row.leagueSlug,
+        league: row.competitionName ?? row.league,
+        match: row.matchLabel,
+        pickDate: row.matchDate,
+      })) as unknown as SettlementQueues["dailyPicks"],
+    });
+  } catch (err) {
+    console.warn("[Settle][refresh] Summary-first result lookup failed — falling back to stored scores:", err);
+  }
+
   for (const row of rows) {
     try {
+      console.log(`[Settle][refresh] Fetching result for ${row.matchLabel} (event ${row.eventId})`);
+      const lookedUp = resultsProvider?.find(row.eventId, row.matchLabel);
+
       const fx = fixtureFromPerformanceRow(row);
       if (!fx) continue;
       const rankingMode = (row.rankingMode as RankingMode) || "B";
       const pred = await runOracleWithStandings(fx, { rankingMode });
       if (!pred) continue;
 
-      // FULL boxscore supply for settlement (Part 1): the ESPN summary
-      // endpoint first (its key space is what evaluateFinishedMatch reads),
-      // then the multi-source aggregator walk (API-Football /fixtures/
+      // The real final score + league slug come from the summary-first lookup.
+      // When the provider cannot see the match (not finished anywhere yet, or
+      // a non-ESPN event with no summary endpoint) fall back to the row's own
+      // stored score so the multi-source boxscore below still resolves stat
+      // markets, and the 24h grace pass can still VOID what no source has.
+      const matchResult: MatchResult = lookedUp
+        ? {
+            eventId:    lookedUp.eventId,
+            leagueSlug: lookedUp.leagueSlug,
+            date:       lookedUp.date || row.matchDate,
+            kickoffAt:  lookedUp.kickoffAt,
+            homeName:   lookedUp.homeName,
+            awayName:   lookedUp.awayName,
+            homeScore:  lookedUp.homeScore,
+            awayScore:  lookedUp.awayScore,
+          }
+        : {
+            eventId:    fx.id,
+            leagueSlug: fx.leagueSlug,
+            date:       row.matchDate,
+            homeName:   row.homeTeam,
+            awayName:   row.awayTeam,
+            homeScore:  row.homeScore,
+            awayScore:  row.awayScore,
+          };
+      if (lookedUp) {
+        console.log(`[Settle][refresh] ESPN summary returned: home ${lookedUp.homeScore}, away ${lookedUp.awayScore}`);
+        // Keep the reconstructed fixture's score in sync so the engine's own
+        // evaluator (evaluateFinishedMatch) sees the real final score too.
+        fx.home.score = String(lookedUp.homeScore);
+        fx.away.score = String(lookedUp.awayScore);
+      }
+
+      // FULL boxscore supply for settlement: the summary-first ESPN boxscore
+      // (getSettlementBoxscore asks under the match's own derived league slug)
+      // plus the multi-source aggregator walk (API-Football /fixtures/
       // statistics, StatsBomb, FBref, TheSportsDB, Understat, … — first-wins,
       // memo-cached, so repeated settlement runs never re-fetch).
-      const matchResult: MatchResult = {
-        eventId:    fx.id,
-        leagueSlug: fx.leagueSlug,
-        date:       row.matchDate,
-        homeName:   row.homeTeam,
-        awayName:   row.awayTeam,
-        homeScore:  row.homeScore,
-        awayScore:  row.awayScore,
-      };
       const canonicalStats = (await getSettlementBoxscore(matchResult)).stats;
-      const boxscore =
-        (await fetchEspnBoxscore(fx.leagueSlug, fx.id)) ?? statsToBoxscore(canonicalStats);
+      const boxscore = statsToBoxscore(canonicalStats);
       evaluateFinishedMatch(fx, pred, boxscore);
 
       // Merge fresh outcomes into the stored detail, keeping original fields.
