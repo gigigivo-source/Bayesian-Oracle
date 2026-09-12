@@ -11,8 +11,8 @@ import { LEAGUE_MAP } from "@/lib/leagues";
 import { withMonitoring } from "@/lib/monitoring";
 import { simulateMatch } from "@/lib/data/monteCarlo";
 import { getRhoForLeague } from "@/lib/data/dixonColes";
-import { statsAggregator } from "@/lib/data/aggregator";
-import { MATCH_STAT_FIELDS, type CanonicalMatchStats, type StatKey } from "@/lib/data/types";
+import type { DeepStatsVector } from "@/lib/engine/types";
+import { MATCH_STAT_FIELDS, type StatKey } from "@/lib/data/types";
 
 export const dynamic = "force-dynamic";
 
@@ -494,13 +494,51 @@ function isPreMatchState(state?: "pre" | "in" | "post" | null): boolean {
   return state !== "in" && state !== "post";
 }
 
-function teamFieldFilled(stats: CanonicalMatchStats, side: "home" | "away", field: StatKey | "cleanSheet"): boolean {
-  const value = stats[side][field];
-  return value !== null && value !== undefined;
+/**
+ * The Deep Statistics dashboard renders these values directly from the engine's
+ * DeepStatsVector. Keep the gate's field lookup on that same object instead of
+ * peeking at a separate aggregator cache, which may be empty even when the
+ * dashboard has populated values.
+ */
+function deepStatsFieldValue(
+  stats: DeepStatsVector,
+  side: "home" | "away",
+  field: StatKey | "cleanSheet",
+): number | null {
+  if (field === "cleanSheet") return null;
+
+  const values = side === "home"
+    ? {
+        xg: stats.homeXg,
+        goals: stats.homeGfAvg,
+        goalsConceded: stats.homeGaAvg,
+        shotsOnTarget: stats.homeSotAvg,
+        corners: stats.homeCornersAvg,
+        yellowCards: stats.homeCardsAvg,
+        fouls: stats.homeFoulsAvg,
+        possession: stats.homePossessionPct,
+      }
+    : {
+        xg: stats.awayXg,
+        goals: stats.awayGfAvg,
+        goalsConceded: stats.awayGaAvg,
+        shotsOnTarget: stats.awaySotAvg,
+        corners: stats.awayCornersAvg,
+        yellowCards: stats.awayCardsAvg,
+        fouls: stats.awayFoulsAvg,
+        possession: stats.awayPossessionPct,
+      };
+
+  const value = values[field as keyof typeof values];
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function teamFieldFilled(stats: DeepStatsVector, side: "home" | "away", field: StatKey | "cleanSheet"): boolean {
+  return deepStatsFieldValue(stats, side, field) !== null;
 }
 
 /**
- * Inspect the canonical stats object the selector just consumed and decide
+ * Inspect the same DeepStatsVector the match-detail table renders and decide
  * whether the Top-10 banner may claim Real data.
  *
  * Pre-match: 8 core fields × 2 teams = 16 slots; cleanSheet (and any other
@@ -508,7 +546,7 @@ function teamFieldFilled(stats: CanonicalMatchStats, side: "home" | "away", fiel
  * plus cleanSheet. Pass mark is ≥ 80% of those slots — not 100%.
  */
 function inspectTop10CriteriaFields(
-  stats: CanonicalMatchStats | null,
+  stats: DeepStatsVector | null,
   state?: "pre" | "in" | "post" | null,
 ): Top10FieldInspection {
   const preMatch = isPreMatchState(state);
@@ -550,6 +588,21 @@ function inspectTop10CriteriaFields(
     ratio >= TOP10_COMPLETENESS_THRESHOLD ? "Real" : present > 0 ? "Mixed" : "Synthetic";
 
   return { present, total, missing, quality, preMatch };
+}
+
+function logTop10CriteriaGateSource(stats: DeepStatsVector | null): void {
+  console.log("[Match] top10Criteria gate source: prediction.deepStats");
+  console.log(
+    "[Match] top10Criteria gate stats snapshot: " +
+      `home.xg=${stats?.homeXg ?? null}, away.xg=${stats?.awayXg ?? null}, ` +
+      `home.goals=${stats?.homeGfAvg ?? null}, away.goals=${stats?.awayGfAvg ?? null}, ` +
+      `home.goalsConceded=${stats?.homeGaAvg ?? null}, away.goalsConceded=${stats?.awayGaAvg ?? null}, ` +
+      `home.shotsOnTarget=${stats?.homeSotAvg ?? null}, away.shotsOnTarget=${stats?.awaySotAvg ?? null}, ` +
+      `home.corners=${stats?.homeCornersAvg ?? null}, away.corners=${stats?.awayCornersAvg ?? null}, ` +
+      `home.yellowCards=${stats?.homeCardsAvg ?? null}, away.yellowCards=${stats?.awayCardsAvg ?? null}, ` +
+      `home.fouls=${stats?.homeFoulsAvg ?? null}, away.fouls=${stats?.awayFoulsAvg ?? null}, ` +
+      `home.possession=${stats?.homePossessionPct ?? null}, away.possession=${stats?.awayPossessionPct ?? null}`,
+  );
 }
 
 function logTop10CriteriaGate(inspection: Top10FieldInspection): void {
@@ -886,21 +939,12 @@ async function handlePost(req: Request): Promise<Response> {
     predictions.set(mode, await runEngineForMode(fixture, summary, liveStats, mode));
   }
 
-  // The engine has just consumed this exact aggregator cache entry for the
-  // Top-10 factors. Reading it back avoids a second stats source or a banner-
-  // only quality calculation; a null peek is the same synthetic fallback the
-  // engine saw when no canonical source contributed data.
-  const statsInspection = inspectTop10CriteriaFields(
-    statsAggregator.peek({
-      leagueSlug: fixture.leagueSlug,
-      eventId: fixture.id,
-      homeTeam: fixture.home.name,
-      awayTeam: fixture.away.name,
-      date: fixture.date,
-      state: fixture.state,
-    }),
-    fixture.state,
-  );
+  // The Deep Statistics dashboard renders `prediction.deepStats` directly.
+  // Gate the Top-10 banner from that same object; a separate aggregator-cache
+  // peek can be empty even when the stats table is populated.
+  const gateStats = predictions.get(rankingMode)?.deepStats ?? null;
+  logTop10CriteriaGateSource(gateStats);
+  const statsInspection = inspectTop10CriteriaFields(gateStats, fixture.state);
   logTop10CriteriaGate(statsInspection);
   const statsDataQuality = statsInspection.quality;
 
