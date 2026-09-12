@@ -12,7 +12,7 @@ import { withMonitoring } from "@/lib/monitoring";
 import { simulateMatch } from "@/lib/data/monteCarlo";
 import { getRhoForLeague } from "@/lib/data/dixonColes";
 import { statsAggregator } from "@/lib/data/aggregator";
-import { MATCH_STAT_FIELDS, BOOLEAN_FIELDS, nonNullFieldCount, type CanonicalMatchStats } from "@/lib/data/types";
+import { MATCH_STAT_FIELDS, type CanonicalMatchStats, type StatKey } from "@/lib/data/types";
 
 export const dynamic = "force-dynamic";
 
@@ -452,25 +452,117 @@ function finiteLambda(value: unknown, fallback: number): number {
 const TOP10_UNAVAILABLE_REASON = "No reliable prediction available — data quality insufficient.";
 
 /**
- * Classify the exact canonical stats object consumed by the selector. A null
- * result is the aggregator's synthetic baseline; a partial merge is Mixed;
- * and a complete per-match canonical payload is Real. Historical-only fields
- * are intentionally not part of this gate because the aggregator itself does
- * not require them before it can call a result real.
- *
- * Match-state aware: for UPCOMING fixtures the payload is built from
- * historical team statistics, and `cleanSheet` — a match OUTCOME — cannot
- * exist before kickoff. Requiring it would make "Real" unreachable pre-match,
- * so it is excluded from the completeness gate when state is "pre".
+ * Match OUTCOMES that cannot exist before kickoff. Including them in the
+ * pre-match completeness gate makes "Real" unreachable (cleanSheet is the
+ * canonical example) and was hiding otherwise-complete API-Football data.
  */
-function classifyStatsDataQuality(
+const POST_MATCH_ONLY_FIELDS = ["cleanSheet"] as const;
+
+/**
+ * Pre-match fields the Top-10 banner gate inspects. These are historical /
+ * season-average inputs API-Football can supply before kickoff — the same
+ * metrics the match-detail stats table displays (xG, goals, SOT, corners,
+ * cards, fouls, possession). One or two optional gaps must not kill the
+ * whole prediction, so the gate requires ≥ 80% of these slots (home+away).
+ */
+const PRE_MATCH_GATE_FIELDS: readonly StatKey[] = [
+  "xg",
+  "goals",
+  "goalsConceded",
+  "shotsOnTarget",
+  "corners",
+  "yellowCards",
+  "fouls",
+  "possession",
+];
+
+/** Fraction of applicable (pre-match or in/post) slots that must be filled. */
+const TOP10_COMPLETENESS_THRESHOLD = 0.8;
+
+interface Top10FieldInspection {
+  present: number;
+  total: number;
+  missing: string[];
+  quality: PredictionDataQuality;
+  /** True when the fixture has not been played — post-match-only fields excluded. */
+  preMatch: boolean;
+}
+
+function isPreMatchState(state?: "pre" | "in" | "post" | null): boolean {
+  // Unknown state is treated as pre-match: cleanSheet still cannot exist, and
+  // requiring it would repeat the original false-rejection.
+  return state !== "in" && state !== "post";
+}
+
+function teamFieldFilled(stats: CanonicalMatchStats, side: "home" | "away", field: StatKey | "cleanSheet"): boolean {
+  const value = stats[side][field];
+  return value !== null && value !== undefined;
+}
+
+/**
+ * Inspect the canonical stats object the selector just consumed and decide
+ * whether the Top-10 banner may claim Real data.
+ *
+ * Pre-match: 8 core fields × 2 teams = 16 slots; cleanSheet (and any other
+ * post-match-only field) is excluded. In/post: every per-match numeric field
+ * plus cleanSheet. Pass mark is ≥ 80% of those slots — not 100%.
+ */
+function inspectTop10CriteriaFields(
   stats: CanonicalMatchStats | null,
   state?: "pre" | "in" | "post" | null,
-): PredictionDataQuality {
-  if (!stats) return "Synthetic";
-  const booleanSlots = state === "pre" ? 0 : BOOLEAN_FIELDS.length * 2;
-  const perMatchSlots = MATCH_STAT_FIELDS.length * 2 + booleanSlots;
-  return nonNullFieldCount(stats) >= perMatchSlots ? "Real" : "Mixed";
+): Top10FieldInspection {
+  const preMatch = isPreMatchState(state);
+  const numericFields: readonly StatKey[] = preMatch ? PRE_MATCH_GATE_FIELDS : MATCH_STAT_FIELDS;
+  const includeCleanSheet = !preMatch;
+  const total = numericFields.length * 2 + (includeCleanSheet ? POST_MATCH_ONLY_FIELDS.length * 2 : 0);
+
+  if (!stats) {
+    const missing = [
+      ...numericFields,
+      ...(includeCleanSheet ? POST_MATCH_ONLY_FIELDS : []),
+    ];
+    return { present: 0, total, missing: [...missing], quality: "Synthetic", preMatch };
+  }
+
+  const missing: string[] = [];
+  let present = 0;
+
+  for (const field of numericFields) {
+    const homeOk = teamFieldFilled(stats, "home", field);
+    const awayOk = teamFieldFilled(stats, "away", field);
+    if (homeOk) present++;
+    if (awayOk) present++;
+    if (!homeOk || !awayOk) missing.push(field);
+  }
+
+  if (includeCleanSheet) {
+    for (const field of POST_MATCH_ONLY_FIELDS) {
+      const homeOk = teamFieldFilled(stats, "home", field);
+      const awayOk = teamFieldFilled(stats, "away", field);
+      if (homeOk) present++;
+      if (awayOk) present++;
+      if (!homeOk || !awayOk) missing.push(field);
+    }
+  }
+
+  const ratio = total === 0 ? 0 : present / total;
+  const quality: PredictionDataQuality =
+    ratio >= TOP10_COMPLETENESS_THRESHOLD ? "Real" : present > 0 ? "Mixed" : "Synthetic";
+
+  return { present, total, missing, quality, preMatch };
+}
+
+function logTop10CriteriaGate(inspection: Top10FieldInspection): void {
+  const fieldLabel = inspection.preMatch ? "pre-match fields" : "fields";
+  if (inspection.quality === "Real") {
+    console.log(
+      `[Match] top10Criteria accepted: ${inspection.present}/${inspection.total} ${fieldLabel} present`,
+    );
+    return;
+  }
+  console.log(
+    `[Match] top10Criteria rejected: missing fields [${inspection.missing.join(", ")}]`,
+  );
 }
 
 function emptyTop10Criteria(
@@ -504,9 +596,10 @@ function topRankedMarket(
   markets: EngineResult["markets"],
   predicate: (market: EngineResult["markets"][number]) => boolean,
   rankingMode: RankingMode,
+  includeRejected = false,
 ): EngineResult["markets"][number] | null {
   return [...markets]
-    .filter((market) => !market.rejected && predicate(market))
+    .filter((market) => (includeRejected || !market.rejected) && predicate(market))
     .sort((a, b) => {
       const scoreDelta = marketRankValue(b, rankingMode) - marketRankValue(a, rankingMode);
       if (Math.abs(scoreDelta) > 1e-9) return scoreDelta;
@@ -543,12 +636,19 @@ function buildTop10Criteria(
   fixture: FixtureLite,
   dataQuality: PredictionDataQuality,
   rankingMode: RankingMode,
+  inspection?: Top10FieldInspection,
 ): Top10CriteriaPrediction {
-  if (dataQuality === "Synthetic") {
-    return emptyTop10Criteria(
-      "Stats aggregator returned no real match statistics; the data-quality gate requires real data.",
-      dataQuality,
-    );
+  // The banner may only claim a prediction when ≥ 80% of the applicable
+  // (pre-match or in/post) fields are present. Mixed/Synthetic means the
+  // gate failed — log the exact missing field names.
+  if (dataQuality !== "Real") {
+    const missing = inspection?.missing ?? [];
+    const reason = missing.length
+      ? `${TOP10_UNAVAILABLE_REASON} Missing fields: ${missing.join(", ")}.`
+      : dataQuality === "Synthetic"
+        ? "Stats aggregator returned no real match statistics; the data-quality gate requires real data."
+        : TOP10_UNAVAILABLE_REASON;
+    return emptyTop10Criteria(reason, dataQuality);
   }
 
   // An empty Top-10 is the selector's explicit confidence/hard-gate failure.
@@ -564,10 +664,15 @@ function buildTop10Criteria(
   // Prefer the already-finalised Top-10 order. If the outcome family was not
   // one of the ten diverse slots, use the selector-scored pool (the same
   // composite/factors) rather than calculating an independent probability.
+  // 1X2 / Correct Score lines are often Grade-D rejected on raw probability
+  // (noAutoFlip + a 20–40% favourite) even when the data is Real — fall back
+  // to the rejected pool so a passing field gate can still surface a banner.
   const outcome = prediction.top10.find((market) => outcomeForMarket(market, fixture))
-    ?? topRankedMarket(prediction.markets, (market) => outcomeForMarket(market, fixture) !== null, rankingMode);
+    ?? topRankedMarket(prediction.markets, (market) => outcomeForMarket(market, fixture) !== null, rankingMode)
+    ?? topRankedMarket(prediction.markets, (market) => outcomeForMarket(market, fixture) !== null, rankingMode, true);
   const scoreline = prediction.top10.find(isCorrectScoreMarket)
-    ?? topRankedMarket(prediction.markets, isCorrectScoreMarket, rankingMode);
+    ?? topRankedMarket(prediction.markets, isCorrectScoreMarket, rankingMode)
+    ?? topRankedMarket(prediction.markets, isCorrectScoreMarket, rankingMode, true);
 
   if (!outcome) {
     return emptyTop10Criteria("No match-outcome market survived the Top 10 gates.", dataQuality);
@@ -785,7 +890,7 @@ async function handlePost(req: Request): Promise<Response> {
   // Top-10 factors. Reading it back avoids a second stats source or a banner-
   // only quality calculation; a null peek is the same synthetic fallback the
   // engine saw when no canonical source contributed data.
-  const statsDataQuality = classifyStatsDataQuality(
+  const statsInspection = inspectTop10CriteriaFields(
     statsAggregator.peek({
       leagueSlug: fixture.leagueSlug,
       eventId: fixture.id,
@@ -796,6 +901,8 @@ async function handlePost(req: Request): Promise<Response> {
     }),
     fixture.state,
   );
+  logTop10CriteriaGate(statsInspection);
+  const statsDataQuality = statsInspection.quality;
 
   // ── Value bet detection (per mode; markets differ per ranking) ───────────────
   const valueBetsByMode = new Map<RankingMode, ValueBet[]>();
@@ -826,7 +933,7 @@ async function handlePost(req: Request): Promise<Response> {
   for (const mode of modes) {
     const pred = predictions.get(mode);
     if (!pred) continue;
-    const top10Criteria = buildTop10Criteria(pred, fixture, statsDataQuality, mode);
+    const top10Criteria = buildTop10Criteria(pred, fixture, statsDataQuality, mode, statsInspection);
     enrichedByMode.set(mode, enrichPredictionWithMonteCarlo(pred, fixture, top10Criteria));
   }
 

@@ -363,9 +363,21 @@ function Top10PredictionBanner({
 }) {
   const criteria = resolveTop10Criteria(result);
   const monteCarlo = resolveMonteCarloPrediction(result, fixture);
-  if (!monteCarlo) return null;
+  const criteriaReady = Boolean(
+    criteria.available &&
+      criteria.winner &&
+      criteria.scoreline &&
+      criteria.winnerProbability !== null &&
+      criteria.scorelineProbability !== null,
+  );
+  if (!monteCarlo && !criteriaReady) return null;
 
-  const badgeQuality = criteria.dataQuality ?? monteCarlo.dataQuality;
+  // A passing Top-10 field gate (Real data) owns the badge so the winner /
+  // scoreline cards render with REAL. Mixed/Synthetic only win the badge
+  // when the criteria section itself is hidden.
+  const badgeQuality: PredictionDataQuality = criteriaReady
+    ? (criteria.dataQuality ?? "Real")
+    : (criteria.dataQuality ?? monteCarlo?.dataQuality ?? "Synthetic");
   const qualityTitle =
     badgeQuality === "Real"
       ? "Prediction grounded in real match data"
@@ -392,8 +404,11 @@ function Top10PredictionBanner({
         <div className="px-3 pt-3 font-mono text-[10px] font-bold uppercase tracking-widest text-amber-300">
           <span id="top10-criteria-heading">TOP 10 CRITERIA</span>
         </div>
-        {criteria.available && criteria.winner && criteria.scoreline &&
-          criteria.winnerProbability !== null && criteria.scorelineProbability !== null ? (
+        {criteria.available &&
+        criteria.winner &&
+        criteria.scoreline &&
+        criteria.winnerProbability !== null &&
+        criteria.scorelineProbability !== null ? (
           <PredictionCards
             winner={criteria.winner}
             winnerProbability={criteria.winnerProbability}
@@ -413,20 +428,22 @@ function Top10PredictionBanner({
         )}
       </section>
 
-      <section aria-labelledby="monte-carlo-heading">
-        <div className="px-4 pt-3 font-mono text-[10px] font-bold uppercase tracking-widest text-slate-400">
-          <span id="monte-carlo-heading">MONTE CARLO</span>
-        </div>
-        <PredictionCards
-          winner={monteCarlo.winner}
-          winnerProbability={monteCarlo.winnerProbability}
-          scoreline={monteCarlo.scoreline}
-          scorelineProbability={monteCarlo.scorelineProbability}
-          fixture={fixture}
-          footerWinner="Monte Carlo 1X2"
-          footerScore="Monte Carlo"
-        />
-      </section>
+      {monteCarlo ? (
+        <section aria-labelledby="monte-carlo-heading">
+          <div className="px-4 pt-3 font-mono text-[10px] font-bold uppercase tracking-widest text-slate-400">
+            <span id="monte-carlo-heading">MONTE CARLO</span>
+          </div>
+          <PredictionCards
+            winner={monteCarlo.winner}
+            winnerProbability={monteCarlo.winnerProbability}
+            scoreline={monteCarlo.scoreline}
+            scorelineProbability={monteCarlo.scorelineProbability}
+            fixture={fixture}
+            footerWinner="Monte Carlo 1X2"
+            footerScore="Monte Carlo"
+          />
+        </section>
+      ) : null}
     </div>
   );
 }
