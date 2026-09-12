@@ -8,6 +8,7 @@ import {
   real,
   boolean,
   uniqueIndex,
+  date,
 } from "drizzle-orm/pg-core";
 
 // Suppress unused-import warning
@@ -264,6 +265,51 @@ export const valueBetPerformance = pgTable("value_bet_performance", {
 export type AccumulatorPerformanceRow = typeof accumulatorPerformance.$inferSelect;
 export type DailyPickPerformanceRow = typeof dailyPickPerformance.$inferSelect;
 export type ValueBetPerformanceRow = typeof valueBetPerformance.$inferSelect;
+
+// ─── Value Accumulator (independent feature) ───────────────────────────────────
+export const vaLegs = pgTable("va_legs", {
+  id:                 serial("id").primaryKey(),
+  scanId:             text("scan_id").notNull(),
+  eventId:            text("event_id").notNull(),
+  matchLabel:         text("match_label").notNull(),
+  homeTeam:           text("home_team").notNull(),
+  awayTeam:           text("away_team").notNull(),
+  leagueSlug:         text("league_slug").notNull(),
+  kickoff:            timestamp("kickoff", { withTimezone: true }).notNull(),
+  market:             text("market").notNull(),
+  selection:          text("selection").notNull(),
+  statFamily:         text("stat_family").notNull(),
+  modelProbability:   real("model_probability").notNull(),
+  bookmakerOdds:      real("bookmaker_odds").notNull(),
+  bookmakerName:      text("bookmaker_name").notNull(),
+  impliedProbability: real("implied_probability").notNull(),
+  ev:                 real("ev").notNull(),
+  oddsAtBuild:        timestamp("odds_at_build", { withTimezone: true }).notNull(),
+  scannedAt:          timestamp("scanned_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+export const vaTickets = pgTable("va_tickets", {
+  id:                  serial("id").primaryKey(),
+  scanId:              text("scan_id").notNull(),
+  weekStart:           date("week_start").notNull(),
+  legs:                jsonb("legs").notNull(),
+  combinedOdds:        real("combined_odds").notNull(),
+  combinedProbability: real("combined_probability").notNull(),
+  combinedEv:          real("combined_ev").notNull(),
+  kellyScore:          real("kelly_score").notNull(),
+  stakePercent:        real("stake_percent").notNull(),
+  isRecommended:       boolean("is_recommended").notNull().default(false),
+  isReferenceOnly:     boolean("is_reference_only").notNull().default(false),
+  status:              text("status").notNull().default("pending"),
+  settledAt:           timestamp("settled_at", { withTimezone: true }),
+  createdAt:           timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+export const vaScanLock = pgTable("va_scan_lock", {
+  id:       serial("id").primaryKey(),
+  lockedAt: timestamp("locked_at", { withTimezone: true }).defaultNow().notNull(),
+  scanId:   text("scan_id").notNull(),
+});
 
 // ─── Legacy aliases (kept for backward compat with older routes) ───────────────
 /** @deprecated use `bankroll` */

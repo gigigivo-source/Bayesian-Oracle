@@ -29,6 +29,13 @@
       "when": 1787857271885,
       "tag": "0003_feature_performance_tracking",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1789239026891,
+      "tag": "0004_add_va_tables",
+      "breakpoints": true
     }
   ]
 }

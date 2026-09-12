@@ -27,8 +27,9 @@
 // Fail-soft: a broken league or provider never aborts the whole job.
 
 import { db } from "@/db";
-import { dailyPicks, performanceLog, savedSlips, valueBetLog } from "@/db/schema";
+import { dailyPicks, performanceLog, savedSlips, valueBetLog, vaTickets } from "@/db/schema";
 import { and, count, eq, isNull, isNotNull, gt } from "drizzle-orm";
+import { settleVaTickets } from "@/lib/va/settlement";
 import { runSettlementEngine, settlementStatusLabel } from "@/lib/settlement/engine";
 import {
   getPendingSettlementItems,
@@ -1179,6 +1180,7 @@ export interface SettleSweepSummary {
   featurePicks: FeatureSettlePass;
   refreshedPerformanceRows: number;
   performanceRefresh: PerformanceRefreshResult;
+  vaTickets: { settled: number; win: number; loss: number; partial: number };
   /** Aggregated per-MARKET outcome tally for the whole sweep. */
   markets: { resolved: number; win: number; loss: number; push: number; void: number; pending: number };
   /** Distinct finished matches touched across all passes. */
@@ -1207,16 +1209,17 @@ async function countPendingRows(): Promise<number> {
   //                       double-count settled feature rows or, if the feature
   //                       clause were dropped, count every regular row ever
   //                       written. Keep both terms.
-  const [daily, value, slips, performance, featurePicks] = await Promise.all([
+  const [daily, value, slips, performance, featurePicks, va] = await Promise.all([
     db.select({ value: count() }).from(dailyPicks).where(eq(dailyPicks.status, "pending")),
     db.select({ value: count() }).from(valueBetLog).where(eq(valueBetLog.outcome, "pending")),
     db.select({ value: count() }).from(savedSlips).where(eq(savedSlips.status, "pending")),
     db.select({ value: count() }).from(performanceLog).where(gt(performanceLog.pending, 0)),
     db.select({ value: count() }).from(performanceLog)
       .where(and(isNotNull(performanceLog.feature), eq(performanceLog.outcome, "pending"))),
+    db.select({ value: count() }).from(vaTickets).where(eq(vaTickets.status, "pending")),
   ]);
   return Number(daily[0]?.value ?? 0) + Number(value[0]?.value ?? 0) + Number(slips[0]?.value ?? 0) +
-    Number(performance[0]?.value ?? 0) + Number(featurePicks[0]?.value ?? 0);
+    Number(performance[0]?.value ?? 0) + Number(featurePicks[0]?.value ?? 0) + Number(va[0]?.value ?? 0);
 }
 
 async function runAllLeagueSettlement(force = false): Promise<SettleSweepSummary> {
@@ -1283,6 +1286,14 @@ async function runAllLeagueSettlement(force = false): Promise<SettleSweepSummary
     failures.push(`legacy backfill: ${err instanceof Error ? err.message : String(err)}`);
   }
 
+  // 6) Value Accumulator tickets settlement (independent pass)
+  let vaTicketsResult = { settled: 0, win: 0, loss: 0, partial: 0 };
+  try {
+    vaTicketsResult = await settleVaTickets();
+  } catch (err) {
+    failures.push(`va_tickets settlement: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
   console.log(
     `[Cron][settle] engine settled ${engine?.settled.total ?? 0} · multi-source settled ` +
     `${multiSource.dailyPicks + multiSource.valueBets + multiSource.accumulators} ` +
@@ -1290,11 +1301,12 @@ async function runAllLeagueSettlement(force = false): Promise<SettleSweepSummary
     `${featurePicks.corners + featurePicks.first5} ` +
     `(${featurePicks.stillPending} still pending, ${featurePicks.backfilledCorners} legacy rows backfilled) · ` +
     `refreshed ${refreshedPerformanceRows} performance rows · ` +
-    `legacy backfill ${legacyBackfill.performanceRows + legacyBackfill.valueBetRows + legacyBackfill.slipRows} rows`,
+    `legacy backfill ${legacyBackfill.performanceRows + legacyBackfill.valueBetRows + legacyBackfill.slipRows} rows · ` +
+    `va_tickets settled ${vaTicketsResult.settled} (win ${vaTicketsResult.win}, loss ${vaTicketsResult.loss}, partial ${vaTicketsResult.partial})`,
   );
 
   const resolved = (engine?.settled.total ?? 0) + multiSource.dailyPicks + multiSource.valueBets +
-    multiSource.accumulators + featurePicks.corners + featurePicks.first5 + refreshedPerformanceRows;
+    multiSource.accumulators + featurePicks.corners + featurePicks.first5 + refreshedPerformanceRows + vaTicketsResult.settled;
 
   // ── End-of-run summary over EVERY market the sweep touched (Part 4) ───────
   const markets = {
@@ -1325,7 +1337,7 @@ async function runAllLeagueSettlement(force = false): Promise<SettleSweepSummary
 
   return {
     ok: failures.length === 0, engine, multiSource, featurePicks, refreshedPerformanceRows,
-    performanceRefresh, markets, matches, stuckPending,
+    performanceRefresh, vaTickets: vaTicketsResult, markets, matches, stuckPending,
     legacyBackfill, failures, totalPending, resolved,
     failed: multiSource.failed + featurePicks.failed + failures.length,
     ranAt: new Date().toISOString(),
