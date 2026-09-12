@@ -1,27 +1,18 @@
-// ĞIGI GIVØ — Daily 7-day picks cron (Weekly Accumulator feed).
+// ĞIGI GIVØ — Daily all-league picks cron.
 //
-// Sweeps the next 7 days (from today) for the 8 Weekly Accumulator
-// competitions (ENG/ESP/GER/ITA/FRA top flights + the three UEFA club
-// competitions) via the live fixture-feed catalogue. Every fixture is
-// processed through the prediction engine (multi-source aggregator +
-// confidence gate), and predictions / settled results are persisted to the
-// performance tables with leagueSlug + competitionName populated.
+// Walks the live fixture-feed catalogue (ESPN / SportScore / OpenLigaDB /
+// TheSportsDB / API-Football — never a hardcoded league list) so a single
+// cron tick produces picks for every competition that has a fixture in the
+// window. Every fixture is processed through the prediction engine
+// (multi-source aggregator + confidence gate), and predictions / settled
+// results are persisted to the performance tables with leagueSlug +
+// competitionName populated.
 //
 // Behaviour:
 //   • fail-soft per league — one broken league never stops the sweep
 //   • idempotent — skips matches already recorded
 //   • low-confidence matches ARE recorded and flagged lowConfidence: true
 //   • progress logs: [Cron] Processing Champions League: 15 matches
-//   • every match's canonical engine output is ALSO upserted into the
-//     `predictions` learning log (keyed by eventId) — see savePredictionRow.
-//     /api/match has always written the full result JSON there, but only for
-//     matches a user opened by hand, so consumers that reuse the persisted
-//     Top-10 (the Weekly Accumulator) saw almost nothing. The sweep now
-//     mirrors the same JSON for every fixture it covers:
-//     [DailyPicks] Wrote N predictions (X new, Y updated, Z skipped)
-//     Pure-Synthetic outputs (fallbackMode + completeness < 45) are never
-//     written — see isPureSyntheticPrediction.
-//   • sweep logs: [DailyPicks] 7-day sweep: N matches across M competitions
 //
 // Scheduling: configured in vercel.json (default 4 AM UTC). Override the
 // cadence per-environment with CRON_DAILY_PICKS_SCHEDULE (e.g. "0 4 * * *");
@@ -32,11 +23,10 @@ import { db } from "@/db";
 import {
   dailyPicks,
   performanceLog,
-  predictions,
   savedSlips,
   valueBetLog,
 } from "@/db/schema";
-import { and, desc, eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { fetchScoreboard, type FixtureLite } from "@/lib/espn";
 import { evaluateFinishedMatch } from "@/lib/engine";
 import { runOracleAllModesWithStandings, type OracleResult } from "@/lib/engine/oracle";
@@ -65,7 +55,7 @@ const TIME_BUDGET_MS = () => {
   return Number.isFinite(raw) && raw > 0 ? raw : 240_000; // stop starting new work after 4 minutes
 };
 
-/** Optional allow-list of league slugs (comma-separated) — defaults to the 7-day accumulator set below. */
+/** Optional allow-list of league slugs (comma-separated) — defaults to ALL. */
 const LEAGUE_ALLOWLIST = () =>
   env("CRON_DAILY_PICKS_LEAGUES")
     .split(",")
@@ -74,24 +64,6 @@ const LEAGUE_ALLOWLIST = () =>
 
 /** When true (default), finished matches are verified + written to performance_log. */
 const VERIFY_FINISHED = () => env("CRON_DAILY_PICKS_VERIFY_FINISHED").toLowerCase() !== "false";
-
-/**
- * Weekly Accumulator coverage — the only competitions the daily sweep walks
- * by default. Mirrors LEAGUE_SLUGS in /api/weekly-accumulator so the cron's
- * 7-day window always feeds the accumulator's 7-day scan. Overridable per
- * environment with CRON_DAILY_PICKS_LEAGUES.
- */
-export const DAILY_PICKS_SWEEP_DAYS = 7;
-export const DAILY_PICKS_7DAY_LEAGUES: readonly string[] = [
-  "eng.1",
-  "esp.1",
-  "ger.1",
-  "ita.1",
-  "fra.1",
-  "uefa.champions",
-  "uefa.europa",
-  "uefa.europa.conf",
-];
 
 // ─── Shared types & lookups (reused by /api/cron/settle and /api/backfill/performance) ──
 
@@ -448,8 +420,7 @@ export async function fetchApiFootballFixtures(dates: string[]): Promise<Aggrega
 /**
  * Fetch fixtures for every competition from the shared fixture feed
  * (live data-source catalogue + fallbacks). Deduplicated across providers
- * and grouped by league slug. Defaults to the 7-day accumulator window;
- * callers may still pass an explicit `days` and/or `leagueSlugs` allow-list.
+ * and grouped by league slug. Does not walk a hardcoded league list.
  */
 export async function aggregateAllCompetitions(opts?: {
   leagueSlugs?: string[];
@@ -457,7 +428,7 @@ export async function aggregateAllCompetitions(opts?: {
   now?: Date;
   days?: number;
 }): Promise<CompetitionFixtures[]> {
-  const days = opts?.days ?? (opts?.dates?.length ? opts.dates.length : DAILY_PICKS_SWEEP_DAYS);
+  const days = opts?.days ?? (opts?.dates?.length ? opts.dates.length : 14);
   const allow = opts?.leagueSlugs?.length
     ? opts.leagueSlugs.map(canonicalLeagueSlug)
     : undefined;
@@ -802,93 +773,6 @@ export async function saveDailyPickRow(
   return true;
 }
 
-/**
- * Pure-Synthetic gate for the `predictions` learning log.
- *
- * Returns true only for unusable rows: the engine fell back to synthetic data
- * (fallbackMode === true) AND field completeness is below 45. Callers skip
- * the predictions-table write entirely for these so the Weekly Accumulator
- * never wastes time on rows it would reject. Real/Mixed outputs always pass.
- */
-export function isPureSyntheticPrediction(pred: OracleResult): boolean {
-  const completeness = pred.match?.dataCompletenessScore ?? 0;
-  return pred.match?.fallbackMode === true && completeness < 45;
-}
-
-/**
- * Bridge the sweep's engine output into the `predictions` learning log.
- *
- * `/api/match` persists the FULL engine result (Top-10 + markets + match
- * metadata) into `predictions.result` — but only when a user opens a match by
- * hand, which left the table almost empty while `daily_picks` held every match
- * the cron covered. Consumers that reuse the persisted Top-10 instead of
- * re-running the engine (the Weekly Accumulator) therefore found no candidates.
- *
- * This upserts one row per eventId with exactly the same JSON shape
- * `/api/match` writes, so those readers work for every swept match. An
- * existing row for the eventId is UPDATED (never duplicated): `event_id` has
- * no unique constraint — /api/match appends a row per page view — so the
- * newest row for the event is refreshed in place.
- *
- * Callers MUST check isPureSyntheticPrediction first and skip the call for
- * pure-Synthetic outputs — this function itself stays a dumb upsert so the
- * one-time backfill can share the exact same gate.
- *
- * Fail-soft: a logging-table hiccup must never abort the sweep or stop the
- * match's remaining writes, so failures are logged and reported as `null`.
- *
- * @returns "new" when a row was inserted, "updated" when an existing row for
- *          the eventId was refreshed, null when the write failed.
- */
-export async function savePredictionRow(
-  fx: FixtureLite,
-  competitionName: string,
-  pred: OracleResult,
-): Promise<"new" | "updated" | null> {
-  if (!fx.id) return null; // nothing to key the upsert on
-
-  const row = {
-    matchLabel:       `${fx.home.name} vs ${fx.away.name}`,
-    homeTeam:         fx.home.name,
-    awayTeam:         fx.away.name,
-    league:           competitionName,
-    leagueSlug:       fx.leagueSlug,
-    eventId:          fx.id,
-    matchDate:        fx.date.slice(0, 10),
-    tournamentStage:  pred.match?.tournamentStage ?? "",
-    topPick:          pred.top1?.[0]?.name ?? "N/A",
-    topHitRate:       pred.top1?.[0]?.hitRate ?? 0,
-    totalMarkets:     pred.totalMarkets,
-    qualifiedMarkets: pred.qualifiedMarkets,
-    // integer column — the engine's 0..100 score can carry a fraction.
-    dataCompleteness: Math.round(pred.match?.dataCompletenessScore ?? 0),
-    // The complete engine output: Top-10 + all markets + match metadata, so
-    // readers can reuse the persisted result exactly as /api/match leaves it.
-    result:           pred,
-  };
-
-  try {
-    const existing = await db
-      .select({ id: predictions.id })
-      .from(predictions)
-      .where(eq(predictions.eventId, fx.id))
-      .orderBy(desc(predictions.createdAt))
-      .limit(1);
-
-    if (existing[0]) {
-      await db.update(predictions).set(row).where(eq(predictions.id, existing[0].id));
-      return "updated";
-    }
-    await db.insert(predictions).values(row);
-    return "new";
-  } catch (err) {
-    console.error(
-      `[DailyPicks] predictions upsert failed for ${fx.id}: ${err instanceof Error ? err.message : String(err)}`,
-    );
-    return null;
-  }
-}
-
 /** Build BookmakerOdds from a fixture's own odds payload (scoreboard odds). */
 export function oddsFromFixture(fx: FixtureLite): BookmakerOdds | null {
   const o = fx.odds;
@@ -1015,12 +899,6 @@ interface ProcessOutcome {
   valueBets: number;
   skipped: number;
   lowConfidence: number;
-  /** Engine outputs mirrored into the `predictions` learning log this run. */
-  predictionsWritten: number;
-  predictionsInserted: number;
-  predictionsUpdated: number;
-  /** predictions-table writes skipped by the pure-Synthetic gate. */
-  predictionsSkipped: number;
   errors: string[];
 }
 
@@ -1031,8 +909,7 @@ export async function processCompetition(
   opts?: { verifyFinished?: boolean },
 ): Promise<ProcessOutcome> {
   const out: ProcessOutcome = {
-    matches: 0, verified: 0, tracked: 0, valueBets: 0, skipped: 0, lowConfidence: 0,
-    predictionsWritten: 0, predictionsInserted: 0, predictionsUpdated: 0, predictionsSkipped: 0, errors: [],
+    matches: 0, verified: 0, tracked: 0, valueBets: 0, skipped: 0, lowConfidence: 0, errors: [],
   };
   const verifyFinished = opts?.verifyFinished ?? VERIFY_FINISHED();
 
@@ -1079,27 +956,6 @@ export async function processCompetition(
         if (await saveDailyPickRow(fx, comp.competitionName, canonical)) out.tracked++;
       }
 
-      // Bridge into the `predictions` learning log: the same full engine JSON
-      // /api/match writes (Top-10 + markets + metadata), upserted by eventId.
-      // Without this the Weekly Accumulator — which reuses the persisted
-      // Top-10 rather than re-running the engine — only ever saw the handful
-      // of matches a user opened by hand. Runs for finished matches too (the
-      // evaluator above has already stamped their Top-10 outcomes), and after
-      // the daily_picks write so an existing pick row never blocks the update.
-      // Pure-Synthetic outputs are skipped entirely so the table stays clean
-      // for the accumulator (Real/Mixed only).
-      if (isPureSyntheticPrediction(canonical)) {
-        out.predictionsSkipped++;
-        const completeness = Math.round(canonical.match?.dataCompletenessScore ?? 0);
-        console.log(
-          `[DailyPicks] Skipped prediction for ${fx.home.name} vs ${fx.away.name} — synthetic data (completeness ${completeness})`,
-        );
-      } else {
-        const persisted = await savePredictionRow(fx, comp.competitionName, canonical);
-        if (persisted === "new") { out.predictionsInserted++; out.predictionsWritten++; }
-        else if (persisted === "updated") { out.predictionsUpdated++; out.predictionsWritten++; }
-      }
-
       // Value bets — recorded per mode (and, when finished, settled) either way.
       const odds = oddsFromFixture(fx);
       for (const [mode, pred] of preds) {
@@ -1135,13 +991,6 @@ export async function processCompetition(
     }
   }
 
-  if (out.predictionsWritten > 0 || out.predictionsSkipped > 0) {
-    console.log(
-      `[DailyPicks] Wrote ${out.predictionsWritten} predictions ` +
-      `(${out.predictionsInserted} new, ${out.predictionsUpdated} updated, ${out.predictionsSkipped} skipped)`,
-    );
-  }
-
   return out;
 }
 
@@ -1156,12 +1005,6 @@ export interface DailyPicksSweepSummary {
   verifiedLogged: number;
   matchesTracked: number;
   valueBetsLogged: number;
-  /** Engine outputs mirrored into the `predictions` learning log this sweep. */
-  predictionsWritten: number;
-  predictionsInserted: number;
-  predictionsUpdated: number;
-  /** predictions-table writes skipped by the pure-Synthetic gate this sweep. */
-  predictionsSkipped: number;
   lowConfidence: number;
   skippedUnplayable: number;
   failures: Array<{ leagueSlug: string; competitionName: string; error: string }>;
@@ -1172,19 +1015,13 @@ export async function runDailyPicksSweep(): Promise<DailyPicksSweepSummary> {
   const startedAt = Date.now();
   const deadline = startedAt + TIME_BUDGET_MS();
   const allowlist = LEAGUE_ALLOWLIST();
-  // Default scope: the 7-day accumulator window (8 leagues). An explicit
-  // CRON_DAILY_PICKS_LEAGUES allow-list still wins when set.
-  const sweepLeagues = allowlist.length ? allowlist : [...DAILY_PICKS_7DAY_LEAGUES];
 
-  console.log(`[Cron] Daily 7-day sweep started (${sweepLeagues.length} league(s), ${DAILY_PICKS_SWEEP_DAYS}-day window, budget ${Math.round(TIME_BUDGET_MS() / 1000)}s, schedule ${CRON_DAILY_PICKS_SCHEDULE()})`);
+  console.log(`[Cron] Daily all-league sweep started (${allowlist.length ? `${allowlist.length} league(s) allow-listed` : "ALL competitions"}, budget ${Math.round(TIME_BUDGET_MS() / 1000)}s, schedule ${CRON_DAILY_PICKS_SCHEDULE()})`);
 
-  const competitions = await aggregateAllCompetitions({
-    leagueSlugs: sweepLeagues,
-    days: DAILY_PICKS_SWEEP_DAYS,
-  });
+  const competitions = await aggregateAllCompetitions(
+    allowlist.length ? { leagueSlugs: allowlist } : undefined,
+  );
 
-  const sweepMatches = competitions.reduce((n, c) => n + c.fixtures.length, 0);
-  console.log(`[DailyPicks] 7-day sweep: ${sweepMatches} matches across ${competitions.length} competitions`);
   console.log(`[Cron] Aggregated ${competitions.length} competitions from the live fixture-feed catalogue`);
 
   const summary: DailyPicksSweepSummary = {
@@ -1196,10 +1033,6 @@ export async function runDailyPicksSweep(): Promise<DailyPicksSweepSummary> {
     verifiedLogged: 0,
     matchesTracked: 0,
     valueBetsLogged: 0,
-    predictionsWritten: 0,
-    predictionsInserted: 0,
-    predictionsUpdated: 0,
-    predictionsSkipped: 0,
     lowConfidence: 0,
     skippedUnplayable: 0,
     failures: [],
@@ -1219,10 +1052,6 @@ export async function runDailyPicksSweep(): Promise<DailyPicksSweepSummary> {
       summary.verifiedLogged += outcome.verified;
       summary.matchesTracked += outcome.tracked;
       summary.valueBetsLogged += outcome.valueBets;
-      summary.predictionsWritten += outcome.predictionsWritten;
-      summary.predictionsInserted += outcome.predictionsInserted;
-      summary.predictionsUpdated += outcome.predictionsUpdated;
-      summary.predictionsSkipped += outcome.predictionsSkipped;
       summary.lowConfidence += outcome.lowConfidence;
       summary.skippedUnplayable += outcome.skipped;
       for (const e of outcome.errors) console.error(`[Cron] ${comp.competitionName} — ${e}`);
@@ -1243,17 +1072,9 @@ export async function runDailyPicksSweep(): Promise<DailyPicksSweepSummary> {
     }
   }
 
-  // Sweep-level total for the predictions bridge (per-competition counts are
-  // logged inside processCompetition as each league finishes).
-  console.log(
-    `[DailyPicks] Wrote ${summary.predictionsWritten} predictions ` +
-    `(${summary.predictionsInserted} new, ${summary.predictionsUpdated} updated, ${summary.predictionsSkipped} skipped)`,
-  );
-
   console.log(
     `[Cron] Sweep finished: ${summary.leaguesProcessed} competitions, ${summary.matchesProcessed} matches, ` +
     `${summary.verifiedLogged} verified, ${summary.matchesTracked} tracked, ${summary.valueBetsLogged} value bets, ` +
-    `${summary.predictionsWritten} predictions mirrored, ` +
     `${summary.lowConfidence} low-confidence flagged, ${summary.leaguesFailed} failed`,
   );
 
