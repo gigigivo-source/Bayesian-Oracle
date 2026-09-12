@@ -218,6 +218,35 @@ async function processValueBet(
 export async function runSettlementEngine(): Promise<SettlementSummary> {
   const queues = await getPendingSettlementItems();
   const results = await fetchSettlementResults(queues);
+  // Result-provenance line: how many finished matches the result pass indexed
+  // and which source answered for them (the per-match [Settle] lines from
+  // ./results name the league slug + endpoint used for each one).
+  const sources = results.sourceCounts();
+  const pendingItems = queues.accumulators.length + queues.dailyPicks.length + queues.valueBets.length;
+  console.log(
+    `[Settle] ${pendingItems} pending item(s) against ${results.all().length} finished match(es) ` +
+    `(ESPN summary ${sources.espnSummary}, scoreboard ${sources.scoreboard})`,
+  );
+  // Rows whose match no source could resolve are the reason a sweep reports
+  // "0 matches" — name them so the next run is diagnosable at a glance.
+  const pendingRefs: Array<{ label: string; eventId?: string | null }> = [
+    ...queues.dailyPicks.map((row) => ({ label: row.match, eventId: row.eventId })),
+    ...queues.valueBets.map((row) => ({ label: row.match, eventId: row.eventId })),
+    ...queues.accumulators.flatMap((slip) => Array.isArray(slip.picks)
+      ? (slip.picks as StoredLeg[]).map((leg) => ({
+          label: leg.matchLabel ?? leg.match ?? `slip #${slip.id}`,
+          eventId: leg.fixtureId ?? leg.eventId,
+        }))
+      : []),
+  ];
+  const unresolved = pendingRefs.filter((ref) => !results.find(ref.eventId, ref.label));
+  if (unresolved.length > 0) {
+    const shown = unresolved.slice(0, 10).map((ref) => `${ref.label} (event ${ref.eventId ?? "?"})`);
+    console.log(
+      `[Settle] No finished result yet for ${unresolved.length} pending match(es): ` +
+      `${shown.join("; ")}${unresolved.length > shown.length ? " …" : ""}`,
+    );
+  }
   // Fetch the full boxscore for every finished match up-front (memo-cached,
   // bounded concurrency) so per-leg evaluation below is a cache read.
   await prefetchBoxscores(results.all());
