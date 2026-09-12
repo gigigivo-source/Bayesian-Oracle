@@ -13,7 +13,11 @@
 //          penalty events, with the aggregator's full-match totals as the
 //          zero-event proof);
 //   3. refreshes performance_log rows whose stat markets were still pending
-//      (boxscore arrives later than the final whistle);
+//      (boxscore arrives later than the final whistle) — resolving them from
+//      the FULL multi-source boxscore, and marking any market no source can
+//      provide VOID (stake returned) once the match is older than the 24h
+//      settlement grace window, so finished matches never keep markets stuck
+//      in PENDING indefinitely;
 //   4. backfills leagueSlug / competitionName on legacy performance rows so
 //      the league dashboard has full transparency across old + new data.
 //
@@ -23,14 +27,16 @@
 import { db } from "@/db";
 import { dailyPicks, performanceLog, savedSlips, valueBetLog } from "@/db/schema";
 import { and, count, eq, isNull, isNotNull, gt } from "drizzle-orm";
-import { runSettlementEngine } from "@/lib/settlement/engine";
+import { runSettlementEngine, settlementStatusLabel } from "@/lib/settlement/engine";
 import {
   getPendingSettlementItems,
   settleAccumulator,
   settleDailyPick,
   settleValueBet,
 } from "@/db/queries/settlement";
-import { evaluateLeg, type MatchResult } from "@/lib/settlement/evaluate";
+import {
+  evaluateLegDetailed, statsGraceElapsed, STATS_SETTLEMENT_GRACE_HOURS, type MatchResult,
+} from "@/lib/settlement/evaluate";
 import { resolveSureCornerOutcome } from "@/lib/settlement/sureCornerOutcomes";
 import type { CanonicalMatchStats } from "@/lib/data/types";
 import { resilientJson } from "@/lib/httpClient";
@@ -42,6 +48,7 @@ import {
 } from "../daily-picks/route";
 import { GET as fixturesGET } from "@/app/api/fixtures/route";
 import { statsAggregator } from "@/lib/data/aggregator";
+import { getSettlementBoxscore } from "@/lib/settlement/results";
 import { canonicalLeagueSlug } from "@/lib/leaguePriority";
 import { evaluateFinishedMatch } from "@/lib/engine";
 import { runOracleWithStandings } from "@/lib/engine/oracle";
@@ -87,13 +94,38 @@ function fixtureFromPerformanceRow(row: typeof performanceLog.$inferSelect): Fix
 
 // ─── Task 1: refresh performance_log rows with still-pending stat markets ────
 
-async function refreshPendingPerformanceRows(force = false): Promise<number> {
+export interface PerformanceRefreshResult {
+  /** Markets newly resolved (PENDING → any final status) this run. */
+  resolved: number;
+  /** Markets newly marked VOID because no source ever had the stat. */
+  voided: number;
+  /** Newly HIT / newly MISS / newly PUSH entries, for the run summary line. */
+  win: number;
+  loss: number;
+  push: number;
+  /** Matches touched by the refresh. */
+  matches: number;
+}
+
+/** Stored top10Detail outcome → canonical per-market label for the log line. */
+function performanceStatusLabel(outcome: string): string {
+  switch (outcome) {
+    case "HIT": return "WIN";
+    case "MISS": return "LOSS";
+    case "PUSH": return "PUSH";
+    case "VOID": return "VOID (no stats)";
+    default: return "PENDING";
+  }
+}
+
+/** Exported for tests — the cron sweeps it through runAllLeagueSettlement(). */
+export async function refreshPendingPerformanceRows(force = false): Promise<PerformanceRefreshResult> {
   const rows = await db
     .select()
     .from(performanceLog)
     .where(gt(performanceLog.pending, 0))
     .limit(SWEEP_LIMIT(force));
-  let refreshed = 0;
+  const result: PerformanceRefreshResult = { resolved: 0, voided: 0, win: 0, loss: 0, push: 0, matches: 0 };
   const resolvedByLeague: Record<string, number> = {};
 
   for (const row of rows) {
@@ -103,29 +135,63 @@ async function refreshPendingPerformanceRows(force = false): Promise<number> {
       const rankingMode = (row.rankingMode as RankingMode) || "B";
       const pred = await runOracleWithStandings(fx, { rankingMode });
       if (!pred) continue;
+
+      // FULL boxscore supply for settlement (Part 1): the ESPN summary
+      // endpoint first (its key space is what evaluateFinishedMatch reads),
+      // then the multi-source aggregator walk (API-Football /fixtures/
+      // statistics, StatsBomb, FBref, TheSportsDB, Understat, … — first-wins,
+      // memo-cached, so repeated settlement runs never re-fetch).
+      const matchResult: MatchResult = {
+        eventId:    fx.id,
+        leagueSlug: fx.leagueSlug,
+        date:       row.matchDate,
+        homeName:   row.homeTeam,
+        awayName:   row.awayTeam,
+        homeScore:  row.homeScore,
+        awayScore:  row.awayScore,
+      };
+      const canonicalStats = (await getSettlementBoxscore(matchResult)).stats;
       const boxscore =
-        (await fetchEspnBoxscore(fx.leagueSlug, fx.id)) ??
-        statsToBoxscore(
-          await statsAggregator
-            .fetch({
-              leagueSlug: fx.leagueSlug,
-              eventId: fx.id,
-              homeTeam: fx.home.name,
-              awayTeam: fx.away.name,
-              date: fx.date,
-              // Settlement: per-match stats only (fx.state is "post").
-              state: fx.state,
-            })
-            .catch(() => null),
-        );
+        (await fetchEspnBoxscore(fx.leagueSlug, fx.id)) ?? statsToBoxscore(canonicalStats);
       evaluateFinishedMatch(fx, pred, boxscore);
 
       // Merge fresh outcomes into the stored detail, keeping original fields.
       const fresh = new Map(
         pred.top10.map((m) => [`${m.name}|${m.selection}`, m.outcome ?? "PENDING"]),
       );
+      // Markets the ESPN boxscore key space cannot see (throw-ins, goal
+      // kicks, saves …) get a second resolution pass through the settlement
+      // evaluator against the canonical multi-source stats. Whatever still
+      // cannot be resolved is decided by the 24h grace window: recent games
+      // wait for late data (PENDING), older ones VOID — stake returned — so
+      // no finished match can keep a market pending forever.
+      const graceElapsed = statsGraceElapsed(matchResult);
+      const newlyResolved: string[] = [];
+      let voidedHere = 0;
       const detail = (row.top10Detail as Array<{ name: string; selection: string; outcome?: string }>)
-        .map((p) => ({ ...p, outcome: fresh.get(`${p.name}|${p.selection}`) ?? p.outcome ?? "PENDING" }));
+        .map((p) => {
+          const previous = p.outcome ?? "PENDING";
+          let outcome = fresh.get(`${p.name}|${p.selection}`) ?? previous ?? "PENDING";
+          if (outcome === "PENDING") {
+            const evaluation = evaluateLegDetailed(
+              { marketName: p.name, selection: p.selection },
+              matchResult,
+              canonicalStats,
+            );
+            if (evaluation.outcome === "won") outcome = "HIT";
+            else if (evaluation.outcome === "lost") outcome = "MISS";
+            else if (evaluation.outcome === "void") outcome = evaluation.push ? "PUSH" : "VOID";
+            if (outcome === "PENDING" && graceElapsed) outcome = "VOID";
+            if (outcome === "VOID") voidedHere++;
+          }
+          if (outcome !== previous) {
+            newlyResolved.push(`${p.name}: ${performanceStatusLabel(outcome)}`);
+            if (outcome === "HIT") result.win++;
+            else if (outcome === "MISS") result.loss++;
+            else if (outcome === "PUSH") result.push++;
+          }
+          return { ...p, outcome };
+        });
 
       const hits    = detail.filter((p) => p.outcome === "HIT").length;
       const misses  = detail.filter((p) => p.outcome === "MISS").length;
@@ -138,7 +204,13 @@ async function refreshPendingPerformanceRows(force = false): Promise<number> {
         accuracy: decided > 0 ? hits / decided : row.accuracy,
       }).where(eq(performanceLog.id, row.id));
       const resolved = Math.max(0, row.pending - pending);
-      refreshed += resolved;
+      result.resolved += resolved;
+      result.voided += voidedHere;
+      if (newlyResolved.length > 0) {
+        result.matches++;
+        // Per-market settlement log (Part 4).
+        console.log(`[Settle] ${row.matchLabel} — ${newlyResolved.join(", ")}`);
+      }
       if (resolved > 0) {
         const label = LEAGUE_MAP[row.leagueSlug ?? ""]?.name ?? row.competitionName ?? row.league;
         resolvedByLeague[label] = (resolvedByLeague[label] ?? 0) + resolved;
@@ -150,7 +222,7 @@ async function refreshPendingPerformanceRows(force = false): Promise<number> {
   for (const [league, resolved] of Object.entries(resolvedByLeague)) {
     console.log(`[Settle] Resolved ${resolved} pending bets for ${league}`);
   }
-  return refreshed;
+  return result;
 }
 
 // ─── Task 2: multi-source settlement of every pending tracked item ───────────
@@ -162,8 +234,15 @@ interface SettlePass {
   won: number;
   lost: number;
   void: number;
+  push: number;
   stillPending: number;
   failed: number;
+  /** Per-MARKET outcome tally across every row this pass evaluated. */
+  markets: { resolved: number; win: number; loss: number; push: number; void: number; pending: number };
+  /** Distinct finished matches touched by this pass. */
+  matches: number;
+  /** Pending markets on matches already past the 24h grace (expected: 0). */
+  stuckPending: number;
   resolvedByLeague: Record<string, number>;
 }
 
@@ -187,7 +266,9 @@ async function seedResultsFromFixtureFeed(): Promise<MatchResult[]> {
   const results: MatchResult[] = [];
   for (const fx of payload.fixtures ?? []) {
     const result = resultFromFixture(fx);
-    if (result) results.push(result);
+    // Keep the exact kickoff timestamp so the 24h stats-void grace measures
+    // from the real final whistle (resultFromFixture truncates the date).
+    if (result) results.push({ ...result, kickoffAt: fx.date });
   }
   console.log(`[Settle] Seeded ${results.length} finished results from the fixture-feed catalogue`);
   return results;
@@ -238,30 +319,47 @@ async function settlePendingAcrossAllSources(force = false): Promise<SettlePass>
     return cache.get(key) ?? null;
   };
 
-  // Canonical stats cache-first lookup so stat legs settle from real data.
-  const statsCache = new Map<string, Awaited<ReturnType<typeof statsAggregator.peek>>>();
+  // Full boxscore, cache-first (settlement memo → aggregator cache → the
+  // multi-source walk). Memoised per match, so repeated settlement runs and
+  // multi-leg slips never re-fetch the same fixture.
+  const matchesTouched = new Set<string>();
   const resolveStats = async (result: MatchResult | null) => {
     if (!result) return null;
-    const key = `${result.leagueSlug}|${result.eventId}`;
-    if (!statsCache.has(key)) {
-      statsCache.set(key, await statsAggregator.fetch({
-        leagueSlug: result.leagueSlug,
-        eventId: result.eventId,
-        homeTeam: result.homeName,
-        awayTeam: result.awayName,
-        date: result.date,
-      }));
-    }
-    return statsCache.get(key) ?? null;
+    return (await getSettlementBoxscore(result)).stats;
   };
 
   const pass: SettlePass = {
-    dailyPicks: 0, valueBets: 0, accumulators: 0, won: 0, lost: 0, void: 0, stillPending: 0,
-    failed: 0, resolvedByLeague: {},
+    dailyPicks: 0, valueBets: 0, accumulators: 0, won: 0, lost: 0, void: 0, push: 0,
+    stillPending: 0, failed: 0, stuckPending: 0, matches: 0,
+    markets: { resolved: 0, win: 0, loss: 0, push: 0, void: 0, pending: 0 },
+    resolvedByLeague: {},
   };
   const recordResolved = (leagueSlug: string | null | undefined) => {
     const label = LEAGUE_MAP[leagueSlug ?? ""]?.name ?? leagueSlug ?? "Unknown League";
     pass.resolvedByLeague[label] = (pass.resolvedByLeague[label] ?? 0) + 1;
+  };
+  /** Count one MARKET outcome (per-market, unlike the row counters above). */
+  const countMarket = (
+    result: MatchResult | null,
+    evaluation: ReturnType<typeof evaluateLegDetailed>,
+  ): void => {
+    pass.markets.pending += evaluation.outcome === "pending" ? 1 : 0;
+    if (evaluation.outcome === "pending") {
+      // Past the grace window a pending market is stuck — evaluateLegDetailed
+      // escalates those to VOID, so this branch is a regression alarm only.
+      if (result && statsGraceElapsed(result)) pass.stuckPending++;
+      return;
+    }
+    pass.markets.resolved++;
+    if (result) matchesTouched.add(`${result.leagueSlug}|${result.eventId}`);
+    if (evaluation.outcome === "won") pass.markets.win++;
+    else if (evaluation.outcome === "lost") pass.markets.loss++;
+    else if (evaluation.push) pass.markets.push++;
+    else pass.markets.void++;
+  };
+  /** `[Settle] Arsenal vs Chelsea — Market A: WIN, Market B: VOID (no stats)` */
+  const logMarkets = (matchLabel: string, parts: string[]): void => {
+    if (parts.length > 0) console.log(`[Settle] ${matchLabel} — ${parts.join(", ")}`);
   };
 
   // ── Daily picks ─────────────────────────────────────────────────────────────
@@ -274,21 +372,33 @@ async function settlePendingAcrossAllSources(force = false): Promise<SettlePass>
 
       const picks = row.picks.map((raw) => {
         const pick = raw as { name?: string; marketName?: string; selection?: string; outcome?: string };
-        const outcome = evaluateLeg(
+        const evaluation = evaluateLegDetailed(
           { marketName: pick.marketName ?? pick.name, selection: pick.selection },
           result,
           stats,
         );
-        const stored = outcome === "won" ? "HIT" : outcome === "lost" ? "MISS" : outcome.toUpperCase();
-        return { pick: { ...pick, outcome: stored }, outcome };
+        countMarket(result, evaluation);
+        const stored =
+          evaluation.outcome === "won" ? "HIT" :
+          evaluation.outcome === "lost" ? "MISS" :
+          evaluation.push ? "PUSH" : evaluation.outcome.toUpperCase();
+        return { pick: { ...pick, outcome: stored }, evaluation };
       });
-      if (picks.some(({ outcome }) => outcome === "pending")) { pass.stillPending++; continue; }
+      // One log line per match listing every market's status (Part 4).
+      logMarkets(
+        `${result.homeName} vs ${result.awayName}`,
+        picks.map(({ pick, evaluation }) =>
+          `${(pick.marketName ?? pick.name ?? "Unknown market").trim()}: ${settlementStatusLabel(evaluation)}`,
+        ),
+      );
+      if (picks.some(({ evaluation }) => evaluation.outcome === "pending")) { pass.stillPending++; continue; }
 
-      const hits   = picks.filter(({ outcome }) => outcome === "won").length;
-      const misses = picks.filter(({ outcome }) => outcome === "lost").length;
-      const voids  = picks.filter(({ outcome }) => outcome === "void").length;
+      const hits    = picks.filter(({ evaluation }) => evaluation.outcome === "won").length;
+      const misses  = picks.filter(({ evaluation }) => evaluation.outcome === "lost").length;
+      const pushes  = picks.filter(({ evaluation }) => evaluation.outcome === "void" && evaluation.push).length;
+      const voids   = picks.filter(({ evaluation }) => evaluation.outcome === "void" && !evaluation.push).length;
       const changed = await settleDailyPick(row, {
-        hits, misses, voids,
+        hits, misses, voids: voids + pushes,
         homeScore: result.homeScore,
         awayScore: result.awayScore,
         pickResults: picks.map(({ pick }) => pick),
@@ -299,6 +409,7 @@ async function settlePendingAcrossAllSources(force = false): Promise<SettlePass>
         if (hits > 0) pass.won++;
         if (misses > 0) pass.lost++;
         if (voids > 0) pass.void++;
+        if (pushes > 0) pass.push++;
       }
     } catch {
       pass.failed++;
@@ -311,14 +422,24 @@ async function settlePendingAcrossAllSources(force = false): Promise<SettlePass>
       const result = await resolve(row.eventId, row.leagueSlug, row.match, row.matchDate);
       if (!result) { pass.stillPending++; continue; }
       const stats = await resolveStats(result);
-      const outcome = evaluateLeg({ marketName: row.marketName, selection: row.selection }, result, stats);
-      if (outcome === "pending") { pass.stillPending++; continue; }
+      const evaluation = evaluateLegDetailed({ marketName: row.marketName, selection: row.selection }, result, stats);
+      countMarket(result, evaluation);
+      logMarkets(`${result.homeName} vs ${result.awayName}`, [
+        `${(row.marketName ?? "Unknown market").trim()}: ${settlementStatusLabel(evaluation)}`,
+      ]);
+      if (evaluation.outcome === "pending") { pass.stillPending++; continue; }
+      // Line-pushes return the stake exactly like a void — the ledger's
+      // vocabulary is won | lost | void; PUSH vs VOID shows in the log + tally.
+      const outcome = evaluation.outcome === "won" ? "won" : evaluation.outcome === "lost" ? "lost" : "void";
       const actualReturn = outcome === "won" ? row.stake * row.bookOdds : outcome === "void" ? row.stake : 0;
       const changed = await settleValueBet(row, { outcome, actualReturn, pnl: actualReturn - row.stake });
       if (changed) {
         pass.valueBets++;
         recordResolved(row.leagueSlug);
-        if (outcome === "won") pass.won++; else if (outcome === "lost") pass.lost++; else pass.void++;
+        if (outcome === "won") pass.won++;
+        else if (outcome === "lost") pass.lost++;
+        else if (evaluation.push) pass.push++;
+        else pass.void++;
       }
     } catch {
       pass.failed++;
@@ -334,18 +455,24 @@ async function settlePendingAcrossAllSources(force = false): Promise<SettlePass>
 
       let allSettled = true;
       let allHit     = true;
-      const evaluated: Array<{ outcome: string }> = [];
+      const evaluated: Array<{ outcome: string; push?: boolean }> = [];
+      const legLabels: string[] = [];
 
       for (const leg of legs) {
         if (!leg?.fixtureId || !leg?.leagueSlug) { allSettled = false; continue; }
         const result = await resolve(leg.fixtureId, leg.leagueSlug, leg.matchLabel ?? "", leg.date ?? "");
         if (!result) { allSettled = false; continue; }
         const stats = await resolveStats(result);
-        const outcome = evaluateLeg({ marketName: leg.marketName, selection: leg.selection }, result, stats);
-        evaluated.push({ outcome });
-        if (outcome === "pending") allSettled = false;
-        if (outcome === "lost") allHit = false;
+        const evaluation = evaluateLegDetailed({ marketName: leg.marketName, selection: leg.selection }, result, stats);
+        countMarket(result, evaluation);
+        legLabels.push(
+          `${(leg.matchLabel ?? `${result.homeName} vs ${result.awayName}`)} · ${(leg.marketName ?? "Unknown market").trim()}: ${settlementStatusLabel(evaluation)}`,
+        );
+        evaluated.push({ outcome: evaluation.outcome, push: evaluation.push });
+        if (evaluation.outcome === "pending") allSettled = false;
+        if (evaluation.outcome === "lost") allHit = false;
       }
+      logMarkets(`Slip #${slip.id}`, legLabels);
       if (!allSettled || evaluated.length !== legs.length) { pass.stillPending++; continue; }
 
       const wonLegs  = evaluated.filter((l) => l.outcome === "won").length;
@@ -369,6 +496,7 @@ async function settlePendingAcrossAllSources(force = false): Promise<SettlePass>
     }
   }
 
+  pass.matches = matchesTouched.size;
   for (const [league, resolved] of Object.entries(pass.resolvedByLeague)) {
     console.log(`[Settle] Resolved ${resolved} pending bets for ${league}`);
   }
@@ -577,6 +705,8 @@ interface FeatureSettlePass {
   voided: number;
   stillPending: number;
   failed: number;
+  /** Distinct matches with at least one feature pick settled this run. */
+  matches: number;
   resolvedByLeague: Record<string, number>;
 }
 
@@ -588,7 +718,7 @@ function detailOutcomeForUpdate(outcome: string): string {
 export async function settleFeaturePicks(force = false): Promise<FeatureSettlePass> {
   const pass: FeatureSettlePass = {
     backfilledCorners: 0, corners: 0, first5: 0, won: 0, lost: 0, push: 0,
-    voided: 0, stillPending: 0, failed: 0, resolvedByLeague: {},
+    voided: 0, stillPending: 0, failed: 0, matches: 0, resolvedByLeague: {},
   };
 
   // Legacy backfill: every rankingMode='S' row is a Sure Bet Corners pick by
@@ -701,8 +831,22 @@ export async function settleFeaturePicks(force = false): Promise<FeatureSettlePa
             outcome = resolveFirst5Outcome(market, selection, result, stats, timeline);
           }
           if (outcome === null || outcome === undefined) {
-            pass.stillPending++;
-            continue;
+            // The match has a confirmed final result but the data this feature
+            // needs (corner counts / first-5 event timeline) is still missing.
+            // Inside the 24h grace the pick waits — feeds publish late; once
+            // the grace elapsed, no future run can honestly resolve it, so
+            // the market is VOIDED (stake returned) instead of rotting in
+            // 'pending' forever.
+            if (statsGraceElapsed(result)) {
+              outcome = "VOID";
+              console.log(
+                `[Settle] ${pick.matchLabel} — ${market || "Unknown market"}: VOID ` +
+                `(no stats after ${STATS_SETTLEMENT_GRACE_HOURS}h grace)`,
+              );
+            } else {
+              pass.stillPending++;
+              continue;
+            }
           }
 
           // Guarded update: only settle rows still 'pending' so a concurrent
@@ -738,6 +882,7 @@ export async function settleFeaturePicks(force = false): Promise<FeatureSettlePa
 
           if (pick.feature === "corners") pass.corners++;
           else pass.first5++;
+          pass.matches++;
           recordResolved(pick.leagueSlug);
           if (outcome === "WIN") pass.won++;
           else if (outcome === "LOSS") pass.lost++;
@@ -826,6 +971,13 @@ export interface SettleSweepSummary {
   multiSource: SettlePass;
   featurePicks: FeatureSettlePass;
   refreshedPerformanceRows: number;
+  performanceRefresh: PerformanceRefreshResult;
+  /** Aggregated per-MARKET outcome tally for the whole sweep. */
+  markets: { resolved: number; win: number; loss: number; push: number; void: number; pending: number };
+  /** Distinct finished matches touched across all passes. */
+  matches: number;
+  /** Pending markets past the 24h grace — the escalation keeps this at 0. */
+  stuckPending: number;
   legacyBackfill: { performanceRows: number; valueBetRows: number; slipRows: number };
   failures: string[];
   totalPending: number;
@@ -861,8 +1013,10 @@ async function runAllLeagueSettlement(force = false): Promise<SettleSweepSummary
 
   // 2) Multi-source pass — everything still pending across ALL competitions.
   let multiSource: SettlePass = {
-    dailyPicks: 0, valueBets: 0, accumulators: 0, won: 0, lost: 0, void: 0, stillPending: 0,
-    failed: 0, resolvedByLeague: {},
+    dailyPicks: 0, valueBets: 0, accumulators: 0, won: 0, lost: 0, void: 0, push: 0,
+    stillPending: 0, failed: 0, stuckPending: 0, matches: 0,
+    markets: { resolved: 0, win: 0, loss: 0, push: 0, void: 0, pending: 0 },
+    resolvedByLeague: {},
   };
   try {
     multiSource = await settlePendingAcrossAllSources(force);
@@ -874,7 +1028,7 @@ async function runAllLeagueSettlement(force = false): Promise<SettleSweepSummary
   //    First 5 Minutes (feature = 'first5').
   let featurePicks: FeatureSettlePass = {
     backfilledCorners: 0, corners: 0, first5: 0, won: 0, lost: 0, push: 0, voided: 0,
-    stillPending: 0, failed: 0, resolvedByLeague: {},
+    stillPending: 0, failed: 0, matches: 0, resolvedByLeague: {},
   };
   try {
     featurePicks = await settleFeaturePicks(force);
@@ -882,13 +1036,15 @@ async function runAllLeagueSettlement(force = false): Promise<SettleSweepSummary
     failures.push(`feature pick settlement: ${err instanceof Error ? err.message : String(err)}`);
   }
 
-  // 4) Refresh performance rows with late-arriving boxscores.
-  let refreshedPerformanceRows = 0;
+  // 4) Refresh performance rows with late-arriving boxscores (and VOID the
+  //    markets no source will ever provide once the 24h grace elapsed).
+  let performanceRefresh: PerformanceRefreshResult = { resolved: 0, voided: 0, win: 0, loss: 0, push: 0, matches: 0 };
   try {
-    refreshedPerformanceRows = await refreshPendingPerformanceRows(force);
+    performanceRefresh = await refreshPendingPerformanceRows(force);
   } catch (err) {
     failures.push(`performance refresh: ${err instanceof Error ? err.message : String(err)}`);
   }
+  const refreshedPerformanceRows = performanceRefresh.resolved;
 
   // 5) Legacy league field backfill.
   let legacyBackfill = { performanceRows: 0, valueBetRows: 0, slipRows: 0 };
@@ -910,8 +1066,37 @@ async function runAllLeagueSettlement(force = false): Promise<SettleSweepSummary
 
   const resolved = (engine?.settled.total ?? 0) + multiSource.dailyPicks + multiSource.valueBets +
     multiSource.accumulators + featurePicks.corners + featurePicks.first5 + refreshedPerformanceRows;
+
+  // ── End-of-run summary over EVERY market the sweep touched (Part 4) ───────
+  const markets = {
+    resolved:
+      (engine?.markets.resolved ?? 0) + multiSource.markets.resolved +
+      featurePicks.won + featurePicks.lost + featurePicks.push + featurePicks.voided +
+      performanceRefresh.win + performanceRefresh.loss + performanceRefresh.push + performanceRefresh.voided,
+    win:
+      (engine?.markets.win ?? 0) + multiSource.markets.win + featurePicks.won + performanceRefresh.win,
+    loss:
+      (engine?.markets.loss ?? 0) + multiSource.markets.loss + featurePicks.lost + performanceRefresh.loss,
+    push:
+      (engine?.markets.push ?? 0) + multiSource.markets.push + featurePicks.push + performanceRefresh.push,
+    void:
+      (engine?.markets.void ?? 0) + multiSource.markets.void + featurePicks.voided + performanceRefresh.voided,
+    pending: (engine?.markets.pending ?? 0) + multiSource.markets.pending + featurePicks.stillPending,
+  };
+  const matches =
+    (engine?.matches ?? 0) + multiSource.matches + featurePicks.matches + performanceRefresh.matches;
+  // Stuck = still pending on a match already past the grace window. The
+  // escalation above guarantees this is 0; the counter alarms on regressions.
+  const stuckPending = (engine?.stuckPending ?? 0) + multiSource.stuckPending;
+  console.log(
+    `[Settle] Run complete: ${matches} matches, ${markets.resolved} markets resolved ` +
+    `(WIN ${markets.win}, LOSS ${markets.loss}, PUSH ${markets.push}, VOID ${markets.void}), ` +
+    `${stuckPending} stuck pending`,
+  );
+
   return {
     ok: failures.length === 0, engine, multiSource, featurePicks, refreshedPerformanceRows,
+    performanceRefresh, markets, matches, stuckPending,
     legacyBackfill, failures, totalPending, resolved,
     failed: multiSource.failed + featurePicks.failed + failures.length,
     ranAt: new Date().toISOString(),
