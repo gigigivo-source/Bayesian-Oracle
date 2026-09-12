@@ -668,6 +668,23 @@ function Header({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
               </div>
               <div className="text-[11px] mt-0.5 leading-snug text-slate-500">Positive EV bets across all sources, sized by Kelly</div>
             </button>
+            <button
+              type="button"
+              role="menuitem"
+              title="Value Accumulator — ranked tickets this week, best first"
+              aria-label="Value Accumulator — ranked tickets this week, best first"
+              onClick={() => {
+                router.push("/value-accumulator");
+                setMenuOpen(false);
+              }}
+              className={`${MENU_ITEM} w-full px-4 py-3 text-left rounded-xl`}
+            >
+              <div className="flex items-center justify-between">
+                <div className="text-sm font-medium leading-tight">📈 Value Accumulator</div>
+                <span className="rounded-full bg-emerald-500/15 px-1.5 py-0.5 font-mono text-[9px] font-bold uppercase tracking-wider text-emerald-300">VA</span>
+              </div>
+              <div className="text-[11px] mt-0.5 leading-snug text-slate-500">Ranked tickets this week, best first</div>
+            </button>
             {menuTabs.map((t) => (
               <button
                 key={t.id}
