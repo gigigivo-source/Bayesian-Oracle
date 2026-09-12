@@ -2,8 +2,8 @@
 import { fetchScoreboard, type FixtureLite } from "@/lib/espn";
 import { leagueTier } from "@/lib/leaguePriority";
 import { runEngineFromReal } from "@/lib/engine";
-import { fetchOddsForFixture, type VaBookmakerOdds } from "./oddsFetcher";
-import { matchEngineMarketToBookmaker } from "./marketMap";
+import { fetchOddsForEvent, resolveBzzoiroEventId, type VaBookmakerOdds } from "./oddsFetcher";
+import { matchEngineMarketToBookmaker, type TeamContext } from "./marketMap";
 import type { VaLeg } from "./ticket";
 import { db } from "@/db";
 import { vaLegs } from "@/db/schema";
@@ -75,43 +75,6 @@ async function fetchMatchesForLeague(leagueSlug: string, days: number): Promise<
   }
 }
 
-// Resolve API-Football fixture ID by date + teams
-// We reuse searchFixture logic from apiFootball lib, but implement lightweight here to avoid coupling
-async function resolveApiFootballId(fx: FixtureLite): Promise<string | null> {
-  const key = (process.env.API_FOOTBALL_KEY ?? process.env.FOOTBALL_API_KEY ?? "").trim();
-  if (!key) return null;
-  const date = fx.date.slice(0, 10); // YYYY-MM-DD
-  const url = `https://v3.football.api-sports.io/fixtures?date=${date}`;
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 8000);
-  try {
-    const res = await fetch(url, {
-      headers: { "x-apisports-key": key },
-      signal: controller.signal,
-    });
-    if (!res.ok) return null;
-    const data = (await res.json()) as {
-      response: Array<{
-        fixture: { id: number; date: string };
-        teams: { home: { name: string }; away: { name: string } };
-      }>;
-    };
-    if (!data.response) return null;
-    const homeNorm = fx.home.name.toLowerCase().slice(0, 5);
-    const awayNorm = fx.away.name.toLowerCase().slice(0, 5);
-    const found = data.response.find((r) => {
-      const h = r.teams.home.name.toLowerCase();
-      const a = r.teams.away.name.toLowerCase();
-      return h.includes(homeNorm) || a.includes(awayNorm) || h.includes(awayNorm) || a.includes(homeNorm);
-    });
-    return found ? String(found.fixture.id) : null;
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
 export interface ScanResult {
   matchesScanned: number;
   marketsEvaluated: number;
@@ -168,24 +131,25 @@ export async function scanValueLegs(scanId: string, days = 7): Promise<ScanResul
     const markets = engineResult.markets ?? [];
     marketsEvaluated += markets.length;
 
-    // b. Get API-Football fixture ID
-    let apiId: string | null = null;
-    // Try to use fx.id if it's numeric (ESPN id is numeric but different), but we need API-Football id
-    // So resolve via date+teams
+    // b. Resolve the Bzzoiro event for this fixture (in-memory cached per match)
+    let bzEventId: string | null = null;
     try {
-      apiId = await resolveApiFootballId(fx);
+      bzEventId = await resolveBzzoiroEventId(fx);
     } catch {
-      apiId = null;
+      bzEventId = null;
     }
-    if (!apiId) {
-      // No API-Football ID, skip odds fetching for this match (contributes zero legs)
+    const matchLabel = `${fx.home.name} vs ${fx.away.name}`;
+    if (!bzEventId) {
+      // No Bzzoiro event ID for this match — skip the match entirely (no odds, no fabricated prices)
+      console.log(`[VA] no Bzzoiro event for ${matchLabel} — skipping match`);
       continue;
     }
+    console.log(`[VA] resolved Bzzoiro event ${bzEventId} for ${matchLabel}`);
 
-    // c. Fetch odds
+    // c. Fetch odds for that event (consensus preferred, fail soft to [])
     let bookmakerOdds: VaBookmakerOdds[] = [];
     try {
-      bookmakerOdds = await fetchOddsForFixture(apiId);
+      bookmakerOdds = await fetchOddsForEvent(bzEventId);
     } catch {
       bookmakerOdds = [];
     }
@@ -197,7 +161,8 @@ export async function scanValueLegs(scanId: string, days = 7): Promise<ScanResul
       const hitRate = m.hitRate;
       if (typeof hitRate !== "number" || !Number.isFinite(hitRate)) continue;
 
-      const matched = matchEngineMarketToBookmaker(m.name, m.selection, bookmakerOdds);
+      const teams: TeamContext = { home: fx.home.name, away: fx.away.name };
+      const matched = matchEngineMarketToBookmaker(m.name, m.selection, bookmakerOdds, teams);
       if (!matched) continue;
 
       const realOdds = matched.odds;
