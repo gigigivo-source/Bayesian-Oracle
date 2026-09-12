@@ -7,12 +7,33 @@ export interface EngineMarketRef {
   family?: string;
 }
 
+/** Optional team context so 1X2 selections like "Arsenal Win" can match Bzzoiro's HOME/AWAY outcomes. */
+export interface TeamContext {
+  home: string;
+  away: string;
+}
+
 // Explicit map table for common pairs
 // Key: normalized engine market base, Value: array of possible bookmaker market labels (normalized)
+//
+// Bzzoiro market vocabulary (verified against sports.bzzoiro.com/docs/football/odds-predictions/):
+//   1x2            → HOME / DRAW / AWAY
+//   over_under_15 / over_under_25 / over_under_35 → over / under (+ line)
+//   btts           → yes / no
+//   double_chance  → 1X / 12 / X2
+//   total_corners  → over / under (+ line, 7.5–11.5)
+//   draw_no_bet    → HOME / AWAY
+// Cards / shots / SOT / offsides markets are NOT priced by Bzzoiro — engine legs
+// for those families simply find no bookmaker row and are skipped (never fabricated).
 const EXPLICIT_MAP: Array<{ engine: string[]; bookmaker: string[] }> = [
   {
     engine: ["total goals", "total goals o/u"],
-    bookmaker: ["goals over/under", "over/under", "total goals", "total"],
+    bookmaker: [
+      "goals over/under",
+      "over/under",
+      "total goals",
+      "over_under", // matches over_under_15 / _25 / _35 after normalization
+    ],
   },
   {
     engine: ["match result", "match winner", "match result:"],
@@ -20,7 +41,7 @@ const EXPLICIT_MAP: Array<{ engine: string[]; bookmaker: string[] }> = [
   },
   {
     engine: ["double chance"],
-    bookmaker: ["double chance"],
+    bookmaker: ["double chance", "double_chance"],
   },
   {
     engine: ["both teams to score", "btts", "both teams to score"],
@@ -28,7 +49,11 @@ const EXPLICIT_MAP: Array<{ engine: string[]; bookmaker: string[] }> = [
   },
   {
     engine: ["total corners", "corners"],
-    bookmaker: ["total corners", "corners over/under", "corners", "corner", "total corners over/under"],
+    bookmaker: ["total corners", "corners over/under", "corners", "corner", "total corners over/under", "total_corners"],
+  },
+  {
+    engine: ["draw no bet"],
+    bookmaker: ["draw no bet", "draw_no_bet"],
   },
   {
     engine: ["total cards", "cards", "yellow cards"],
@@ -91,24 +116,76 @@ function linesMatch(a: number | null, b: number | null): boolean {
   return Math.abs(a - b) < 0.001;
 }
 
-function selectionMatches(engineSelection: string, bookmakerSelection: string): boolean {
+const NOISE_TOKENS = new Set(["fc", "cf", "afc", "sc", "ac", "as", "fk", "club", "the", "de", "del"]);
+
+function nameTokens(name: string): string[] {
+  return name
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter((t) => t.length > 0 && !NOISE_TOKENS.has(t));
+}
+
+/** Does the text reference this team (any significant token appears)? */
+function mentionsTeam(text: string, team: string | undefined): boolean {
+  if (!team) return false;
+  const tokens = nameTokens(team).filter((t) => t.length >= 3);
+  if (tokens.length === 0) return false;
+  const t = normalize(text);
+  return tokens.some((tok) => t.includes(tok));
+}
+
+/** Extract a double-chance code ("1x" | "12" | "x2") from normalized text, if any. */
+function dcCode(text: string): string | null {
+  const m = text.match(/\b(1x|12|x2)\b/);
+  return m ? m[1] : null;
+}
+
+function selectionMatches(
+  engineMarket: string,
+  engineSelection: string,
+  bm: VaBookmakerOdds,
+  teams?: TeamContext
+): boolean {
   const e = normalize(engineSelection);
-  const b = normalize(bookmakerSelection);
-  if (e === b) return true;
+  const b = normalize(bm.selection);
+  // Bzzoiro outcome enum (HOME/DRAW/AWAY/over/under/yes/no/1X/12/X2) — authoritative when present
+  const o = normalize(bm.outcome ?? "");
+  const bCombined = `${b} ${o}`.trim();
+
+  if (e === b || (o.length > 0 && e === o)) return true;
+
+  // Double chance: both sides must carry the same code. This also guards the
+  // reverse — a 1X2 "Draw" selection must never price a Double Chance row.
+  // The engine-side code is only read for actual Double Chance markets, so
+  // corner lines like "Under 12.5" are never mistaken for a DC code.
+  const isDcMarket = normalize(engineMarket).includes("double chance");
+  const eDc = isDcMarket ? dcCode(normalize(engineMarket)) ?? dcCode(e) : null;
+  const bDc = dcCode(o) ?? dcCode(b);
+  if (eDc !== null || bDc !== null) {
+    return eDc !== null && bDc !== null && eDc === bDc;
+  }
+
   // Over/Under matching
-  if (e.includes("over") && b.includes("over")) return true;
-  if (e.includes("under") && b.includes("under")) return true;
-  // Yes/No
-  if (e === "yes" && b === "yes") return true;
-  if (e === "no" && b === "no") return true;
-  // Home/Away/Draw etc — check inclusion
-  // For team-specific markets, engine selection may be team name; bookmaker selection may be "Home" etc.
-  // We try loose contains for home/away/draw
+  if (e.includes("over") && bCombined.includes("over")) return true;
+  if (e.includes("under") && bCombined.includes("under")) return true;
+  // Yes/No (BTTS)
+  if (e === "yes" && bCombined.includes("yes")) return true;
+  if (e === "no" && bCombined.includes("no") && !bCombined.includes("yes")) return true;
+
+  // 1X2 outcome enums — engine selection is usually "{Team} Win" / "Draw".
+  if (o === "home" && (e.includes("home") || mentionsTeam(e, teams?.home))) return true;
+  if (o === "away" && (e.includes("away") || mentionsTeam(e, teams?.away))) return true;
+  if (o === "draw" && e.includes("draw")) return true;
+
+  // Home/Away/Draw etc — check inclusion (legacy label style)
   if (e.includes("home") && b.includes("home")) return true;
   if (e.includes("away") && b.includes("away")) return true;
   if (e.includes("draw") && b.includes("draw")) return true;
+
   // For exact team names, require some overlap
-  // If both contain over/under, already matched, so now check direct substring
   if (e.length > 3 && b.length > 3 && (e.includes(b) || b.includes(e))) return true;
   return false;
 }
@@ -116,7 +193,8 @@ function selectionMatches(engineSelection: string, bookmakerSelection: string): 
 export function matchEngineMarketToBookmaker(
   engineMarket: string,
   engineSelection: string,
-  bookmakerMarkets: VaBookmakerOdds[]
+  bookmakerMarkets: VaBookmakerOdds[],
+  teams?: TeamContext
 ): VaBookmakerOdds | null {
   if (!bookmakerMarkets || bookmakerMarkets.length === 0) return null;
   const engineNorm = normalize(engineMarket);
@@ -138,13 +216,15 @@ export function matchEngineMarketToBookmaker(
       const explicitBmMatch = mapping.bookmaker.some((b) => {
         const bn = normalize(b);
         const bs = stripNumbers(b);
-        return bmNorm.includes(bn) || bmStripped.includes(bs) || bmStripped.includes(bn) || bmNorm.includes(bs);
+        // Guard against empty normalized labels (digit-only slugs like "1x2")
+        if (!bn && !bs) return false;
+        return bmNorm.includes(bn) || (bs.length > 0 && bmStripped.includes(bs)) || (bn.length > 0 && bmStripped.includes(bn)) || (bs.length > 0 && bmNorm.includes(bs));
       });
       if (!explicitBmMatch) continue;
       // Line must agree
       const bmLine = bm.line ?? extractLineFromString(bm.selection) ?? extractLineFromString(bm.marketLabel);
       if (!linesMatch(engineLine, bmLine)) continue;
-      if (!selectionMatches(engineSelection, bm.selection)) continue;
+      if (!selectionMatches(engineMarket, engineSelection, bm, teams)) continue;
       return bm;
     }
   }
@@ -153,10 +233,11 @@ export function matchEngineMarketToBookmaker(
   for (const bm of bookmakerMarkets) {
     const bmNorm = normalize(bm.marketLabel);
     const bmStripped = stripNumbers(bm.marketLabel);
+    if (bmStripped.length === 0) continue; // digit-only labels ("1x2") must not substring-match everything
     // Direct stripped equality or containment
     const nameMatch =
-      engineStripped === bmStripped ||
-      engineNorm === bmNorm ||
+      (engineStripped.length > 0 && engineStripped === bmStripped) ||
+      (engineNorm.length > 0 && engineNorm === bmNorm) ||
       engineStripped.includes(bmStripped) ||
       bmStripped.includes(engineStripped) ||
       engineNorm.includes(bmNorm) ||
@@ -165,7 +246,7 @@ export function matchEngineMarketToBookmaker(
     if (!nameMatch) continue;
     const bmLine = bm.line ?? extractLineFromString(bm.selection) ?? extractLineFromString(bm.marketLabel);
     if (!linesMatch(engineLine, bmLine)) continue;
-    if (!selectionMatches(engineSelection, bm.selection)) continue;
+    if (!selectionMatches(engineMarket, engineSelection, bm, teams)) continue;
     return bm;
   }
 
