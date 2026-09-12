@@ -668,23 +668,6 @@ function Header({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
               </div>
               <div className="text-[11px] mt-0.5 leading-snug text-slate-500">Positive EV bets across all sources, sized by Kelly</div>
             </button>
-            <button
-              type="button"
-              role="menuitem"
-              title="one 3–4 leg ticket per week from the best high hit-rate, positive-EV markets"
-              aria-label="Weekly Accumulator — one 3 to 4 leg ticket per week"
-              onClick={() => {
-                router.push("/weekly-accumulator");
-                setMenuOpen(false);
-              }}
-              className={`${MENU_ITEM} w-full px-4 py-3 text-left rounded-xl`}
-            >
-              <div className="flex items-center justify-between">
-                <div className="text-sm font-medium leading-tight">🎟️ Weekly Accumulator</div>
-                <span className="rounded-full bg-amber-500/15 px-1.5 py-0.5 font-mono text-[9px] font-bold uppercase tracking-wider text-amber-300">3–4 LEGS</span>
-              </div>
-              <div className="text-[11px] mt-0.5 leading-snug text-slate-500">One ticket per week · combined odds 3.0–4.5</div>
-            </button>
             {menuTabs.map((t) => (
               <button
                 key={t.id}
