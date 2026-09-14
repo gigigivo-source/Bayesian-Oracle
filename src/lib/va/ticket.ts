@@ -214,63 +214,115 @@ export function buildTickets(legs: VaLeg[]): VaTicket[] {
   }
 
   if (tickets.length === 0) {
-    // Compute best combined odds for logging if still 0
-    if (bestCombinedOdds === 0) {
-      // Fallback: best product of up to 3 distinct eventIds from sorted that doesn't exceed 4.5
-      // Find the best achievable ticket-like combination respecting event_id uniqueness and <=4.5
-      // Greedy best: take top distinct legs until product exceeds 4.5 or we have 3
-      let fallbackOdds = 1;
-      let distinctCount = 0;
-      const seenEvents = new Set<string>();
-      for (const leg of sorted) {
-        if (seenEvents.has(leg.eventId)) continue;
-        const tentative = fallbackOdds * leg.bookmakerOdds;
-        if (tentative > 4.5) continue;
-        fallbackOdds = tentative;
-        seenEvents.add(leg.eventId);
-        distinctCount++;
-        if (distinctCount === 3) break;
-      }
-      // If we couldn't get 3 distinct within 4.5, just take product of first 3 distinct regardless of cap
-      if (distinctCount < 3) {
-        const distinct: VaLeg[] = [];
-        const seen2 = new Set<string>();
-        for (const leg of sorted) {
-          if (seen2.has(leg.eventId)) continue;
-          seen2.add(leg.eventId);
-          distinct.push(leg);
-          if (distinct.length === 3) break;
+    // Fallback: best 3-leg combination across distinct events (product in 3.0–4.5)
+    let bestFallbackLegs: VaLeg[] | null = null;
+    let bestFallbackOdds = 0;
+    for (let i = 0; i < sorted.length; i++) {
+      for (let j = i + 1; j < sorted.length; j++) {
+        if (sorted[j].eventId === sorted[i].eventId) continue;
+        for (let k = j + 1; k < sorted.length; k++) {
+          const a = sorted[i];
+          const b = sorted[j];
+          const c = sorted[k];
+          if (c.eventId === a.eventId || c.eventId === b.eventId) continue;
+          const prod = a.bookmakerOdds * b.bookmakerOdds * c.bookmakerOdds;
+          if (prod < 3.0 || prod > 4.5) continue;
+          if (prod > bestFallbackOdds) {
+            bestFallbackOdds = prod;
+            bestFallbackLegs = [a, b, c];
+          }
         }
-        if (distinct.length > 0) {
-          fallbackOdds = distinct.reduce((acc, l) => acc * l.bookmakerOdds, 1);
-        } else {
-          fallbackOdds = 0;
-        }
-      }
-      // Also compare with product of top 3 distinct regardless — take max
-      const distinct3: VaLeg[] = [];
-      const seen3 = new Set<string>();
-      for (const leg of sorted) {
-        if (seen3.has(leg.eventId)) continue;
-        seen3.add(leg.eventId);
-        distinct3.push(leg);
-        if (distinct3.length === 3) break;
-      }
-      if (distinct3.length === 3) {
-        const prod = distinct3.reduce((acc, l) => acc * l.bookmakerOdds, 1);
-        // Choose the larger of fallback and prod that is more representative of best attempt
-        // But if prod <=4.5 and fallback was limited, keep fallback; otherwise use prod
-        if (prod > fallbackOdds && prod <= 4.5) bestCombinedOdds = prod;
-        else if (fallbackOdds > 0) bestCombinedOdds = fallbackOdds;
-        else bestCombinedOdds = prod;
-      } else if (distinct3.length > 0) {
-        bestCombinedOdds = distinct3.reduce((acc, l) => acc * l.bookmakerOdds, 1);
-      } else {
-        bestCombinedOdds = fallbackOdds;
       }
     }
-    console.log(`[VA] No ticket built: ${legs.length} legs available, best combined odds ${bestCombinedOdds.toFixed(2)}`);
-    return [];
+
+    if (bestFallbackLegs && bestFallbackLegs.length === 3 && bestFallbackOdds >= 3.0) {
+      const stats = computeTicketStats(bestFallbackLegs);
+      const weekStart = getWeekStartForLegs(bestFallbackLegs);
+      const ticketLegs: VaTicketLeg[] = bestFallbackLegs.map((l) => ({
+        match: l.matchLabel,
+        market: l.market,
+        selection: l.selection,
+        odds: l.bookmakerOdds,
+        ev: l.ev,
+        kickoff: toDate(l.kickoff).toISOString(),
+        statFamily: l.statFamily,
+        homeTeam: l.homeTeam,
+        awayTeam: l.awayTeam,
+        bookmaker: l.bookmakerName,
+        eventId: l.eventId,
+        modelProbability: l.modelProbability,
+      }));
+      tickets.push({
+        scanId: bestFallbackLegs[0].scanId,
+        weekStart,
+        legs: ticketLegs,
+        combinedOdds: stats.combinedOdds,
+        combinedProbability: stats.combinedProbability,
+        combinedEv: stats.combinedEv,
+        kellyScore: stats.kellyScore,
+        stakePercent: stats.stakePercent,
+        isRecommended: true,
+        isReferenceOnly: false,
+      });
+    } else {
+      // Compute best combined odds for logging if still 0
+      if (bestCombinedOdds === 0) {
+        // Fallback: best product of up to 3 distinct eventIds from sorted that doesn't exceed 4.5
+        // Find the best achievable ticket-like combination respecting event_id uniqueness and <=4.5
+        // Greedy best: take top distinct legs until product exceeds 4.5 or we have 3
+        let fallbackOdds = 1;
+        let distinctCount = 0;
+        const seenEvents = new Set<string>();
+        for (const leg of sorted) {
+          if (seenEvents.has(leg.eventId)) continue;
+          const tentative = fallbackOdds * leg.bookmakerOdds;
+          if (tentative > 4.5) continue;
+          fallbackOdds = tentative;
+          seenEvents.add(leg.eventId);
+          distinctCount++;
+          if (distinctCount === 3) break;
+        }
+        // If we couldn't get 3 distinct within 4.5, just take product of first 3 distinct regardless of cap
+        if (distinctCount < 3) {
+          const distinct: VaLeg[] = [];
+          const seen2 = new Set<string>();
+          for (const leg of sorted) {
+            if (seen2.has(leg.eventId)) continue;
+            seen2.add(leg.eventId);
+            distinct.push(leg);
+            if (distinct.length === 3) break;
+          }
+          if (distinct.length > 0) {
+            fallbackOdds = distinct.reduce((acc, l) => acc * l.bookmakerOdds, 1);
+          } else {
+            fallbackOdds = 0;
+          }
+        }
+        // Also compare with product of top 3 distinct regardless — take max
+        const distinct3: VaLeg[] = [];
+        const seen3 = new Set<string>();
+        for (const leg of sorted) {
+          if (seen3.has(leg.eventId)) continue;
+          seen3.add(leg.eventId);
+          distinct3.push(leg);
+          if (distinct3.length === 3) break;
+        }
+        if (distinct3.length === 3) {
+          const prod = distinct3.reduce((acc, l) => acc * l.bookmakerOdds, 1);
+          // Choose the larger of fallback and prod that is more representative of best attempt
+          // But if prod <=4.5 and fallback was limited, keep fallback; otherwise use prod
+          if (prod > fallbackOdds && prod <= 4.5) bestCombinedOdds = prod;
+          else if (fallbackOdds > 0) bestCombinedOdds = fallbackOdds;
+          else bestCombinedOdds = prod;
+        } else if (distinct3.length > 0) {
+          bestCombinedOdds = distinct3.reduce((acc, l) => acc * l.bookmakerOdds, 1);
+        } else {
+          bestCombinedOdds = fallbackOdds;
+        }
+      }
+      console.log(`[VA] No ticket built: ${legs.length} legs available, best combined odds ${bestCombinedOdds.toFixed(2)}`);
+      return [];
+    }
   }
 
   // Sort by kelly_score descending

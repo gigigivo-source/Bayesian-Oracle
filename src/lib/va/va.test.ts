@@ -177,6 +177,32 @@ describe("Value Accumulator — Partitioner", () => {
     const highestKelly = Math.max(...tickets.map((t) => t.kellyScore));
     expect(recommended[0].kellyScore).toBeCloseTo(highestKelly, 5);
   });
+
+  it("returns 1 ticket with combinedOdds ≈ 3.55 from 3 distinct events", () => {
+    const legs: VaLeg[] = [
+      makeLeg({ eventId: "1", statFamily: "goals", homeTeam: "A", awayTeam: "B", ev: 0.2, bookmakerOdds: 1.5, kickoff: new Date("2026-09-13T12:00:00Z") }),
+      makeLeg({ eventId: "2", statFamily: "corners", homeTeam: "C", awayTeam: "D", ev: 0.19, bookmakerOdds: 1.5, kickoff: new Date("2026-09-13T15:30:00Z") }),
+      makeLeg({ eventId: "3", statFamily: "cards", homeTeam: "E", awayTeam: "F", ev: 0.18, bookmakerOdds: 1.5777777778, kickoff: new Date("2026-09-13T19:00:00Z") }),
+      makeLeg({ eventId: "1", statFamily: "shots", homeTeam: "A", awayTeam: "B", ev: 0.1, bookmakerOdds: 1.4, kickoff: new Date("2026-09-13T12:00:00Z") }),
+    ];
+    const tickets = buildTickets(legs);
+    expect(tickets).toHaveLength(1);
+    expect(tickets[0].combinedOdds).toBeCloseTo(3.55, 2);
+    expect(tickets[0].isRecommended).toBe(true);
+    expect(tickets[0].isReferenceOnly).toBe(false);
+    expect(new Set(tickets[0].legs.map((l) => l.eventId)).size).toBe(3);
+  });
+
+  it("returns no ticket when legs span only 2 distinct events", () => {
+    const legs: VaLeg[] = [
+      makeLeg({ eventId: "1", statFamily: "goals", homeTeam: "A", awayTeam: "B", ev: 0.2, bookmakerOdds: 1.5, kickoff: new Date("2026-09-13T12:00:00Z") }),
+      makeLeg({ eventId: "1", statFamily: "corners", homeTeam: "A", awayTeam: "B", ev: 0.19, bookmakerOdds: 1.5, kickoff: new Date("2026-09-13T12:00:00Z") }),
+      makeLeg({ eventId: "2", statFamily: "cards", homeTeam: "C", awayTeam: "D", ev: 0.18, bookmakerOdds: 1.58, kickoff: new Date("2026-09-13T15:30:00Z") }),
+      makeLeg({ eventId: "2", statFamily: "shots", homeTeam: "C", awayTeam: "D", ev: 0.17, bookmakerOdds: 1.5, kickoff: new Date("2026-09-13T15:30:00Z") }),
+    ];
+    const tickets = buildTickets(legs);
+    expect(tickets).toHaveLength(0);
+  });
 });
 
 describe("Value Accumulator — Immutability and Lock", () => {
