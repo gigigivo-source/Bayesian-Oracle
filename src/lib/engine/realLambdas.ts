@@ -253,8 +253,18 @@ export function buildRealLambdas(
     }
     if (odds.overUnder && Number(odds.overUnder) > 0) {
       const marketTotal = Number(odds.overUnder) + 0.15;
-      totalGoals = clamp(0.35 * totalGoals + 0.65 * marketTotal, 0.5, 7.0);
-      notes.push(`O/U ${odds.overUnder} line anchored total goals to ${totalGoals.toFixed(2)}.`);
+      // Sanity guard: reject the market O/U when it is more than 1 goal
+      // away from the league anchor. Real O/U lines for a top-5 league sit
+      // within roughly ±1 goal of the league average. Anything further out
+      // is a stale, mismatched, or malformed feed (ESPN has returned 4.5
+      // for Bundesliga fixtures whose real line is 3.5). Blending toward
+      // bad data produces fake model edges, so fall through to the anchor.
+      if (Math.abs(marketTotal - anchors.avgGoals) <= 1.0) {
+        totalGoals = clamp(0.35 * totalGoals + 0.65 * marketTotal, 0.5, 7.0);
+        notes.push(`O/U ${odds.overUnder} line anchored total goals to ${totalGoals.toFixed(2)}.`);
+      } else {
+        notes.push(`O/U ${odds.overUnder} rejected: ${Math.abs(marketTotal - anchors.avgGoals).toFixed(2)} goals off the league anchor (${anchors.avgGoals}) — using form/anchor only.`);
+      }
     }
     const sup = parseSupremacy(odds.details, fx.home.abbrev);
     if (sup !== null) {
