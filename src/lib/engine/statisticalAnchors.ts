@@ -204,7 +204,14 @@ export function deriveFromGoals(
 
   const avgSot       = f(anchors.avgSot);
   const avgShots     = f(anchors.avgShots);
-  const avgCorners   = f(anchors.avgCorners);
+  // Corners are only weakly coupled to goals: scaling them by gRatio (the
+  // multiplicative goal ratio) overshot them badly for goal-heavy matches.
+  // Use a shallow linear regression anchored at the league mean instead —
+  // 0.6 corners per goal above the league baseline.
+  const avgCorners   = Math.max(
+    1,
+    anchors.avgCorners + 0.6 * (totalGoals - anchors.avgGoals),
+  );
   const avgCards     = f(anchors.avgCards);
   const avgFouls     = f(anchors.avgFouls);
   const avgOffsides  = f(anchors.avgOffsides);
