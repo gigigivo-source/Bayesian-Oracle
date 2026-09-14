@@ -40,11 +40,21 @@ interface TicketsResponse {
   scanId: string | null;
 }
 
+/**
+ * Read-only view of Value Accumulator tickets.
+ *
+ * This page intentionally has NO client-side scan trigger: the scan API route is
+ * authenticated with a server-side bearer secret, and that secret must never
+ * reach the browser. Any env var exposed to client code is inlined into the
+ * public bundle at build time, so every visitor could read it and fire scans at
+ * will. Scans therefore run server-side only: on the Vercel cron schedule, or
+ * via an authenticated curl call from a trusted machine. This page just reads
+ * whatever tickets the last scan produced.
+ */
 export default function ValueAccumulatorPage() {
   const [tickets, setTickets] = useState<VaTicketRow[]>([]);
   const [scanId, setScanId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [rebuilding, setRebuilding] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   async function loadTickets(specificScanId?: string) {
@@ -89,30 +99,6 @@ export default function ValueAccumulatorPage() {
     };
   }, []);
 
-  async function handleRebuild() {
-    setRebuilding(true);
-    try {
-      const secret = process.env.NEXT_PUBLIC_CRON_SECRET || "my-secret-123";
-      const res = await fetch("/api/va/scan", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${secret}`,
-          "Content-Type": "application/json",
-        },
-      });
-      const data = await res.json();
-      if (data.ok) {
-        await loadTickets(data.scanId);
-      } else {
-        setError(data.reason || "Rebuild failed");
-      }
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setRebuilding(false);
-    }
-  }
-
   const totalExposure = tickets
     .filter((t) => !t.isReferenceOnly)
     .reduce((sum, t) => sum + t.stakePercent, 0);
@@ -137,23 +123,9 @@ export default function ValueAccumulatorPage() {
             Ranked tickets this week, best first
           </p>
           <div style={{ marginTop: 16, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
-            <button
-              onClick={handleRebuild}
-              disabled={rebuilding}
-              style={{
-                background: rebuilding ? "#9ca3af" : "#0a7d4f",
-                color: "white",
-                border: "none",
-                borderRadius: 8,
-                padding: "10px 18px",
-                fontSize: 14,
-                fontWeight: 600,
-                cursor: rebuilding ? "not-allowed" : "pointer",
-                boxShadow: "0 1px 2px rgba(0,0,0,0.05)",
-              }}
-            >
-              {rebuilding ? "Rebuilding…" : "Rebuild"}
-            </button>
+            <span style={{ fontSize: 13, color: "#6b7280", fontWeight: 500 }}>
+              Scan is run from the server. Refresh to see latest tickets.
+            </span>
             {scanId && (
               <span style={{ fontSize: 12, color: "#9ca3af", fontFamily: "monospace" }}>
                 Scan: {scanId.slice(0, 20)}…
