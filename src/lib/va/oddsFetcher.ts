@@ -6,6 +6,12 @@
 //   Events:  GET /events/?date_from=YYYY-MM-DD&date_to=YYYY-MM-DD  (paginated {count,next,results})
 //   Odds:    GET /odds/?event_id={id}                    (one row per event × market × outcome)
 //
+// Event resolution never queries a single exact date: Bzzoiro publishes kickoffs
+// in its own timezone and sometimes a day early/late, so an exact-date query
+// returns 0 rows for leagues that are in fact covered. We always query a date
+// RANGE around the UTC kickoff date (±2 days, widened once to ±5 days) and then
+// pick the event by fuzzy team-name comparison plus a kickoff-proximity check.
+//
 // Verified against the live v2 docs (sports.bzzoiro.com/docs/football/):
 //   market  : 1x2 · over_under_15 · over_under_25 · over_under_35 · btts ·
 //             double_chance · draw_no_bet · asian_handicap · total_corners
@@ -60,6 +66,30 @@ interface BzEventRow {
   status?: string | null;
 }
 
+/**
+ * Why a fixture did (not) resolve to a Bzzoiro event.
+ *
+ *   resolved   — an event id was found.
+ *   no-match   — Bzzoiro clearly carries this competition (it returned events
+ *                featuring these teams / this league) but nothing paired up.
+ *   no-events  — Bzzoiro returned nothing recognisable for this fixture across
+ *                the whole window: a coverage gap, which lets the caller skip
+ *                the rest of the league instead of re-probing every fixture.
+ */
+export type BzzoiroResolutionStatus = "resolved" | "no-match" | "no-events";
+
+export interface BzzoiroResolution {
+  /** Bzzoiro event id as a string, or null when nothing matched. */
+  eventId: string | null;
+  status: BzzoiroResolutionStatus;
+  /** How many events Bzzoiro returned across the widest range we queried. */
+  eventsInRange: number;
+  /** Events in that range that look like this fixture's teams or league. */
+  relatedInRange: number;
+  /** Tolerance (in days) of the last window we tried: 2, or 5 after widening. */
+  toleranceDays: number;
+}
+
 interface BzPage<T> {
   count?: number;
   next?: string | null;
@@ -74,6 +104,11 @@ const BZOOIRO_BASE = (() => {
 const TIMEOUT_MS = 8000;
 const PAGE_LIMIT = 200; // API max
 const CACHE_TTL_MS = 30 * 60 * 1000; // event/fixture lists are safe to reuse within a scan window
+/** First attempt: kickoff date ±2 days. */
+export const BZ_RANGE_DAYS = 2;
+/** Second (and last) attempt when ±2 days found nothing. */
+export const BZ_WIDE_RANGE_DAYS = 5;
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 let warnedNoKey = false;
 
@@ -125,10 +160,10 @@ interface CacheEntry<T> {
   at: number;
 }
 
-/** Fixtures for one kickoff date, cached in memory (scan duration / TTL). */
-const eventsByDate = new Map<string, CacheEntry<BzEventRow[]>>();
-/** Resolved Bzzoiro event id per match (date|home|away), cached in memory. */
-const eventIdByMatch = new Map<string, CacheEntry<string | null>>();
+/** Fixtures for one `date_from|date_to` window, cached in memory (scan duration / TTL). */
+const eventsByRange = new Map<string, CacheEntry<BzEventRow[]>>();
+/** Resolved Bzzoiro event per match (date|home|away), cached in memory. */
+const resolutionByMatch = new Map<string, CacheEntry<BzzoiroResolution>>();
 
 function cached<T>(store: Map<string, CacheEntry<T>>, key: string): T | undefined {
   const hit = store.get(key);
@@ -205,30 +240,44 @@ function eventId(e: BzEventRow): number | null {
   return null;
 }
 
-/** Fetch Bzzoiro fixtures for one YYYY-MM-DD date (follows pagination, cached, fail soft). */
-async function getEventsForDate(date: string): Promise<BzEventRow[]> {
-  const hit = cached(eventsByDate, date);
+/** UTC calendar day (YYYY-MM-DD) of an ISO timestamp, or "" when unparseable. */
+export function utcDateKey(iso: string): string {
+  const ms = Date.parse(iso);
+  if (!Number.isFinite(ms)) return "";
+  return new Date(ms).toISOString().slice(0, 10);
+}
+
+/** Shift a YYYY-MM-DD key by `days` (UTC, so no DST drift). */
+function shiftDate(dateKey: string, days: number): string {
+  const ms = Date.parse(`${dateKey}T00:00:00Z`);
+  if (!Number.isFinite(ms)) return dateKey;
+  return new Date(ms + days * DAY_MS).toISOString().slice(0, 10);
+}
+
+/**
+ * Fetch Bzzoiro fixtures for an inclusive [dateFrom, dateTo] window
+ * (follows pagination, cached per window, fail soft to []).
+ */
+async function getEventsInRange(dateFrom: string, dateTo: string): Promise<BzEventRow[]> {
+  const cacheKey = `${dateFrom}|${dateTo}`;
+  const hit = cached(eventsByRange, cacheKey);
   if (hit) return hit;
 
   const rows: BzEventRow[] = [];
   let offset = 0;
-  for (let page = 0; page < 3; page++) {
-    const path = `/events/?date_from=${date}&date_to=${date}&limit=${PAGE_LIMIT}&offset=${offset}`;
+  for (let page = 0; page < 5; page++) {
+    const query = `date_from=${dateFrom}&date_to=${dateTo}`;
+    const path = `/events/?${query}&limit=${PAGE_LIMIT}&offset=${offset}`;
     const data = await bzGet<BzPage<BzEventRow>>(path);
     const batch = pageRows(data);
     rows.push(...batch);
-    console.log(`[VA][Bzzoiro] GET /events/?date_from=${date}&date_to=${date} → ${batch.length} events`);
+    console.log(`[VA][Bzzoiro] GET /events/?${query} → ${batch.length} events`);
     if (!data?.next || batch.length === 0) break;
     offset += batch.length;
   }
 
-  // Defensive: keep only rows whose kickoff date is the requested one
-  const filtered = rows.filter((e) => {
-    const d = eventDate(e);
-    return d.slice(0, 10) === date;
-  });
-  store(eventsByDate, date, filtered);
-  return filtered;
+  store(eventsByRange, cacheKey, rows);
+  return rows;
 }
 
 export interface BzzoiroMatchRef {
@@ -237,37 +286,128 @@ export interface BzzoiroMatchRef {
   away: { name: string };
 }
 
+/** Absolute distance in days between a Bzzoiro event_date and the fixture kickoff. */
+function dayDistance(eventIso: string, kickoffMs: number): number | null {
+  if (!eventIso) return null;
+  const parsed = Date.parse(eventIso.length === 10 ? `${eventIso}T00:00:00Z` : eventIso);
+  if (!Number.isFinite(parsed)) return null;
+  return Math.abs(parsed - kickoffMs) / DAY_MS;
+}
+
 /**
- * Resolve the Bzzoiro event id for a match by kickoff date + fuzzy team names.
- * Returns null when no confident match exists — the caller must skip the match.
+ * How many events in the window feature either of the fixture's teams on
+ * either side. Zero means Bzzoiro simply isn't carrying this competition in
+ * this window — a coverage gap rather than a naming mismatch.
  */
-export async function resolveBzzoiroEventId(fx: BzzoiroMatchRef): Promise<string | null> {
-  const date = fx.date.slice(0, 10);
-  const homeName = fx.home?.name ?? "";
-  const awayName = fx.away?.name ?? "";
-  if (!date || !homeName || !awayName) return null;
+function countRelated(events: BzEventRow[], homeName: string, awayName: string): number {
+  let n = 0;
+  for (const e of events) {
+    const sides = [eventHome(e), eventAway(e)];
+    const related = sides.some(
+      (side) => teamNameScore(homeName, side) >= 0.5 || teamNameScore(awayName, side) >= 0.5,
+    );
+    if (related) n++;
+  }
+  return n;
+}
 
-  const cacheKey = `${date}|${homeName.toLowerCase()}|${awayName.toLowerCase()}`;
-  const hit = cached(eventIdByMatch, cacheKey);
-  if (hit !== undefined) return hit;
-
-  const events = await getEventsForDate(date);
-
+/**
+ * Pick the best event in `events` for the fixture: both team names must clear
+ * the fuzzy bar AND the event_date must sit within `toleranceDays` of kickoff.
+ */
+function pickEvent(
+  events: BzEventRow[],
+  homeName: string,
+  awayName: string,
+  kickoffMs: number,
+  toleranceDays: number,
+): { id: number; score: number } | null {
   let best: { id: number; score: number } | null = null;
   for (const e of events) {
     const id = eventId(e);
     if (id === null) continue;
+
+    const distance = dayDistance(eventDate(e), kickoffMs);
+    // A row with no usable date is only usable on names alone; treat as max distance.
+    if (distance !== null && distance > toleranceDays) continue;
+
     const hScore = teamNameScore(homeName, eventHome(e));
     const aScore = teamNameScore(awayName, eventAway(e));
     // Both sides must clear the bar — one-sided similarity is not a match.
     if (hScore < 0.5 || aScore < 0.5) continue;
-    const score = hScore + aScore;
+
+    // Closer kickoffs break ties between equally-named candidates.
+    const proximity = distance === null ? 0 : 1 - distance / (toleranceDays + 1);
+    const score = hScore + aScore + proximity;
     if (!best || score > best.score) best = { id, score };
   }
+  return best;
+}
 
-  const resolved = best ? String(best.id) : null;
-  store(eventIdByMatch, cacheKey, resolved);
-  return resolved;
+/**
+ * Resolve the Bzzoiro event for a match: query a ±2-day window around the UTC
+ * kickoff date, match on fuzzy team names + kickoff proximity, and widen once
+ * to ±5 days when nothing is found. Fails soft — `eventId` is null when no
+ * confident match exists and the caller must skip the match.
+ */
+export async function resolveBzzoiroEvent(fx: BzzoiroMatchRef): Promise<BzzoiroResolution> {
+  const homeName = fx.home?.name ?? "";
+  const awayName = fx.away?.name ?? "";
+  const kickoffDate = utcDateKey(fx.date ?? "");
+  const kickoffMs = Date.parse(fx.date ?? "");
+  if (!kickoffDate || !Number.isFinite(kickoffMs) || !homeName || !awayName) {
+    return {
+      eventId: null,
+      status: "no-match",
+      eventsInRange: 0,
+      relatedInRange: 0,
+      toleranceDays: BZ_RANGE_DAYS,
+    };
+  }
+
+  const cacheKey = `${kickoffDate}|${homeName.toLowerCase()}|${awayName.toLowerCase()}`;
+  const hit = cached(resolutionByMatch, cacheKey);
+  if (hit !== undefined) return hit;
+
+  let events: BzEventRow[] = [];
+  let toleranceDays = BZ_RANGE_DAYS;
+
+  for (const days of [BZ_RANGE_DAYS, BZ_WIDE_RANGE_DAYS]) {
+    toleranceDays = days;
+    events = await getEventsInRange(shiftDate(kickoffDate, -days), shiftDate(kickoffDate, days));
+    const best = pickEvent(events, homeName, awayName, kickoffMs, days);
+    if (best) {
+      const resolved: BzzoiroResolution = {
+        eventId: String(best.id),
+        status: "resolved",
+        eventsInRange: events.length,
+        relatedInRange: 1,
+        toleranceDays: days,
+      };
+      store(resolutionByMatch, cacheKey, resolved);
+      return resolved;
+    }
+  }
+
+  // Nothing matched even at ±5 days. Distinguish "the feed has no idea these
+  // teams exist" (coverage gap) from "the teams are there but nothing paired".
+  const relatedInRange = countRelated(events, homeName, awayName);
+  const missed: BzzoiroResolution = {
+    eventId: null,
+    status: relatedInRange === 0 ? "no-events" : "no-match",
+    eventsInRange: events.length,
+    relatedInRange,
+    toleranceDays,
+  };
+  store(resolutionByMatch, cacheKey, missed);
+  return missed;
+}
+
+/**
+ * Back-compat convenience wrapper: the resolved Bzzoiro event id, or null.
+ */
+export async function resolveBzzoiroEventId(fx: BzzoiroMatchRef): Promise<string | null> {
+  return (await resolveBzzoiroEvent(fx)).eventId;
 }
 
 // ─── Odds ─────────────────────────────────────────────────────────────────────

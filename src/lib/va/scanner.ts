@@ -2,7 +2,13 @@
 import { fetchScoreboard, type FixtureLite } from "@/lib/espn";
 import { leagueTier } from "@/lib/leaguePriority";
 import { runEngineFromReal } from "@/lib/engine";
-import { fetchOddsForEvent, resolveBzzoiroEventId, type VaBookmakerOdds } from "./oddsFetcher";
+import {
+  fetchOddsForEvent,
+  resolveBzzoiroEvent,
+  BZ_WIDE_RANGE_DAYS,
+  type BzzoiroResolution,
+  type VaBookmakerOdds,
+} from "./oddsFetcher";
 import { matchEngineMarketToBookmaker, type TeamContext } from "./marketMap";
 import type { VaLeg } from "./ticket";
 import { db } from "@/db";
@@ -56,6 +62,47 @@ function getStatFamily(marketName: string, family: string): string {
   )
     return "goals";
   return "other";
+}
+
+/**
+ * A league is declared "not covered by Bzzoiro" once this many of its matches
+ * come back with zero events across the widened (±5 day) range. One probe could
+ * be a blip (a timeout, a single missing fixture); two in a row is the feed
+ * simply not carrying the competition.
+ */
+const LEAGUE_UNCOVERED_THRESHOLD = 2;
+
+/** Per-scan bookkeeping for leagues that Bzzoiro does not carry. */
+class LeagueCoverage {
+  private emptyByLeague = new Map<string, number>();
+  private announced = new Set<string>();
+
+  /** True when we already know the league is uncovered — skip without retrying. */
+  isUncovered(leagueSlug: string): boolean {
+    return (this.emptyByLeague.get(leagueSlug) ?? 0) >= LEAGUE_UNCOVERED_THRESHOLD;
+  }
+
+  /** Record a resolution outcome for a league; logs the skip notice once. */
+  record(leagueSlug: string, resolution: BzzoiroResolution): void {
+    if (resolution.status === "resolved") {
+      // Coverage proven — reset any earlier empty probes for this league.
+      this.emptyByLeague.delete(leagueSlug);
+      return;
+    }
+    if (resolution.status !== "no-events") return; // names didn't match, but the league IS carried
+
+    const count = (this.emptyByLeague.get(leagueSlug) ?? 0) + 1;
+    this.emptyByLeague.set(leagueSlug, count);
+    if (count >= LEAGUE_UNCOVERED_THRESHOLD && !this.announced.has(leagueSlug)) {
+      this.announced.add(leagueSlug);
+      console.log(`[VA] league ${leagueSlug} not covered by Bzzoiro — skipping all its matches`);
+    }
+  }
+
+  /** Leagues declared uncovered during this scan. */
+  uncoveredLeagues(): string[] {
+    return Array.from(this.announced);
+  }
 }
 
 function isDataQualityOk(completeness: number): boolean {
@@ -119,9 +166,39 @@ export async function scanValueLegs(scanId: string, days = 7): Promise<ScanResul
 
   let marketsEvaluated = 0;
   const qualified: VaLeg[] = [];
+  const coverage = new LeagueCoverage();
 
   for (const fx of capped) {
-    // a. Run engine to produce all 217 markets with hitRate
+    const matchLabel = `${fx.home.name} vs ${fx.away.name}`;
+
+    // a. Leagues already proven absent from Bzzoiro are skipped without a retry.
+    if (coverage.isUncovered(fx.leagueSlug)) continue;
+
+    // b. Resolve the Bzzoiro event for this fixture: kickoff date ±2 days,
+    //    widened once to ±5 days (in-memory cached per match).
+    let resolution: BzzoiroResolution;
+    try {
+      resolution = await resolveBzzoiroEvent(fx);
+    } catch {
+      resolution = {
+        eventId: null,
+        status: "no-match",
+        eventsInRange: 0,
+        relatedInRange: 0,
+        toleranceDays: BZ_WIDE_RANGE_DAYS,
+      };
+    }
+    coverage.record(fx.leagueSlug, resolution);
+
+    const bzEventId = resolution.eventId;
+    if (!bzEventId) {
+      // No Bzzoiro event for this match — skip it entirely (no odds, no fabricated prices)
+      console.log(`[VA] no Bzzoiro event for ${matchLabel} after widening to ±${BZ_WIDE_RANGE_DAYS} days`);
+      continue;
+    }
+    console.log(`[VA] resolved Bzzoiro event ${bzEventId} for ${matchLabel}`);
+
+    // c. Run engine to produce all 217 markets with hitRate
     let engineResult;
     try {
       engineResult = runEngineFromReal(fx, null);
@@ -131,22 +208,7 @@ export async function scanValueLegs(scanId: string, days = 7): Promise<ScanResul
     const markets = engineResult.markets ?? [];
     marketsEvaluated += markets.length;
 
-    // b. Resolve the Bzzoiro event for this fixture (in-memory cached per match)
-    let bzEventId: string | null = null;
-    try {
-      bzEventId = await resolveBzzoiroEventId(fx);
-    } catch {
-      bzEventId = null;
-    }
-    const matchLabel = `${fx.home.name} vs ${fx.away.name}`;
-    if (!bzEventId) {
-      // No Bzzoiro event ID for this match — skip the match entirely (no odds, no fabricated prices)
-      console.log(`[VA] no Bzzoiro event for ${matchLabel} — skipping match`);
-      continue;
-    }
-    console.log(`[VA] resolved Bzzoiro event ${bzEventId} for ${matchLabel}`);
-
-    // c. Fetch odds for that event (consensus preferred, fail soft to [])
+    // d. Fetch odds for that event (consensus preferred, fail soft to [])
     let bookmakerOdds: VaBookmakerOdds[] = [];
     try {
       bookmakerOdds = await fetchOddsForEvent(bzEventId);
@@ -155,7 +217,7 @@ export async function scanValueLegs(scanId: string, days = 7): Promise<ScanResul
     }
     if (bookmakerOdds.length === 0) continue;
 
-    // d. For each engine market, match to bookmaker
+    // e. For each engine market, match to bookmaker
     for (const m of markets) {
       // Only consider markets with hitRate (model probability)
       const hitRate = m.hitRate;
@@ -169,7 +231,7 @@ export async function scanValueLegs(scanId: string, days = 7): Promise<ScanResul
       const ev = hitRate * realOdds - 1;
       const implied = 1 / realOdds;
 
-      // e. Qualify leg only if all true:
+      // f. Qualify leg only if all true:
       // - bookmaker_odds not null (already)
       // - ev > 0.03
       // - hitRate >=0.55
@@ -239,6 +301,10 @@ export async function scanValueLegs(scanId: string, days = 7): Promise<ScanResul
   }
 
   // 6. Log
+  const uncovered = coverage.uncoveredLeagues();
+  if (uncovered.length > 0) {
+    console.log(`[VA] scan ${scanId}: skipped leagues (no Bzzoiro coverage): ${uncovered.join(", ")}`);
+  }
   console.log(`[VA] scan ${scanId}: ${capped.length} matches, ${marketsEvaluated} markets, ${qualified.length} qualified legs`);
 
   return {
