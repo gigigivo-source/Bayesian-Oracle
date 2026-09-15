@@ -277,6 +277,24 @@ export async function scanValueLegs(scanId: string, days = 7, mode: VaScanMode =
     }
   }
 
+  // Source-of-truth cleanup (applies in BOTH modes): at most one qualified leg
+  // per (eventId, statFamily) pair — if several markets from the same match
+  // land in the same stat family, keep only the highest-EV one.
+  const bestByPair = new Map<string, VaLeg>();
+  for (const leg of qualified) {
+    const key = `${leg.eventId}|${leg.statFamily}`;
+    const current = bestByPair.get(key);
+    if (!current || leg.ev > current.ev) {
+      bestByPair.set(key, leg);
+    }
+  }
+  const uniqueQualified = Array.from(bestByPair.values());
+  if (uniqueQualified.length !== qualified.length) {
+    console.log(`[VA] dedup (eventId, statFamily): ${qualified.length} -> ${uniqueQualified.length} qualified legs`);
+    qualified.length = 0;
+    qualified.push(...uniqueQualified);
+  }
+
   // 5. Insert each qualified leg into va_legs
   if (mode === "stack") {
     console.log(`[VA][stack] qualified=${qualified.length} from ${marketsEvaluated} markets`);
