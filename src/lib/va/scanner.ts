@@ -237,11 +237,10 @@ export async function scanValueLegs(scanId: string, days = 7, mode: VaScanMode =
 
       // f. Qualify leg only if all true (mode-specific filters).
       if (mode === "stack") {
-        if (realOdds < 1.05 || realOdds > 1.6) continue;
-        if (hitRate < 0.75) continue;
-        if (ev <= 0.005) continue;
+        if (realOdds < 1.03 || realOdds > 1.70) continue;
+        if (hitRate < 0.62) continue;
         if (statFamily !== "goals" && statFamily !== "cards" && statFamily !== "corners") continue;
-        // Stack mode does not apply the isDataQualityOk() gate.
+        // Stack mode does not apply the EV or isDataQualityOk() gates.
       } else {
         // - bookmaker_odds not null (already)
         // - ev > 0.03
@@ -279,6 +278,9 @@ export async function scanValueLegs(scanId: string, days = 7, mode: VaScanMode =
   }
 
   // 5. Insert each qualified leg into va_legs
+  if (mode === "stack") {
+    console.log(`[VA][stack] qualified=${qualified.length} from ${marketsEvaluated} markets`);
+  }
   if (qualified.length > 0) {
     try {
       const rows = qualified.map((l) => ({

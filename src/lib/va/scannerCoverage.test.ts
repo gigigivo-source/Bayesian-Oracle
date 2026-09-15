@@ -1,9 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { FixtureLite } from "@/lib/espn";
-import type { BzzoiroResolution } from "./oddsFetcher";
+import type { BzzoiroResolution, VaBookmakerOdds } from "./oddsFetcher";
 
 const resolveBzzoiroEvent = vi.fn<(fx: { home: { name: string } }) => Promise<BzzoiroResolution>>();
-const fetchOddsForEvent = vi.fn(async () => []);
+const fetchOddsForEvent = vi.fn(async () => [] as VaBookmakerOdds[]);
 const insertValues = vi.fn(async () => undefined);
 
 vi.mock("./oddsFetcher", async (importOriginal) => {
@@ -24,12 +24,14 @@ vi.mock("@/db/schema", () => ({ vaLegs: {} }));
 const fetchScoreboard = vi.fn<(slug: string, range: string) => Promise<FixtureLite[]>>();
 vi.mock("@/lib/espn", () => ({ fetchScoreboard: (s: string, r: string) => fetchScoreboard(s, r) }));
 
-vi.mock("@/lib/engine", () => ({
-  runEngineFromReal: () => ({
-    match: { dataCompletenessScore: 80 },
-    markets: [],
-  }),
+const runEngineFromReal = vi.fn<() => {
+  match: { dataCompletenessScore: number };
+  markets: Array<{ name: string; selection: string; family?: string; hitRate: number; ev?: number }>;
+}>(() => ({
+  match: { dataCompletenessScore: 80 },
+  markets: [],
 }));
+vi.mock("@/lib/engine", () => ({ runEngineFromReal }));
 
 function fixture(id: string, leagueSlug: string, home: string, away: string): FixtureLite {
   return {
@@ -151,5 +153,28 @@ describe("Value Accumulator — league coverage skipping", () => {
 
     expect(logs.some((l) => l.includes("not covered by Bzzoiro"))).toBe(false);
     expect(resolveBzzoiroEvent).toHaveBeenCalledTimes(3);
+  });
+
+  it("qualifies a stack leg with negative EV when odds and hit rate qualify", async () => {
+    const { scanValueLegs } = await import("./scanner");
+
+    fetchScoreboard.mockImplementation(async (slug) =>
+      slug === "eng.1" ? [fixture("s1", "eng.1", "Arsenal", "Chelsea")] : [],
+    );
+    resolveBzzoiroEvent.mockResolvedValue(resolved("stack-event"));
+    runEngineFromReal.mockReturnValue({
+      match: { dataCompletenessScore: 10 },
+      markets: [{ name: "Total Goals O/U 2.5", selection: "Over 2.5", family: "goals", hitRate: 0.63, ev: -0.02 }],
+    });
+    fetchOddsForEvent.mockResolvedValue([
+      { bookmaker: "1xBet", marketLabel: "Goals Over/Under", line: 2.5, selection: "Over 2.5", odds: 1.2 },
+    ]);
+
+    const result = await scanValueLegs("scan_stack_test", 7, "stack");
+
+    expect(result.legs).toHaveLength(1);
+    expect(result.legs[0].modelProbability).toBe(0.63);
+    expect(result.legs[0].ev).toBeCloseTo(-0.244);
+    expect(logs).toContain("[VA][stack] qualified=1 from 1 markets");
   });
 });
