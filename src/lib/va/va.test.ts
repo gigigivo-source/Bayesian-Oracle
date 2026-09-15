@@ -205,6 +205,74 @@ describe("Value Accumulator — Partitioner", () => {
   });
 });
 
+describe("Value Accumulator — Stack mode", () => {
+  function makeLeg(overrides: Partial<VaLeg> & { eventId: string }): VaLeg {
+    const base: VaLeg = {
+      scanId: "stack_scan",
+      eventId: overrides.eventId,
+      matchLabel: overrides.matchLabel ?? `${overrides.homeTeam ?? "H"} vs ${overrides.awayTeam ?? "A"}`,
+      homeTeam: overrides.homeTeam ?? "H",
+      awayTeam: overrides.awayTeam ?? "A",
+      leagueSlug: "eng.1",
+      kickoff: overrides.kickoff ?? new Date("2026-09-13T12:00:00Z"),
+      market: "Total Goals O/U 2.5",
+      selection: "Over 2.5",
+      statFamily: overrides.statFamily ?? "goals",
+      modelProbability: overrides.modelProbability ?? 0.85,
+      bookmakerOdds: overrides.bookmakerOdds ?? 1.28,
+      bookmakerName: "1xBet",
+      impliedProbability: 1 / (overrides.bookmakerOdds ?? 1.28),
+      ev: overrides.ev ?? 0.088,
+      oddsAtBuild: new Date(),
+      scannedAt: new Date(),
+    };
+    return { ...base, ...overrides };
+  }
+
+  it("builds 1 ticket with 6–8 legs and combinedOdds in [4.5, 7.5]", () => {
+    const legs: VaLeg[] = [];
+    for (let i = 0; i < 8; i++) {
+      legs.push(
+        makeLeg({
+          eventId: `ev${i}`,
+          homeTeam: `Home${i}`,
+          awayTeam: `Away${i}`,
+          modelProbability: 0.85,
+          bookmakerOdds: 1.28,
+          ev: 0.088,
+          kickoff: new Date(`2026-09-1${3 + (i % 4)}T12:00:00Z`),
+        })
+      );
+    }
+    const tickets = buildTickets(legs, "stack");
+    expect(tickets).toHaveLength(1);
+    expect(tickets[0].legs.length).toBeGreaterThanOrEqual(6);
+    expect(tickets[0].legs.length).toBeLessThanOrEqual(8);
+    expect(tickets[0].combinedOdds).toBeGreaterThanOrEqual(4.5);
+    expect(tickets[0].combinedOdds).toBeLessThanOrEqual(7.5);
+    expect(tickets[0].stakePercent).toBeLessThanOrEqual(1.0);
+  });
+
+  it("returns a ticket when only 4 legs are available (no 6-leg minimum)", () => {
+    const legs: VaLeg[] = [];
+    for (let i = 0; i < 4; i++) {
+      legs.push(
+        makeLeg({
+          eventId: `ev${i}`,
+          homeTeam: `Home${i}`,
+          awayTeam: `Away${i}`,
+          modelProbability: 0.85,
+          bookmakerOdds: 1.28,
+          ev: 0.088,
+        })
+      );
+    }
+    const tickets = buildTickets(legs, "stack");
+    expect(tickets.length).toBeGreaterThanOrEqual(1);
+    expect(tickets[0].legs.length).toBe(4);
+  });
+});
+
 describe("Value Accumulator — Immutability and Lock", () => {
   it("8. ticket immutability — second scan does not mutate first scan's tickets (logic)", () => {
     const legs1: VaLeg[] = [

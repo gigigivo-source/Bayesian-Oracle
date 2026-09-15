@@ -129,7 +129,9 @@ export interface ScanResult {
   legs: VaLeg[];
 }
 
-export async function scanValueLegs(scanId: string, days = 7): Promise<ScanResult> {
+export type VaScanMode = "value" | "stack";
+
+export async function scanValueLegs(scanId: string, days = 7, mode: VaScanMode = "value"): Promise<ScanResult> {
   // 1. Fetch matches in next days from fixture feed, leagues only allowed
   const leagueSlugs = Array.from(ALLOWED_LEAGUES);
   const allFixtures: FixtureLite[] = [];
@@ -231,18 +233,26 @@ export async function scanValueLegs(scanId: string, days = 7): Promise<ScanResul
       const ev = hitRate * realOdds - 1;
       const implied = 1 / realOdds;
 
-      // f. Qualify leg only if all true:
-      // - bookmaker_odds not null (already)
-      // - ev > 0.03
-      // - hitRate >=0.55
-      // - 1.30 <= bookmaker_odds <=2.00
-      // - Data quality Real or Mixed (Synthetic excluded)
-      if (ev <= 0.03) continue;
-      if (hitRate < 0.55) continue;
-      if (realOdds < 1.3 || realOdds > 2.0) continue;
-      if (!isDataQualityOk(engineResult.match.dataCompletenessScore)) continue;
-
       const statFamily = getStatFamily(m.name, m.family);
+
+      // f. Qualify leg only if all true (mode-specific filters).
+      if (mode === "stack") {
+        if (realOdds < 1.05 || realOdds > 1.6) continue;
+        if (hitRate < 0.75) continue;
+        if (ev <= 0.005) continue;
+        if (statFamily !== "goals" && statFamily !== "cards" && statFamily !== "corners") continue;
+        // Stack mode does not apply the isDataQualityOk() gate.
+      } else {
+        // - bookmaker_odds not null (already)
+        // - ev > 0.03
+        // - hitRate >=0.55
+        // - 1.30 <= bookmaker_odds <=2.00
+        // - Data quality Real or Mixed (Synthetic excluded)
+        if (ev <= 0.03) continue;
+        if (hitRate < 0.55) continue;
+        if (realOdds < 1.3 || realOdds > 2.0) continue;
+        if (!isDataQualityOk(engineResult.match.dataCompletenessScore)) continue;
+      }
 
       const leg: VaLeg = {
         scanId,
