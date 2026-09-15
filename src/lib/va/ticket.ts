@@ -84,7 +84,10 @@ export function getWeekStartForLegs(legs: VaLeg[]): string {
   return getMondayCat(earliest);
 }
 
-export function buildTickets(legs: VaLeg[]): VaTicket[] {
+export function buildTickets(legs: VaLeg[], mode: "value" | "stack" = "value"): VaTicket[] {
+  if (mode === "stack") {
+    return buildStackTickets(legs);
+  }
   if (legs.length < 3) {
     const best = legs.length === 0 ? 0 : legs.reduce((acc, l) => acc * l.bookmakerOdds, 1);
     // If we have <3 legs, best is still product but we cap display to 2 decimals
@@ -353,5 +356,193 @@ export function buildTickets(legs: VaLeg[]): VaTicket[] {
 
   console.log(`[VA] Built ${tickets.length} tickets from ${legs.length} qualified legs`);
 
+  return tickets;
+}
+
+function buildStackTickets(legs: VaLeg[]): VaTicket[] {
+  if (legs.length === 0) {
+    console.log(`[VA] No ticket built: 0 legs available, best combined odds 0.00`);
+    return [];
+  }
+
+  const sorted = [...legs].sort((a, b) => b.ev - a.ev);
+
+  function computeTicketStats(ticketLegs: VaLeg[]): {
+    combinedOdds: number;
+    combinedProbability: number;
+    combinedEv: number;
+    kellyScore: number;
+    stakePercent: number;
+  } {
+    const combinedOdds = ticketLegs.reduce((acc, l) => acc * l.bookmakerOdds, 1);
+    const combinedProbability = ticketLegs.reduce((acc, l) => acc * l.modelProbability, 1);
+    const combinedEv = combinedProbability * combinedOdds - 1;
+    const kellyScore = combinedOdds > 1 ? combinedEv / (combinedOdds - 1) : 0;
+    const stakePercent = Math.min(0.5 * kellyScore * 100, 1.0);
+    return {
+      combinedOdds,
+      combinedProbability,
+      combinedEv,
+      kellyScore,
+      stakePercent,
+    };
+  }
+
+  function toTicket(ticketLegs: VaLeg[], recommended: boolean): VaTicket {
+    const stats = computeTicketStats(ticketLegs);
+    const weekStart = getWeekStartForLegs(ticketLegs);
+    const mapped: VaTicketLeg[] = ticketLegs.map((l) => ({
+      match: l.matchLabel,
+      market: l.market,
+      selection: l.selection,
+      odds: l.bookmakerOdds,
+      ev: l.ev,
+      kickoff: toDate(l.kickoff).toISOString(),
+      statFamily: l.statFamily,
+      homeTeam: l.homeTeam,
+      awayTeam: l.awayTeam,
+      bookmaker: l.bookmakerName,
+      eventId: l.eventId,
+      modelProbability: l.modelProbability,
+    }));
+    return {
+      scanId: ticketLegs[0].scanId,
+      weekStart,
+      legs: mapped,
+      combinedOdds: stats.combinedOdds,
+      combinedProbability: stats.combinedProbability,
+      combinedEv: stats.combinedEv,
+      kellyScore: stats.kellyScore,
+      stakePercent: stats.stakePercent,
+      isRecommended: recommended,
+      isReferenceOnly: false,
+    };
+  }
+
+  const usedLegIndices = new Set<number>();
+  const tickets: VaTicket[] = [];
+
+  const remainingCount = () => sorted.filter((_, idx) => !usedLegIndices.has(idx)).length;
+
+  const eventCount = (ticket: VaLeg[], eventId: string) => ticket.filter((l) => l.eventId === eventId).length;
+
+  while (remainingCount() > 0) {
+    const currentTicket: VaLeg[] = [];
+    let combinedOdds = 1;
+
+    for (let i = 0; i < sorted.length && currentTicket.length < 8; i++) {
+      if (usedLegIndices.has(i)) continue;
+      const candidate = sorted[i];
+      if (eventCount(currentTicket, candidate.eventId) >= 2) continue;
+
+      const tentative = combinedOdds * candidate.bookmakerOdds;
+      if (tentative > 7.5) continue;
+
+      currentTicket.push(candidate);
+      combinedOdds = tentative;
+
+      if (currentTicket.length >= 6 && combinedOdds >= 4.5) {
+        // Prefer stopping once we are inside the target window, unless we still have room
+        // and adding more would stay in range — continue only if below 8.
+        if (currentTicket.length >= 8) break;
+        // If already in [4.5, 7.5] with 6–7, keep trying extra legs that stay <= 7.5.
+      }
+    }
+
+    const inWindow =
+      currentTicket.length >= 6 &&
+      currentTicket.length <= 8 &&
+      combinedOdds >= 4.5 &&
+      combinedOdds <= 7.5;
+
+    if (!inWindow) {
+      break;
+    }
+
+    tickets.push(toTicket(currentTicket, false));
+    for (const leg of currentTicket) {
+      const idx = sorted.findIndex((l) => l === leg);
+      if (idx !== -1) usedLegIndices.add(idx);
+    }
+  }
+
+  if (tickets.length === 0) {
+    // Fallback: best valid combo rather than returning [] (PR #117 analogue).
+    const bestHolder: { legs: VaLeg[] } = { legs: [] };
+    let bestScore = -Infinity;
+
+    const n = Math.min(sorted.length, 12);
+    const pool = sorted.slice(0, n);
+
+    function consider(combo: VaLeg[]) {
+      if (combo.length === 0 || combo.length > 8) return;
+      const counts = new Map<string, number>();
+      for (const l of combo) {
+        counts.set(l.eventId, (counts.get(l.eventId) ?? 0) + 1);
+        if ((counts.get(l.eventId) ?? 0) > 2) return;
+      }
+      const prod = combo.reduce((acc, l) => acc * l.bookmakerOdds, 1);
+      const inRange = prod >= 4.5 && prod <= 7.5;
+      const sizeScore = combo.length;
+      const rangeBonus = inRange ? 1000 : 0;
+      const closeness = inRange ? 0 : -Math.min(Math.abs(prod - 4.5), Math.abs(prod - 7.5));
+      const score = rangeBonus + sizeScore * 10 + prod + closeness;
+      if (score > bestScore) {
+        bestScore = score;
+        bestHolder.legs = combo;
+      }
+    }
+
+    // Greedy remaining fill ignoring the 4.5 floor (for short pools).
+    const greedy: VaLeg[] = [];
+    let gOdds = 1;
+    for (const candidate of sorted) {
+      if (greedy.length >= 8) break;
+      if (eventCount(greedy, candidate.eventId) >= 2) continue;
+      const tentative = gOdds * candidate.bookmakerOdds;
+      if (tentative > 7.5) continue;
+      greedy.push(candidate);
+      gOdds = tentative;
+    }
+    consider(greedy);
+
+    // Bounded search for 4–8 combos from the top pool.
+    function rec(start: number, acc: VaLeg[]) {
+      consider(acc);
+      if (acc.length >= 8) return;
+      for (let i = start; i < pool.length; i++) {
+        rec(i + 1, [...acc, pool[i]]);
+      }
+    }
+    rec(0, []);
+
+    if (bestHolder.legs.length > 0) {
+      tickets.push(toTicket(bestHolder.legs, true));
+    } else {
+      console.log(`[VA] No ticket built: ${legs.length} legs available, best combined odds 0.00`);
+      return [];
+    }
+  }
+
+  tickets.sort((a, b) => b.kellyScore - a.kellyScore);
+  if (tickets.length > 0) {
+    tickets[0].isRecommended = true;
+  }
+
+  let totalExposure = tickets.reduce((sum, t) => sum + t.stakePercent, 0);
+  if (totalExposure > 6) {
+    const sortedByKellyAsc = [...tickets].sort((a, b) => a.kellyScore - b.kellyScore);
+    for (const ticket of sortedByKellyAsc) {
+      if (ticket.isRecommended) continue;
+      if (totalExposure <= 6) break;
+      if (!ticket.isReferenceOnly) {
+        ticket.isReferenceOnly = true;
+        totalExposure -= ticket.stakePercent;
+      }
+    }
+  }
+
+  tickets.sort((a, b) => b.kellyScore - a.kellyScore);
+  console.log(`[VA] Built ${tickets.length} tickets from ${legs.length} qualified legs`);
   return tickets;
 }

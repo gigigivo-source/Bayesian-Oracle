@@ -1,7 +1,7 @@
 import { db } from "@/db";
 import { vaScanLock, vaTickets } from "@/db/schema";
 import { desc, lt, sql } from "drizzle-orm";
-import { scanValueLegs } from "@/lib/va/scanner";
+import { scanValueLegs, type VaScanMode } from "@/lib/va/scanner";
 import { buildTickets } from "@/lib/va/ticket";
 import crypto from "crypto";
 
@@ -79,11 +79,14 @@ export async function POST(req: Request) {
   let recommendedTicketId: number | null = null;
 
   try {
+    const modeParam = url.searchParams.get("mode")?.trim().toLowerCase();
+    const mode: VaScanMode = modeParam === "stack" ? "stack" : "value";
+
     // Run scanner
-    scanResult = await scanValueLegs(scanId, 7);
+    scanResult = await scanValueLegs(scanId, 7, mode);
 
     // Partitioner
-    const built = buildTickets(scanResult.legs);
+    const built = buildTickets(scanResult.legs, mode);
 
     // Write tickets to va_tickets. Once written, immutable — never updated by later scans
     const weekStart = getMondayCat();
