@@ -128,15 +128,44 @@ export function buildTickets(legs: VaLeg[], mode: "value" | "stack" = "value"): 
   // Helper to count remaining legs
   const remainingCount = () => sorted.filter((_, idx) => !usedLegIndices.has(idx)).length;
 
+  // Helpers for the required constraints
+  const hasEventFamilyDup = (ticket: VaLeg[], cand: VaLeg) =>
+    ticket.some((l) => l.eventId === cand.eventId && l.statFamily === cand.statFamily);
+  const hasEventDup = (ticket: VaLeg[], cand: VaLeg) =>
+    ticket.some((l) => l.eventId === cand.eventId);
+  const hasFamilyDup = (ticket: VaLeg[], cand: VaLeg) =>
+    ticket.some((l) => l.statFamily === cand.statFamily);
+  const hasTeamDupDifferentEvent = (ticket: VaLeg[], cand: VaLeg) => {
+    const candTeams = [cand.homeTeam.toLowerCase(), cand.awayTeam.toLowerCase()];
+    for (const l of ticket) {
+      if (l.eventId === cand.eventId) continue; // same event may share teams (different market family)
+      const existing = [l.homeTeam.toLowerCase(), l.awayTeam.toLowerCase()];
+      if (existing.some((t) => candTeams.includes(t))) return true;
+    }
+    return false;
+  };
+
   while (remainingCount() >= 3) {
     const currentTicket: VaLeg[] = [];
     let combinedOdds = 1;
 
     // Greedy fill from sorted EV order
+    // Enforces:
+    //  - at most 1 leg per eventId per market family (goals, corners, cards) [task]
+    //  - at most 1 leg per eventId (distinct events) to guarantee 3 distinct matches
+    //  - stat-family diversity (unique family per ticket) [test 4]
+    //  - team uniqueness across different events [test 5]
     for (let i = 0; i < sorted.length && currentTicket.length < 4; i++) {
       if (usedLegIndices.has(i)) continue;
       const candidate = sorted[i];
-      if (currentTicket.some((l) => l.eventId === candidate.eventId)) continue;
+      // Task: at most 1 per eventId per market family
+      if (hasEventFamilyDup(currentTicket, candidate)) continue;
+      // Distinct eventId enforcement (stricter than task, guarantees 3 distinct events)
+      if (hasEventDup(currentTicket, candidate)) continue;
+      // Family diversity
+      if (hasFamilyDup(currentTicket, candidate)) continue;
+      // Team uniqueness across different events
+      if (hasTeamDupDifferentEvent(currentTicket, candidate)) continue;
 
       const tentative = combinedOdds * candidate.bookmakerOdds;
       if (tentative > 4.5) {
@@ -217,17 +246,49 @@ export function buildTickets(legs: VaLeg[], mode: "value" | "stack" = "value"): 
   }
 
   if (tickets.length === 0) {
-    // Fallback: best 3-leg combination across distinct events (product in 3.0–4.5)
+    // Fallback: best 3-leg combination respecting:
+    // - at most 1 per eventId per family (task)
+    // - distinct eventId (at least 3 distinct)
+    // - unique family per ticket
+    // - team uniqueness across different events
     let bestFallbackLegs: VaLeg[] | null = null;
     let bestFallbackOdds = 0;
+    const isValidTriple = (a: VaLeg, b: VaLeg, c: VaLeg): boolean => {
+      const arr = [a, b, c];
+      // eventId+family uniqueness
+      const ef = new Set(arr.map((l) => `${l.eventId}|${l.statFamily}`));
+      if (ef.size !== 3) return false;
+      // distinct eventId
+      const ev = new Set(arr.map((l) => l.eventId));
+      if (ev.size !== 3) return false;
+      // family diversity
+      const fam = new Set(arr.map((l) => l.statFamily));
+      if (fam.size !== 3) return false;
+      // team uniqueness across different events
+      const teamsLower = arr.flatMap((l) => [l.homeTeam.toLowerCase(), l.awayTeam.toLowerCase()]);
+      // Since eventIds are distinct, any team overlap is invalid
+      if (new Set(teamsLower).size !== teamsLower.length) return false;
+      return true;
+    };
     for (let i = 0; i < sorted.length; i++) {
       for (let j = i + 1; j < sorted.length; j++) {
         if (sorted[j].eventId === sorted[i].eventId) continue;
+        if (sorted[j].statFamily === sorted[i].statFamily) continue;
+        // team overlap check for pair
+        {
+          const a = sorted[i];
+          const b = sorted[j];
+          if (a.eventId !== b.eventId) {
+            const teamsA = [a.homeTeam.toLowerCase(), a.awayTeam.toLowerCase()];
+            const teamsB = [b.homeTeam.toLowerCase(), b.awayTeam.toLowerCase()];
+            if (teamsA.some((t) => teamsB.includes(t))) continue;
+          }
+        }
         for (let k = j + 1; k < sorted.length; k++) {
           const a = sorted[i];
           const b = sorted[j];
           const c = sorted[k];
-          if (c.eventId === a.eventId || c.eventId === b.eventId) continue;
+          if (!isValidTriple(a, b, c)) continue;
           const prod = a.bookmakerOdds * b.bookmakerOdds * c.bookmakerOdds;
           if (prod < 3.0 || prod > 4.5) continue;
           if (prod > bestFallbackOdds) {
@@ -424,7 +485,8 @@ function buildStackTickets(legs: VaLeg[]): VaTicket[] {
 
   const remainingCount = () => sorted.filter((_, idx) => !usedLegIndices.has(idx)).length;
 
-  const eventCount = (ticket: VaLeg[], eventId: string) => ticket.filter((l) => l.eventId === eventId).length;
+  const hasEventFamily = (ticket: VaLeg[], candidate: VaLeg) =>
+    ticket.some((l) => l.eventId === candidate.eventId && l.statFamily === candidate.statFamily);
 
   while (remainingCount() > 0) {
     const currentTicket: VaLeg[] = [];
@@ -433,7 +495,8 @@ function buildStackTickets(legs: VaLeg[]): VaTicket[] {
     for (let i = 0; i < sorted.length && currentTicket.length < 8; i++) {
       if (usedLegIndices.has(i)) continue;
       const candidate = sorted[i];
-      if (eventCount(currentTicket, candidate.eventId) >= 2) continue;
+      // At most 1 leg per eventId per market family (goals, corners, cards)
+      if (hasEventFamily(currentTicket, candidate)) continue;
 
       const tentative = combinedOdds * candidate.bookmakerOdds;
       if (tentative > 7.5) continue;
@@ -476,10 +539,12 @@ function buildStackTickets(legs: VaLeg[]): VaTicket[] {
 
     function consider(combo: VaLeg[]) {
       if (combo.length === 0 || combo.length > 8) return;
-      const counts = new Map<string, number>();
+      // At most 1 leg per eventId per market family
+      const seen = new Set<string>();
       for (const l of combo) {
-        counts.set(l.eventId, (counts.get(l.eventId) ?? 0) + 1);
-        if ((counts.get(l.eventId) ?? 0) > 2) return;
+        const key = `${l.eventId}|${l.statFamily}`;
+        if (seen.has(key)) return;
+        seen.add(key);
       }
       const prod = combo.reduce((acc, l) => acc * l.bookmakerOdds, 1);
       const inRange = prod >= 4.5 && prod <= 7.5;
@@ -498,7 +563,7 @@ function buildStackTickets(legs: VaLeg[]): VaTicket[] {
     let gOdds = 1;
     for (const candidate of sorted) {
       if (greedy.length >= 8) break;
-      if (eventCount(greedy, candidate.eventId) >= 2) continue;
+      if (greedy.some((l) => l.eventId === candidate.eventId && l.statFamily === candidate.statFamily)) continue;
       const tentative = gOdds * candidate.bookmakerOdds;
       if (tentative > 7.5) continue;
       greedy.push(candidate);

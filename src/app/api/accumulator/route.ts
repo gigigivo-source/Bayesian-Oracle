@@ -228,7 +228,8 @@ function buildAcca(
   type: "highhit" | "value",
 ): Accumulator | null {
   const candidates: AccaPick[] = [];
-  const used = new Set<string>();
+  // At most 1 leg per eventId per market family (goals, corners, cards)
+  const used = new Set<string>(); // key = fixtureId|family
   const all = matchPicks
     .flatMap((mp) => mp.picks)
     .filter((p) => p.hitRate >= minHitRate)
@@ -237,9 +238,10 @@ function buildAcca(
     );
   for (const p of all) {
     if (candidates.length >= legs) break;
-    if (used.has(p.fixtureId)) continue;
+    const key = `${p.fixtureId}|${p.family}`;
+    if (used.has(key)) continue;
     candidates.push(p);
-    used.add(p.fixtureId);
+    used.add(key);
   }
   if (candidates.length < Math.min(legs, 2)) return null;
   const prob = candidates.reduce((p, c) => p * c.hitRate, 1);

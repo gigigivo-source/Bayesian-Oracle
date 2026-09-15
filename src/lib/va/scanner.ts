@@ -277,6 +277,24 @@ export async function scanValueLegs(scanId: string, days = 7, mode: VaScanMode =
     }
   }
 
+  // 4b. Enforce at most 1 leg per eventId per market family (goals, corners, cards)
+  // Keep highest EV per (eventId, statFamily)
+  const dedupedByFamily = (() => {
+    const best = new Map<string, VaLeg>();
+    for (const leg of qualified) {
+      const key = `${leg.eventId}|${leg.statFamily}`;
+      const existing = best.get(key);
+      if (!existing || leg.ev > existing.ev) {
+        best.set(key, leg);
+      }
+    }
+    return Array.from(best.values());
+  })();
+
+  // Replace qualified with deduped for insertion and return
+  qualified.length = 0;
+  qualified.push(...dedupedByFamily);
+
   // 5. Insert each qualified leg into va_legs
   if (mode === "stack") {
     console.log(`[VA][stack] qualified=${qualified.length} from ${marketsEvaluated} markets`);
