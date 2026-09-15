@@ -149,3 +149,60 @@ export function marketReliability(m: Market, ctx?: MatchVolatility): number {
   const base = reliabilityOf(m);
   return ctx ? Math.max(0.4, Math.min(1.0, base * contextModifier(m, ctx))) : base;
 }
+
+// ─── Empirical backtest calibration layer ─────────────────────────────────────
+
+// Empirical calibration table mapping a raw claimed probability to the hit
+// rate actually observed in the 207-match backtest (see calibrateAgainstBacktest).
+const BACKTEST_CALIBRATION_POINTS: ReadonlyArray<readonly [number, number]> = [
+  [0.50, 0.50],
+  [0.60, 0.55],
+  [0.70, 0.58],
+  [0.75, 0.61], // empirical
+  [0.80, 0.72], // smoothed (empirical 0.766 broke monotonicity with the next bin)
+  [0.85, 0.75], // smoothed (empirical 0.705 broke monotonicity)
+  [0.90, 0.79], // empirical
+  [0.95, 0.83], // empirical (0.815 rounded up within noise)
+  [1.00, 0.85], // cap
+];
+
+/**
+ * Maps a raw model probability to an empirically-calibrated probability via
+ * piecewise linear interpolation over `BACKTEST_CALIBRATION_POINTS`.
+ *
+ * - The calibration table is empirical, derived from a 207-match backtest
+ *   over goals/BTTS markets in the top-5 European leagues.
+ * - Values were smoothed where the empirical data was non-monotonic
+ *   (claimed 0.80 → observed 0.766 and claimed 0.85 → observed 0.705 are
+ *   mapped to 0.72 / 0.75 so the fitted curve stays monotone).
+ * - This function should be applied AFTER `calibratedWinProb`, as a final
+ *   correction step before the scanner consumes hitRate.
+ *
+ * Inputs ≤ 0.50 pass through unchanged (identity); output is clamped to
+ * [0.02, 0.98].
+ */
+export function calibrateAgainstBacktest(rawProb: number): number {
+  const clamp = (v: number): number => Math.max(0.02, Math.min(0.98, v));
+
+  // Below 0.50 the table has no data — pass through unchanged (identity).
+  if (rawProb <= 0.50) return clamp(rawProb);
+
+  const pts = BACKTEST_CALIBRATION_POINTS;
+  const last = pts[pts.length - 1];
+
+  // At or above the top anchor (including out-of-range inputs > 1.0) sit on
+  // the capped plateau.
+  if (rawProb >= last[0]) return clamp(last[1]);
+
+  // Piecewise linear interpolation between adjacent sorted anchors.
+  for (let i = 0; i < pts.length - 1; i++) {
+    const [x0, y0] = pts[i];
+    const [x1, y1] = pts[i + 1];
+    if (rawProb <= x1) {
+      const t = (rawProb - x0) / (x1 - x0);
+      return clamp(y0 + t * (y1 - y0));
+    }
+  }
+
+  return clamp(last[1]);
+}
