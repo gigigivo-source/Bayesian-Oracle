@@ -424,7 +424,9 @@ function buildStackTickets(legs: VaLeg[]): VaTicket[] {
 
   const remainingCount = () => sorted.filter((_, idx) => !usedLegIndices.has(idx)).length;
 
-  const eventCount = (ticket: VaLeg[], eventId: string) => ticket.filter((l) => l.eventId === eventId).length;
+  // Stack-mode shape rule: at most 1 leg per (eventId, statFamily) pair.
+  const pairSeen = (ticket: VaLeg[], leg: VaLeg) =>
+    ticket.some((l) => l.eventId === leg.eventId && l.statFamily === leg.statFamily);
 
   while (remainingCount() > 0) {
     const currentTicket: VaLeg[] = [];
@@ -433,7 +435,7 @@ function buildStackTickets(legs: VaLeg[]): VaTicket[] {
     for (let i = 0; i < sorted.length && currentTicket.length < 8; i++) {
       if (usedLegIndices.has(i)) continue;
       const candidate = sorted[i];
-      if (eventCount(currentTicket, candidate.eventId) >= 2) continue;
+      if (pairSeen(currentTicket, candidate)) continue;
 
       const tentative = combinedOdds * candidate.bookmakerOdds;
       if (tentative > 7.5) continue;
@@ -476,10 +478,11 @@ function buildStackTickets(legs: VaLeg[]): VaTicket[] {
 
     function consider(combo: VaLeg[]) {
       if (combo.length === 0 || combo.length > 8) return;
-      const counts = new Map<string, number>();
+      const pairs = new Set<string>();
       for (const l of combo) {
-        counts.set(l.eventId, (counts.get(l.eventId) ?? 0) + 1);
-        if ((counts.get(l.eventId) ?? 0) > 2) return;
+        const key = `${l.eventId}|${l.statFamily}`;
+        if (pairs.has(key)) return; // at most 1 leg per (eventId, statFamily) pair
+        pairs.add(key);
       }
       const prod = combo.reduce((acc, l) => acc * l.bookmakerOdds, 1);
       const inRange = prod >= 4.5 && prod <= 7.5;
@@ -498,7 +501,7 @@ function buildStackTickets(legs: VaLeg[]): VaTicket[] {
     let gOdds = 1;
     for (const candidate of sorted) {
       if (greedy.length >= 8) break;
-      if (eventCount(greedy, candidate.eventId) >= 2) continue;
+      if (pairSeen(greedy, candidate)) continue;
       const tentative = gOdds * candidate.bookmakerOdds;
       if (tentative > 7.5) continue;
       greedy.push(candidate);
