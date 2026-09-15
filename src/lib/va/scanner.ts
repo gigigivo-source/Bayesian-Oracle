@@ -1,7 +1,7 @@
 // Value Accumulator — Scanner (independent, no accumulator reuse)
-import { fetchScoreboard, type FixtureLite } from "@/lib/espn";
+import { fetchScoreboard, fetchSummary, type FixtureLite } from "@/lib/espn";
 import { leagueTier } from "@/lib/leaguePriority";
-import { runEngineFromReal } from "@/lib/engine";
+import { runEngineFromRealWithProfiles } from "@/lib/engine";
 import {
   fetchOddsForEvent,
   resolveBzzoiroEvent,
@@ -199,9 +199,17 @@ export async function scanValueLegs(scanId: string, days = 7): Promise<ScanResul
     console.log(`[VA] resolved Bzzoiro event ${bzEventId} for ${matchLabel}`);
 
     // c. Run engine to produce all 217 markets with hitRate
+    //    Real per-fixture data (form, H2H, lineups, xG) from ESPN feeds the
+    //    12-factor selector; without it the engine runs on league anchors only.
+    let summary = null;
+    try {
+      summary = await fetchSummary(fx.leagueSlug, fx.id);
+    } catch {
+      // fail soft: keep summary null, engine falls back to anchors
+    }
     let engineResult;
     try {
-      engineResult = runEngineFromReal(fx, null);
+      engineResult = await runEngineFromRealWithProfiles(fx, summary);
     } catch {
       continue;
     }
