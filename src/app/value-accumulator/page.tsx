@@ -40,6 +40,36 @@ interface TicketsResponse {
   scanId: string | null;
 }
 
+interface BacktestBucket {
+  claimed: number;
+  n: number;
+  hits: number;
+  actual: number;
+  diff: number;
+}
+
+interface BacktestResponse {
+  ok: boolean;
+  elapsedMs: number;
+  matchesFound: number;
+  matchesProcessed: number;
+  totalPredictions: number;
+  buckets: BacktestBucket[];
+}
+
+type BacktestStatus = "idle" | "running" | "done" | "error";
+
+/** Small inline spinner shared by the chip and the backtest sheet. */
+const spinnerStyle = {
+  width: 12,
+  height: 12,
+  borderRadius: "50%",
+  border: "2px solid #a7f3d0",
+  borderTopColor: "#0a7d4f",
+  display: "inline-block",
+  animation: "va-spin 0.8s linear infinite",
+} as const;
+
 /**
  * Read-only view of Value Accumulator tickets.
  *
@@ -56,6 +86,36 @@ export default function ValueAccumulatorPage() {
   const [scanId, setScanId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [backtestStatus, setBacktestStatus] = useState<BacktestStatus>("idle");
+  const [backtestResult, setBacktestResult] = useState<BacktestResponse | null>(null);
+  const [backtestError, setBacktestError] = useState<string | null>(null);
+  const [backtestOpen, setBacktestOpen] = useState(false);
+
+  async function runBacktest() {
+    if (backtestStatus === "running") return;
+    setBacktestStatus("running");
+    setBacktestError(null);
+    setBacktestResult(null);
+    try {
+      const res = await fetch("/api/backtest", { method: "POST", cache: "no-store" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = (await res.json()) as BacktestResponse;
+      if (!data.ok) throw new Error("Backtest failed");
+      setBacktestResult(data);
+      setBacktestStatus("done");
+      setBacktestOpen(true);
+    } catch (e) {
+      setBacktestError(e instanceof Error ? e.message : String(e));
+      setBacktestStatus("error");
+      setBacktestOpen(true);
+    }
+  }
+
+  function closeBacktest() {
+    setBacktestOpen(false);
+    setBacktestStatus("idle");
+  }
+
 
   async function loadTickets(specificScanId?: string) {
     setLoading(true);
@@ -111,6 +171,8 @@ export default function ValueAccumulatorPage() {
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
         * { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; }
+        @keyframes va-spin { to { transform: rotate(360deg); } }
+        @keyframes va-slide-up { from { transform: translateY(100%); } to { transform: translateY(0); } }
       `}</style>
 
       <div style={{ maxWidth: 720, margin: "0 auto", paddingTop: 32 }}>
@@ -126,6 +188,33 @@ export default function ValueAccumulatorPage() {
             <span style={{ fontSize: 13, color: "#6b7280", fontWeight: 500 }}>
               Scan is run from the server. Refresh to see latest tickets.
             </span>
+            <button
+              type="button"
+              onClick={runBacktest}
+              disabled={backtestStatus === "running"}
+              style={{
+                background: "#ecfdf5",
+                color: "#0a7d4f",
+                border: "1px solid #a7f3d0",
+                borderRadius: 999,
+                padding: "4px 12px",
+                fontSize: 13,
+                fontWeight: 600,
+                cursor: backtestStatus === "running" ? "default" : "pointer",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+              }}
+            >
+              {backtestStatus === "running" ? (
+                <>
+                  <span style={spinnerStyle} aria-hidden="true" />
+                  Running…
+                </>
+              ) : (
+                "Run Backtest"
+              )}
+            </button>
             {scanId && (
               <span style={{ fontSize: 12, color: "#9ca3af", fontFamily: "monospace" }}>
                 Scan: {scanId.slice(0, 20)}…
@@ -446,6 +535,149 @@ export default function ValueAccumulatorPage() {
           built. Settlement runs automatically after matches finish.
         </div>
       </div>
+
+      {/* Calibration backtest — bottom-sheet modal */}
+      {backtestOpen && (
+        <div
+          onClick={closeBacktest}
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(17, 24, 39, 0.55)",
+            zIndex: 1000,
+            display: "flex",
+            alignItems: "flex-end",
+            justifyContent: "center",
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              background: "white",
+              width: "100%",
+              maxWidth: 720,
+              maxHeight: "70vh",
+              borderRadius: "16px 16px 0 0",
+              display: "flex",
+              flexDirection: "column",
+              overflow: "hidden",
+              boxShadow: "0 -4px 24px rgba(0,0,0,0.2)",
+              animation: "va-slide-up 0.25s ease-out",
+            }}
+          >
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                padding: "16px 20px",
+                borderBottom: "1px solid #e5e7eb",
+              }}
+            >
+              <div style={{ fontSize: 16, fontWeight: 700, color: "#111827" }}>Calibration Backtest</div>
+              <button
+                type="button"
+                onClick={closeBacktest}
+                aria-label="Close"
+                style={{
+                  background: "#f3f4f6",
+                  border: "none",
+                  borderRadius: 8,
+                  width: 28,
+                  height: 28,
+                  fontSize: 14,
+                  lineHeight: 1,
+                  color: "#6b7280",
+                  cursor: "pointer",
+                }}
+              >
+                ✕
+              </button>
+            </div>
+
+            <div style={{ overflowY: "auto", padding: "16px 20px 24px" }}>
+              {backtestStatus === "running" && (
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 10,
+                    color: "#6b7280",
+                    fontSize: 14,
+                    padding: "24px 0",
+                  }}
+                >
+                  <span style={spinnerStyle} aria-hidden="true" />
+                  Scanning recent matches…
+                </div>
+              )}
+
+              {backtestStatus === "error" && (
+                <div style={{ color: "#dc2626", fontSize: 14, padding: "8px 0" }}>{backtestError}</div>
+              )}
+
+              {backtestStatus === "done" && backtestResult && (
+                <>
+                  <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 12 }}>
+                    {backtestResult.matchesProcessed} matches · {backtestResult.totalPredictions} predictions ·{" "}
+                    {backtestResult.elapsedMs}ms
+                  </div>
+                  {backtestResult.buckets.length > 0 ? (
+                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                      <thead>
+                        <tr style={{ textAlign: "left", borderBottom: "1px solid #e5e7eb" }}>
+                          {["Claimed", "N", "Hits", "Actual", "Diff"].map((h) => (
+                            <th
+                              key={h}
+                              style={{
+                                padding: "8px 6px",
+                                color: "#6b7280",
+                                fontWeight: 600,
+                                fontSize: 11,
+                                textTransform: "uppercase",
+                              }}
+                            >
+                              {h}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {backtestResult.buckets.map((b) => (
+                          <tr key={b.claimed} style={{ borderBottom: "1px solid #f3f4f6" }}>
+                            <td style={{ padding: "10px 6px", color: "#111827", fontWeight: 600 }}>
+                              {(b.claimed * 100).toFixed(0)}%
+                            </td>
+                            <td style={{ padding: "10px 6px", color: "#374151" }}>{b.n}</td>
+                            <td style={{ padding: "10px 6px", color: "#374151" }}>{b.hits}</td>
+                            <td style={{ padding: "10px 6px", color: "#111827", fontWeight: 600 }}>
+                              {(b.actual * 100).toFixed(1)}%
+                            </td>
+                            <td
+                              style={{
+                                padding: "10px 6px",
+                                fontWeight: 600,
+                                color: b.diff > -0.05 ? "#0a7d4f" : b.diff >= -0.1 ? "#d97706" : "#dc2626",
+                              }}
+                            >
+                              {b.diff >= 0 ? "+" : ""}
+                              {(b.diff * 100).toFixed(1)}%
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  ) : (
+                    <div style={{ fontSize: 13, color: "#6b7280", padding: "8px 0" }}>
+                      No bucket reached 5 predictions yet — scan more days first.
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
