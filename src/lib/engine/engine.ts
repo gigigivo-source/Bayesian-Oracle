@@ -1,4 +1,5 @@
 // ĞIGI GIVØ — Orchestrator (L0→L11)
+import { calibrateAgainstBacktest } from "./calibration";
 import { buildMatchContext } from "./context";
 import { buildLambdas, type LambdaSet } from "./lambdas";
 import { buildRealLambdas, type RealProfiles } from "./realLambdas";
@@ -80,6 +81,19 @@ function assemble(
 ): EngineResult {
   const engine    = new MarketEngine(match, lam);
   const markets   = engine.buildAll();
+
+  // Empirical calibration: the raw Poisson market probabilities are
+  // systematically over-confident (measured: claimed 0.90 → realised
+  // 0.80, claimed 0.95 → realised 0.82 in a 207-match backtest of
+  // goals/BTTS markets). Apply the empirically-fitted correction to
+  // the goals family only — corners/cards/shots do not yet have a
+  // calibration curve and stay raw for now.
+  for (const m of markets) {
+    if (m.family === "Goals") {
+      m.hitRate = calibrateAgainstBacktest(m.hitRate);
+    }
+  }
+
   const qualified = markets.filter((m) => !m.rejected);
   const rejected  = markets.filter((m) => m.rejected);
 
