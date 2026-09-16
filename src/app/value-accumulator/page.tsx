@@ -88,6 +88,8 @@ interface VaScanResponse {
   marketsEvaluated?: number;
   legsQualified?: number;
   ticketsBuilt?: number;
+  legsQualifiedBacktest?: number;
+  ticketsBuiltBacktest?: number;
   recommendedTicketId?: number | null;
   settled?: VaScanSettled;
   ticketBacktest?: TicketBacktest;
@@ -838,8 +840,10 @@ export default function ValueAccumulatorPage() {
                 <div style={{ fontSize: 16, fontWeight: 700, color: "#111827" }}>Ticket Backtest</div>
                 {ticketBacktestStatus === "done" && ticketBacktestResult?.settled && (
                   <div style={{ fontSize: 13, color: "#6b7280", marginTop: 4 }}>
-                    {ticketBacktestResult.matchesScanned ?? 0} matches · {ticketBacktestResult.settled.won} won ·{" "}
-                    {ticketBacktestResult.settled.lost} lost · {ticketBacktestResult.settled.pending} pending
+                    {ticketBacktestResult.matchesScanned ?? 0} matches ·{" "}
+                    {ticketBacktestResult.legsQualifiedBacktest ?? 0} legs ·{" "}
+                    {ticketBacktestResult.ticketsBuiltBacktest ?? 0} tickets · {ticketBacktestResult.settled.won}{" "}
+                    won · {ticketBacktestResult.settled.lost} lost · {ticketBacktestResult.settled.pending} pending
                   </div>
                 )}
               </div>
