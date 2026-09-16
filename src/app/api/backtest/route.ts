@@ -1,132 +1,164 @@
-import { fetchScoreboard, fetchSummary, type FixtureLite } from "@/lib/espn";
-import { runEngineFromReal, evaluateFinishedMatch } from "@/lib/engine";
+// Calibration backtest — replays the VA scanner's prediction path (blind
+// pre-match fixture, null summary, no odds anchor) over recently finished
+// matches and reports claimed hit rates vs actual outcomes, bucketed by the
+// probability the model claimed. Read-only: no auth, no DB access.
+//
+// Markets the engine flags `rejected` are deliberately NOT skipped: on the
+// null-summary, odds-free path the engine's completeness gate (score 30 < 45)
+// rejects every market, and the VA scanner itself iterates engine markets
+// without a rejected check — so the table measures every Goals claim the
+// model actually emits on that path.
+import { fetchScoreboard, type FixtureLite, type TeamLite } from "@/lib/espn";
+import { runEngineFromReal } from "@/lib/engine";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
-const ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports/soccer";
+const DEFAULT_LEAGUES = "eng.1,esp.1,ita.1,ger.1,fra.1,ned.1,por.1";
 
-async function fetchBoxscore(slug: string, eventId: string): Promise<Record<string, number> | null> {
-  try {
-    const res = await fetch(`${ESPN_BASE}/${slug}/summary?event=${eventId}`, {
-      next: { revalidate: 86400 },
-    });
-    if (!res.ok) return null;
-    const data = await res.json() as { boxscore?: { teams?: Array<{ statistics?: Array<{ name: string; displayValue: string }> }> } };
-    const teams = data.boxscore?.teams;
-    if (!teams || teams.length < 2) return null;
-
-    const parse = (stats: Array<{ name: string; displayValue: string }>) => {
-      const m: Record<string, number> = {};
-      for (const s of stats) m[s.name] = parseFloat(s.displayValue) || 0;
-      return m;
-    };
-
-    const h = parse(teams[0]?.statistics ?? []);
-    const a = parse(teams[1]?.statistics ?? []);
-
-    return {
-      homeShots:         h.totalShots        ?? 0, awayShots:         a.totalShots        ?? 0,
-      homeSot:           h.shotsOnTarget      ?? 0, awaySot:           a.shotsOnTarget      ?? 0,
-      homeCorners:       h.wonCorners         ?? 0, awayCorners:       a.wonCorners         ?? 0,
-      homeCards:         h.yellowCards        ?? 0, awayCards:         a.yellowCards        ?? 0,
-      homeOffsides:      h.offsides           ?? 0, awayOffsides:      a.offsides           ?? 0,
-      homeSaves:         h.saves              ?? 0, awaySaves:         a.saves              ?? 0,
-      homeInterceptions: h.interceptions      ?? 0, awayInterceptions: a.interceptions      ?? 0,
-      homeFouls:         h.foulsCommitted     ?? 0, awayFouls:         a.foulsCommitted     ?? 0,
-    };
-  } catch {
-    return null;
-  }
+interface Bucket {
+  claimed: number;
+  n: number;
+  hits: number;
+  actual: number;
+  diff: number;
 }
 
-function fmt(d: Date): string {
-  return d.toISOString().slice(0, 10).replace(/-/g, "");
+function yyyymmdd(daysAgo: number): string {
+  return new Date(Date.now() - daysAgo * 86_400_000)
+    .toISOString()
+    .slice(0, 10)
+    .replace(/-/g, "");
 }
 
-export async function GET(req: Request) {
+/** Blind pre-match fixture — the engine must not see the result or the line. */
+function toBlindFixture(fx: FixtureLite): FixtureLite {
+  const blind = (t: TeamLite, homeAway: "home" | "away"): TeamLite => ({
+    id: t.id,
+    name: t.name,
+    shortName: t.shortName,
+    abbrev: t.abbrev,
+    logo: null,
+    color: null,
+    score: null,
+    homeAway,
+    record: null,
+    form: null,
+  });
+  return {
+    id: fx.id,
+    leagueSlug: fx.leagueSlug,
+    leagueName: fx.leagueName,
+    date: fx.date,
+    state: "pre",
+    statusDetail: "Scheduled",
+    venue: null,
+    home: blind(fx.home, "home"),
+    away: blind(fx.away, "away"),
+    neutralSite: false,
+    odds: null,
+  };
+}
+
+export async function POST(req: Request) {
+  const started = Date.now();
   const { searchParams } = new URL(req.url);
-  const league = searchParams.get("league") ?? "eng.1";
-  const months = Math.min(parseInt(searchParams.get("months") ?? "3"), 6);
-  const limit  = Math.min(parseInt(searchParams.get("limit")  ?? "30"), 50);
+  const daysRaw = parseInt(searchParams.get("days") ?? "21", 10);
+  const days = Math.min(Math.max(Number.isFinite(daysRaw) ? daysRaw : 21, 1), 30);
+  const leagues = (searchParams.get("leagues") ?? DEFAULT_LEAGUES)
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
 
-  // Build ESPN date-range string covering the requested window
-  const now  = new Date();
-  const from = new Date(now);
-  from.setMonth(from.getMonth() - months);
-  const dateRange = `${fmt(from)}-${fmt(now)}`;
+  // 1. Finished matches — one day at a time (ESPN returns nothing for ranges).
+  const byId = new Map<string, FixtureLite>();
+  for (let i = 1; i <= days; i++) {
+    const date = yyyymmdd(i);
+    const settled = await Promise.allSettled(
+      leagues.map(async (slug) => {
+        try {
+          return await fetchScoreboard(slug, date);
+        } catch {
+          return [];
+        }
+      }),
+    );
+    for (const s of settled) {
+      if (s.status !== "fulfilled") continue;
+      for (const fx of s.value) {
+        if (fx.state !== "post") continue;
+        if (fx.home.score === null || fx.away.score === null) continue;
+        if (!Number.isFinite(Number(fx.home.score)) || !Number.isFinite(Number(fx.away.score))) continue;
+        if (!byId.has(fx.id)) byId.set(fx.id, fx);
+      }
+    }
+  }
+  const finished = Array.from(byId.values());
 
-  // fetchScoreboard now accepts an optional dateRange string
-  const fixtures = await fetchScoreboard(league, dateRange);
-  const finished = (fixtures as FixtureLite[])
-    .filter((f) => f.state === "post" && f.home.score !== null)
-    .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
-    .slice(0, limit);
-
-  let totalHits    = 0;
-  let totalMisses  = 0;
-  let totalPending = 0;
-  let totalPicks   = 0;
+  // 2-4. Blind prediction + outcome measurement, bucketed by claimed hitRate.
+  const buckets = new Map<number, { n: number; hits: number }>();
   let matchesProcessed = 0;
+  let totalPredictions = 0;
 
-  const matchResults: Array<{
-    match: string;
-    score: string;
-    date: string;
-    hits: number;
-    misses: number;
-    pending: number;
-    accuracy: number;
-  }> = [];
+  for (const ev of finished) {
+    const homeScore = Number(ev.home.score);
+    const awayScore = Number(ev.away.score);
 
-  for (const fx of finished) {
+    let result;
     try {
-      const summary   = await fetchSummary(league, fx.id);
-      const prediction = runEngineFromReal(fx, summary);
-      const boxscore  = await fetchBoxscore(league, fx.id);
-
-      evaluateFinishedMatch(fx, prediction, boxscore);
-
-      const h = prediction.hitCount ?? 0;
-      const m = prediction.top10.filter((p) => p.outcome === "MISS").length;
-      const p = prediction.top10.filter((p) => p.outcome === "PENDING" || !p.outcome).length;
-
-      totalHits    += h;
-      totalMisses  += m;
-      totalPending += p;
-      totalPicks   += prediction.top10.length;
-      matchesProcessed++;
-
-      matchResults.push({
-        match:    `${fx.home.name} vs ${fx.away.name}`,
-        score:    `${fx.home.score}-${fx.away.score}`,
-        date:     fx.date.slice(0, 10),
-        hits:     h,
-        misses:   m,
-        pending:  p,
-        accuracy: (h + m) > 0 ? h / (h + m) : 0,
-      });
-
-      // Polite rate-limit — avoid hammering ESPN
-      await new Promise((r) => setTimeout(r, 500));
+      result = runEngineFromReal(toBlindFixture(ev), null);
     } catch {
-      // Skip individual failed matches silently
+      continue; // skip match on engine error
+    }
+    matchesProcessed++;
+
+    for (const m of result.markets ?? []) {
+      if (m.family !== "Goals") continue;
+      const hitRate = m.hitRate;
+      if (typeof hitRate !== "number" || !Number.isFinite(hitRate) || hitRate < 0.5) continue;
+
+      let hit: boolean;
+      if (m.name.startsWith("Total Goals O/U")) {
+        const line = Number(/O\/U\s+([\d.]+)/.exec(m.name)?.[1]);
+        if (!Number.isFinite(line)) continue;
+        const total = homeScore + awayScore;
+        hit = m.selection.startsWith("Over") ? total > line : total < line;
+      } else if (m.name === "Both Teams To Score") {
+        const btts = homeScore >= 1 && awayScore >= 1;
+        hit = m.selection === "Yes" ? btts : !btts;
+      } else {
+        continue;
+      }
+
+      const idx = Math.floor(hitRate * 20 + 1e-6); // floor(hitRate / 0.05), FP-safe
+      const b = buckets.get(idx) ?? { n: 0, hits: 0 };
+      b.n += 1;
+      b.hits += hit ? 1 : 0;
+      buckets.set(idx, b);
+      totalPredictions++;
     }
   }
 
-  const totalVerified   = totalHits + totalMisses;
-  const overallAccuracy = totalVerified > 0 ? totalHits / totalVerified : 0;
+  // 5. Bucket table — ascending, only buckets with enough samples to read.
+  const round4 = (v: number) => Math.round(v * 10000) / 10000;
+  const table: Bucket[] = Array.from(buckets.entries())
+    .filter(([, b]) => b.n >= 5)
+    .map(([idx, b]) => {
+      const claimed = idx / 20;
+      const actual = b.hits / b.n;
+      return { claimed, n: b.n, hits: b.hits, actual: round4(actual), diff: round4(actual - claimed) };
+    })
+    .sort((a, b) => a.claimed - b.claimed);
+
+  const elapsedMs = Date.now() - started;
+  console.log(`[backtest] ${matchesProcessed} matches, ${totalPredictions} predictions, ${elapsedMs}ms`);
 
   return Response.json({
-    league,
-    months,
-    matchesFound:     finished.length,
+    ok: true,
+    elapsedMs,
+    matchesFound: finished.length,
     matchesProcessed,
-    totalPicks,
-    totalHits,
-    totalMisses,
-    totalPending,
-    overallAccuracy,
-    matchResults,
+    totalPredictions,
+    buckets: table,
   });
 }
