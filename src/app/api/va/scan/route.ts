@@ -27,19 +27,27 @@ function getMondayCat(): string {
   return `${y}-${m}-${d}`;
 }
 
+/**
+ * Runs the VA scan; ?finished=true skips authentication for local backtests.
+ * All other requests retain the existing CRON_SECRET authentication check.
+ */
 export async function POST(req: Request) {
-  // Protected by CRON_SECRET header
-  const auth = req.headers.get("authorization") || req.headers.get("x-cron-secret") || "";
-  const secret = getCronSecret();
-  const provided = auth.startsWith("Bearer ") ? auth.slice(7).trim() : auth.trim();
-  // Also allow ?secret= or header CRON_SECRET
   const url = new URL(req.url);
-  const querySecret = url.searchParams.get("secret")?.trim() ?? "";
+  const finished = url.searchParams.get("finished") === "true";
 
-  if (secret) {
-    const ok = provided === secret || querySecret === secret || req.headers.get("cron_secret") === secret;
-    if (!ok) {
-      return Response.json({ ok: false, reason: "unauthorized" }, { status: 401 });
+  if (!finished) {
+    // Protected by CRON_SECRET header
+    const auth = req.headers.get("authorization") || req.headers.get("x-cron-secret") || "";
+    const secret = getCronSecret();
+    const provided = auth.startsWith("Bearer ") ? auth.slice(7).trim() : auth.trim();
+    // Also allow ?secret= or header CRON_SECRET
+    const querySecret = url.searchParams.get("secret")?.trim() ?? "";
+
+    if (secret) {
+      const ok = provided === secret || querySecret === secret || req.headers.get("cron_secret") === secret;
+      if (!ok) {
+        return Response.json({ ok: false, reason: "unauthorized" }, { status: 401 });
+      }
     }
   }
 
@@ -81,7 +89,6 @@ export async function POST(req: Request) {
   try {
     const modeParam = url.searchParams.get("mode")?.trim().toLowerCase();
     const mode: VaScanMode = modeParam === "stack" ? "stack" : "value";
-    const finished = url.searchParams.get("finished") === "true";
 
     // Run scanner (?finished=true backtests the last 14 days of finished matches)
     let finishedResults: Map<string, BacktestMatchResult> | null = null;
