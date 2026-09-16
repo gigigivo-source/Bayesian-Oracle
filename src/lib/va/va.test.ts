@@ -2,6 +2,11 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { matchEngineMarketToBookmaker } from "./marketMap";
 import { buildTickets, type VaLeg } from "./ticket";
 import type { VaBookmakerOdds } from "./oddsFetcher";
+import { settleBacktestTickets, type BacktestMatchResult } from "./scanner";
+
+// scanner.ts pulls in the db layer at module scope; stub it for unit tests without DATABASE_URL.
+vi.mock("@/db", () => ({ db: { insert: () => ({ values: () => Promise.resolve([]) }) } }));
+vi.mock("@/db/schema", () => ({ vaLegs: {} }));
 
 // Mock oddsFetcher module for scanner tests? We'll test marketMap directly for case 1 & 2.
 
@@ -320,5 +325,34 @@ describe("Value Accumulator — Immutability and Lock", () => {
     expect(settleTicket(["won", "lost", "won"])).toBe("loss");
     expect(settleTicket(["won", "void", "won"])).toBe("partial");
     expect(settleTicket(["won", "void", "lost"])).toBe("loss"); // loss takes precedence
+  });
+});
+
+describe("Value Accumulator — Finished backtest settlement", () => {
+  it("settles stack tickets against finished matches (2-1 and 0-0)", async () => {
+    const results = new Map<string, BacktestMatchResult>([
+      ["fx_21", { leagueSlug: "eng.1", homeScore: 2, awayScore: 1, corners: null }],
+      ["fx_00", { leagueSlug: "eng.1", homeScore: 0, awayScore: 0, corners: null }],
+    ]);
+    const leg = (eventId: string, market: string, selection: string, home: string, away: string): VaLeg => ({
+      scanId: "backtest", eventId, matchLabel: `${home} vs ${away}`, homeTeam: home, awayTeam: away,
+      leagueSlug: "eng.1", kickoff: new Date("2026-09-10T15:00:00Z"), market, selection, statFamily: "goals",
+      modelProbability: 0.85, bookmakerOdds: 1.3, bookmakerName: "Consensus", impliedProbability: 1 / 1.3, ev: 0.1,
+    });
+    // Ticket 1 wins every leg (Over 0.5 beats 2-1, BTTS "No" beats 0-0); Over 3.5 reaches neither result.
+    const wonTickets = buildTickets([
+      leg("fx_21", "Total Goals O/U 0.5", "Over 0.5", "Alpha", "Beta"),
+      leg("fx_00", "Both Teams To Score", "No", "Gamma", "Delta"),
+    ], "stack");
+    const lostTickets = buildTickets([
+      leg("fx_21", "Total Goals O/U 3.5", "Over 3.5", "Alpha", "Beta"),
+      leg("fx_00", "Total Goals O/U 3.5", "Over 3.5", "Gamma", "Delta"),
+    ], "stack");
+    expect(wonTickets).toHaveLength(1);
+    expect(lostTickets).toHaveLength(1);
+    const [wonStatus] = await settleBacktestTickets(wonTickets, results);
+    const [lostStatus] = await settleBacktestTickets(lostTickets, results);
+    expect(wonStatus).toBe("won");
+    expect(lostStatus).toBe("lost");
   });
 });

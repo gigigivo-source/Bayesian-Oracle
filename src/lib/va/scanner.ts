@@ -10,7 +10,7 @@ import {
   type VaBookmakerOdds,
 } from "./oddsFetcher";
 import { matchEngineMarketToBookmaker, type TeamContext } from "./marketMap";
-import type { VaLeg } from "./ticket";
+import type { VaLeg, VaTicket } from "./ticket";
 import { db } from "@/db";
 import { vaLegs } from "@/db/schema";
 
@@ -166,11 +166,15 @@ export async function scanValueLegs(scanId: string, days = 7, mode: VaScanMode =
   // Cap at 40 matches per run
   const capped = deduped.slice(0, 40);
 
+  return runScan(capped, scanId, mode);
+}
+
+async function runScan(fixtures: FixtureLite[], scanId: string, mode: VaScanMode): Promise<ScanResult> {
   let marketsEvaluated = 0;
   const qualified: VaLeg[] = [];
   const coverage = new LeagueCoverage();
 
-  for (const fx of capped) {
+  for (const fx of fixtures) {
     const matchLabel = `${fx.home.name} vs ${fx.away.name}`;
 
     // a. Leagues already proven absent from Bzzoiro are skipped without a retry.
@@ -335,12 +339,93 @@ export async function scanValueLegs(scanId: string, days = 7, mode: VaScanMode =
   if (uncovered.length > 0) {
     console.log(`[VA] scan ${scanId}: skipped leagues (no Bzzoiro coverage): ${uncovered.join(", ")}`);
   }
-  console.log(`[VA] scan ${scanId}: ${capped.length} matches, ${marketsEvaluated} markets, ${qualified.length} qualified legs`);
+  console.log(`[VA] scan ${scanId}: ${fixtures.length} matches, ${marketsEvaluated} markets, ${qualified.length} qualified legs`);
 
   return {
-    matchesScanned: capped.length,
+    matchesScanned: fixtures.length,
     marketsEvaluated,
     legsQualified: qualified.length,
     legs: qualified,
   };
+}
+
+// ─── Finished-match backtest (?finished=true): one-shot retrospective reusing the mode filters + partitioner, not the live settlement engine ───
+const BACKTEST_LEAGUES = ["eng.1", "esp.1", "ita.1", "ger.1", "fra.1"];
+
+/** Final result of a finished match; corners stays null unless the ESPN boxscore supplies it. */
+export interface BacktestMatchResult { leagueSlug: string; homeScore: number; awayScore: number; corners: number | null }
+export type BacktestLegStatus = "won" | "lost" | "unknown";
+export type BacktestTicketStatus = "won" | "lost" | "pending";
+export interface FinishedScanResult extends ScanResult { results: Map<string, BacktestMatchResult> }
+
+async function fetchFinishedFixtures(days: number): Promise<FixtureLite[]> {
+  const to = new Date(), from = new Date(to.getTime() - days * 24 * 60 * 60 * 1000);
+  const settled = await Promise.allSettled(BACKTEST_LEAGUES.map((slug) => fetchScoreboard(slug, `${fmtDate(from)}-${fmtDate(to)}`)));
+  const fixtures: FixtureLite[] = [], seen = new Set<string>();
+  for (const res of settled) {
+    if (res.status !== "fulfilled") continue;
+    for (const fx of res.value) {
+      if (seen.has(fx.id) || fx.state !== "post" || !Number.isFinite(Number(fx.home.score)) || !Number.isFinite(Number(fx.away.score))) continue;
+      seen.add(fx.id);
+      fixtures.push({ ...fx, state: "post" }); // FixtureLite pinned to "post" with the real final scores
+    }
+  }
+  return fixtures;
+}
+
+export async function scanFinishedLegs(scanId: string, mode: VaScanMode = "value"): Promise<FinishedScanResult> {
+  const fixtures = await fetchFinishedFixtures(14);
+  const results = new Map(fixtures.map((fx): [string, BacktestMatchResult] =>
+    [fx.id, { leagueSlug: fx.leagueSlug, homeScore: Number(fx.home.score), awayScore: Number(fx.away.score), corners: null }]));
+  return { ...(await runScan(fixtures, scanId, mode)), results };
+}
+
+async function fetchEventCornerTotal(leagueSlug: string, eventId: string): Promise<number | null> {
+  try {
+    const res = await fetch(`https://site.api.espn.com/apis/site/v2/sports/soccer/${encodeURIComponent(leagueSlug)}/summary?event=${encodeURIComponent(eventId)}`, { cache: "no-store" });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { boxscore?: { teams?: Array<{ statistics?: Array<{ name?: string; label?: string; displayValue?: string }> }> } };
+    let total = 0, found = false;
+    for (const team of data.boxscore?.teams ?? []) {
+      const stat = (team.statistics ?? []).find((s) => s.name === "wonCorners" || /corner/i.test(`${s.name ?? ""} ${s.label ?? ""}`));
+      if (stat && Number.isFinite(Number(stat.displayValue))) { total += Number(stat.displayValue); found = true; }
+    }
+    return found ? total : null;
+  } catch { return null; }
+}
+
+function settleTotal(total: number | null, line: number, selection: string): BacktestLegStatus {
+  if (total === null) return "unknown";
+  const diff = total - line;
+  if (/^over\b/i.test(selection)) return diff > 0 ? "won" : diff < 0 ? "lost" : "unknown";
+  if (/^under\b/i.test(selection)) return diff < 0 ? "won" : diff > 0 ? "lost" : "unknown";
+  return "unknown";
+}
+
+export function settleBacktestLeg(market: string, selection: string, result: BacktestMatchResult | undefined): BacktestLegStatus {
+  if (!result) return "unknown";
+  const m = market.toLowerCase();
+  const lineMatch = selection.match(/(\d+(?:\.\d+)?)/);
+  const line = lineMatch ? Number(lineMatch[1]) : null;
+  if (m.includes("total goals") && line !== null) return settleTotal(result.homeScore + result.awayScore, line, selection);
+  if (m.includes("both teams to score") || m.includes("btts")) {
+    const bothScored = result.homeScore > 0 && result.awayScore > 0;
+    if (/^yes\b/i.test(selection)) return bothScored ? "won" : "lost";
+    if (/^no\b/i.test(selection)) return bothScored ? "lost" : "won";
+  }
+  if (m.includes("corner") && line !== null) return settleTotal(result.corners, line, selection);
+  return "unknown";
+}
+
+/** Settle tickets: won = ALL legs won, lost = ANY leg lost, pending = no loss but unknown legs. */
+export async function settleBacktestTickets(tickets: VaTicket[], results: Map<string, BacktestMatchResult>): Promise<BacktestTicketStatus[]> {
+  const needCorners = new Set(tickets.flatMap((t) => t.legs).filter((l) => l.market.toLowerCase().includes("corner")).map((l) => l.eventId));
+  for (const eventId of needCorners) {
+    const result = results.get(eventId);
+    if (result && result.corners === null) result.corners = await fetchEventCornerTotal(result.leagueSlug, eventId);
+  }
+  return tickets.map((ticket) => {
+    const statuses = ticket.legs.map((leg) => settleBacktestLeg(leg.market, leg.selection, results.get(leg.eventId)));
+    return statuses.includes("lost") ? "lost" : statuses.includes("unknown") ? "pending" : "won";
+  });
 }
