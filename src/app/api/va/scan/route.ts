@@ -130,10 +130,7 @@ export async function POST(req: Request) {
     const settledStatuses = finished ? backtestTickets.map((t) => t.status) : null;
 
     // Write tickets to va_tickets. Once written, immutable — never updated by later scans.
-    // Backtest samples: persist only the first 5 — the sheet's sample list is a
-    // preview; the full sample set (up to 2000 combinations) is reported in the
-    // scan response, not in the ticket table.
-    const persistCount = finished ? Math.min(5, built.length) : built.length;
+    const persistCount = finished ? 0 : built.length;
     const weekStart = getMondayCat();
     const insertedIds: number[] = [];
 
