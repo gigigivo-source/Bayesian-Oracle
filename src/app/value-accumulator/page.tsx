@@ -842,8 +842,8 @@ export default function ValueAccumulatorPage() {
                   <div style={{ fontSize: 13, color: "#6b7280", marginTop: 4 }}>
                     {ticketBacktestResult.matchesScanned ?? 0} matches ·{" "}
                     {ticketBacktestResult.legsQualifiedBacktest ?? 0} legs ·{" "}
-                    {ticketBacktestResult.ticketsBuiltBacktest ?? 0} tickets · {ticketBacktestResult.settled.won}{" "}
-                    won · {ticketBacktestResult.settled.lost} lost · {ticketBacktestResult.settled.pending} pending
+                    {ticketBacktestResult.ticketsBuiltBacktest ?? 0} samples · {ticketBacktestResult.settled.won}{" "}
+                    won · {ticketBacktestResult.settled.lost} lost
                   </div>
                 )}
               </div>

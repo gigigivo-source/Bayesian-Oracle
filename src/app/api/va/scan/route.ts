@@ -1,7 +1,7 @@
 import { db } from "@/db";
 import { vaScanLock, vaTickets } from "@/db/schema";
 import { desc, lt, sql } from "drizzle-orm";
-import { scanValueLegs, scanFinishedLegs, settleBacktestTickets, type BacktestMatchResult, type VaScanMode } from "@/lib/va/scanner";
+import { scanValueLegs, scanFinishedLegs, type BacktestSampleTicket, type VaScanMode } from "@/lib/va/scanner";
 import { buildTickets } from "@/lib/va/ticket";
 import crypto from "crypto";
 
@@ -107,26 +107,37 @@ export async function POST(req: Request) {
     const modeParam = url.searchParams.get("mode")?.trim().toLowerCase();
     const mode: VaScanMode = modeParam === "stack" ? "stack" : "value";
 
-    // Run scanner (?finished=true backtests the last 30 days of finished matches)
-    let finishedResults: Map<string, BacktestMatchResult> | null = null;
+    // Run scanner (?finished=true backtests the last 30 days of finished matches).
+    // Backtest mode: the scanner samples 3-leg combinations itself (settled,
+    // fair-odds priced) and hands them back as `tickets`.
+    let backtestTickets: BacktestSampleTicket[] = [];
     if (finished) {
-      scanResult = await scanFinishedLegs(scanId, mode);
-      finishedResults = scanResult.results;
+      const finishedScan = await scanFinishedLegs(scanId, mode);
+      scanResult = finishedScan;
+      backtestTickets = finishedScan.tickets;
     } else {
       scanResult = await scanValueLegs(scanId, 7, mode);
     }
 
-    // Partitioner
-    const built = buildTickets(scanResult.legs, mode);
+    // Partitioner — live path only. The backtest path does NOT use buildTickets:
+    // its odds-window/family-cap/exposure constraints don't belong in a
+    // calibration sample, so the scanner's combination samples are used instead.
+    const built = finished ? backtestTickets : buildTickets(scanResult.legs, mode);
 
-    // Backtest mode: settle tickets immediately against the finished results
-    const settledStatuses = finishedResults ? await settleBacktestTickets(built, finishedResults) : null;
+    // Backtest mode: every sample was settled inside the scanner (combinations
+    // containing a leg with an unknown result are skipped there), so the
+    // statuses come straight off the samples themselves.
+    const settledStatuses = finished ? backtestTickets.map((t) => t.status) : null;
 
-    // Write tickets to va_tickets. Once written, immutable — never updated by later scans
+    // Write tickets to va_tickets. Once written, immutable — never updated by later scans.
+    // Backtest samples: persist only the first 5 — the sheet's sample list is a
+    // preview; the full sample set (up to 2000 combinations) is reported in the
+    // scan response, not in the ticket table.
+    const persistCount = finished ? Math.min(5, built.length) : built.length;
     const weekStart = getMondayCat();
     const insertedIds: number[] = [];
 
-    for (let i = 0; i < built.length; i++) {
+    for (let i = 0; i < persistCount; i++) {
       const ticket = built[i];
       const ticketStatus = settledStatuses ? settledStatuses[i] : "pending";
       try {
@@ -179,9 +190,11 @@ export async function POST(req: Request) {
         realisedRate: settledCount === 0 ? null : won / settledCount,
       };
 
-      // Ticket-level calibration: bucket the settled tickets (won/lost only —
-      // pending tickets are counted separately, never bucketed) by the combined
-      // probability the model claimed for the ticket, in 0.05-wide buckets.
+      // Ticket-level calibration: bucket the settled samples (won/lost only —
+      // pending samples are counted separately, never bucketed) by the combined
+      // probability the model claimed for the sample, in 0.05-wide buckets.
+      // Threshold n >= 5: combination sampling yields far more samples than the
+      // old ticket builder ever did, so each bucket can afford a higher bar.
       const round3 = (v: number) => Math.round(v * 1000) / 1000;
       const buckets = new Map<number, { won: number; lost: number }>();
       for (let i = 0; i < built.length; i++) {
@@ -194,7 +207,7 @@ export async function POST(req: Request) {
         buckets.set(idx, bucket);
       }
       const ticketBuckets: TicketBacktestBucket[] = Array.from(buckets.entries())
-        .filter(([, bucket]) => bucket.won + bucket.lost >= 3)
+        .filter(([, bucket]) => bucket.won + bucket.lost >= 5)
         .map(([idx, bucket]) => {
           const claimed = round3(idx / 20); // bucket start on the 0.05 grid
           const realised = bucket.won / (bucket.won + bucket.lost);
