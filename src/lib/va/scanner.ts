@@ -352,6 +352,32 @@ async function runScan(fixtures: FixtureLite[], scanId: string, mode: VaScanMode
 // ─── Finished-match backtest (?finished=true): calibration probe — qualifies by model probability alone, no odds/EV filter ───
 const BACKTEST_LEAGUES = ["eng.1", "esp.1", "ita.1", "ger.1", "fra.1"];
 
+/** Fixed seed for the backtest sample shuffle — makes the random sample reproducible. */
+const BACKTEST_SAMPLE_SEED = 0x9e3779b9;
+
+/** Mulberry32: a tiny, deterministic PRNG from a 32-bit seed. */
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a += 0x6d2b79f5;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** Fisher–Yates shuffle of a copy of `legs`, driven by a seeded PRNG. */
+function shuffleSeeded<T>(input: T[], seed: number): T[] {
+  const shuffled = [...input];
+  const rand = mulberry32(seed);
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+  }
+  return shuffled;
+}
+
 /** Final result of a finished match; corners stays null unless the ESPN boxscore supplies it. */
 export interface BacktestMatchResult { leagueSlug: string; homeScore: number; awayScore: number; corners: number | null }
 export type BacktestLegStatus = "won" | "lost" | "unknown";
@@ -485,36 +511,9 @@ async function runBacktestScan(fixtures: FixtureLite[], scanId: string): Promise
     qualified.push(...uniqueQualified);
   }
 
-  // Persist qualified legs (same as the live path).
-  if (qualified.length > 0) {
-    try {
-      const rows = qualified.map((l) => ({
-        scanId: l.scanId,
-        eventId: l.eventId,
-        matchLabel: l.matchLabel,
-        homeTeam: l.homeTeam,
-        awayTeam: l.awayTeam,
-        leagueSlug: l.leagueSlug,
-        kickoff: new Date(l.kickoff as Date),
-        market: l.market,
-        selection: l.selection,
-        statFamily: l.statFamily,
-        modelProbability: l.modelProbability,
-        bookmakerOdds: l.bookmakerOdds,
-        bookmakerName: l.bookmakerName,
-        impliedProbability: l.impliedProbability,
-        ev: l.ev,
-        oddsAtBuild: new Date(l.oddsAtBuild as Date),
-        scannedAt: new Date(),
-      }));
-      for (let i = 0; i < rows.length; i += 50) {
-        const batch = rows.slice(i, i + 50);
-        await db.insert(vaLegs).values(batch);
-      }
-    } catch (err) {
-      console.error("[VA] failed to insert legs", err);
-    }
-  }
+  // NOTE: the backtest path intentionally does NOT persist to va_legs — these
+  // are finished-match samples, not live qualified legs, and writing them would
+  // leak historical fixtures into the live scan state.
 
   console.log(`[VA] backtest scan ${scanId}: ${fixtures.length} matches, ${marketsEvaluated} markets, ${qualified.length} qualified legs`);
 
@@ -525,9 +524,14 @@ async function runBacktestScan(fixtures: FixtureLite[], scanId: string): Promise
   // combinedOdds is its mirror image — no bookmaker prices enter the sample.
   const MAX_COMBINATION_SAMPLES = 2000; // keep the sample size (and runtime) bounded
 
-  // Deterministic order: highest model probability first, so the first
-  // MAX_COMBINATION_SAMPLES combinations taken in i<j<k order are stable.
-  const legs = [...qualified].sort((a, b) => b.modelProbability - a.modelProbability);
+  // Random, reproducible order: a seeded Fisher–Yates shuffle over a copy of the
+  // qualified pool. Sorting by probability (as before) biased the first 2000
+  // combinations toward the same few top legs, so the "samples" measured the
+  // outcome of two legs instead of the pool — and the realised rate blew past
+  // the claimed probability. The shuffle keeps every leg's chance of appearing
+  // in the first N combinations uniform, and the fixed seed keeps the sample
+  // reproducible across scans.
+  const legs = shuffleSeeded([...qualified], BACKTEST_SAMPLE_SEED);
 
   // Final results for settlement (same map scanFinishedLegs returns), with
   // corner totals pulled from the ESPN boxscore for every event that has a

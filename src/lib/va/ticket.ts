@@ -126,7 +126,11 @@ export function buildTickets(legs: VaLeg[], mode: "value" | "stack" = "value"): 
   const sorted = [...legs].sort((a, b) => b.ev - a.ev);
 
   const tickets: VaTicket[] = [];
-  const usedLegIndices = new Set<number>();
+  const seenTicketKeys = new Set<string>();
+  // NEW: per-leg appearance cap — no single leg may appear in more than 2
+  // tickets, so cross-ticket reuse stays controlled even with the old
+  // per-leg exclusivity removed.
+  const appearanceCount = new Map<VaLeg, number>();
 
   function computeTicketStats(ticketLegs: VaLeg[]): {
     combinedOdds: number;
@@ -159,65 +163,18 @@ export function buildTickets(legs: VaLeg[], mode: "value" | "stack" = "value"): 
 
   let bestCombinedOdds = 0;
 
-  // Helper to count remaining legs
-  const remainingCount = () => sorted.filter((_, idx) => !usedLegIndices.has(idx)).length;
+  const commitTicket = (ticketLegs: VaLeg[], recommended: boolean): boolean => {
+    const key = Array.from(new Set(ticketLegs.map((l) => l.eventId)))
+      .sort()
+      .join("|");
+    if (seenTicketKeys.has(key)) return false; // duplicate: same set of eventIds already built
+    seenTicketKeys.add(key);
 
-  while (remainingCount() >= 3) {
-    const currentTicket: VaLeg[] = [];
-    let combinedOdds = 1;
-
-    // Greedy fill from sorted EV order
-    for (let i = 0; i < sorted.length && currentTicket.length < 4; i++) {
-      if (usedLegIndices.has(i)) continue;
-      const candidate = sorted[i];
-      if (currentTicket.some((l) => l.eventId === candidate.eventId)) continue;
-      // FAMILY CAP: at most 2 legs from the same statFamily in one ticket.
-      if (currentTicket.filter((l) => l.statFamily === candidate.statFamily).length >= FAMILY_CAP) continue;
-
-      const tentative = combinedOdds * candidate.bookmakerOdds;
-      if (tentative > 4.5) {
-        continue;
-      }
-
-      currentTicket.push(candidate);
-      combinedOdds = tentative;
-
-      // Stop when ticket has 3 legs and combined odds are >= 3.0
-      if (currentTicket.length === 3 && combinedOdds >= 3.0) {
-        break;
-      }
-      // If we have 4 legs, stop regardless (max 4)
-      if (currentTicket.length === 4) {
-        break;
-      }
-    }
-
-    // If we couldn't fill at least 3 legs, no further tickets possible
-    if (currentTicket.length < 3) {
-      // Update best with whatever we managed (if 1-2 legs)
-      if (currentTicket.length > 0) {
-        const curBest = currentTicket.reduce((acc, l) => acc * l.bookmakerOdds, 1);
-        if (curBest > bestCombinedOdds) bestCombinedOdds = curBest;
-      }
-      break;
-    }
-
-    const stats = computeTicketStats(currentTicket);
+    const stats = computeTicketStats(ticketLegs);
     if (stats.combinedOdds > bestCombinedOdds) bestCombinedOdds = stats.combinedOdds;
+    const weekStart = getWeekStartForLegs(ticketLegs);
 
-    // Must be within 3.0 - 4.5; otherwise this ticket cannot be committed
-    if (stats.combinedOdds < 3.0 || stats.combinedOdds > 4.5) {
-      // Combined odds never reach 3.0 (or exceeded) — cannot build more tickets with this greedy approach
-      // If we have at least 3 legs but odds <3.0, we attempted to add a 4th within loop; if still <3.0, we break.
-      // To avoid infinite loop, break outer loop. Any remaining legs would also fail similarly.
-      // If tickets already built, we stop and log built; if none built, we log no ticket.
-      break;
-    }
-
-    // Commit ticket
-    const weekStart = getWeekStartForLegs(currentTicket);
-
-    const ticketLegs: VaTicketLeg[] = currentTicket.map((l) => ({
+    const ticketLegsOut: VaTicketLeg[] = ticketLegs.map((l) => ({
       match: l.matchLabel,
       market: l.market,
       selection: l.selection,
@@ -233,9 +190,9 @@ export function buildTickets(legs: VaLeg[], mode: "value" | "stack" = "value"): 
     }));
 
     tickets.push({
-      scanId: currentTicket[0].scanId,
+      scanId: ticketLegs[0].scanId,
       weekStart,
-      legs: ticketLegs,
+      legs: ticketLegsOut,
       combinedOdds: stats.combinedOdds,
       combinedProbability: stats.combinedProbability,
       combinedEv: stats.combinedEv,
@@ -243,15 +200,55 @@ export function buildTickets(legs: VaLeg[], mode: "value" | "stack" = "value"): 
       effectiveProbability: stats.effectiveProbability,
       kellyScore: stats.kellyScore,
       stakePercent: stats.stakePercent,
-      isRecommended: false,
+      isRecommended: recommended,
       isReferenceOnly: false,
     });
 
-    // Mark legs as used
-    for (const leg of currentTicket) {
-      const idx = sorted.findIndex((l) => l === leg);
-      if (idx !== -1) usedLegIndices.add(idx);
+    // Controlled reuse: bump each leg's appearance count; a leg is skipped by
+    // later tickets once it has already been used in 2 tickets.
+    for (const leg of ticketLegs) {
+      appearanceCount.set(leg, (appearanceCount.get(leg) ?? 0) + 1);
     }
+    return true;
+  };
+
+  // Seed-driven, multi-ticket assembly: iterate the top N legs (N = 12); each
+  // seed starts a ticket and greedily adds other legs subject to the existing
+  // constraints (distinct eventId per leg, ≤2 legs per family, odds window,
+  // family/direction caps). Tickets are covered by the per-leg appearance cap
+  // instead of the removed per-leg exclusivity, so legs can be shared across at
+  // most 2 tickets.
+  const SEED_COUNT = Math.min(sorted.length, 12);
+  for (let seedIdx = 0; seedIdx < SEED_COUNT && tickets.length < 5; seedIdx++) {
+    const seed = sorted[seedIdx];
+    if ((appearanceCount.get(seed) ?? 0) >= 2) continue; // leg already at its 2-ticket cap
+    const currentTicket: VaLeg[] = [seed];
+    let combinedOdds = seed.bookmakerOdds;
+
+    for (let i = 0; i < sorted.length && currentTicket.length < 4; i++) {
+      if (i === seedIdx) continue;
+      const candidate = sorted[i];
+      if ((appearanceCount.get(candidate) ?? 0) >= 2) continue; // appear in ≤2 tickets total
+      if (currentTicket.some((l) => l.eventId === candidate.eventId)) continue;
+      // FAMILY CAP: at most 2 legs from the same statFamily in one ticket.
+      if (currentTicket.filter((l) => l.statFamily === candidate.statFamily).length >= FAMILY_CAP) continue;
+
+      const tentative = combinedOdds * candidate.bookmakerOdds;
+      if (tentative > 4.5) continue;
+
+      currentTicket.push(candidate);
+      combinedOdds = tentative;
+
+      if (currentTicket.length === 3 && combinedOdds >= 3.0) break;
+      if (currentTicket.length === 4) break;
+    }
+
+    if (currentTicket.length < 3) continue; // seed could not grow into a valid ticket
+
+    const stats = computeTicketStats(currentTicket);
+    if (stats.combinedOdds < 3.0 || stats.combinedOdds > 4.5) continue; // outside odds window
+
+    commitTicket(currentTicket, false);
   }
 
   if (tickets.length === 0) {
@@ -278,36 +275,9 @@ export function buildTickets(legs: VaLeg[], mode: "value" | "stack" = "value"): 
     }
 
     if (bestFallbackLegs && bestFallbackLegs.length === 3 && bestFallbackOdds >= 3.0) {
-      const stats = computeTicketStats(bestFallbackLegs);
-      const weekStart = getWeekStartForLegs(bestFallbackLegs);
-      const ticketLegs: VaTicketLeg[] = bestFallbackLegs.map((l) => ({
-        match: l.matchLabel,
-        market: l.market,
-        selection: l.selection,
-        odds: l.bookmakerOdds,
-        ev: l.ev,
-        kickoff: toDate(l.kickoff).toISOString(),
-        statFamily: l.statFamily,
-        homeTeam: l.homeTeam,
-        awayTeam: l.awayTeam,
-        bookmaker: l.bookmakerName,
-        eventId: l.eventId,
-        modelProbability: l.modelProbability,
-      }));
-      tickets.push({
-        scanId: bestFallbackLegs[0].scanId,
-        weekStart,
-        legs: ticketLegs,
-        combinedOdds: stats.combinedOdds,
-        combinedProbability: stats.combinedProbability,
-        combinedEv: stats.combinedEv,
-        independentProbability: stats.independentProbability,
-        effectiveProbability: stats.effectiveProbability,
-        kellyScore: stats.kellyScore,
-        stakePercent: stats.stakePercent,
-        isRecommended: true,
-        isReferenceOnly: false,
-      });
+      // The fallback names the best achievable combination (marked recommended);
+      // dedupe and the appearance cap still go through the shared commit path.
+      commitTicket(bestFallbackLegs, true);
     } else {
       // Compute best combined odds for logging if still 0
       if (bestCombinedOdds === 0) {
@@ -470,21 +440,21 @@ function buildStackTickets(legs: VaLeg[]): VaTicket[] {
     };
   }
 
-  const usedLegIndices = new Set<number>();
+  const usedStackIndices = new Set<number>();
   const tickets: VaTicket[] = [];
 
-  const remainingCount = () => sorted.filter((_, idx) => !usedLegIndices.has(idx)).length;
+  const remainingStackCount = () => sorted.filter((_, idx) => !usedStackIndices.has(idx)).length;
 
   // Stack-mode shape rule: at most 1 leg per (eventId, statFamily) pair.
   const pairSeen = (ticket: VaLeg[], leg: VaLeg) =>
     ticket.some((l) => l.eventId === leg.eventId && l.statFamily === leg.statFamily);
 
-  while (remainingCount() > 0) {
+  while (remainingStackCount() > 0) {
     const currentTicket: VaLeg[] = [];
     let combinedOdds = 1;
 
     for (let i = 0; i < sorted.length && currentTicket.length < 8; i++) {
-      if (usedLegIndices.has(i)) continue;
+      if (usedStackIndices.has(i)) continue;
       const candidate = sorted[i];
       if (pairSeen(currentTicket, candidate)) continue;
       // FAMILY CAP: at most 2 legs from the same statFamily in one ticket.
@@ -517,7 +487,7 @@ function buildStackTickets(legs: VaLeg[]): VaTicket[] {
     tickets.push(toTicket(currentTicket, false));
     for (const leg of currentTicket) {
       const idx = sorted.findIndex((l) => l === leg);
-      if (idx !== -1) usedLegIndices.add(idx);
+      if (idx !== -1) usedStackIndices.add(idx);
     }
   }
 
