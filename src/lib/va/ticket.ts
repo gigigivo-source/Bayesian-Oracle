@@ -43,6 +43,18 @@ export interface VaTicket {
   combinedOdds: number;
   combinedProbability: number;
   combinedEv: number;
+  /**
+   * Product of per-leg model probabilities, assuming legs are independent.
+   * Identical to `combinedProbability` today; kept as a separate field so the
+   * independence assumption stays explicit if the combined figure ever becomes
+   * correlation-aware.
+   */
+  independentProbability: number;
+  /**
+   * Alias of `combinedProbability`, populated identically today so the ticket
+   * output shape does not change.
+   */
+  effectiveProbability: number;
   kellyScore: number;
   stakePercent: number;
   isRecommended: boolean;
@@ -106,18 +118,26 @@ export function buildTickets(legs: VaLeg[], mode: "value" | "stack" = "value"): 
     combinedOdds: number;
     combinedProbability: number;
     combinedEv: number;
+    independentProbability: number;
+    effectiveProbability: number;
     kellyScore: number;
     stakePercent: number;
   } {
     const combinedOdds = ticketLegs.reduce((acc, l) => acc * l.bookmakerOdds, 1);
     const combinedProbability = ticketLegs.reduce((acc, l) => acc * l.modelProbability, 1);
     const combinedEv = combinedProbability * combinedOdds - 1;
+    // Independence product of per-leg model probabilities (same maths as combinedProbability).
+    const independentProbability = ticketLegs.reduce((acc, l) => acc * l.modelProbability, 1);
+    // Alias of combinedProbability for now — identical value, no behavioural change.
+    const effectiveProbability = combinedProbability;
     const kellyScore = combinedOdds > 1 ? combinedEv / (combinedOdds - 1) : 0;
     const stakePercent = Math.min(0.5 * kellyScore * 100, 2);
     return {
       combinedOdds,
       combinedProbability,
       combinedEv,
+      independentProbability,
+      effectiveProbability,
       kellyScore,
       stakePercent,
     };
@@ -203,6 +223,8 @@ export function buildTickets(legs: VaLeg[], mode: "value" | "stack" = "value"): 
       combinedOdds: stats.combinedOdds,
       combinedProbability: stats.combinedProbability,
       combinedEv: stats.combinedEv,
+      independentProbability: stats.independentProbability,
+      effectiveProbability: stats.effectiveProbability,
       kellyScore: stats.kellyScore,
       stakePercent: stats.stakePercent,
       isRecommended: false,
@@ -262,6 +284,8 @@ export function buildTickets(legs: VaLeg[], mode: "value" | "stack" = "value"): 
         combinedOdds: stats.combinedOdds,
         combinedProbability: stats.combinedProbability,
         combinedEv: stats.combinedEv,
+        independentProbability: stats.independentProbability,
+        effectiveProbability: stats.effectiveProbability,
         kellyScore: stats.kellyScore,
         stakePercent: stats.stakePercent,
         isRecommended: true,
@@ -371,18 +395,26 @@ function buildStackTickets(legs: VaLeg[]): VaTicket[] {
     combinedOdds: number;
     combinedProbability: number;
     combinedEv: number;
+    independentProbability: number;
+    effectiveProbability: number;
     kellyScore: number;
     stakePercent: number;
   } {
     const combinedOdds = ticketLegs.reduce((acc, l) => acc * l.bookmakerOdds, 1);
     const combinedProbability = ticketLegs.reduce((acc, l) => acc * l.modelProbability, 1);
     const combinedEv = combinedProbability * combinedOdds - 1;
+    // Independence product of per-leg model probabilities (same maths as combinedProbability).
+    const independentProbability = ticketLegs.reduce((acc, l) => acc * l.modelProbability, 1);
+    // Alias of combinedProbability for now — identical value, no behavioural change.
+    const effectiveProbability = combinedProbability;
     const kellyScore = combinedOdds > 1 ? combinedEv / (combinedOdds - 1) : 0;
     const stakePercent = Math.min(0.5 * kellyScore * 100, 1.0);
     return {
       combinedOdds,
       combinedProbability,
       combinedEv,
+      independentProbability,
+      effectiveProbability,
       kellyScore,
       stakePercent,
     };
@@ -412,6 +444,8 @@ function buildStackTickets(legs: VaLeg[]): VaTicket[] {
       combinedOdds: stats.combinedOdds,
       combinedProbability: stats.combinedProbability,
       combinedEv: stats.combinedEv,
+      independentProbability: stats.independentProbability,
+      effectiveProbability: stats.effectiveProbability,
       kellyScore: stats.kellyScore,
       stakePercent: stats.stakePercent,
       isRecommended: recommended,
