@@ -10,7 +10,7 @@ import {
   type VaBookmakerOdds,
 } from "./oddsFetcher";
 import { matchEngineMarketToBookmaker, type TeamContext } from "./marketMap";
-import { getWeekStartForLegs, type VaLeg, type VaTicket, type VaTicketLeg } from "./ticket";
+import { buildTickets, getWeekStartForLegs, type VaLeg, type VaTicket, type VaTicketLeg } from "./ticket";
 import { db } from "@/db";
 import { vaLegs } from "@/db/schema";
 
@@ -349,59 +349,58 @@ async function runScan(fixtures: FixtureLite[], scanId: string, mode: VaScanMode
   };
 }
 
-// ─── Finished-match backtest (?finished=true): calibration probe — qualifies by model probability alone, no odds/EV filter ───
+// ─── Finished-match backtest (?finished=true): 1 ticket per finished match via stack-mode builder ───
 const BACKTEST_LEAGUES = ["eng.1", "esp.1", "ita.1", "ger.1", "fra.1"];
-
-/** Fixed seed for the backtest sample shuffle — makes the random sample reproducible. */
-const BACKTEST_SAMPLE_SEED = 0x9e3779b9;
-
-/** Mulberry32: a tiny, deterministic PRNG from a 32-bit seed. */
-function mulberry32(seed: number): () => number {
-  let a = seed >>> 0;
-  return () => {
-    a += 0x6d2b79f5;
-    let t = a;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-/** Fisher–Yates shuffle of a copy of `legs`, driven by a seeded PRNG. */
-function shuffleSeeded<T>(input: T[], seed: number): T[] {
-  const shuffled = [...input];
-  const rand = mulberry32(seed);
-  for (let i = shuffled.length - 1; i > 0; i--) {
-    const j = Math.floor(rand() * (i + 1));
-    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
-  }
-  return shuffled;
-}
 
 /** Final result of a finished match; corners stays null unless the ESPN boxscore supplies it. */
 export interface BacktestMatchResult { leagueSlug: string; homeScore: number; awayScore: number; corners: number | null }
 export type BacktestLegStatus = "won" | "lost" | "unknown";
 export type BacktestTicketStatus = "won" | "lost" | "pending";
 
-/**
- * A backtest calibration sample: a 3-leg combination (three different events)
- * priced entirely at the model's own fair odds — combinedOdds is the product
- * of 1/modelProbability per leg, so combinedEv is ~0 by construction. The
- * sample exists to compare combinedProbability against the realised win rate.
- */
+export interface BacktestTicketItem {
+  matchLabel: string;
+  legsCount: number;
+  combinedOdds: number;
+  claimedProbability: number;
+  status: BacktestTicketStatus;
+}
+
+export interface TicketBacktestBucket {
+  claimed: number;
+  n: number;
+  won: number;
+  lost: number;
+  realised: number;
+  diff: number;
+}
+
+export interface TicketBacktestData {
+  matchesWithTicket: number;
+  won: number;
+  lost: number;
+  pending: number;
+  realisedRate: number | null;
+  claimedAverage: number | null;
+  edge: number | null;
+  tickets: BacktestTicketItem[];
+  ticketBuckets: TicketBacktestBucket[];
+}
+
 export interface BacktestSampleTicket extends VaTicket {
   status: BacktestTicketStatus;
+  matchLabel?: string;
 }
 
 /** runBacktestScan result: the qualified legs plus the settled combination samples. */
 export interface BacktestScanResult extends ScanResult {
   tickets: BacktestSampleTicket[];
+  ticketBacktest: TicketBacktestData;
 }
 
 export interface FinishedScanResult extends ScanResult {
   results: Map<string, BacktestMatchResult>;
-  /** Combination samples settled by the scanner — the backtest path's replacement for buildTickets. */
   tickets: BacktestSampleTicket[];
+  ticketBacktest: TicketBacktestData;
 }
 
 async function fetchFinishedFixtures(days: number): Promise<FixtureLite[]> {
@@ -420,204 +419,16 @@ async function fetchFinishedFixtures(days: number): Promise<FixtureLite[]> {
 }
 
 export async function scanFinishedLegs(scanId: string, _mode: VaScanMode = "value"): Promise<FinishedScanResult> {
-  void _mode; // Backtest qualification is mode-independent (model probability alone); mode still selects the ticket shape in buildTickets.
+  void _mode;
   const fixtures = await fetchFinishedFixtures(30);
-  const results = new Map(fixtures.map((fx): [string, BacktestMatchResult] =>
-    [fx.id, { leagueSlug: fx.leagueSlug, homeScore: Number(fx.home.score), awayScore: Number(fx.away.score), corners: null }]));
-  return { ...(await runBacktestScan(fixtures, scanId)), results };
-}
-
-/**
- * Backtest-only scan: engine-driven, no Bzzoiro resolution, no bookmaker odds.
- * Qualifies legs by model probability alone (hitRate >= 0.60, family in
- * Goals/Corners/Cards) with the same per-(eventId, statFamily) dedup as the
- * live path. Instead of running buildTickets (whose odds windows, family caps
- * and exposure caps don't belong in a calibration sample), it samples 3-leg
- * combinations — three different eventIds — priced at the model's own fair
- * odds (combinedOdds = Π 1/modelProbability), settles every leg against the
- * finished result (Over/Under Goals, Over/Under Corners from the ESPN boxscore,
- * BTTS Yes/No), skips any combination with an unknown leg, and returns the
- * settled samples as `tickets`.
- */
-async function runBacktestScan(fixtures: FixtureLite[], scanId: string): Promise<BacktestScanResult> {
-  let marketsEvaluated = 0;
-  const qualified: VaLeg[] = [];
-
-  for (const fx of fixtures) {
-    // Run engine to produce all 217 markets with hitRate (no odds lookups).
-    let engineResult;
-    try {
-      engineResult = runEngineFromReal(fx, null);
-    } catch {
-      continue;
-    }
-    const markets = engineResult.markets ?? [];
-    marketsEvaluated += markets.length;
-
-    for (const m of markets) {
-      const hitRate = m.hitRate;
-      if (typeof hitRate !== "number" || !Number.isFinite(hitRate)) continue;
-
-      const statFamily = getStatFamily(m.name, m.family);
-
-      // No odds-range filter, no EV filter — model probability alone.
-      if (hitRate < 0.6) continue;
-      if (statFamily !== "goals" && statFamily !== "corners" && statFamily !== "cards") continue;
-
-      // Fair price for the ticket's combined-odds display.
-      const fairOdds = m.fairOddsWorst;
-      if (typeof fairOdds !== "number" || !Number.isFinite(fairOdds) || fairOdds <= 1) continue;
-      const ev = hitRate * fairOdds - 1;
-      const implied = 1 / fairOdds;
-
-      const leg: VaLeg = {
-        scanId,
-        eventId: fx.id,
-        matchLabel: `${fx.home.name} vs ${fx.away.name}`,
-        homeTeam: fx.home.name,
-        awayTeam: fx.away.name,
-        leagueSlug: fx.leagueSlug,
-        kickoff: new Date(fx.date),
-        market: m.name,
-        selection: m.selection,
-        statFamily,
-        modelProbability: hitRate,
-        bookmakerOdds: fairOdds,
-        bookmakerName: "Model Fair",
-        impliedProbability: implied,
-        ev,
-        oddsAtBuild: new Date(),
-        scannedAt: new Date(),
-      };
-
-      qualified.push(leg);
-    }
-  }
-
-  // Same source-of-truth cleanup as the live path: at most one qualified leg
-  // per (eventId, statFamily) pair — keep only the highest-EV one.
-  const bestByPair = new Map<string, VaLeg>();
-  for (const leg of qualified) {
-    const key = `${leg.eventId}|${leg.statFamily}`;
-    const current = bestByPair.get(key);
-    if (!current || leg.ev > current.ev) {
-      bestByPair.set(key, leg);
-    }
-  }
-  const uniqueQualified = Array.from(bestByPair.values());
-  if (uniqueQualified.length !== qualified.length) {
-    console.log(`[VA] dedup (eventId, statFamily): ${qualified.length} -> ${uniqueQualified.length} qualified legs`);
-    qualified.length = 0;
-    qualified.push(...uniqueQualified);
-  }
-
-  // NOTE: the backtest path intentionally does NOT persist to va_legs — these
-  // are finished-match samples, not live qualified legs, and writing them would
-  // leak historical fixtures into the live scan state.
-
-  console.log(`[VA] backtest scan ${scanId}: ${fixtures.length} matches, ${marketsEvaluated} markets, ${qualified.length} qualified legs`);
-
-  // ─── Combination sampling (replaces buildTickets on the backtest path) ───
-  // Enumerate 3-leg combinations straight from the qualified pool. Every
-  // combination is priced at the model's OWN fair odds (1/modelProbability per
-  // leg), so combinedProbability is exactly what the model claims and
-  // combinedOdds is its mirror image — no bookmaker prices enter the sample.
-  const MAX_COMBINATION_SAMPLES = 2000; // keep the sample size (and runtime) bounded
-
-  // Random, reproducible order: a seeded Fisher–Yates shuffle over a copy of the
-  // qualified pool. Sorting by probability (as before) biased the first 2000
-  // combinations toward the same few top legs, so the "samples" measured the
-  // outcome of two legs instead of the pool — and the realised rate blew past
-  // the claimed probability. The shuffle keeps every leg's chance of appearing
-  // in the first N combinations uniform, and the fixed seed keeps the sample
-  // reproducible across scans.
-  const legs = shuffleSeeded([...qualified], BACKTEST_SAMPLE_SEED);
-
-  // Final results for settlement (same map scanFinishedLegs returns), with
-  // corner totals pulled from the ESPN boxscore for every event that has a
-  // qualified corners leg — settleBacktestLeg cannot settle corners without it.
+  const backtestResult = await runBacktestScan(fixtures, scanId);
   const results = new Map(
     fixtures.map((fx): [string, BacktestMatchResult] => [
       fx.id,
       { leagueSlug: fx.leagueSlug, homeScore: Number(fx.home.score), awayScore: Number(fx.away.score), corners: null },
-    ]),
+    ])
   );
-  const cornerEventIds = new Set(legs.filter((l) => l.market.toLowerCase().includes("corner")).map((l) => l.eventId));
-  await Promise.all(
-    Array.from(cornerEventIds).map(async (eventId) => {
-      const result = results.get(eventId);
-      if (result && result.corners === null) {
-        result.corners = await fetchEventCornerTotal(result.leagueSlug, eventId);
-      }
-    }),
-  );
-
-  // Pre-settle every leg once: Over/Under Goals, Over/Under Corners, BTTS
-  // Yes/No — any other market (cards included) settles "unknown".
-  const legStatuses = legs.map((leg) => settleBacktestLeg(leg.market, leg.selection, results.get(leg.eventId)));
-
-  const toIso = (d: Date | string): string => (d instanceof Date ? d : new Date(d)).toISOString();
-  const toSampleLeg = (l: VaLeg): VaTicketLeg => ({
-    match: l.matchLabel,
-    market: l.market,
-    selection: l.selection,
-    odds: 1 / l.modelProbability, // fair odds — the sample prices the model's own probability
-    ev: l.ev,
-    kickoff: toIso(l.kickoff),
-    statFamily: l.statFamily,
-    homeTeam: l.homeTeam,
-    awayTeam: l.awayTeam,
-    bookmaker: l.bookmakerName,
-    eventId: l.eventId,
-    modelProbability: l.modelProbability,
-  });
-
-  const tickets: BacktestSampleTicket[] = [];
-  for (let i = 0; i < legs.length && tickets.length < MAX_COMBINATION_SAMPLES; i++) {
-    for (let j = i + 1; j < legs.length && tickets.length < MAX_COMBINATION_SAMPLES; j++) {
-      if (legs[j].eventId === legs[i].eventId) continue; // the three legs need three DIFFERENT eventIds
-      for (let k = j + 1; k < legs.length && tickets.length < MAX_COMBINATION_SAMPLES; k++) {
-        if (legs[k].eventId === legs[i].eventId || legs[k].eventId === legs[j].eventId) continue;
-        // A leg that cannot be settled against the finished result poisons the
-        // whole sample — skip the combination entirely.
-        if (legStatuses[i] === "unknown" || legStatuses[j] === "unknown" || legStatuses[k] === "unknown") continue;
-
-        const a = legs[i], b = legs[j], c = legs[k];
-        const combinedProbability = a.modelProbability * b.modelProbability * c.modelProbability;
-        // Fair odds, not bookmaker odds — this measures the model's own
-        // probability, not the market's price.
-        const combinedOdds = (1 / a.modelProbability) * (1 / b.modelProbability) * (1 / c.modelProbability);
-        const sampleLegs = [a, b, c];
-        tickets.push({
-          scanId,
-          weekStart: getWeekStartForLegs(sampleLegs),
-          legs: sampleLegs.map(toSampleLeg),
-          combinedOdds,
-          combinedProbability,
-          combinedEv: combinedProbability * combinedOdds - 1, // ~0 by construction (fair price)
-          independentProbability: combinedProbability,
-          effectiveProbability: combinedProbability,
-          kellyScore: 0, // fair price → no edge → no stake recommendation
-          stakePercent: 0,
-          isRecommended: false,
-          isReferenceOnly: false,
-          // All 3 legs won → "won"; any leg lost → "lost" (unknown legs never reach here).
-          status:
-            legStatuses[i] === "won" && legStatuses[j] === "won" && legStatuses[k] === "won" ? "won" : "lost",
-        });
-      }
-    }
-  }
-
-  console.log(`[VA] backtest scan ${scanId}: sampled ${tickets.length} 3-leg combinations (cap ${MAX_COMBINATION_SAMPLES})`);
-
-  return {
-    matchesScanned: fixtures.length,
-    marketsEvaluated,
-    legsQualified: qualified.length,
-    legs: qualified,
-    tickets,
-  };
+  return { ...backtestResult, results };
 }
 
 async function fetchEventCornerTotal(leagueSlug: string, eventId: string): Promise<number | null> {
@@ -645,6 +456,7 @@ function settleTotal(total: number | null, line: number, selection: string): Bac
 export function settleBacktestLeg(market: string, selection: string, result: BacktestMatchResult | undefined): BacktestLegStatus {
   if (!result) return "unknown";
   const m = market.toLowerCase();
+  if (m.includes("card")) return "unknown";
   const lineMatch = selection.match(/(\d+(?:\.\d+)?)/);
   const line = lineMatch ? Number(lineMatch[1]) : null;
   if (m.includes("total goals") && line !== null) return settleTotal(result.homeScore + result.awayScore, line, selection);
@@ -668,4 +480,225 @@ export async function settleBacktestTickets(tickets: VaTicket[], results: Map<st
     const statuses = ticket.legs.map((leg) => settleBacktestLeg(leg.market, leg.selection, results.get(leg.eventId)));
     return statuses.includes("lost") ? "lost" : statuses.includes("unknown") ? "pending" : "won";
   });
+}
+
+/**
+ * Backtest scan: runs engine for each finished match in the 30-day window,
+ * qualifies legs with stack-mode filters (odds 1.03..1.70, hitRate >= 0.62,
+ * families {Goals, Corners, Cards}, deduped per family), builds at most ONE
+ * ticket per match via buildTickets(legs, "stack") keeping the highest-kelly
+ * ticket, settles each ticket against the match result, and aggregates results.
+ */
+async function runBacktestScan(fixtures: FixtureLite[], scanId: string): Promise<BacktestScanResult> {
+  let marketsEvaluated = 0;
+  const allQualifiedLegs: VaLeg[] = [];
+  const builtTickets: BacktestSampleTicket[] = [];
+
+  for (const fx of fixtures) {
+    // 1a. Run the engine (runEngineFromReal(fx, null)) — same as today.
+    let engineResult;
+    try {
+      engineResult = runEngineFromReal(fx, null);
+    } catch {
+      continue;
+    }
+    const markets = engineResult.markets ?? [];
+    marketsEvaluated += markets.length;
+
+    // 1b. Qualify legs using the SAME filters as stack mode:
+    //      - realOdds 1.03 .. 1.70
+    //      - hitRate >= 0.62
+    //      - statFamily in {Goals, Corners, Cards}
+    //      - no EV filter
+    //      - per-(eventId, family) dedup
+    const matchQualified: VaLeg[] = [];
+    for (const m of markets) {
+      const hitRate = m.hitRate;
+      if (typeof hitRate !== "number" || !Number.isFinite(hitRate)) continue;
+
+      const statFamily = getStatFamily(m.name, m.family);
+
+      if (hitRate < 0.62) continue;
+      if (statFamily !== "goals" && statFamily !== "corners" && statFamily !== "cards") continue;
+
+      const realOdds = m.fairOddsWorst;
+      if (typeof realOdds !== "number" || !Number.isFinite(realOdds)) continue;
+      if (realOdds < 1.03 || realOdds > 1.70) continue;
+
+      const ev = hitRate * realOdds - 1;
+      const implied = 1 / realOdds;
+
+      matchQualified.push({
+        scanId,
+        eventId: fx.id,
+        matchLabel: `${fx.home.name} vs ${fx.away.name}`,
+        homeTeam: fx.home.name,
+        awayTeam: fx.away.name,
+        leagueSlug: fx.leagueSlug,
+        kickoff: new Date(fx.date),
+        market: m.name,
+        selection: m.selection,
+        statFamily,
+        modelProbability: hitRate,
+        bookmakerOdds: realOdds,
+        bookmakerName: "Model Fair",
+        impliedProbability: implied,
+        ev,
+        oddsAtBuild: new Date(),
+        scannedAt: new Date(),
+      });
+    }
+
+    // per-(eventId, family) dedup — keep only the highest-EV leg for each statFamily
+    const bestByFamily = new Map<string, VaLeg>();
+    for (const leg of matchQualified) {
+      const current = bestByFamily.get(leg.statFamily);
+      if (!current || leg.ev > current.ev) {
+        bestByFamily.set(leg.statFamily, leg);
+      }
+    }
+    const qualifiedLegs = Array.from(bestByFamily.values());
+    if (qualifiedLegs.length === 0) continue;
+    allQualifiedLegs.push(...qualifiedLegs);
+
+    // 1c. Build a ticket from those legs using buildTickets(legs, "stack")
+    const ticketsForMatch = buildTickets(qualifiedLegs, "stack");
+    if (ticketsForMatch.length === 0) continue;
+
+    // 2. IMPORTANT: build only ONE ticket per match. If buildTickets
+    //    returns multiple, keep only the one with the highest kellyScore.
+    let bestTicket = ticketsForMatch[0];
+    for (let i = 1; i < ticketsForMatch.length; i++) {
+      if (ticketsForMatch[i].kellyScore > bestTicket.kellyScore) {
+        bestTicket = ticketsForMatch[i];
+      }
+    }
+
+    // 1d. Settle every leg of the ticket against the finished match result:
+    //      - Total Goals O/U: over/under vs homeScore + awayScore
+    //      - Total Corners O/U: over/under vs ESPN boxscore corner count
+    //      - Both Teams To Score: Yes = both scored, No = not both
+    //      - Cards O/U: mark leg as unknown (no card data in ESPN feed)
+    //    Any leg with an unknown result → ticket status "pending".
+    //    Else: won if all legs won, lost if any leg lost.
+    let cornerTotal: number | null = null;
+    const hasCorners = bestTicket.legs.some(
+      (l) => l.statFamily === "corners" || l.market.toLowerCase().includes("corner")
+    );
+    if (hasCorners) {
+      cornerTotal = await fetchEventCornerTotal(fx.leagueSlug, fx.id);
+    }
+
+    const matchResult: BacktestMatchResult = {
+      leagueSlug: fx.leagueSlug,
+      homeScore: Number(fx.home.score),
+      awayScore: Number(fx.away.score),
+      corners: cornerTotal,
+    };
+
+    const legStatuses = bestTicket.legs.map((leg) =>
+      settleBacktestLeg(leg.market, leg.selection, matchResult)
+    );
+
+    const ticketStatus: BacktestTicketStatus = legStatuses.includes("unknown")
+      ? "pending"
+      : legStatuses.every((s) => s === "won")
+      ? "won"
+      : "lost";
+
+    builtTickets.push({
+      ...bestTicket,
+      status: ticketStatus,
+      matchLabel: `${fx.home.name} vs ${fx.away.name}`,
+    });
+  }
+
+  // 3. Aggregate and return:
+  const won = builtTickets.filter((t) => t.status === "won").length;
+  const lost = builtTickets.filter((t) => t.status === "lost").length;
+  const pending = builtTickets.filter((t) => t.status === "pending").length;
+  const matchesWithTicket = builtTickets.length;
+  const settledCount = won + lost;
+
+  const round4 = (v: number) => Math.round(v * 10000) / 10000;
+  const round3 = (v: number) => Math.round(v * 1000) / 1000;
+
+  const realisedRate = settledCount > 0 ? round4(won / settledCount) : null;
+
+  const settledTickets = builtTickets.filter((t) => t.status === "won" || t.status === "lost");
+  const claimedAverage =
+    settledCount > 0
+      ? round4(settledTickets.reduce((sum, t) => sum + t.combinedProbability, 0) / settledCount)
+      : null;
+
+  const edge =
+    realisedRate !== null && claimedAverage !== null
+      ? round4(realisedRate - claimedAverage)
+      : null;
+
+  // Newest first, capped at 50 for response size
+  const sortedTickets = [...builtTickets].sort((a, b) => {
+    const timeA = a.legs[0]?.kickoff ? new Date(a.legs[0].kickoff).getTime() : 0;
+    const timeB = b.legs[0]?.kickoff ? new Date(b.legs[0].kickoff).getTime() : 0;
+    return timeB - timeA;
+  });
+
+  const ticketsOut: BacktestTicketItem[] = sortedTickets.slice(0, 50).map((t) => ({
+    matchLabel: t.matchLabel ?? (t.legs[0] ? t.legs[0].match : "Unknown match"),
+    legsCount: t.legs.length,
+    combinedOdds: round4(t.combinedOdds),
+    claimedProbability: round4(t.combinedProbability),
+    status: t.status,
+  }));
+
+  const buckets = new Map<number, { won: number; lost: number }>();
+  for (const t of builtTickets) {
+    if (t.status === "pending") continue;
+    const idx = Math.floor(t.combinedProbability / 0.05 + 1e-6);
+    const bucket = buckets.get(idx) ?? { won: 0, lost: 0 };
+    bucket[t.status === "won" ? "won" : "lost"] += 1;
+    buckets.set(idx, bucket);
+  }
+  const ticketBuckets: TicketBacktestBucket[] = Array.from(buckets.entries())
+    .filter(([, bucket]) => bucket.won + bucket.lost >= 3)
+    .map(([idx, bucket]) => {
+      const claimed = round3(idx / 20); // bucket start on the 0.05 grid
+      const realised = bucket.won / (bucket.won + bucket.lost);
+      return {
+        claimed,
+        n: bucket.won + bucket.lost,
+        won: bucket.won,
+        lost: bucket.lost,
+        realised: round3(realised),
+        diff: round3(realised - claimed),
+      };
+    })
+    .sort((a, b) => a.claimed - b.claimed);
+
+  const ticketBacktest: TicketBacktestData = {
+    matchesWithTicket,
+    won,
+    lost,
+    pending,
+    realisedRate,
+    claimedAverage,
+    edge,
+    tickets: ticketsOut,
+    ticketBuckets,
+  };
+
+  console.log(
+    `[VA] backtest scan ${scanId}: ${fixtures.length} matches, ${marketsEvaluated} markets, ` +
+      `${allQualifiedLegs.length} qualified legs, ${matchesWithTicket} tickets built ` +
+      `(${won} won, ${lost} lost, ${pending} pending)`
+  );
+
+  return {
+    matchesScanned: fixtures.length,
+    marketsEvaluated,
+    legsQualified: allQualifiedLegs.length,
+    legs: allQualifiedLegs,
+    tickets: builtTickets,
+    ticketBacktest,
+  };
 }

@@ -64,6 +64,14 @@ interface VaScanSettled {
   realisedRate: number | null;
 }
 
+interface TicketBacktestItem {
+  matchLabel: string;
+  legsCount: number;
+  combinedOdds: number;
+  claimedProbability: number;
+  status: "won" | "lost" | "pending";
+}
+
 interface TicketBacktestBucket {
   claimed: number;
   n: number;
@@ -74,10 +82,14 @@ interface TicketBacktestBucket {
 }
 
 interface TicketBacktest {
-  totalTickets: number;
-  settledTickets: number;
-  pendingTickets: number;
-  overallRealisedRate: number | null;
+  matchesWithTicket: number;
+  won: number;
+  lost: number;
+  pending: number;
+  realisedRate: number | null;
+  claimedAverage: number | null;
+  edge: number | null;
+  tickets: TicketBacktestItem[];
   ticketBuckets: TicketBacktestBucket[];
 }
 
@@ -135,7 +147,6 @@ export default function ValueAccumulatorPage() {
   const [ticketBacktestResult, setTicketBacktestResult] = useState<VaScanResponse | null>(null);
   const [ticketBacktestError, setTicketBacktestError] = useState<string | null>(null);
   const [ticketBacktestOpen, setTicketBacktestOpen] = useState(false);
-  const [ticketBacktestRows, setTicketBacktestRows] = useState<VaTicketRow[]>([]);
 
   async function runBacktest() {
     if (backtestStatus === "running") return;
@@ -167,7 +178,6 @@ export default function ValueAccumulatorPage() {
     setTicketBacktestStatus("running");
     setTicketBacktestError(null);
     setTicketBacktestResult(null);
-    setTicketBacktestRows([]);
     try {
       const res = await fetch("/api/va/scan?mode=stack&finished=true", {
         method: "POST",
@@ -177,23 +187,6 @@ export default function ValueAccumulatorPage() {
       const data = (await res.json()) as VaScanResponse;
       if (!data.ok) throw new Error(data.reason || data.error || "Ticket backtest failed");
       setTicketBacktestResult(data);
-
-      // Re-read tickets for the just-completed scan so we can render the per-ticket table.
-      // The scan route persists tickets to va_tickets; /api/va/tickets returns them by scanId.
-      const ticketScanId = data.scanId;
-      if (ticketScanId) {
-        try {
-          const tr = await fetch(`/api/va/tickets?scanId=${encodeURIComponent(ticketScanId)}`, {
-            cache: "no-store",
-          });
-          if (tr.ok) {
-            const td = (await tr.json()) as TicketsResponse;
-            if (td.ok) setTicketBacktestRows(td.tickets ?? []);
-          }
-        } catch {
-          // Non-fatal: the sheet still shows aggregate settled stats.
-        }
-      }
       setTicketBacktestStatus("done");
       setTicketBacktestOpen(true);
     } catch (e) {
@@ -838,12 +831,12 @@ export default function ValueAccumulatorPage() {
             >
               <div>
                 <div style={{ fontSize: 16, fontWeight: 700, color: "#111827" }}>Ticket Backtest</div>
-                {ticketBacktestStatus === "done" && ticketBacktestResult?.settled && (
+                {ticketBacktestStatus === "done" && ticketBacktestResult?.ticketBacktest && (
                   <div style={{ fontSize: 13, color: "#6b7280", marginTop: 4 }}>
-                    {ticketBacktestResult.matchesScanned ?? 0} matches ·{" "}
-                    {ticketBacktestResult.legsQualifiedBacktest ?? 0} legs ·{" "}
-                    {ticketBacktestResult.ticketsBuiltBacktest ?? 0} samples · {ticketBacktestResult.settled.won}{" "}
-                    won · {ticketBacktestResult.settled.lost} lost
+                    {ticketBacktestResult.ticketBacktest.matchesWithTicket} matches with a ticket ·{" "}
+                    {ticketBacktestResult.ticketBacktest.won} won ·{" "}
+                    {ticketBacktestResult.ticketBacktest.lost} lost ·{" "}
+                    {ticketBacktestResult.ticketBacktest.pending} pending
                   </div>
                 )}
               </div>
@@ -888,7 +881,7 @@ export default function ValueAccumulatorPage() {
                 <div style={{ color: "#dc2626", fontSize: 14, padding: "8px 0" }}>{ticketBacktestError}</div>
               )}
 
-              {ticketBacktestStatus === "done" && ticketBacktestResult?.settled && (
+              {ticketBacktestStatus === "done" && ticketBacktestResult?.ticketBacktest && (
                 <>
                   <div
                     style={{
@@ -902,13 +895,25 @@ export default function ValueAccumulatorPage() {
                       Realised hit rate
                     </div>
                     <div style={{ fontSize: 40, fontWeight: 700, color: "#111827", letterSpacing: "-0.02em", marginTop: 4 }}>
-                      {ticketBacktestResult.settled.realisedRate == null
+                      {ticketBacktestResult.ticketBacktest.realisedRate == null
                         ? "—"
-                        : `${(ticketBacktestResult.settled.realisedRate * 100).toFixed(1)}%`}
+                        : `${(ticketBacktestResult.ticketBacktest.realisedRate * 100).toFixed(1)}%`}
+                    </div>
+                    <div style={{ fontSize: 13, color: "#6b7280", marginTop: 4 }}>
+                      Claimed avg{" "}
+                      {ticketBacktestResult.ticketBacktest.claimedAverage != null
+                        ? `${(ticketBacktestResult.ticketBacktest.claimedAverage * 100).toFixed(1)}%`
+                        : "—"}{" "}
+                      · Edge{" "}
+                      {ticketBacktestResult.ticketBacktest.edge != null
+                        ? `${ticketBacktestResult.ticketBacktest.edge >= 0 ? "+" : ""}${(
+                            ticketBacktestResult.ticketBacktest.edge * 100
+                          ).toFixed(1)}%`
+                        : "—"}
                     </div>
                   </div>
 
-                  {ticketBacktestRows.length > 0 ? (
+                  {ticketBacktestResult.ticketBacktest.tickets && ticketBacktestResult.ticketBacktest.tickets.length > 0 ? (
                     <div style={{ overflowX: "auto" }}>
                       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
                         <thead>
@@ -930,7 +935,7 @@ export default function ValueAccumulatorPage() {
                           </tr>
                         </thead>
                         <tbody>
-                          {ticketBacktestRows.map((t) => {
+                          {ticketBacktestResult.ticketBacktest.tickets.slice(0, 20).map((t, idx) => {
                             const status =
                               t.status === "won" || t.status === "lost" || t.status === "pending"
                                 ? t.status
@@ -942,15 +947,15 @@ export default function ValueAccumulatorPage() {
                                 ? { bg: "#fef2f2", fg: "#dc2626" }
                                 : { bg: "#f3f4f6", fg: "#6b7280" };
                             return (
-                              <tr key={t.id} style={{ borderBottom: "1px solid #f3f4f6" }}>
+                              <tr key={`${t.matchLabel}-${idx}`} style={{ borderBottom: "1px solid #f3f4f6" }}>
                                 <td style={{ padding: "10px 6px", color: "#111827", fontWeight: 600 }}>
-                                  {t.legs.length}
+                                  {t.legsCount}
                                 </td>
                                 <td style={{ padding: "10px 6px", color: "#111827", fontWeight: 600 }}>
                                   {t.combinedOdds.toFixed(2)}
                                 </td>
                                 <td style={{ padding: "10px 6px", color: "#374151" }}>
-                                  {(t.combinedProbability * 100).toFixed(1)}%
+                                  {(t.claimedProbability * 100).toFixed(1)}%
                                 </td>
                                 <td style={{ padding: "10px 6px" }}>
                                   <span
