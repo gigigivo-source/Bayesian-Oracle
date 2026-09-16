@@ -107,7 +107,7 @@ export async function POST(req: Request) {
     const modeParam = url.searchParams.get("mode")?.trim().toLowerCase();
     const mode: VaScanMode = modeParam === "stack" ? "stack" : "value";
 
-    // Run scanner (?finished=true backtests the last 14 days of finished matches)
+    // Run scanner (?finished=true backtests the last 30 days of finished matches)
     let finishedResults: Map<string, BacktestMatchResult> | null = null;
     if (finished) {
       scanResult = await scanFinishedLegs(scanId, mode);
@@ -226,6 +226,9 @@ export async function POST(req: Request) {
       legsQualified: scanResult.legsQualified,
       ticketsBuilt: built.length,
       recommendedTicketId,
+      ...(finished
+        ? { legsQualifiedBacktest: scanResult.legsQualified, ticketsBuiltBacktest: built.length }
+        : {}),
       ...(settled ? { settled } : {}),
       ...(ticketBacktest ? { ticketBacktest } : {}),
     });

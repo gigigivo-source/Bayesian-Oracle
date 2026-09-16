@@ -349,7 +349,7 @@ async function runScan(fixtures: FixtureLite[], scanId: string, mode: VaScanMode
   };
 }
 
-// ─── Finished-match backtest (?finished=true): one-shot retrospective reusing the mode filters + partitioner, not the live settlement engine ───
+// ─── Finished-match backtest (?finished=true): calibration probe — qualifies by model probability alone, no odds/EV filter ───
 const BACKTEST_LEAGUES = ["eng.1", "esp.1", "ita.1", "ger.1", "fra.1"];
 
 /** Final result of a finished match; corners stays null unless the ESPN boxscore supplies it. */
@@ -373,11 +373,133 @@ async function fetchFinishedFixtures(days: number): Promise<FixtureLite[]> {
   return fixtures;
 }
 
-export async function scanFinishedLegs(scanId: string, mode: VaScanMode = "value"): Promise<FinishedScanResult> {
-  const fixtures = await fetchFinishedFixtures(14);
+export async function scanFinishedLegs(scanId: string, _mode: VaScanMode = "value"): Promise<FinishedScanResult> {
+  void _mode; // Backtest qualification is mode-independent (model probability alone); mode still selects the ticket shape in buildTickets.
+  const fixtures = await fetchFinishedFixtures(30);
   const results = new Map(fixtures.map((fx): [string, BacktestMatchResult] =>
     [fx.id, { leagueSlug: fx.leagueSlug, homeScore: Number(fx.home.score), awayScore: Number(fx.away.score), corners: null }]));
-  return { ...(await runScan(fixtures, scanId, mode)), results };
+  return { ...(await runBacktestScan(fixtures, scanId)), results };
+}
+
+/**
+ * Backtest-only scan: engine-driven, no Bzzoiro resolution, no bookmaker odds.
+ * Qualifies legs by model probability alone (hitRate >= 0.60, family in
+ * Goals/Corners/Cards) with the same per-(eventId, statFamily) dedup as the
+ * live path. The leg's bookmakerOdds is the engine market's fairOddsWorst so
+ * the ticket's combined-odds display has a price; EV against that fair price
+ * is ~0 by construction — the backtest measures calibration, not value.
+ */
+async function runBacktestScan(fixtures: FixtureLite[], scanId: string): Promise<ScanResult> {
+  let marketsEvaluated = 0;
+  const qualified: VaLeg[] = [];
+
+  for (const fx of fixtures) {
+    // Run engine to produce all 217 markets with hitRate (no odds lookups).
+    let engineResult;
+    try {
+      engineResult = runEngineFromReal(fx, null);
+    } catch {
+      continue;
+    }
+    const markets = engineResult.markets ?? [];
+    marketsEvaluated += markets.length;
+
+    for (const m of markets) {
+      const hitRate = m.hitRate;
+      if (typeof hitRate !== "number" || !Number.isFinite(hitRate)) continue;
+
+      const statFamily = getStatFamily(m.name, m.family);
+
+      // No odds-range filter, no EV filter — model probability alone.
+      if (hitRate < 0.6) continue;
+      if (statFamily !== "goals" && statFamily !== "corners" && statFamily !== "cards") continue;
+
+      // Fair price for the ticket's combined-odds display.
+      const fairOdds = m.fairOddsWorst;
+      if (typeof fairOdds !== "number" || !Number.isFinite(fairOdds) || fairOdds <= 1) continue;
+      const ev = hitRate * fairOdds - 1;
+      const implied = 1 / fairOdds;
+
+      const leg: VaLeg = {
+        scanId,
+        eventId: fx.id,
+        matchLabel: `${fx.home.name} vs ${fx.away.name}`,
+        homeTeam: fx.home.name,
+        awayTeam: fx.away.name,
+        leagueSlug: fx.leagueSlug,
+        kickoff: new Date(fx.date),
+        market: m.name,
+        selection: m.selection,
+        statFamily,
+        modelProbability: hitRate,
+        bookmakerOdds: fairOdds,
+        bookmakerName: "Model Fair",
+        impliedProbability: implied,
+        ev,
+        oddsAtBuild: new Date(),
+        scannedAt: new Date(),
+      };
+
+      qualified.push(leg);
+    }
+  }
+
+  // Same source-of-truth cleanup as the live path: at most one qualified leg
+  // per (eventId, statFamily) pair — keep only the highest-EV one.
+  const bestByPair = new Map<string, VaLeg>();
+  for (const leg of qualified) {
+    const key = `${leg.eventId}|${leg.statFamily}`;
+    const current = bestByPair.get(key);
+    if (!current || leg.ev > current.ev) {
+      bestByPair.set(key, leg);
+    }
+  }
+  const uniqueQualified = Array.from(bestByPair.values());
+  if (uniqueQualified.length !== qualified.length) {
+    console.log(`[VA] dedup (eventId, statFamily): ${qualified.length} -> ${uniqueQualified.length} qualified legs`);
+    qualified.length = 0;
+    qualified.push(...uniqueQualified);
+  }
+
+  // Persist qualified legs (same as the live path).
+  if (qualified.length > 0) {
+    try {
+      const rows = qualified.map((l) => ({
+        scanId: l.scanId,
+        eventId: l.eventId,
+        matchLabel: l.matchLabel,
+        homeTeam: l.homeTeam,
+        awayTeam: l.awayTeam,
+        leagueSlug: l.leagueSlug,
+        kickoff: new Date(l.kickoff as Date),
+        market: l.market,
+        selection: l.selection,
+        statFamily: l.statFamily,
+        modelProbability: l.modelProbability,
+        bookmakerOdds: l.bookmakerOdds,
+        bookmakerName: l.bookmakerName,
+        impliedProbability: l.impliedProbability,
+        ev: l.ev,
+        oddsAtBuild: new Date(l.oddsAtBuild as Date),
+        scannedAt: new Date(),
+      }));
+      for (let i = 0; i < rows.length; i += 50) {
+        const batch = rows.slice(i, i + 50);
+        await db.insert(vaLegs).values(batch);
+      }
+    } catch (err) {
+      console.error("[VA] failed to insert legs", err);
+    }
+  }
+
+  console.log(`[VA] backtest scan ${scanId}: ${fixtures.length} matches, ${marketsEvaluated} markets, ${qualified.length} qualified legs`);
+
+  return {
+    matchesScanned: fixtures.length,
+    marketsEvaluated,
+    legsQualified: qualified.length,
+    legs: qualified,
+  };
 }
 
 async function fetchEventCornerTotal(leagueSlug: string, eventId: string): Promise<number | null> {
