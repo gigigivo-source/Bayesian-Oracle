@@ -224,16 +224,52 @@ export async function fetchAllScoreboard(dates: string): Promise<FixtureLite[] |
   return normalizeScoreboard(data, "all", "Other Competition");
 }
 
+// ─── Day helpers ──────────────────────────────────────────────────────────────
+
+/** Parse a strict "YYYYMMDD" day key as UTC midnight. `null` when invalid. */
+function parseDayKey(value: string): Date | null {
+  if (!/^\d{8}$/.test(value)) return null;
+  const year  = Number(value.slice(0, 4));
+  const month = Number(value.slice(4, 6));
+  const day   = Number(value.slice(6, 8));
+  const date  = new Date(Date.UTC(year, month - 1, day));
+  const valid = date.getUTCFullYear() === year
+    && date.getUTCMonth()    === month - 1
+    && date.getUTCDate()     === day;
+  return valid ? date : null;
+}
+
+/**
+ * Expand a "YYYYMMDD" range into an inclusive list of "YYYYMMDD" days, walking
+ * UTC in 1-day steps. A same-day or reversed range collapses to the start day;
+ * a start value that is not a day key yields an empty list so the caller can
+ * pass the original value through untouched.
+ */
+function enumerateDays(from: string, to: string): string[] {
+  const start = parseDayKey(from);
+  if (!start) return [];
+  const end = parseDayKey(to);
+  if (!end || end.getTime() <= start.getTime()) return [from];
+
+  const days: string[] = [];
+  for (let t = start.getTime(); t <= end.getTime(); t += 24 * 60 * 60 * 1000) {
+    days.push(new Date(t).toISOString().slice(0, 10).replace(/-/g, ""));
+  }
+  return days;
+}
+
 /**
  * Fetch fixtures for a league slug.
  * @param slug    ESPN league slug e.g. "eng.1"
  * @param dates   Optional date string "YYYYMMDD" or range "YYYYMMDD-YYYYMMDD".
+ *                A range is fetched day-by-day (ESPN answers HTTP 400 to
+ *                multi-day ranges) and merged, deduplicated by event id.
  *                When omitted, fetches a 3-day window (yesterday → tomorrow)
  *                to catch all live, upcoming and very recently finished matches.
  */
 export async function fetchScoreboard(
   slug:   string,
-  dates?: string,
+  dates?: string | null,
 ): Promise<FixtureLite[]> {
   const leagueName = LEAGUE_MAP[slug]?.name ?? slug;
 
@@ -246,6 +282,27 @@ export async function fetchScoreboard(
     const tomorrow  = new Date(now); tomorrow.setDate(now.getDate() + 1);
     const fmt = (d: Date) => d.toISOString().slice(0, 10).replace(/-/g, "");
     dates = `${fmt(yesterday)}-${fmt(tomorrow)}`;
+  }
+
+  // ESPN rejects multi-day ranges with HTTP 400, so a range is expanded into
+  // one single-day request per day and the events are merged (deduplicated by
+  // id). Single-day values skip this and keep the one-request path below.
+  if (dates.includes("-")) {
+    const [from, to] = dates.split("-");
+    const days = enumerateDays(from, to);
+    if (days.length > 0) {
+      const seen   = new Set<string>();
+      const merged: FixtureLite[] = [];
+      for (const day of days) {
+        const partial = await fetchScoreboard(slug, day);
+        for (const fixture of partial) {
+          if (seen.has(fixture.id)) continue;
+          seen.add(fixture.id);
+          merged.push(fixture);
+        }
+      }
+      return merged;
+    }
   }
 
   if (slug === "all") return (await fetchAllScoreboard(dates)) ?? [];
