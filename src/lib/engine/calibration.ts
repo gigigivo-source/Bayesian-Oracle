@@ -206,3 +206,49 @@ export function calibrateAgainstBacktest(rawProb: number): number {
 
   return clamp(last[1]);
 }
+
+const SCANNER_PATH_CALIBRATION_POINTS: ReadonlyArray<readonly [number, number]> = [
+  [0.50, 0.50],
+  [0.60, 0.60],
+  [0.65, 0.63],
+  [0.70, 0.66],
+  [0.75, 0.74],
+  [0.80, 0.80],
+  [0.85, 0.85],
+  [0.90, 0.90],
+  [0.95, 0.94],
+  [1.00, 0.97],
+];
+
+/**
+ * Applies the scanner-path calibration curve fitted from the 210-match,
+ * 1,255-prediction scanner-path backtest.
+ *
+ * Values below 0.50 pass through unchanged, while values from 0.50 onward
+ * are piecewise-linearly interpolated between the fitted anchors. The result
+ * is clamped to [0.02, 0.98].
+ */
+export function calibrateScannerPath(rawProb: number): number {
+  const clamp = (v: number): number => Math.max(0.02, Math.min(0.98, v));
+
+  // Below 0.50 the scanner-path fit has no anchors — preserve the input.
+  if (rawProb <= 0.50) return clamp(rawProb);
+
+  const pts = SCANNER_PATH_CALIBRATION_POINTS;
+  const last = pts[pts.length - 1];
+
+  // Inputs at or above the final anchor use the capped top value.
+  if (rawProb >= last[0]) return clamp(last[1]);
+
+  // Piecewise linear interpolation between adjacent sorted anchors.
+  for (let i = 0; i < pts.length - 1; i++) {
+    const [x0, y0] = pts[i];
+    const [x1, y1] = pts[i + 1];
+    if (rawProb <= x1) {
+      const t = (rawProb - x0) / (x1 - x0);
+      return clamp(y0 + t * (y1 - y0));
+    }
+  }
+
+  return clamp(last[1]);
+}
