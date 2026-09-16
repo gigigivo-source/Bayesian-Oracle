@@ -1,7 +1,7 @@
 import { db } from "@/db";
 import { vaScanLock, vaTickets } from "@/db/schema";
 import { desc, lt, sql } from "drizzle-orm";
-import { scanValueLegs, type VaScanMode } from "@/lib/va/scanner";
+import { scanValueLegs, scanFinishedLegs, settleBacktestTickets, type BacktestMatchResult, type VaScanMode } from "@/lib/va/scanner";
 import { buildTickets } from "@/lib/va/ticket";
 import crypto from "crypto";
 
@@ -81,18 +81,30 @@ export async function POST(req: Request) {
   try {
     const modeParam = url.searchParams.get("mode")?.trim().toLowerCase();
     const mode: VaScanMode = modeParam === "stack" ? "stack" : "value";
+    const finished = url.searchParams.get("finished") === "true";
 
-    // Run scanner
-    scanResult = await scanValueLegs(scanId, 7, mode);
+    // Run scanner (?finished=true backtests the last 14 days of finished matches)
+    let finishedResults: Map<string, BacktestMatchResult> | null = null;
+    if (finished) {
+      scanResult = await scanFinishedLegs(scanId, mode);
+      finishedResults = scanResult.results;
+    } else {
+      scanResult = await scanValueLegs(scanId, 7, mode);
+    }
 
     // Partitioner
     const built = buildTickets(scanResult.legs, mode);
+
+    // Backtest mode: settle tickets immediately against the finished results
+    const settledStatuses = finishedResults ? await settleBacktestTickets(built, finishedResults) : null;
 
     // Write tickets to va_tickets. Once written, immutable — never updated by later scans
     const weekStart = getMondayCat();
     const insertedIds: number[] = [];
 
-    for (const ticket of built) {
+    for (let i = 0; i < built.length; i++) {
+      const ticket = built[i];
+      const ticketStatus = settledStatuses ? settledStatuses[i] : "pending";
       try {
         const inserted = await db
           .insert(vaTickets)
@@ -107,7 +119,8 @@ export async function POST(req: Request) {
             stakePercent: ticket.stakePercent,
             isRecommended: ticket.isRecommended,
             isReferenceOnly: ticket.isReferenceOnly,
-            status: "pending",
+            status: ticketStatus,
+            ...(settledStatuses ? { settledAt: new Date() } : {}),
           })
           .returning({ id: vaTickets.id });
         if (inserted.length > 0) {
@@ -128,6 +141,12 @@ export async function POST(req: Request) {
       await db.delete(vaScanLock).where(sql`${vaScanLock.scanId} = ${scanId}`);
     } catch {}
 
+    let settled: { won: number; lost: number; pending: number; realisedRate: number } | null = null;
+    if (settledStatuses) {
+      const won = settledStatuses.filter((s) => s === "won").length, lost = settledStatuses.filter((s) => s === "lost").length;
+      settled = { won, lost, pending: settledStatuses.length - won - lost, realisedRate: (won + lost) / Math.max(1, settledStatuses.length) };
+    }
+
     return Response.json({
       ok: true,
       scanId,
@@ -136,6 +155,7 @@ export async function POST(req: Request) {
       legsQualified: scanResult.legsQualified,
       ticketsBuilt: built.length,
       recommendedTicketId,
+      ...(settled ? { settled } : {}),
     });
   } catch (err) {
     console.error("[VA] scan failed", err);
