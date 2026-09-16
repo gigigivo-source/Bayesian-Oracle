@@ -61,7 +61,24 @@ interface VaScanSettled {
   won: number;
   lost: number;
   pending: number;
-  realisedRate: number;
+  realisedRate: number | null;
+}
+
+interface TicketBacktestBucket {
+  claimed: number;
+  n: number;
+  won: number;
+  lost: number;
+  realised: number;
+  diff: number;
+}
+
+interface TicketBacktest {
+  totalTickets: number;
+  settledTickets: number;
+  pendingTickets: number;
+  overallRealisedRate: number | null;
+  ticketBuckets: TicketBacktestBucket[];
 }
 
 interface VaScanResponse {
@@ -73,6 +90,7 @@ interface VaScanResponse {
   ticketsBuilt?: number;
   recommendedTicketId?: number | null;
   settled?: VaScanSettled;
+  ticketBacktest?: TicketBacktest;
   reason?: string;
   error?: string;
 }
@@ -880,7 +898,9 @@ export default function ValueAccumulatorPage() {
                       Realised hit rate
                     </div>
                     <div style={{ fontSize: 40, fontWeight: 700, color: "#111827", letterSpacing: "-0.02em", marginTop: 4 }}>
-                      {(ticketBacktestResult.settled.realisedRate * 100).toFixed(1)}%
+                      {ticketBacktestResult.settled.realisedRate == null
+                        ? "—"
+                        : `${(ticketBacktestResult.settled.realisedRate * 100).toFixed(1)}%`}
                     </div>
                   </div>
 
@@ -952,6 +972,81 @@ export default function ValueAccumulatorPage() {
                   ) : (
                     <div style={{ fontSize: 13, color: "#6b7280", padding: "8px 0" }}>
                       No tickets were built for this scan.
+                    </div>
+                  )}
+
+                  {ticketBacktestResult.ticketBacktest && (
+                    <div style={{ marginTop: 20 }}>
+                      <div
+                        style={{
+                          fontSize: 11,
+                          color: "#6b7280",
+                          textTransform: "uppercase",
+                          fontWeight: 600,
+                          letterSpacing: "0.02em",
+                          marginBottom: 8,
+                        }}
+                      >
+                        Ticket Calibration
+                      </div>
+                      {ticketBacktestResult.ticketBacktest.ticketBuckets.length > 0 ? (
+                        <div style={{ overflowX: "auto" }}>
+                          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                            <thead>
+                              <tr style={{ textAlign: "left", borderBottom: "1px solid #e5e7eb" }}>
+                                {["Claimed", "N", "Won", "Lost", "Realised", "Diff"].map((h) => (
+                                  <th
+                                    key={h}
+                                    style={{
+                                      padding: "8px 6px",
+                                      color: "#6b7280",
+                                      fontWeight: 600,
+                                      fontSize: 11,
+                                      textTransform: "uppercase",
+                                    }}
+                                  >
+                                    {h}
+                                  </th>
+                                ))}
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {ticketBacktestResult.ticketBacktest.ticketBuckets.map((b) => (
+                                <tr key={b.claimed} style={{ borderBottom: "1px solid #f3f4f6" }}>
+                                  <td style={{ padding: "10px 6px", color: "#111827", fontWeight: 600 }}>
+                                    {(b.claimed * 100).toFixed(0)}%
+                                  </td>
+                                  <td style={{ padding: "10px 6px", color: "#374151" }}>{b.n}</td>
+                                  <td style={{ padding: "10px 6px", color: "#374151" }}>{b.won}</td>
+                                  <td style={{ padding: "10px 6px", color: "#374151" }}>{b.lost}</td>
+                                  <td style={{ padding: "10px 6px", color: "#111827", fontWeight: 600 }}>
+                                    {(b.realised * 100).toFixed(1)}%
+                                  </td>
+                                  <td
+                                    style={{
+                                      padding: "10px 6px",
+                                      fontWeight: 600,
+                                      color:
+                                        Math.abs(b.diff) <= 0.05
+                                          ? "#0a7d4f"
+                                          : Math.abs(b.diff) <= 0.1
+                                          ? "#d97706"
+                                          : "#dc2626",
+                                    }}
+                                  >
+                                    {b.diff >= 0 ? "+" : ""}
+                                    {(b.diff * 100).toFixed(1)}%
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      ) : (
+                        <div style={{ fontSize: 13, color: "#6b7280", padding: "8px 0" }}>
+                          No bucket reached 3 settled tickets yet — run more scans first.
+                        </div>
+                      )}
                     </div>
                   )}
                 </>

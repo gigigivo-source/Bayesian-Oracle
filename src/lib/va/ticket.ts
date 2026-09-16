@@ -84,6 +84,20 @@ function getMondayCat(date: Date): string {
   return `${y}-${m}-${d}`;
 }
 
+/**
+ * FAMILY CAP: at most this many legs from the same statFamily in one ticket.
+ * Applied by the ticket assembler only — the leg pool is untouched.
+ */
+const FAMILY_CAP = 2;
+
+function familyCapExceeded(legs: VaLeg[]): boolean {
+  const counts = new Map<string, number>();
+  for (const leg of legs) {
+    counts.set(leg.statFamily, (counts.get(leg.statFamily) ?? 0) + 1);
+  }
+  return Array.from(counts.values()).some((n) => n > FAMILY_CAP);
+}
+
 export function getWeekStartForLegs(legs: VaLeg[]): string {
   if (legs.length === 0) {
     // default to current week's Monday CAT
@@ -157,6 +171,8 @@ export function buildTickets(legs: VaLeg[], mode: "value" | "stack" = "value"): 
       if (usedLegIndices.has(i)) continue;
       const candidate = sorted[i];
       if (currentTicket.some((l) => l.eventId === candidate.eventId)) continue;
+      // FAMILY CAP: at most 2 legs from the same statFamily in one ticket.
+      if (currentTicket.filter((l) => l.statFamily === candidate.statFamily).length >= FAMILY_CAP) continue;
 
       const tentative = combinedOdds * candidate.bookmakerOdds;
       if (tentative > 4.5) {
@@ -250,6 +266,7 @@ export function buildTickets(legs: VaLeg[], mode: "value" | "stack" = "value"): 
           const b = sorted[j];
           const c = sorted[k];
           if (c.eventId === a.eventId || c.eventId === b.eventId) continue;
+          if (familyCapExceeded([a, b, c])) continue; // FAMILY CAP
           const prod = a.bookmakerOdds * b.bookmakerOdds * c.bookmakerOdds;
           if (prod < 3.0 || prod > 4.5) continue;
           if (prod > bestFallbackOdds) {
@@ -470,6 +487,8 @@ function buildStackTickets(legs: VaLeg[]): VaTicket[] {
       if (usedLegIndices.has(i)) continue;
       const candidate = sorted[i];
       if (pairSeen(currentTicket, candidate)) continue;
+      // FAMILY CAP: at most 2 legs from the same statFamily in one ticket.
+      if (currentTicket.filter((l) => l.statFamily === candidate.statFamily).length >= FAMILY_CAP) continue;
 
       const tentative = combinedOdds * candidate.bookmakerOdds;
       if (tentative > 7.5) continue;
@@ -518,6 +537,7 @@ function buildStackTickets(legs: VaLeg[]): VaTicket[] {
         if (pairs.has(key)) return; // at most 1 leg per (eventId, statFamily) pair
         pairs.add(key);
       }
+      if (familyCapExceeded(combo)) return; // FAMILY CAP
       const prod = combo.reduce((acc, l) => acc * l.bookmakerOdds, 1);
       const inRange = prod >= 4.5 && prod <= 7.5;
       const sizeScore = combo.length;
@@ -536,6 +556,7 @@ function buildStackTickets(legs: VaLeg[]): VaTicket[] {
     for (const candidate of sorted) {
       if (greedy.length >= 8) break;
       if (pairSeen(greedy, candidate)) continue;
+      if (greedy.filter((l) => l.statFamily === candidate.statFamily).length >= FAMILY_CAP) continue; // FAMILY CAP
       const tentative = gOdds * candidate.bookmakerOdds;
       if (tentative > 7.5) continue;
       greedy.push(candidate);

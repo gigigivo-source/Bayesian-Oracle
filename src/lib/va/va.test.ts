@@ -208,6 +208,24 @@ describe("Value Accumulator — Partitioner", () => {
     const tickets = buildTickets(legs);
     expect(tickets).toHaveLength(0);
   });
+
+  it("FAMILY CAP: pool of 5 goals legs (distinct events) + 2 corners legs → every ticket has ≤2 goals legs", () => {
+    const legs: VaLeg[] = [
+      makeLeg({ eventId: "g1", statFamily: "goals", homeTeam: "GA", awayTeam: "GB", ev: 0.25, bookmakerOdds: 1.5, kickoff: new Date("2026-09-13T12:00:00Z") }),
+      makeLeg({ eventId: "g2", statFamily: "goals", homeTeam: "GC", awayTeam: "GD", ev: 0.24, bookmakerOdds: 1.5, kickoff: new Date("2026-09-13T15:30:00Z") }),
+      makeLeg({ eventId: "g3", statFamily: "goals", homeTeam: "GE", awayTeam: "GF", ev: 0.23, bookmakerOdds: 1.5, kickoff: new Date("2026-09-14T12:00:00Z") }),
+      makeLeg({ eventId: "g4", statFamily: "goals", homeTeam: "GG", awayTeam: "GH", ev: 0.22, bookmakerOdds: 1.5, kickoff: new Date("2026-09-14T15:30:00Z") }),
+      makeLeg({ eventId: "g5", statFamily: "goals", homeTeam: "GI", awayTeam: "GJ", ev: 0.21, bookmakerOdds: 1.5, kickoff: new Date("2026-09-14T19:00:00Z") }),
+      makeLeg({ eventId: "c1", statFamily: "corners", homeTeam: "CA", awayTeam: "CB", ev: 0.20, bookmakerOdds: 1.5, kickoff: new Date("2026-09-15T12:00:00Z") }),
+      makeLeg({ eventId: "c2", statFamily: "corners", homeTeam: "CC", awayTeam: "CD", ev: 0.19, bookmakerOdds: 1.5, kickoff: new Date("2026-09-15T15:30:00Z") }),
+    ];
+    const tickets = buildTickets(legs);
+    expect(tickets.length).toBeGreaterThan(0);
+    for (const ticket of tickets) {
+      const goalsLegs = ticket.legs.filter((l) => l.statFamily === "goals").length;
+      expect(goalsLegs).toBeLessThanOrEqual(2);
+    }
+  });
 });
 
 describe("Value Accumulator — Stack mode", () => {
@@ -242,6 +260,9 @@ describe("Value Accumulator — Stack mode", () => {
           eventId: `ev${i}`,
           homeTeam: `Home${i}`,
           awayTeam: `Away${i}`,
+          // Mixed stat families (2 per family) — the FAMILY CAP allows at most
+          // 2 legs per family, so a single-family pool can no longer fill a stack ticket.
+          statFamily: ["goals", "corners", "cards", "shots"][i % 4],
           modelProbability: 0.85,
           bookmakerOdds: 1.28,
           ev: 0.088,
@@ -266,6 +287,9 @@ describe("Value Accumulator — Stack mode", () => {
           eventId: `ev${i}`,
           homeTeam: `Home${i}`,
           awayTeam: `Away${i}`,
+          // One leg per stat family — the FAMILY CAP allows at most 2 per family,
+          // so a distinct family per leg keeps the 4-leg ticket buildable.
+          statFamily: ["goals", "corners", "cards", "shots"][i % 4],
           modelProbability: 0.85,
           bookmakerOdds: 1.28,
           ev: 0.088,
@@ -275,6 +299,26 @@ describe("Value Accumulator — Stack mode", () => {
     const tickets = buildTickets(legs, "stack");
     expect(tickets.length).toBeGreaterThanOrEqual(1);
     expect(tickets[0].legs.length).toBe(4);
+  });
+
+  it("FAMILY CAP: pool of 6 goals legs → every ticket has ≤2 goals legs", () => {
+    const legs: VaLeg[] = [];
+    for (let i = 0; i < 6; i++) {
+      legs.push(
+        makeLeg({
+          eventId: `g${i}`,
+          homeTeam: `Home${i}`,
+          awayTeam: `Away${i}`,
+          kickoff: new Date(`2026-09-1${3 + (i % 4)}T12:00:00Z`),
+        })
+      );
+    }
+    const tickets = buildTickets(legs, "stack");
+    expect(tickets.length).toBeGreaterThan(0);
+    for (const ticket of tickets) {
+      const goalsLegs = ticket.legs.filter((l) => l.statFamily === "goals").length;
+      expect(goalsLegs).toBeLessThanOrEqual(2);
+    }
   });
 });
 

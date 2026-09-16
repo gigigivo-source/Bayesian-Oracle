@@ -12,6 +12,23 @@ function getCronSecret(): string {
   return (process.env.CRON_SECRET ?? "").trim();
 }
 
+interface TicketBacktestBucket {
+  claimed: number;
+  n: number;
+  won: number;
+  lost: number;
+  realised: number;
+  diff: number;
+}
+
+interface TicketBacktest {
+  totalTickets: number;
+  settledTickets: number;
+  pendingTickets: number;
+  overallRealisedRate: number | null;
+  ticketBuckets: TicketBacktestBucket[];
+}
+
 function getMondayCat(): string {
   const now = new Date();
   const catMs = now.getTime() + 2 * 60 * 60 * 1000;
@@ -148,10 +165,57 @@ export async function POST(req: Request) {
       await db.delete(vaScanLock).where(sql`${vaScanLock.scanId} = ${scanId}`);
     } catch {}
 
-    let settled: { won: number; lost: number; pending: number; realisedRate: number } | null = null;
+    let settled: { won: number; lost: number; pending: number; realisedRate: number | null } | null = null;
+    let ticketBacktest: TicketBacktest | null = null;
     if (settledStatuses) {
-      const won = settledStatuses.filter((s) => s === "won").length, lost = settledStatuses.filter((s) => s === "lost").length;
-      settled = { won, lost, pending: settledStatuses.length - won - lost, realisedRate: (won + lost) / Math.max(1, settledStatuses.length) };
+      const won = settledStatuses.filter((s) => s === "won").length;
+      const lost = settledStatuses.filter((s) => s === "lost").length;
+      const settledCount = won + lost;
+      // realisedRate = won / (won + lost); null when nothing has settled yet.
+      settled = {
+        won,
+        lost,
+        pending: settledStatuses.length - settledCount,
+        realisedRate: settledCount === 0 ? null : won / settledCount,
+      };
+
+      // Ticket-level calibration: bucket the settled tickets (won/lost only —
+      // pending tickets are counted separately, never bucketed) by the combined
+      // probability the model claimed for the ticket, in 0.05-wide buckets.
+      const round3 = (v: number) => Math.round(v * 1000) / 1000;
+      const buckets = new Map<number, { won: number; lost: number }>();
+      for (let i = 0; i < built.length; i++) {
+        const status = settledStatuses[i];
+        if (status === "pending") continue;
+        // Bucket key = Math.floor(combinedProbability / 0.05) * 0.05 (FP-safe).
+        const idx = Math.floor(built[i].combinedProbability / 0.05 + 1e-6);
+        const bucket = buckets.get(idx) ?? { won: 0, lost: 0 };
+        bucket[status === "won" ? "won" : "lost"] += 1;
+        buckets.set(idx, bucket);
+      }
+      const ticketBuckets: TicketBacktestBucket[] = Array.from(buckets.entries())
+        .filter(([, bucket]) => bucket.won + bucket.lost >= 3)
+        .map(([idx, bucket]) => {
+          const claimed = round3(idx / 20); // bucket start on the 0.05 grid
+          const realised = bucket.won / (bucket.won + bucket.lost);
+          return {
+            claimed,
+            n: bucket.won + bucket.lost,
+            won: bucket.won,
+            lost: bucket.lost,
+            realised: round3(realised),
+            diff: round3(realised - claimed),
+          };
+        })
+        .sort((a, b) => a.claimed - b.claimed);
+
+      ticketBacktest = {
+        totalTickets: built.length,
+        settledTickets: settledCount,
+        pendingTickets: settledStatuses.length - settledCount,
+        overallRealisedRate: settledCount === 0 ? null : won / settledCount,
+        ticketBuckets,
+      };
     }
 
     return Response.json({
@@ -163,6 +227,7 @@ export async function POST(req: Request) {
       ticketsBuilt: built.length,
       recommendedTicketId,
       ...(settled ? { settled } : {}),
+      ...(ticketBacktest ? { ticketBacktest } : {}),
     });
   } catch (err) {
     console.error("[VA] scan failed", err);
