@@ -57,7 +57,28 @@ interface BacktestResponse {
   buckets: BacktestBucket[];
 }
 
+interface VaScanSettled {
+  won: number;
+  lost: number;
+  pending: number;
+  realisedRate: number;
+}
+
+interface VaScanResponse {
+  ok: boolean;
+  scanId?: string;
+  matchesScanned?: number;
+  marketsEvaluated?: number;
+  legsQualified?: number;
+  ticketsBuilt?: number;
+  recommendedTicketId?: number | null;
+  settled?: VaScanSettled;
+  reason?: string;
+  error?: string;
+}
+
 type BacktestStatus = "idle" | "running" | "done" | "error";
+type TicketBacktestStatus = "idle" | "running" | "done" | "error";
 
 /** Small inline spinner shared by the chip and the backtest sheet. */
 const spinnerStyle = {
@@ -90,6 +111,11 @@ export default function ValueAccumulatorPage() {
   const [backtestResult, setBacktestResult] = useState<BacktestResponse | null>(null);
   const [backtestError, setBacktestError] = useState<string | null>(null);
   const [backtestOpen, setBacktestOpen] = useState(false);
+  const [ticketBacktestStatus, setTicketBacktestStatus] = useState<TicketBacktestStatus>("idle");
+  const [ticketBacktestResult, setTicketBacktestResult] = useState<VaScanResponse | null>(null);
+  const [ticketBacktestError, setTicketBacktestError] = useState<string | null>(null);
+  const [ticketBacktestOpen, setTicketBacktestOpen] = useState(false);
+  const [ticketBacktestRows, setTicketBacktestRows] = useState<VaTicketRow[]>([]);
 
   async function runBacktest() {
     if (backtestStatus === "running") return;
@@ -114,6 +140,52 @@ export default function ValueAccumulatorPage() {
   function closeBacktest() {
     setBacktestOpen(false);
     setBacktestStatus("idle");
+  }
+
+  async function runTicketBacktest() {
+    if (ticketBacktestStatus === "running") return;
+    setTicketBacktestStatus("running");
+    setTicketBacktestError(null);
+    setTicketBacktestResult(null);
+    setTicketBacktestRows([]);
+    try {
+      const res = await fetch("/api/va/scan?mode=stack&finished=true", {
+        method: "POST",
+        cache: "no-store",
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = (await res.json()) as VaScanResponse;
+      if (!data.ok) throw new Error(data.reason || data.error || "Ticket backtest failed");
+      setTicketBacktestResult(data);
+
+      // Re-read tickets for the just-completed scan so we can render the per-ticket table.
+      // The scan route persists tickets to va_tickets; /api/va/tickets returns them by scanId.
+      const ticketScanId = data.scanId;
+      if (ticketScanId) {
+        try {
+          const tr = await fetch(`/api/va/tickets?scanId=${encodeURIComponent(ticketScanId)}`, {
+            cache: "no-store",
+          });
+          if (tr.ok) {
+            const td = (await tr.json()) as TicketsResponse;
+            if (td.ok) setTicketBacktestRows(td.tickets ?? []);
+          }
+        } catch {
+          // Non-fatal: the sheet still shows aggregate settled stats.
+        }
+      }
+      setTicketBacktestStatus("done");
+      setTicketBacktestOpen(true);
+    } catch (e) {
+      setTicketBacktestError(e instanceof Error ? e.message : String(e));
+      setTicketBacktestStatus("error");
+      setTicketBacktestOpen(true);
+    }
+  }
+
+  function closeTicketBacktest() {
+    setTicketBacktestOpen(false);
+    setTicketBacktestStatus("idle");
   }
 
 
@@ -213,6 +285,33 @@ export default function ValueAccumulatorPage() {
                 </>
               ) : (
                 "Run Backtest"
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={runTicketBacktest}
+              disabled={ticketBacktestStatus === "running"}
+              style={{
+                background: "#ecfdf5",
+                color: "#0a7d4f",
+                border: "1px solid #a7f3d0",
+                borderRadius: 999,
+                padding: "4px 12px",
+                fontSize: 13,
+                fontWeight: 600,
+                cursor: ticketBacktestStatus === "running" ? "default" : "pointer",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+              }}
+            >
+              {ticketBacktestStatus === "running" ? (
+                <>
+                  <span style={spinnerStyle} aria-hidden="true" />
+                  Running…
+                </>
+              ) : (
+                "Backtest Tickets"
               )}
             </button>
             {scanId && (
@@ -670,6 +769,189 @@ export default function ValueAccumulatorPage() {
                   ) : (
                     <div style={{ fontSize: 13, color: "#6b7280", padding: "8px 0" }}>
                       No bucket reached 5 predictions yet — scan more days first.
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Ticket backtest — bottom-sheet modal (same visual pattern as Calibration Backtest) */}
+      {ticketBacktestOpen && (
+        <div
+          onClick={closeTicketBacktest}
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(17, 24, 39, 0.55)",
+            zIndex: 1000,
+            display: "flex",
+            alignItems: "flex-end",
+            justifyContent: "center",
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              background: "white",
+              width: "100%",
+              maxWidth: 720,
+              maxHeight: "70vh",
+              borderRadius: "16px 16px 0 0",
+              display: "flex",
+              flexDirection: "column",
+              overflow: "hidden",
+              boxShadow: "0 -4px 24px rgba(0,0,0,0.2)",
+              animation: "va-slide-up 0.25s ease-out",
+            }}
+          >
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                padding: "16px 20px",
+                borderBottom: "1px solid #e5e7eb",
+              }}
+            >
+              <div>
+                <div style={{ fontSize: 16, fontWeight: 700, color: "#111827" }}>Ticket Backtest</div>
+                {ticketBacktestStatus === "done" && ticketBacktestResult?.settled && (
+                  <div style={{ fontSize: 13, color: "#6b7280", marginTop: 4 }}>
+                    {ticketBacktestResult.matchesScanned ?? 0} matches · {ticketBacktestResult.settled.won} won ·{" "}
+                    {ticketBacktestResult.settled.lost} lost · {ticketBacktestResult.settled.pending} pending
+                  </div>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={closeTicketBacktest}
+                aria-label="Close"
+                style={{
+                  background: "#f3f4f6",
+                  border: "none",
+                  borderRadius: 8,
+                  width: 28,
+                  height: 28,
+                  fontSize: 14,
+                  lineHeight: 1,
+                  color: "#6b7280",
+                  cursor: "pointer",
+                }}
+              >
+                ✕
+              </button>
+            </div>
+
+            <div style={{ overflowY: "auto", padding: "16px 20px 24px" }}>
+              {ticketBacktestStatus === "running" && (
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 10,
+                    color: "#6b7280",
+                    fontSize: 14,
+                    padding: "24px 0",
+                  }}
+                >
+                  <span style={spinnerStyle} aria-hidden="true" />
+                  Settling finished matches…
+                </div>
+              )}
+
+              {ticketBacktestStatus === "error" && (
+                <div style={{ color: "#dc2626", fontSize: 14, padding: "8px 0" }}>{ticketBacktestError}</div>
+              )}
+
+              {ticketBacktestStatus === "done" && ticketBacktestResult?.settled && (
+                <>
+                  <div
+                    style={{
+                      padding: "16px 0 20px",
+                      textAlign: "center",
+                      borderBottom: "1px solid #f3f4f6",
+                      marginBottom: 16,
+                    }}
+                  >
+                    <div style={{ fontSize: 11, color: "#6b7280", textTransform: "uppercase", fontWeight: 600 }}>
+                      Realised hit rate
+                    </div>
+                    <div style={{ fontSize: 40, fontWeight: 700, color: "#111827", letterSpacing: "-0.02em", marginTop: 4 }}>
+                      {(ticketBacktestResult.settled.realisedRate * 100).toFixed(1)}%
+                    </div>
+                  </div>
+
+                  {ticketBacktestRows.length > 0 ? (
+                    <div style={{ overflowX: "auto" }}>
+                      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                        <thead>
+                          <tr style={{ textAlign: "left", borderBottom: "1px solid #e5e7eb" }}>
+                            {["Legs", "Combined Odds", "Model Claimed Prob", "Status"].map((h) => (
+                              <th
+                                key={h}
+                                style={{
+                                  padding: "8px 6px",
+                                  color: "#6b7280",
+                                  fontWeight: 600,
+                                  fontSize: 11,
+                                  textTransform: "uppercase",
+                                }}
+                              >
+                                {h}
+                              </th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {ticketBacktestRows.map((t) => {
+                            const status =
+                              t.status === "won" || t.status === "lost" || t.status === "pending"
+                                ? t.status
+                                : "pending";
+                            const palette =
+                              status === "won"
+                                ? { bg: "#ecfdf5", fg: "#0a7d4f" }
+                                : status === "lost"
+                                ? { bg: "#fef2f2", fg: "#dc2626" }
+                                : { bg: "#f3f4f6", fg: "#6b7280" };
+                            return (
+                              <tr key={t.id} style={{ borderBottom: "1px solid #f3f4f6" }}>
+                                <td style={{ padding: "10px 6px", color: "#111827", fontWeight: 600 }}>
+                                  {t.legs.length}
+                                </td>
+                                <td style={{ padding: "10px 6px", color: "#111827", fontWeight: 600 }}>
+                                  {t.combinedOdds.toFixed(2)}
+                                </td>
+                                <td style={{ padding: "10px 6px", color: "#374151" }}>
+                                  {(t.combinedProbability * 100).toFixed(1)}%
+                                </td>
+                                <td style={{ padding: "10px 6px" }}>
+                                  <span
+                                    style={{
+                                      background: palette.bg,
+                                      color: palette.fg,
+                                      padding: "2px 8px",
+                                      borderRadius: 4,
+                                      fontWeight: 600,
+                                      textTransform: "uppercase",
+                                      fontSize: 11,
+                                    }}
+                                  >
+                                    {status}
+                                  </span>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    <div style={{ fontSize: 13, color: "#6b7280", padding: "8px 0" }}>
+                      No tickets were built for this scan.
                     </div>
                   )}
                 </>
