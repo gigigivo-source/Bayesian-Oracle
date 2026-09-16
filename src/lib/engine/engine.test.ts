@@ -1,9 +1,18 @@
-// Engine assembly tests — empirical backtest calibration pass.
+// Engine assembly tests — the scanner path emits RAW model probabilities.
 //
-// Verifies that assemble() applies calibrateAgainstBacktest to every
-// Goals-family market (Total Goals O/U, team goals, BTTS, …) and leaves
-// every other family (Corners, Cards, SOT, Shots, …) exactly as the raw
-// Poisson pipeline produced it.
+// assemble() must NOT apply calibrateAgainstBacktest to any market. The
+// backtest calibration curve was fitted against the /api/match pipeline,
+// which fetches the ESPN summary and therefore produces different raw
+// probabilities; applying it to the scanner path (runEngineFromReal(fx, null),
+// anchor-only lambdas) over-shrinks by 6–13 points. The scanner path stays
+// raw until the curve is refitted against this baseline.
+//
+// These tests are the guard against silently re-introducing the pass: they
+// pin every Goals-family market — the family the reverted loop targeted — to
+// byte-for-byte equality with the raw Poisson pipeline, and additionally
+// assert the value is NOT the calibrated one wherever the curve would move
+// it (raw > 0.5). calibration.ts and calibration.test.ts are untouched; the
+// function stays exported for the refit.
 //
 // The raw pipeline is reconstructed by re-running the same deterministic
 // building blocks runEngineFromReal() uses internally (buildRealLambdas is
@@ -55,7 +64,7 @@ function espn1Fixture(): FixtureLite {
   };
 }
 
-/** The raw (pre-calibration) market pipeline for a fixture, paired by id. */
+/** The raw (uncalibrated) market pipeline for a fixture, paired by id. */
 function rawPipeline(fx: FixtureLite): Map<string, Market> {
   const { lam, completeness } = buildRealLambdas(fx, null, undefined);
   const match: LockedMatchObject = {
@@ -75,7 +84,15 @@ function rawPipeline(fx: FixtureLite): Map<string, Market> {
   return new Map(new MarketEngine(match, lam).buildAll().map((m) => [m.id, m]));
 }
 
-describe("assemble() — empirical backtest calibration (goals family only)", () => {
+/**
+ * The calibration curve is the identity for raw ≤ 0.50 and strictly below it
+ * above, so raw > 0.5 is the region where "equals raw" and "equals
+ * calibrated" are mutually exclusive — i.e. where the negative assertions
+ * below actually discriminate.
+ */
+const CURVE_MOVES = (raw: number) => raw > 0.5;
+
+describe("assemble() — scanner path emits raw probabilities (no backtest calibration)", () => {
   const fx     = espn1Fixture();
   const result = runEngineFromReal(fx, null);
   const raw    = rawPipeline(fx);
@@ -83,29 +100,27 @@ describe("assemble() — empirical backtest calibration (goals family only)", ()
   const goals   = result.markets.filter((m) => m.family === "Goals");
   const corners = result.markets.filter((m) => m.family === "Corners");
 
-  it("A. applies calibrateAgainstBacktest to every Goals-family market and never raises it", () => {
+  it("A. leaves every Goals-family market exactly as the raw pipeline produced it", () => {
     expect(goals.length).toBeGreaterThan(0);
 
     for (const m of goals) {
       const r = raw.get(m.id);
       expect(r, `raw counterpart for ${m.id} (${m.name})`).toBeDefined();
-      // The pass must apply the empirical curve exactly.
-      expect(m.hitRate).toBe(calibrateAgainstBacktest(r!.hitRate));
-      // Where the curve is defined as identity-or-shrinkage (raw ≥ 0.02),
-      // calibration never raises the probability.
-      if (r!.hitRate >= 0.02) {
-        expect(m.hitRate).toBeLessThanOrEqual(r!.hitRate);
+      // Untouched: byte-for-byte the raw pipeline's hitRate…
+      expect(m.hitRate).toBe(r!.hitRate);
+      // …and NOT the calibrated value wherever the curve would move it. If
+      // the calibration pass came back, this is the assertion that catches
+      // it: above 0.5 the curve is strictly below the identity, so equality
+      // with the calibrated value could not be a coincidence.
+      if (CURVE_MOVES(r!.hitRate)) {
+        expect(m.hitRate).not.toBe(calibrateAgainstBacktest(r!.hitRate));
       }
     }
 
-    // Raw values above 0.5 are the over-confident region the backtest
-    // measured — the curve is strictly below the identity there, so every
-    // such goals market must be strictly lowered.
-    const aboveHalf = goals.filter((m) => (raw.get(m.id)?.hitRate ?? 0) > 0.5);
-    expect(aboveHalf.length).toBeGreaterThan(0); // non-vacuous
-    for (const m of aboveHalf) {
-      expect(m.hitRate).toBeLessThan(raw.get(m.id)!.hitRate);
-    }
+    // Non-vacuous: at least one goals line sits in the region where the
+    // "not calibrated" check above is discriminating.
+    const aboveHalf = goals.filter((m) => CURVE_MOVES(raw.get(m.id)?.hitRate ?? 0));
+    expect(aboveHalf.length).toBeGreaterThan(0);
   });
 
   it("B. leaves Corners-family markets exactly as the raw pipeline produced them", () => {
@@ -114,22 +129,29 @@ describe("assemble() — empirical backtest calibration (goals family only)", ()
     for (const m of corners) {
       const r = raw.get(m.id);
       expect(r, `raw counterpart for ${m.id} (${m.name})`).toBeDefined();
-      // Untouched: byte-for-byte the raw pipeline's hitRate…
       expect(m.hitRate).toBe(r!.hitRate);
-      // …and NOT the calibrated value for the same raw input. For raw > 0.5
-      // the curve is strictly below the identity, so equality with the
-      // calibrated value would prove the pass wrongly touched corners.
-      if (r!.hitRate > 0.5) {
+      if (CURVE_MOVES(r!.hitRate)) {
         expect(m.hitRate).not.toBe(calibrateAgainstBacktest(r!.hitRate));
       }
     }
 
-    // Non-vacuous: at least one corners line sits in the region where the
-    // "not calibrated" check above is discriminating.
-    expect(corners.some((m) => (raw.get(m.id)?.hitRate ?? 0) > 0.5)).toBe(true);
+    // Non-vacuous: at least one corners line sits in the discriminating region.
+    expect(corners.some((m) => CURVE_MOVES(raw.get(m.id)?.hitRate ?? 0))).toBe(true);
   });
 
-  it("C. is deterministic — two runs produce byte-identical corners markets", () => {
+  it("C. applies no calibration to ANY market family", () => {
+    expect(result.markets.length).toBeGreaterThan(0);
+
+    const drifted: string[] = [];
+    for (const m of result.markets) {
+      const r = raw.get(m.id);
+      expect(r, `raw counterpart for ${m.id} (${m.name})`).toBeDefined();
+      if (m.hitRate !== r!.hitRate) drifted.push(`${m.id} (${m.family}): ${r!.hitRate} → ${m.hitRate}`);
+    }
+    expect(drifted, "markets whose hitRate differs from the raw pipeline").toEqual([]);
+  });
+
+  it("D. is deterministic — two runs produce byte-identical corners markets", () => {
     const again = runEngineFromReal(fx, null);
     const cornersJson = (r: typeof result) =>
       JSON.stringify(r.markets.filter((m) => m.family === "Corners"));
