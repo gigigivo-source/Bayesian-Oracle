@@ -79,7 +79,7 @@ describe("Value Accumulator — Partitioner", () => {
     };
   }
 
-  it("3. produces disjoint tickets (no leg reused)", () => {
+  it("3. builds multiple tickets with controlled leg reuse (≤2 tickets per leg)", () => {
     const legs: VaLeg[] = [
       makeLeg({ eventId: "1", statFamily: "goals", homeTeam: "Arsenal", awayTeam: "Chelsea", ev: 0.2, kickoff: new Date("2026-09-13T12:00:00Z") }),
       makeLeg({ eventId: "2", statFamily: "corners", homeTeam: "Man City", awayTeam: "Liverpool", ev: 0.19, kickoff: new Date("2026-09-13T15:30:00Z") }),
@@ -93,11 +93,19 @@ describe("Value Accumulator — Partitioner", () => {
     ];
 
     const tickets = buildTickets(legs);
-    expect(tickets.length).toBeGreaterThan(0);
+    expect(tickets.length).toBeGreaterThanOrEqual(3);
 
-    const allEventIds = tickets.flatMap((t) => t.legs.map((l) => l.eventId));
-    const unique = new Set(allEventIds);
-    expect(unique.size).toBe(allEventIds.length); // no reuse
+    const appearances = new Map<string, number>();
+    for (const ticket of tickets) {
+      const ids = ticket.legs.map((l) => l.eventId);
+      // Distinct eventIds within a single ticket (unchanged rule).
+      expect(new Set(ids).size).toBe(ids.length);
+      for (const id of ids) appearances.set(id, (appearances.get(id) ?? 0) + 1);
+    }
+    // Controlled cross-ticket reuse: a leg may appear in at most 2 tickets.
+    for (const count of appearances.values()) {
+      expect(count).toBeLessThanOrEqual(2);
+    }
   });
 
   it("4. enforces stat-family diversity", () => {
@@ -225,6 +233,67 @@ describe("Value Accumulator — Partitioner", () => {
       const goalsLegs = ticket.legs.filter((l) => l.statFamily === "goals").length;
       expect(goalsLegs).toBeLessThanOrEqual(2);
     }
+  });
+
+  // ─── Multi-ticket assembly (Fix 3: controlled leg reuse) ─────────────────────
+  function diverseLegs(n: number): VaLeg[] {
+    const families = ["goals", "corners", "cards", "shots", "other"];
+    const legs: VaLeg[] = [];
+    for (let i = 0; i < n; i++) {
+      legs.push(
+        makeLeg({
+          eventId: `ev${i}`,
+          statFamily: families[i % families.length],
+          homeTeam: `Home${i}`,
+          awayTeam: `Away${i}`,
+          ev: 0.2 - i * 0.005,
+          modelProbability: 0.65,
+          bookmakerOdds: 1.5,
+          kickoff: new Date(`2026-09-${13 + Math.floor(i / 5)}T${12 + (i % 5) * 3}:00:00Z`),
+        }),
+      );
+    }
+    return legs;
+  }
+
+  it("a. pool of 20 diverse legs → buildTickets returns 3-5 tickets", () => {
+    const tickets = buildTickets(diverseLegs(20));
+    expect(tickets.length).toBeGreaterThanOrEqual(3);
+    expect(tickets.length).toBeLessThanOrEqual(5);
+  });
+
+  it("b. no leg appears in more than 2 tickets", () => {
+    const tickets = buildTickets(diverseLegs(20));
+    expect(tickets.length).toBeGreaterThan(0);
+    const appearances = new Map<string, number>();
+    for (const ticket of tickets) {
+      for (const leg of ticket.legs) {
+        appearances.set(leg.eventId, (appearances.get(leg.eventId) ?? 0) + 1);
+      }
+    }
+    for (const count of appearances.values()) {
+      expect(count).toBeLessThanOrEqual(2);
+    }
+  });
+
+  it("c. same input twice → identical output (deterministic)", () => {
+    const input = diverseLegs(20);
+    const first = JSON.stringify(buildTickets(input));
+    const second = JSON.stringify(buildTickets(input));
+    expect(second).toBe(first);
+  });
+
+  it("d. two identical tickets (same eventIds) are deduped to one", () => {
+    // A pool with exactly three diverse legs: the multi-ticket builder has
+    // several seeds but every seed greedily fills to the same 3-eventId set,
+    // so the dedupe must collapse them into a single ticket.
+    const legs: VaLeg[] = [
+      makeLeg({ eventId: "A", statFamily: "goals", homeTeam: "HomeA", awayTeam: "AwayA", ev: 0.2, bookmakerOdds: 1.5, kickoff: new Date("2026-09-13T12:00:00Z") }),
+      makeLeg({ eventId: "B", statFamily: "corners", homeTeam: "HomeB", awayTeam: "AwayB", ev: 0.19, bookmakerOdds: 1.5, kickoff: new Date("2026-09-13T15:30:00Z") }),
+      makeLeg({ eventId: "C", statFamily: "cards", homeTeam: "HomeC", awayTeam: "AwayC", ev: 0.18, bookmakerOdds: 1.5, kickoff: new Date("2026-09-13T19:00:00Z") }),
+    ];
+    const tickets = buildTickets(legs);
+    expect(tickets).toHaveLength(1);
   });
 });
 
