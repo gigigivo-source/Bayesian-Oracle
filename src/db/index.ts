@@ -1,5 +1,6 @@
 import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
+import { sql } from "drizzle-orm";
 
 const databaseUrl = process.env.DATABASE_URL;
 
@@ -18,11 +19,16 @@ export const pool =
     // Without these, an unreachable or overloaded database makes every query
     // hang on the OS-level TCP timeout. `/api/auth` gates the entire UI, so a
     // slow pool literally means a blank screen for minutes.
-    connectionTimeoutMillis: Number(process.env.PGCONNECT_TIMEOUT_MS ?? 5_000),
+    connectionTimeoutMillis: Number(process.env.PGCONNECT_TIMEOUT_MS ?? 10_000),
     statement_timeout:       Number(process.env.PGSTATEMENT_TIMEOUT_MS ?? 15_000),
     idle_in_transaction_session_timeout: 15_000,
-    idleTimeoutMillis:       30_000,
-    max:                     Number(process.env.PGPOOL_MAX ?? 10),
+    // Neon closes idle connections aggressively. Recycle our idle clients
+    // before Neon does (20s) and keep the TCP socket warm so long-running
+    // scans (4-6 min) don't come back to a dead connection.
+    idleTimeoutMillis:       20_000,
+    max:                     Number(process.env.PGPOOL_MAX ?? 5),
+    keepAlive:               true,
+    keepAliveInitialDelayMillis: 10_000,
   });
 
 // A pool-level error (e.g. the server dropping an idle connection) is emitted
@@ -39,3 +45,16 @@ if (process.env.NODE_ENV !== "production") {
 }
 
 export const db = drizzle(pool);
+
+/**
+ * Cheap round-trip used to keep a pooled connection warm during long-running
+ * work (e.g. the 4-6 minute VA scan). Errors are swallowed on purpose: a failed
+ * ping just means the pool will open a fresh connection on the next real query.
+ */
+export async function keepDbAlive(): Promise<void> {
+  try {
+    await db.execute(sql`SELECT 1`);
+  } catch {
+    /* ignore */
+  }
+}
