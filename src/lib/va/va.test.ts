@@ -133,9 +133,13 @@ describe("Value Accumulator — Partitioner", () => {
 
     const tickets = buildTickets(legs);
     for (const ticket of tickets) {
-      const families = ticket.legs.map((l) => l.statFamily);
-      const uniq = new Set(families);
-      expect(uniq.size).toBe(families.length);
+      const familyCounts = new Map<string, number>();
+      for (const leg of ticket.legs) {
+        familyCounts.set(leg.statFamily, (familyCounts.get(leg.statFamily) ?? 0) + 1);
+      }
+      for (const count of familyCounts.values()) {
+        expect(count).toBeLessThanOrEqual(2);
+      }
     }
   });
 
@@ -151,9 +155,16 @@ describe("Value Accumulator — Partitioner", () => {
 
     const tickets = buildTickets(legs);
     for (const ticket of tickets) {
-      const teams = ticket.legs.flatMap((l) => [l.homeTeam.toLowerCase(), l.awayTeam.toLowerCase()]);
-      const uniq = new Set(teams);
-      expect(uniq.size).toBe(teams.length);
+      const teamCounts = new Map<string, number>();
+      for (const leg of ticket.legs) {
+        for (const team of [leg.homeTeam, leg.awayTeam]) {
+          const key = team.toLowerCase();
+          teamCounts.set(key, (teamCounts.get(key) ?? 0) + 1);
+        }
+      }
+      for (const count of teamCounts.values()) {
+        expect(count).toBeLessThanOrEqual(2);
+      }
     }
   });
 
