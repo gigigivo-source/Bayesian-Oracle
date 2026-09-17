@@ -137,6 +137,7 @@ export async function POST(req: Request) {
             legs: ticket.legs as any,
             combinedOdds: ticket.combinedOdds,
             combinedProbability: ticket.combinedProbability,
+            independentProbability: ticket.independentProbability?.toString() ?? null,
             combinedEv: ticket.combinedEv,
             kellyScore: ticket.kellyScore,
             stakePercent: ticket.stakePercent,

@@ -24,6 +24,7 @@ interface VaTicketRow {
   legs: VaTicketLeg[];
   combinedOdds: number;
   combinedProbability: number;
+  independentProbability: number | string | null;
   combinedEv: number;
   kellyScore: number;
   stakePercent: number;
@@ -656,8 +657,18 @@ export default function ValueAccumulatorPage() {
                     <div style={{ color: "#111827", fontWeight: 700, fontSize: 14 }}>{ticket.combinedOdds.toFixed(2)}</div>
                   </div>
                   <div>
-                    <div style={{ color: "#6b7280", fontSize: 11, textTransform: "uppercase", fontWeight: 600 }}>Combined prob</div>
+                    <div style={{ color: "#6b7280", fontSize: 11, textTransform: "uppercase", fontWeight: 600 }}>Combined prob (adjusted)</div>
                     <div style={{ color: "#111827", fontWeight: 600 }}>{(ticket.combinedProbability * 100).toFixed(1)}%</div>
+                    {ticket.legs.length >= 2 && ticket.independentProbability != null && (() => {
+                      const ind = typeof ticket.independentProbability === "number"
+                        ? ticket.independentProbability
+                        : Number(ticket.independentProbability);
+                      return (
+                        <div style={{ color: "#9ca3af", fontSize: 10, fontWeight: 400, marginTop: 2 }}>
+                          Independent: {(ind * 100).toFixed(1)}% · {ticket.legs.length}-leg discount ×{Math.pow(0.92, ticket.legs.length).toFixed(3)}
+                        </div>
+                      );
+                    })()}
                   </div>
                   <div>
                     <div style={{ color: "#6b7280", fontSize: 11, textTransform: "uppercase", fontWeight: 600 }}>Combined EV</div>
