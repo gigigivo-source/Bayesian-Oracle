@@ -483,6 +483,123 @@ describe("Value Accumulator — Finished backtest settlement", () => {
   });
 });
 
+describe("Value Accumulator — Correlation discount", () => {
+  const K = 0.92;
+
+  function makeDiscountLeg(
+    eventId: string,
+    modelProbability: number,
+    bookmakerOdds: number,
+    statFamily: string,
+    kickoff?: Date
+  ): VaLeg {
+    return {
+      scanId: "discount_scan",
+      eventId,
+      matchLabel: `${eventId} match`,
+      homeTeam: `H${eventId}`,
+      awayTeam: `A${eventId}`,
+      leagueSlug: "eng.1",
+      kickoff: kickoff ?? new Date("2026-09-13T12:00:00Z"),
+      market: "Total Goals O/U 2.5",
+      selection: "Over 2.5",
+      statFamily,
+      modelProbability,
+      bookmakerOdds,
+      bookmakerName: "1xBet",
+      impliedProbability: 1 / bookmakerOdds,
+      ev: modelProbability * bookmakerOdds - 1,
+      oddsAtBuild: new Date(),
+      scannedAt: new Date(),
+    };
+  }
+
+  // Helper: build a 4-leg value ticket with perLegOdds whose product falls
+  // inside the assembler's [3.0, 4.5] window, with one leg per stat family.
+  function fourLegValueTicket(prob: number, perLegOdds: number) {
+    const legs: VaLeg[] = [
+      makeDiscountLeg("e1", prob, perLegOdds, "goals", new Date("2026-09-14T12:00:00Z")),
+      makeDiscountLeg("e2", prob, perLegOdds, "corners", new Date("2026-09-14T15:00:00Z")),
+      makeDiscountLeg("e3", prob, perLegOdds, "cards", new Date("2026-09-15T12:00:00Z")),
+      makeDiscountLeg("e4", prob, perLegOdds, "shots", new Date("2026-09-15T15:00:00Z")),
+    ];
+    return { legs, tickets: buildTickets(legs) };
+  }
+
+  it("a. 4 legs each with modelProbability 0.82: combinedProbability = independentProbability * 0.92^4", () => {
+    // perLegOdds 1.42 → combinedOdds ≈ 4.07 (inside [3.0, 4.5]); ev = 0.82*1.42-1 ≈ 0.164 positive.
+    const { tickets } = fourLegValueTicket(0.82, 1.42);
+    expect(tickets.length).toBeGreaterThan(0);
+    const t = tickets[0];
+    expect(t.legs.length).toBe(4);
+    const expectedIndependent = Math.pow(0.82, 4);
+    const expectedDiscount = Math.pow(K, 4);
+    expect(t.independentProbability).toBeCloseTo(expectedIndependent, 3);
+    expect(t.combinedProbability).toBeCloseTo(expectedIndependent * expectedDiscount, 3);
+  });
+
+  it("b. 2 legs each with modelProbability 0.70 → combinedProbability = 0.49 * 0.92^2 ≈ 0.4147", () => {
+    // Closed-form check (the value builder requires ≥3 legs, but the discount
+    // formula is uniform across leg counts).
+    expect(Math.pow(0.70, 2)).toBeCloseTo(0.49, 4);
+    expect(Math.pow(K, 2)).toBeCloseTo(0.8464, 4);
+    expect(0.49 * Math.pow(K, 2)).toBeCloseTo(0.4147, 4);
+
+    // Exercise the code path on a 3-leg ticket at 0.70 across 3 families to
+    // confirm the builder applies the same formula end-to-end.
+    const legs: VaLeg[] = [
+      makeDiscountLeg("e1", 0.70, 1.5, "goals", new Date("2026-09-14T12:00:00Z")),
+      makeDiscountLeg("e2", 0.70, 1.5, "corners", new Date("2026-09-14T15:00:00Z")),
+      makeDiscountLeg("e3", 0.70, 1.5, "cards", new Date("2026-09-15T12:00:00Z")),
+    ];
+    const tickets = buildTickets(legs);
+    expect(tickets.length).toBeGreaterThan(0);
+    expect(tickets[0].legs.length).toBe(3);
+    expect(tickets[0].combinedProbability).toBeCloseTo(
+      Math.pow(0.70, 3) * Math.pow(K, 3),
+      3
+    );
+  });
+
+  it("c. independentProbability is the raw product, unchanged by the discount", () => {
+    const { tickets } = fourLegValueTicket(0.82, 1.42);
+    expect(tickets.length).toBeGreaterThan(0);
+    const t = tickets[0];
+    expect(t.independentProbability).toBeCloseTo(Math.pow(0.82, t.legs.length), 3);
+    // independentProbability must strictly exceed the discounted combinedProbability.
+    expect(t.independentProbability).toBeGreaterThan(t.combinedProbability);
+  });
+
+  it("d. combinedEv, kellyScore and stakePercent all use the discounted combinedProbability", () => {
+    const { tickets } = fourLegValueTicket(0.82, 1.42);
+    expect(tickets.length).toBeGreaterThan(0);
+    const t = tickets[0];
+    const discount = Math.pow(K, t.legs.length);
+    const expectedCombined = t.independentProbability * discount;
+    expect(t.combinedProbability).toBeCloseTo(expectedCombined, 4);
+    const expectedEv = expectedCombined * t.combinedOdds - 1;
+    expect(t.combinedEv).toBeCloseTo(expectedEv, 3);
+    const expectedKelly = t.combinedOdds > 1 ? expectedEv / (t.combinedOdds - 1) : 0;
+    expect(t.kellyScore).toBeCloseTo(expectedKelly, 3);
+    expect(t.stakePercent).toBe(Math.min(0.5 * expectedKelly * 100, 2));
+    // EV computed from the naive (undiscounted) product must be strictly higher.
+    const naiveEv = t.independentProbability * t.combinedOdds - 1;
+    expect(t.combinedEv).toBeLessThan(naiveEv);
+
+    // Spec's worked example: 4 legs @ 0.82 with odds 1.30 each combine to
+    // ≈2.856. The discount pushes combined EV materially below the naive EV
+    // (for fair-line bets it flips negative). Verify the arithmetic directly
+    // since the builder rejects combinedOdds < 3.0.
+    const specCombinedOdds = Math.pow(1.3, 4);
+    expect(specCombinedOdds).toBeCloseTo(2.856, 3);
+    const specIndependent = Math.pow(0.82, 4);
+    const specCombined = specIndependent * Math.pow(K, 4);
+    const specEv = specCombined * specCombinedOdds - 1;
+    const naiveSpecEv = specIndependent * specCombinedOdds - 1;
+    expect(specEv).toBeLessThan(naiveSpecEv);
+  });
+});
+
 describe("Value Accumulator — Self-learning market reliability", () => {
   it("a. marketKeyOf(\"Total Goals O/U 1.5\", \"Over 1.5\", \"Goals\") === \"Goals:TotalO/U:1.5:Over\"", () => {
     expect(marketKeyOf("Total Goals O/U 1.5", "Over 1.5", "Goals")).toBe("Goals:TotalO/U:1.5:Over");

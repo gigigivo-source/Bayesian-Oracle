@@ -41,19 +41,15 @@ export interface VaTicket {
   weekStart: string; // YYYY-MM-DD
   legs: VaTicketLeg[];
   combinedOdds: number;
+  /** Correlation-adjusted combined probability: independentProbability * K^legs. */
   combinedProbability: number;
   combinedEv: number;
   /**
-   * Product of per-leg model probabilities, assuming legs are independent.
-   * Identical to `combinedProbability` today; kept as a separate field so the
-   * independence assumption stays explicit if the combined figure ever becomes
-   * correlation-aware.
+   * Raw product of per-leg model probabilities, assuming legs are independent.
+   * Retained for future comparison against the correlation-adjusted figure.
    */
   independentProbability: number;
-  /**
-   * Alias of `combinedProbability`, populated identically today so the ticket
-   * output shape does not change.
-   */
+  /** Alias of `combinedProbability` (correlation-adjusted) for backwards compat. */
   effectiveProbability: number;
   kellyScore: number;
   stakePercent: number;
@@ -83,6 +79,18 @@ function getMondayCat(date: Date): string {
   const d = String(monday.getUTCDate()).padStart(2, "0");
   return `${y}-${m}-${d}`;
 }
+
+/**
+ * Per-leg correlation discount for combined ticket probability.
+ * Legs in an accumulator are not independent — same-model legs across
+ * different matches in the same league share the anchor bias and fail
+ * together. Empirically measured at 4 legs: claimed 44.4% vs realised
+ * 31.6% (ratio 0.71). This maps to a per-leg factor of
+ * 0.71^(1/4) ≈ 0.92.
+ *
+ * Applied as: combinedProbability = independentProbability * K^legs
+ */
+const CORRELATION_DISCOUNT_PER_LEG = 0.92;
 
 /**
  * FAMILY CAP: at most this many legs from the same statFamily in one ticket.
@@ -142,11 +150,12 @@ export function buildTickets(legs: VaLeg[], mode: "value" | "stack" = "value"): 
     stakePercent: number;
   } {
     const combinedOdds = ticketLegs.reduce((acc, l) => acc * l.bookmakerOdds, 1);
-    const combinedProbability = ticketLegs.reduce((acc, l) => acc * l.modelProbability, 1);
-    const combinedEv = combinedProbability * combinedOdds - 1;
-    // Independence product of per-leg model probabilities (same maths as combinedProbability).
     const independentProbability = ticketLegs.reduce((acc, l) => acc * l.modelProbability, 1);
-    // Alias of combinedProbability for now — identical value, no behavioural change.
+    const legCount = ticketLegs.length;
+    const discount = Math.pow(CORRELATION_DISCOUNT_PER_LEG, legCount);
+    const combinedProbability = independentProbability * discount;
+    const combinedEv = combinedProbability * combinedOdds - 1;
+    // Alias of combinedProbability (correlation-adjusted) for backwards compat.
     const effectiveProbability = combinedProbability;
     const kellyScore = combinedOdds > 1 ? combinedEv / (combinedOdds - 1) : 0;
     const stakePercent = Math.min(0.5 * kellyScore * 100, 2);
@@ -388,11 +397,12 @@ function buildStackTickets(legs: VaLeg[]): VaTicket[] {
     stakePercent: number;
   } {
     const combinedOdds = ticketLegs.reduce((acc, l) => acc * l.bookmakerOdds, 1);
-    const combinedProbability = ticketLegs.reduce((acc, l) => acc * l.modelProbability, 1);
-    const combinedEv = combinedProbability * combinedOdds - 1;
-    // Independence product of per-leg model probabilities (same maths as combinedProbability).
     const independentProbability = ticketLegs.reduce((acc, l) => acc * l.modelProbability, 1);
-    // Alias of combinedProbability for now — identical value, no behavioural change.
+    const legCount = ticketLegs.length;
+    const discount = Math.pow(CORRELATION_DISCOUNT_PER_LEG, legCount);
+    const combinedProbability = independentProbability * discount;
+    const combinedEv = combinedProbability * combinedOdds - 1;
+    // Alias of combinedProbability (correlation-adjusted) for backwards compat.
     const effectiveProbability = combinedProbability;
     const kellyScore = combinedOdds > 1 ? combinedEv / (combinedOdds - 1) : 0;
     const stakePercent = Math.min(0.5 * kellyScore * 100, 1.0);
