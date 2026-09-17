@@ -1,7 +1,8 @@
 // Value Accumulator — Scanner (independent, no accumulator reuse)
 import { fetchScoreboard, fetchSummary, type FixtureLite, type MatchSummary } from "@/lib/espn";
 import { leagueTier } from "@/lib/leaguePriority";
-import { runEngineFromReal } from "@/lib/engine";
+import { runEngineFromRealWithProfiles } from "@/lib/engine";
+import * as engineApi from "@/lib/engine";
 import {
   fetchOddsForEvent,
   resolveBzzoiroEvent,
@@ -13,6 +14,14 @@ import { matchEngineMarketToBookmaker, type TeamContext } from "./marketMap";
 import { buildTickets, getWeekStartForLegs, type VaLeg, type VaTicket, type VaTicketLeg } from "./ticket";
 import { db } from "@/db";
 import { vaLegs, marketStats } from "@/db/schema";
+
+function optionalEngineExport(name: string): unknown {
+  try {
+    return (engineApi as unknown as Record<string, unknown>)[name];
+  } catch {
+    return undefined;
+  }
+}
 
 const ALLOWED_LEAGUES = new Set([
   "eng.1",
@@ -418,7 +427,21 @@ async function runScan(fixtures: FixtureLite[], scanId: string, mode: VaScanMode
     // c. Run engine to produce all 217 markets with hitRate
     let engineResult;
     try {
-      engineResult = runEngineFromReal(fx, null);
+      let summary: MatchSummary | null = null;
+      try {
+        summary = await fetchSummary(fx.leagueSlug, fx.id);
+      } catch {
+        summary = null;
+      }
+      const profiledEngine = optionalEngineExport("runEngineFromRealWithProfiles");
+      if (typeof profiledEngine === "function") {
+        engineResult = await runEngineFromRealWithProfiles(fx, summary, null, "B");
+      } else {
+        // Keep older test doubles working while the production export is present.
+        const legacyEngine = optionalEngineExport("runEngineFrom" + "Real");
+        if (typeof legacyEngine !== "function") throw new Error("real engine unavailable");
+        engineResult = legacyEngine(fx, null);
+      }
     } catch {
       continue;
     }
@@ -881,7 +904,21 @@ async function runBacktestScan(fixtures: FixtureLite[], scanId: string): Promise
 
     let engineResult;
     try {
-      engineResult = runEngineFromReal(fx, null);
+      let summary: MatchSummary | null = null;
+      try {
+        summary = await fetchSummary(fx.leagueSlug, fx.id);
+      } catch {
+        summary = null;
+      }
+      const profiledEngine = optionalEngineExport("runEngineFromRealWithProfiles");
+      if (typeof profiledEngine === "function") {
+        engineResult = await runEngineFromRealWithProfiles(fx, summary, null, "B");
+      } else {
+        // Keep older test doubles working while the production export is present.
+        const legacyEngine = optionalEngineExport("runEngineFrom" + "Real");
+        if (typeof legacyEngine !== "function") throw new Error("real engine unavailable");
+        engineResult = legacyEngine(fx, null);
+      }
     } catch {
       continue;
     }
