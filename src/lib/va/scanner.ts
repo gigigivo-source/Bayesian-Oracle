@@ -616,7 +616,7 @@ async function runScan(fixtures: FixtureLite[], scanId: string, mode: VaScanMode
   };
 }
 
-// ─── Finished-match backtest (?finished=true): weekly multi-match tickets via stack-mode builder ───
+// ─── Finished-match backtest (?finished=true): daily simulated scans via stack-mode builder ───
 const BACKTEST_LEAGUES = ["eng.1", "esp.1", "ita.1", "ger.1", "fra.1"];
 
 /** Final result of a finished match; corners stays null unless the ESPN boxscore supplies it. */
@@ -652,7 +652,7 @@ export interface MarketReliabilityItem {
 }
 
 export interface TicketBacktestData {
-  weeksScanned: number;
+  daysSimulated: number;
   ticketsBuilt: number;
   won: number;
   lost: number;
@@ -765,29 +765,22 @@ export async function settleBacktestTickets(tickets: VaTicket[], results: Map<st
 /**
  * Backtest scan: runs the engine for each finished match in the 30-day window,
  * qualifies legs with stack-mode filters (odds 1.03..1.70, hitRate >= 0.62,
- * families {Goals, Corners, Cards}), pools every qualified leg across ALL
- * matches, dedups globally per (eventId, family) keeping the highest hitRate,
- * groups the pool by ISO week (Monday-based, UTC), builds tickets per week via
- * buildTickets(weekLegs, "stack") — the same builder the live scanner uses, so
- * tickets are multi-match (6-8 legs when available, combined odds 4.5-7.5) —
- * settles each ticket against the finished results (goals from the scoreboard
- * final scores, corners + cards from the ESPN match summary boxscore with one
- * fetchSummary call per match maximum), and aggregates results.
+ * families {Goals, Corners, Cards}), then simulates a DAILY live scan for each
+ * day D from 30 days ago up to 8 days ago: pool the qualified legs of matches
+ * kicking off in the forward window [D+1, D+7] (the same 7-day window the live
+ * scanner uses), dedup by (eventId, family) keeping the highest hitRate, build
+ * tickets via buildTickets(pool, "stack") — the same builder the live scanner
+ * uses, so tickets are multi-match (6-8 legs when available, combined odds
+ * 4.5-7.5) — keep only the first (recommended) ticket per day, settle each
+ * ticket against the finished results (goals from the scoreboard final scores,
+ * corners + cards from the ESPN match summary boxscore with one fetchSummary
+ * call per match maximum), and aggregate results across all simulated days.
  */
 async function runBacktestScan(fixtures: FixtureLite[], scanId: string): Promise<BacktestScanResult> {
   let marketsEvaluated = 0;
 
   // Backtest-only settlement helpers (local to this scan — the live scan path
   // and the exported settleBacktestLeg / settleBacktestTickets are untouched).
-
-  /** ISO week label (Monday-based, UTC) for a kickoff: YYYY-MM-DD. */
-  const isoWeekMondayUtc = (kickoff: Date | string): string => {
-    const date = kickoff instanceof Date ? kickoff : new Date(kickoff);
-    const monday = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
-    const day = monday.getUTCDay(); // 0 = Sunday … 6 = Saturday
-    monday.setUTCDate(monday.getUTCDate() + (day === 0 ? -6 : 1 - day));
-    return monday.toISOString().slice(0, 10);
-  };
 
   /** Numeric O/U line from a selection ("Over 2.5" → 2.5); null when absent. */
   const parseLine = (selection: string): number | null => {
@@ -946,6 +939,9 @@ async function runBacktestScan(fixtures: FixtureLite[], scanId: string): Promise
   }
 
   // Step 4: global dedup by (eventId, family), keeping the highest hitRate.
+  // Kept for the legsQualified/legs return values; daily ticket building
+  // below re-pools from `pooled` per simulated day and dedups each day's
+  // pool the same way.
   const bestByPair = new Map<string, VaLeg>();
   for (const leg of pooled) {
     const key = `${leg.eventId}|${leg.statFamily}`;
@@ -956,25 +952,65 @@ async function runBacktestScan(fixtures: FixtureLite[], scanId: string): Promise
   }
   const allQualifiedLegs = Array.from(bestByPair.values());
 
-  // Step 5: group legs by ISO week (Monday-based, UTC).
-  const legsByWeek = new Map<string, VaLeg[]>();
-  for (const leg of allQualifiedLegs) {
-    const weekLabel = isoWeekMondayUtc(leg.kickoff);
-    const bucket = legsByWeek.get(weekLabel);
-    if (bucket) bucket.push(leg);
-    else legsByWeek.set(weekLabel, [leg]);
-  }
+  // Steps 5-6: DAILY scan simulation with the SAME ticket-building logic
+  // and constraints as the live scanner.
+  //
+  // For each simulated scan day D from 30 days ago up to 8 days ago:
+  //   a. Forward window: legs whose kickoff UTC calendar date is in
+  //      [D+1, D+7] (the same 7-day window the live scanner uses).
+  //   b. Dedup that day's pool by (eventId, family), highest hitRate wins.
+  //   c. buildTickets(pool, "stack") — the SAME builder as live.
+  //   d. Skip D when the builder returns 0 tickets; otherwise keep only
+  //      the first (recommended) ticket for the day.
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const toUtcDay = (value: Date | string): number => {
+    const d = value instanceof Date ? value : new Date(value);
+    return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+  };
+  const fmtDay = (utcMidnight: number): string =>
+    new Date(utcMidnight).toISOString().slice(0, 10);
 
-  // Step 6: one buildTickets(weekLegs, "stack") call per week — the same
-  // builder the live scanner uses, so tickets are multi-match.
+  const now = new Date();
+  const todayUtc = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  const firstDay = todayUtc - 30 * DAY_MS;
+  const lastDay = todayUtc - 8 * DAY_MS;
+  const daysSimulated = Math.max(0, Math.round((lastDay - firstDay) / DAY_MS) + 1);
+
   const builtTickets: BacktestSampleTicket[] = [];
-  const weekLabels = Array.from(legsByWeek.keys()).sort();
-  for (const weekLabel of weekLabels) {
-    const weekLegs = legsByWeek.get(weekLabel) ?? [];
-    const ticketsForWeek = buildTickets(weekLegs, "stack");
-    for (const ticket of ticketsForWeek) {
-      builtTickets.push({ ...ticket, status: "pending" as BacktestTicketStatus, weekLabel });
+  for (let dayOffset = 0; dayOffset < daysSimulated; dayOffset++) {
+    const dayD = firstDay + dayOffset * DAY_MS;
+    const windowStart = dayD + 1 * DAY_MS;
+    const windowEnd = dayD + 7 * DAY_MS;
+    const dayLabel = fmtDay(dayD);
+
+    // (a) Pool qualified legs for matches kicking off in [D+1, D+7].
+    const dayPool = pooled.filter((leg) => {
+      const kickoffDay = toUtcDay(leg.kickoff);
+      return kickoffDay >= windowStart && kickoffDay <= windowEnd;
+    });
+    if (dayPool.length === 0) continue;
+
+    // (b) Dedup by (eventId, family), keeping the highest hitRate.
+    const bestByPairForDay = new Map<string, VaLeg>();
+    for (const leg of dayPool) {
+      const key = `${leg.eventId}|${leg.statFamily}`;
+      const current = bestByPairForDay.get(key);
+      if (!current || leg.modelProbability > current.modelProbability) {
+        bestByPairForDay.set(key, leg);
+      }
     }
+    const dedupedDayPool = Array.from(bestByPairForDay.values());
+
+    // (c) SAME builder as live.
+    const ticketsForDay = buildTickets(dedupedDayPool, "stack");
+
+    // (d) Skip days with no ticket; keep only the first (recommended) one.
+    if (ticketsForDay.length === 0) continue;
+    builtTickets.push({
+      ...ticketsForDay[0],
+      status: "pending" as BacktestTicketStatus,
+      weekLabel: dayLabel,
+    });
   }
 
   // Step 7: settle each ticket's legs against the finished match results.
@@ -1112,7 +1148,6 @@ async function runBacktestScan(fixtures: FixtureLite[], scanId: string): Promise
   const won = builtTickets.filter((t) => t.status === "won").length;
   const lost = builtTickets.filter((t) => t.status === "lost").length;
   const pending = builtTickets.filter((t) => t.status === "pending").length;
-  const weeksScanned = weekLabels.length;
   const ticketsBuiltCount = builtTickets.length;
   const settledCount = won + lost;
 
@@ -1132,7 +1167,7 @@ async function runBacktestScan(fixtures: FixtureLite[], scanId: string): Promise
       ? round4(realisedRate - claimedAverage)
       : null;
 
-  // Newest week first, capped at 50 for response size
+  // Newest day first, capped at 50 for response size
   const sortedTickets = [...builtTickets].sort((a, b) =>
     (b.weekLabel ?? "").localeCompare(a.weekLabel ?? "")
   );
@@ -1198,7 +1233,7 @@ async function runBacktestScan(fixtures: FixtureLite[], scanId: string): Promise
     .sort((a, b) => b.n - a.n);
 
   const ticketBacktest: TicketBacktestData = {
-    weeksScanned,
+    daysSimulated,
     ticketsBuilt: ticketsBuiltCount,
     won,
     lost,
@@ -1213,12 +1248,17 @@ async function runBacktestScan(fixtures: FixtureLite[], scanId: string): Promise
 
   console.log(
     `[VA] backtest scan ${scanId}: ${fixtures.length} matches, ${marketsEvaluated} markets, ` +
-      `${allQualifiedLegs.length} qualified legs, ${weeksScanned} weeks, ${ticketsBuiltCount} tickets built ` +
+      `${allQualifiedLegs.length} qualified legs, ${daysSimulated} days, ${ticketsBuiltCount} tickets built ` +
       `(${won} won, ${lost} lost, ${pending} pending)`
   );
   console.log(
     `[backtest] ${matchesProcessed} matches, ${allQualifiedLegs.length} legs with real odds, ` +
       `${ticketsBuiltCount} tickets, ${won}W/${lost}L/${pending}P`
+  );
+  const legsSettled = builtTickets.reduce((sum, t) => sum + t.legs.length, 0);
+  console.log(
+    `[backtest] daysSimulated=${daysSimulated} ticketsBuilt=${ticketsBuiltCount} legsSettled=${legsSettled} ` +
+      `marketKeys=${accumulatedStats.size} won=${won} lost=${lost} pending=${pending}`
   );
 
   return {

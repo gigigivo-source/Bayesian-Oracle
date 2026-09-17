@@ -106,7 +106,7 @@ interface VaLearningStats {
 }
 
 interface TicketBacktest {
-  weeksScanned: number;
+  daysSimulated: number;
   ticketsBuilt: number;
   won: number;
   lost: number;
@@ -877,7 +877,7 @@ export default function ValueAccumulatorPage() {
                 <div style={{ fontSize: 16, fontWeight: 700, color: "#111827" }}>Ticket Backtest</div>
                 {ticketBacktestStatus === "done" && ticketBacktestResult?.ticketBacktest && (
                   <div style={{ fontSize: 13, color: "#6b7280", marginTop: 4 }}>
-                    {ticketBacktestResult.ticketBacktest.weeksScanned} weeks ·{" "}
+                    {ticketBacktestResult.ticketBacktest.daysSimulated} days ·{" "}
                     {ticketBacktestResult.ticketBacktest.ticketsBuilt} tickets ·{" "}
                     {ticketBacktestResult.ticketBacktest.won} won ·{" "}
                     {ticketBacktestResult.ticketBacktest.lost} lost ·{" "}
