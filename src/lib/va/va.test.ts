@@ -14,16 +14,65 @@ import type { FixtureLite } from "@/lib/espn";
 import type { StatDistribution, TeamStatProfile } from "@/lib/engine/sofascore";
 
 // scanner.ts pulls in the db layer at module scope; stub it for unit tests without DATABASE_URL.
+// The chain is shaped so both scanner.ts (`insert().values()`, `select().from()`,
+// `delete()`) and performScan.ts (`select().from().orderBy().limit()`,
+// `insert().values().returning()`, `delete().where()`) resolve to empty arrays.
+const { dbInsertValues, dbDelete, dbSelectFrom, keepDbAlive, fetchScoreboard } = vi.hoisted(() => {
+  const dbInsertValues = vi.fn(() => {
+    const p = Promise.resolve([]) as Promise<never[]> & { returning: () => Promise<never[]> };
+    p.returning = () => Promise.resolve([]);
+    return p;
+  });
+  const dbDelete = vi.fn(() => {
+    const p = Promise.resolve([]) as Promise<never[]> & { where: () => Promise<never[]> };
+    p.where = () => Promise.resolve([]);
+    return p;
+  });
+  const dbSelectFrom = vi.fn(() => {
+    const p = Promise.resolve([]) as Promise<never[]> & {
+      orderBy: () => { limit: () => Promise<never[]> };
+    };
+    p.orderBy = () => ({ limit: () => Promise.resolve([]) });
+    return p;
+  });
+  const keepDbAlive = vi.fn(async () => undefined);
+  const fetchScoreboard = vi.fn(async (): Promise<FixtureLite[]> => []);
+  return { dbInsertValues, dbDelete, dbSelectFrom, keepDbAlive, fetchScoreboard };
+});
 vi.mock("@/db", () => ({
   db: {
-    insert: () => ({ values: () => Promise.resolve([]) }),
-    delete: () => Promise.resolve([]),
-    select: () => ({
-      from: () => Promise.resolve([]),
-    }),
+    insert: () => ({ values: dbInsertValues }),
+    delete: dbDelete,
+    select: () => ({ from: dbSelectFrom }),
   },
+  keepDbAlive: () => keepDbAlive(),
 }));
-vi.mock("@/db/schema", () => ({ vaLegs: {}, marketStats: {} }));
+vi.mock("@/db/schema", () => ({ vaLegs: {}, marketStats: {}, vaScanLock: {}, vaTickets: {} }));
+
+// External boundaries of the scanner: ESPN (fixtures) and Bzzoiro (odds). Mocked
+// the same way scannerCoverage.test.ts does so performScan runs end-to-end offline.
+vi.mock("@/lib/espn", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/espn")>();
+  return {
+    ...actual,
+    fetchScoreboard: () => fetchScoreboard(),
+    fetchSummary: vi.fn(async () => null),
+  };
+});
+vi.mock("./oddsFetcher", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./oddsFetcher")>();
+  return {
+    ...actual,
+    resolveBzzoiroEvent: vi.fn(async () => ({
+      eventId: null,
+      status: "no-events",
+      eventsInRange: 0,
+      relatedInRange: 0,
+      toleranceDays: 5,
+    })),
+    fetchOddsForEvent: vi.fn(async () => [] as VaBookmakerOdds[]),
+  };
+});
 
 // Mock oddsFetcher module for scanner tests? We'll test marketMap directly for case 1 & 2.
 
@@ -1153,5 +1202,72 @@ describe("Value Accumulator — leg probability cap", () => {
     expect(capModelProbability(0.85)).toBe(0.85);
     expect(capModelProbability(0.62)).toBe(0.62);
     expect(capModelProbability(0.98)).toBe(0.90);
+  });
+});
+
+describe("Value Accumulator — shared performScan + runLiveScan server action", () => {
+  beforeEach(() => {
+    fetchScoreboard.mockResolvedValue([]);
+    keepDbAlive.mockClear();
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it("performScan('stack', false) returns the same shape the /api/va/scan route returns", async () => {
+    const { performScan } = await import("./performScan");
+
+    const result = await performScan("stack", false);
+
+    expect(result.status).toBe(200);
+    expect(result.body).toEqual({
+      ok: true,
+      scanId: expect.stringMatching(/^va_\d+_[0-9a-f]{8}$/),
+      matchesScanned: expect.any(Number),
+      marketsEvaluated: expect.any(Number),
+      legsQualified: expect.any(Number),
+      ticketsBuilt: expect.any(Number),
+      recommendedTicketId: null,
+    });
+    // Lock acquired and released.
+    expect(dbInsertValues).toHaveBeenCalled();
+    expect(dbDelete).toHaveBeenCalled();
+  });
+
+  it("runLiveScan() invokes the scan, pings the DB while it runs, and does not throw", async () => {
+    vi.useFakeTimers();
+    let release!: () => void;
+    fetchScoreboard.mockImplementationOnce(
+      () => new Promise<FixtureLite[]>((resolve) => { release = () => resolve([]); }),
+    );
+
+    const { runLiveScan } = await import("../../app/value-accumulator/actions");
+    const pending = runLiveScan();
+
+    // Two keepalive ticks while the scan is "in flight".
+    await vi.advanceTimersByTimeAsync(60_000 * 2 + 10);
+    expect(keepDbAlive).toHaveBeenCalledTimes(2);
+
+    release();
+    const result = await pending;
+
+    expect(result.ok).toBe(true);
+    expect(result.scanId).toMatch(/^va_/);
+    expect(result).toEqual(
+      expect.objectContaining({
+        matchesScanned: expect.any(Number),
+        marketsEvaluated: expect.any(Number),
+        legsQualified: expect.any(Number),
+        ticketsBuilt: expect.any(Number),
+      }),
+    );
+
+    // Interval cleared: no more pings after completion.
+    await vi.advanceTimersByTimeAsync(60_000 * 3);
+    expect(keepDbAlive).toHaveBeenCalledTimes(2);
   });
 });

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { runLiveScan } from "./actions";
 
 interface VaTicketLeg {
   match: string;
@@ -139,6 +140,7 @@ interface VaScanResponse {
 
 type BacktestStatus = "idle" | "running" | "done" | "error";
 type TicketBacktestStatus = "idle" | "running" | "done" | "error";
+type LiveScanStatus = "idle" | "running" | "done" | "error";
 
 /** Small inline spinner shared by the chip and the backtest sheet. */
 const spinnerStyle = {
@@ -152,15 +154,13 @@ const spinnerStyle = {
 } as const;
 
 /**
- * Read-only view of Value Accumulator tickets.
+ * Value Accumulator tickets view.
  *
- * This page intentionally has NO client-side scan trigger: the scan API route is
- * authenticated with a server-side bearer secret, and that secret must never
- * reach the browser. Any env var exposed to client code is inlined into the
- * public bundle at build time, so every visitor could read it and fire scans at
- * will. Scans therefore run server-side only: on the Vercel cron schedule, or
- * via an authenticated curl call from a trusted machine. This page just reads
- * whatever tickets the last scan produced.
+ * The live scan is triggered via a Next.js server action (`runLiveScan`), which
+ * runs the scan in-process on the server. The CRON_SECRET that protects the
+ * /api/va/scan HTTP route is therefore never needed in — and never reaches —
+ * the browser. Scans also still run on the Vercel cron schedule or via an
+ * authenticated curl call from a trusted machine.
  */
 export default function ValueAccumulatorPage() {
   const [tickets, setTickets] = useState<VaTicketRow[]>([]);
@@ -176,6 +176,42 @@ export default function ValueAccumulatorPage() {
   const [ticketBacktestError, setTicketBacktestError] = useState<string | null>(null);
   const [ticketBacktestOpen, setTicketBacktestOpen] = useState(false);
   const [learning, setLearning] = useState<VaLearningStats | null>(null);
+  const [liveScanStatus, setLiveScanStatus] = useState<LiveScanStatus>("idle");
+  const [liveScanError, setLiveScanError] = useState<string | null>(null);
+  const [liveScanErrorOpen, setLiveScanErrorOpen] = useState(false);
+  const [liveScanToast, setLiveScanToast] = useState<string | null>(null);
+
+  async function startLiveScan() {
+    if (liveScanStatus === "running") return;
+    setLiveScanStatus("running");
+    setLiveScanError(null);
+    setLiveScanToast(null);
+    try {
+      // Server action — runs in-process on the server, no HTTP hop, no secret.
+      const result = await runLiveScan();
+      if (!result.ok) throw new Error(result.error || "Live scan failed");
+      setLiveScanStatus("done");
+      await loadTickets();
+      const n = result.ticketsBuilt ?? 0;
+      setLiveScanToast(`Scan complete — ${n} ticket${n === 1 ? "" : "s"} built`);
+      setLiveScanStatus("idle");
+    } catch (e) {
+      setLiveScanError(e instanceof Error ? e.message : String(e));
+      setLiveScanStatus("error");
+      setLiveScanErrorOpen(true);
+    }
+  }
+
+  function closeLiveScanError() {
+    setLiveScanErrorOpen(false);
+    setLiveScanStatus("idle");
+  }
+
+  useEffect(() => {
+    if (!liveScanToast) return;
+    const t = setTimeout(() => setLiveScanToast(null), 4000);
+    return () => clearTimeout(t);
+  }, [liveScanToast]);
 
   async function runBacktest() {
     if (backtestStatus === "running") return;
@@ -340,6 +376,33 @@ export default function ValueAccumulatorPage() {
             </button>
             <button
               type="button"
+              onClick={startLiveScan}
+              disabled={liveScanStatus === "running"}
+              style={{
+                background: "#ecfdf5",
+                color: "#0a7d4f",
+                border: "1px solid #a7f3d0",
+                borderRadius: 999,
+                padding: "4px 12px",
+                fontSize: 13,
+                fontWeight: 600,
+                cursor: liveScanStatus === "running" ? "default" : "pointer",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+              }}
+            >
+              {liveScanStatus === "running" ? (
+                <>
+                  <span style={spinnerStyle} aria-hidden="true" />
+                  Scanning…
+                </>
+              ) : (
+                "Run Live Scan"
+              )}
+            </button>
+            <button
+              type="button"
               onClick={runTicketBacktest}
               disabled={ticketBacktestStatus === "running"}
               style={{
@@ -372,6 +435,31 @@ export default function ValueAccumulatorPage() {
             )}
           </div>
         </div>
+
+        {/* Live scan in-progress banner */}
+        {liveScanStatus === "running" && (
+          <div
+            role="status"
+            style={{
+              background: "#fffbeb",
+              border: "1px solid #fde68a",
+              borderRadius: 12,
+              padding: "14px 20px",
+              marginBottom: 24,
+              display: "flex",
+              alignItems: "center",
+              gap: 12,
+            }}
+          >
+            <span
+              style={{ ...spinnerStyle, border: "2px solid #fde68a", borderTopColor: "#d97706" }}
+              aria-hidden="true"
+            />
+            <div style={{ fontSize: 13, color: "#92400e", fontWeight: 500 }}>
+              Scan running — this takes 4-6 minutes. Matches are being analysed. Do not close this tab.
+            </div>
+          </div>
+        )}
 
         {/* Exposure indicator */}
         {hasTickets && (
@@ -841,6 +929,96 @@ export default function ValueAccumulatorPage() {
                   )}
                 </>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Live scan — completion toast */}
+      {liveScanToast && (
+        <div
+          role="status"
+          style={{
+            position: "fixed",
+            left: "50%",
+            bottom: 24,
+            transform: "translateX(-50%)",
+            background: "#111827",
+            color: "white",
+            borderRadius: 999,
+            padding: "10px 18px",
+            fontSize: 13,
+            fontWeight: 600,
+            boxShadow: "0 4px 16px rgba(0,0,0,0.25)",
+            zIndex: 1100,
+            animation: "va-slide-up 0.25s ease-out",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {liveScanToast}
+        </div>
+      )}
+
+      {/* Live scan — error bottom-sheet (same visual pattern as Ticket Backtest error path) */}
+      {liveScanErrorOpen && (
+        <div
+          onClick={closeLiveScanError}
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(17, 24, 39, 0.55)",
+            zIndex: 1000,
+            display: "flex",
+            alignItems: "flex-end",
+            justifyContent: "center",
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              background: "white",
+              width: "100%",
+              maxWidth: 720,
+              maxHeight: "70vh",
+              borderRadius: "16px 16px 0 0",
+              display: "flex",
+              flexDirection: "column",
+              overflow: "hidden",
+              boxShadow: "0 -4px 24px rgba(0,0,0,0.2)",
+              animation: "va-slide-up 0.25s ease-out",
+            }}
+          >
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                padding: "16px 20px",
+                borderBottom: "1px solid #e5e7eb",
+              }}
+            >
+              <div style={{ fontSize: 16, fontWeight: 700, color: "#111827" }}>Live Scan</div>
+              <button
+                type="button"
+                onClick={closeLiveScanError}
+                aria-label="Close"
+                style={{
+                  background: "#f3f4f6",
+                  border: "none",
+                  borderRadius: 8,
+                  width: 28,
+                  height: 28,
+                  fontSize: 14,
+                  lineHeight: 1,
+                  color: "#6b7280",
+                  cursor: "pointer",
+                }}
+              >
+                ✕
+              </button>
+            </div>
+            <div style={{ overflowY: "auto", padding: "16px 20px 24px" }}>
+              <div style={{ color: "#dc2626", fontSize: 14, padding: "8px 0" }}>{liveScanError}</div>
             </div>
           </div>
         </div>
