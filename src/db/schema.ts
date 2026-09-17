@@ -9,6 +9,7 @@ import {
   boolean,
   uniqueIndex,
   date,
+  numeric,
 } from "drizzle-orm/pg-core";
 
 // Suppress unused-import warning
@@ -310,6 +311,18 @@ export const vaScanLock = pgTable("va_scan_lock", {
   lockedAt: timestamp("locked_at", { withTimezone: true }).defaultNow().notNull(),
   scanId:   text("scan_id").notNull(),
 });
+
+export const marketStats = pgTable("market_stats", {
+  marketKey:   text("market_key").primaryKey(),
+  family:      text("family").notNull(),
+  n:           integer("n").notNull(),
+  claimedSum:  numeric("claimed_sum").notNull(),
+  realisedSum: numeric("realised_sum").notNull(),
+  lastUpdated: timestamp("last_updated").defaultNow().notNull(),
+});
+
+export type MarketStatRow = typeof marketStats.$inferSelect;
+export type NewMarketStat = typeof marketStats.$inferInsert;
 
 // ─── Legacy aliases (kept for backward compat with older routes) ───────────────
 /** @deprecated use `bankroll` */

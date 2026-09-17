@@ -2,11 +2,24 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { matchEngineMarketToBookmaker } from "./marketMap";
 import { buildTickets, type VaLeg } from "./ticket";
 import type { VaBookmakerOdds } from "./oddsFetcher";
-import { settleBacktestTickets, type BacktestMatchResult } from "./scanner";
+import {
+  settleBacktestTickets,
+  type BacktestMatchResult,
+  marketKeyOf,
+  applyMarketCorrection,
+} from "./scanner";
 
 // scanner.ts pulls in the db layer at module scope; stub it for unit tests without DATABASE_URL.
-vi.mock("@/db", () => ({ db: { insert: () => ({ values: () => Promise.resolve([]) }) } }));
-vi.mock("@/db/schema", () => ({ vaLegs: {} }));
+vi.mock("@/db", () => ({
+  db: {
+    insert: () => ({ values: () => Promise.resolve([]) }),
+    delete: () => Promise.resolve([]),
+    select: () => ({
+      from: () => Promise.resolve([]),
+    }),
+  },
+}));
+vi.mock("@/db/schema", () => ({ vaLegs: {}, marketStats: {} }));
 
 // Mock oddsFetcher module for scanner tests? We'll test marketMap directly for case 1 & 2.
 
@@ -467,5 +480,73 @@ describe("Value Accumulator — Finished backtest settlement", () => {
     const [lostStatus] = await settleBacktestTickets(lostTickets, results);
     expect(wonStatus).toBe("won");
     expect(lostStatus).toBe("lost");
+  });
+});
+
+describe("Value Accumulator — Self-learning market reliability", () => {
+  it("a. marketKeyOf(\"Total Goals O/U 1.5\", \"Over 1.5\", \"Goals\") === \"Goals:TotalO/U:1.5:Over\"", () => {
+    expect(marketKeyOf("Total Goals O/U 1.5", "Over 1.5", "Goals")).toBe("Goals:TotalO/U:1.5:Over");
+  });
+
+  it("b. marketKeyOf(\"Both Teams To Score\", \"Yes\", \"Goals\") === \"Goals:BTTS:Yes\"", () => {
+    expect(marketKeyOf("Both Teams To Score", "Yes", "Goals")).toBe("Goals:BTTS:Yes");
+  });
+
+  it("normalises other market keys according to rules", () => {
+    expect(marketKeyOf("Total Goals O/U 3.5", "Under 3.5", "Goals")).toBe("Goals:TotalO/U:3.5:Under");
+    expect(marketKeyOf("Total Corners O/U 8.5", "Over 8.5", "Corners")).toBe("Corners:TotalO/U:8.5:Over");
+    expect(marketKeyOf("Arsenal Corners O/U 4.5", "Over 4.5", "Corners")).toBe("Corners:Team:4.5:Over");
+    expect(marketKeyOf("Total Cards O/U 2.5", "Under 2.5", "Cards")).toBe("Cards:TotalO/U:2.5:Under");
+    expect(marketKeyOf("Chelsea Cards O/U 1.5", "Over 1.5", "Cards")).toBe("Cards:Team:1.5:Over");
+    expect(marketKeyOf("Match Winner", "Home", "Goals")).toBe("Goals:Other:Match Winner");
+  });
+
+  it("c. Given a mocked marketStats row for \"Goals:TotalO/U:1.5:Over\" with n=100, claimedSum=70, realisedSum=68 (corr 0.971): a leg with modelProbability=0.70 and that market key gets an adjustedProb ≈ 0.68", () => {
+    const mockStats = new Map([
+      [
+        "Goals:TotalO/U:1.5:Over",
+        {
+          marketKey: "Goals:TotalO/U:1.5:Over",
+          family: "Goals",
+          n: 100,
+          claimedSum: 70,
+          realisedSum: 68,
+        },
+      ],
+    ]);
+    const leg = {
+      market: "Total Goals O/U 1.5",
+      selection: "Over 1.5",
+      statFamily: "Goals",
+      modelProbability: 0.70,
+    };
+    const result = applyMarketCorrection(leg, mockStats);
+    expect(result.filtered).toBe(false);
+    expect(result.level).toBe("line");
+    expect(result.correction).toBeCloseTo(68 / 70, 3);
+    expect(result.adjustedProb).toBeCloseTo(0.68, 2);
+  });
+
+  it("d. Given the same row with n=100, claimedSum=70, realisedSum=50 (corr 0.714, filtered): the leg is skipped by the qualification path", () => {
+    const mockStats = new Map([
+      [
+        "Goals:TotalO/U:1.5:Over",
+        {
+          marketKey: "Goals:TotalO/U:1.5:Over",
+          family: "Goals",
+          n: 100,
+          claimedSum: 70,
+          realisedSum: 50,
+        },
+      ],
+    ]);
+    const leg = {
+      market: "Total Goals O/U 1.5",
+      selection: "Over 1.5",
+      statFamily: "Goals",
+      modelProbability: 0.70,
+    };
+    const result = applyMarketCorrection(leg, mockStats);
+    expect(result.filtered).toBe(true);
   });
 });
