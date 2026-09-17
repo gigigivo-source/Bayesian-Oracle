@@ -307,77 +307,11 @@ export const vaTickets = pgTable("va_tickets", {
   createdAt:           timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 });
 
-/**
- * One row per scan. Doubles as (a) the "don't run two scans at once" mutex the
- * scanner has always used and (b) the background-job record the
- * /api/va/tickets/status endpoint reads.
- *
- * `status` / `mode` / `startedAt` / `completedAt` / `error` were added by
- * drizzle/0008_extend_scan_lock.sql and are nullable: rows written before that
- * migration (and rows written by a foreground scan, which still deletes its own
- * row when it finishes) carry only `lockedAt` + `scanId`. Every reader therefore
- * treats a NULL status as "legacy row" and falls back to `lockedAt`.
- */
 export const vaScanLock = pgTable("va_scan_lock", {
-  id:          serial("id").primaryKey(),
-  lockedAt:    timestamp("locked_at", { withTimezone: true }).defaultNow().notNull(),
-  scanId:      text("scan_id").notNull(),
-  /** Background-job lifecycle: running | done | error. NULL on legacy rows. */
-  status:      text("status"),
-  /** Which flavour owns the row: value | stack | backtest (finished=true). */
-  mode:        text("mode"),
-  startedAt:   timestamp("started_at"),
-  completedAt: timestamp("completed_at"),
-  error:       text("error"),
+  id:       serial("id").primaryKey(),
+  lockedAt: timestamp("locked_at", { withTimezone: true }).defaultNow().notNull(),
+  scanId:   text("scan_id").notNull(),
 });
-
-// ─── VA xG caches (event-driven invalidation, NOT TTL-based) ──────────────────
-//
-// A 30-day backtest used to re-request the same team xG averages and the same
-// finished-match xG values from Bzzoiro on every scan (~4,600 HTTP calls, most
-// of them for data we already had). These two tables are the durable layer of
-// the three-layer read in src/lib/va/xgFetcher.ts (memory → DB → HTTP).
-//
-// Invalidation is event-driven, not time-driven:
-//   team_xg_cache  — a team's rolling average only changes when that team plays,
-//                    so the row is valid while now() < next_match_at. A NULL
-//                    next_match_at means "no upcoming fixture known", which is
-//                    NOT a valid state — it forces a refetch.
-//   match_xg_cache — xG for a FINISHED match never changes, so is_finished rows
-//                    are valid forever; rows built from pre-full-time estimates
-//                    are valid for 24h (MATCH_XG_CACHE_TTL_MS in xgFetcher.ts).
-// Nulls are never cached: Bzzoiro intermittently returns empty stats for
-// fixtures that later populate, so an absent row simply means "retry next scan".
-
-/** Rolling team xG average, keyed by Bzzoiro team id. */
-export const teamXgCache = pgTable("team_xg_cache", {
-  teamId:           integer("team_id").primaryKey(),
-  /** numeric (not real): the average is stored exactly as computed, as a string in JS. */
-  xgFor:            numeric("xg_for").notNull(),
-  xgAgainst:        numeric("xg_against").notNull(),
-  samples:          integer("samples").notNull(),
-  /** Kickoff of the most recent FINISHED match included in the average. */
-  basedOnThroughAt: timestamp("based_on_through_at").notNull(),
-  /** Kickoff of the team's next scheduled match; NULL when none is known. */
-  nextMatchAt:      timestamp("next_match_at"),
-  updatedAt:        timestamp("updated_at").defaultNow().notNull(),
-});
-
-/** Real per-match xG, keyed by Bzzoiro event id. */
-export const matchXgCache = pgTable("match_xg_cache", {
-  eventId:    text("event_id").primaryKey(),
-  homeXg:     numeric("home_xg").notNull(),
-  awayXg:     numeric("away_xg").notNull(),
-  /** True once the value came from full-time stats — those never change. */
-  isFinished: boolean("is_finished").notNull().default(false),
-  updatedAt:  timestamp("updated_at").defaultNow().notNull(),
-});
-
-export type VaScanLockRow   = typeof vaScanLock.$inferSelect;
-export type TeamXgCacheRow  = typeof teamXgCache.$inferSelect;
-export type NewTeamXgCache  = typeof teamXgCache.$inferInsert;
-export type MatchXgCacheRow = typeof matchXgCache.$inferSelect;
-export type NewMatchXgCache = typeof matchXgCache.$inferInsert;
 
 export const marketStats = pgTable("market_stats", {
   marketKey:   text("market_key").primaryKey(),

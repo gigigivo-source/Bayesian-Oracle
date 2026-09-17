@@ -75,20 +75,15 @@ describe("Value Accumulator — league coverage skipping", () => {
     vi.restoreAllMocks();
   });
 
-  it("logs an uncovered league once and stops probing it from the next batch", async () => {
+  it("logs an uncovered league once and stops probing its remaining matches", async () => {
     const { scanValueLegs } = await import("./scanner");
-    const { FIXTURE_BATCH_SIZE } = await import("./parallel");
 
-    // Fixtures are processed in parallel batches of FIXTURE_BATCH_SIZE (8), and
-    // they are sorted by league, so a whole batch of an uncovered league is
-    // dispatched before any coverage verdict exists: those 8 probe. The league
-    // is blacklisted by then, so every fixture in LATER batches is skipped
-    // without a retry — the skip is bounded by the batch size, not by the
-    // fixture count. (The sequential loop needed only 2 probes, but paid every
-    // round trip in series; see the coverage note in scanner.ts.)
-    const esp = Array.from({ length: FIXTURE_BATCH_SIZE + 2 }, (_, i) =>
-      fixture(`e${i + 1}`, "esp.1", `Real Team ${i + 1}`, `Away Team ${i + 1}`),
-    );
+    const esp = [
+      fixture("e1", "esp.1", "Real Madrid", "Athletic Club"),
+      fixture("e2", "esp.1", "Barcelona", "Getafe"),
+      fixture("e3", "esp.1", "Sevilla", "Valencia"),
+      fixture("e4", "esp.1", "Girona", "Osasuna"),
+    ];
     fetchScoreboard.mockImplementation(async (slug) => (slug === "esp.1" ? esp : []));
     resolveBzzoiroEvent.mockResolvedValue(uncovered);
 
@@ -97,9 +92,8 @@ describe("Value Accumulator — league coverage skipping", () => {
     const notices = logs.filter((l) => l.includes("not covered by Bzzoiro"));
     expect(notices).toEqual(["[VA] league esp.1 not covered by Bzzoiro — skipping all its matches"]);
 
-    // 10 matches, 8 probes: the two fixtures in the second batch never retry.
-    expect(resolveBzzoiroEvent).toHaveBeenCalledTimes(FIXTURE_BATCH_SIZE);
-    expect(resolveBzzoiroEvent.mock.calls.length).toBeLessThan(esp.length);
+    // Two probes establish the gap; matches 3 and 4 are skipped without retrying.
+    expect(resolveBzzoiroEvent).toHaveBeenCalledTimes(2);
   });
 
   it("logs the widened-range miss per unresolved match", async () => {
