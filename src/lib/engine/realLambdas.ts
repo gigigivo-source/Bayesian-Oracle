@@ -42,7 +42,28 @@ export interface RealLambdaResult {
 }
 
 /** Which xG layer grounded the goal lambdas (highest-preference layer used). */
-export type XgSource = "bzzoiro" | "aggregator" | "proxy" | "anchor";
+export type XgSource =
+  | "bzzoiro"
+  | "bzzoiro-match"
+  | "bzzoiro-team-avg"
+  | "aggregator"
+  | "proxy"
+  | "anchor";
+
+const XG_SOURCES: readonly XgSource[] = [
+  "bzzoiro",
+  "bzzoiro-match",
+  "bzzoiro-team-avg",
+  "aggregator",
+  "proxy",
+  "anchor",
+];
+
+function asXgSource(v: unknown): XgSource | null {
+  return typeof v === "string" && (XG_SOURCES as readonly string[]).includes(v)
+    ? (v as XgSource)
+    : null;
+}
 
 /** Minimal structural view of the legacy enrichment xG (oracle.ts concept). */
 export interface XgEnrichmentLike {
@@ -61,7 +82,9 @@ export interface ResolvedXg {
 /**
  * Resolve real xG through the three-layer preference chain (plus the
  * league-anchor fallback):
- *   1. Real xG from Bzzoiro stats (sum.__homeXg / sum.__awayXg)
+ *   1. Real xG from Bzzoiro (sum.__homeXg / sum.__awayXg; sum.__homeXgSource
+ *      — "bzzoiro-match" for finished-match stats, "bzzoiro-team-avg" for the
+ *      live scanner's rolling averages — names the layer for logging)
  *   2. Real xG from stats aggregator (stats.home.xg / stats.away.xg)
  *   3. Shot-based proxy from mesh distributions
  *      (xG ≈ (Shots − SOT) × 0.05 + SOT × 0.30 — the standard academic proxy)
@@ -76,24 +99,27 @@ export function resolveRealXg(
   enrichment?: XgEnrichmentLike | null,
 ): ResolvedXg {
   // xG grounding preference (highest to lowest):
-  //   1. Real xG from Bzzoiro stats (sum.__homeXg / sum.__awayXg)
+  //   1. Real xG from Bzzoiro (sum.__homeXg / sum.__awayXg; __homeXgSource for logging)
   //   2. Real xG from stats aggregator (stats.home.xg / stats.away.xg)
   //   3. Shot-based proxy from mesh distributions
   //   4. League-anchor fallback (existing behaviour)
+  const sumXg = (sum as unknown as
+    | {
+        __homeXg?: number | null;
+        __awayXg?: number | null;
+        __homeXgSource?: string | null;
+        __awayXgSource?: string | null;
+      }
+    | null) ?? null;
   let realHomeXG: number | null =
-    (sum as unknown as { __homeXg?: number | null } | null)?.__homeXg ??
-    stats?.home.xg ??
-    enrichment?.data.homeXG ??
-    null;
+    sumXg?.__homeXg ?? stats?.home.xg ?? enrichment?.data.homeXG ?? null;
   let realAwayXG: number | null =
-    (sum as unknown as { __awayXg?: number | null } | null)?.__awayXg ??
-    stats?.away.xg ??
-    enrichment?.data.awayXG ??
-    null;
+    sumXg?.__awayXg ?? stats?.away.xg ?? enrichment?.data.awayXG ?? null;
   let xgSource: XgSource =
-    (sum as unknown as { __homeXg?: number | null } | null)?.__homeXg != null ? "bzzoiro"
+    asXgSource(sumXg?.__homeXgSource) ??
+    (sumXg?.__homeXg != null ? "bzzoiro"
     : stats?.home.xg != null ? "aggregator"
-    : "anchor";
+    : "anchor");
 
   // Layer 3 — shot-based proxy from mesh distributions
   // (uses the same conversion used by academic xG proxies:
