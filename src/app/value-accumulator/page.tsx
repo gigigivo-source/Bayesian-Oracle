@@ -38,6 +38,7 @@ interface TicketsResponse {
   ok: boolean;
   tickets: VaTicketRow[];
   scanId: string | null;
+  learning?: VaLearningStats;
 }
 
 interface BacktestBucket {
@@ -81,6 +82,29 @@ interface TicketBacktestBucket {
   diff: number;
 }
 
+interface MarketReliabilityItem {
+  marketKey: string;
+  n: number;
+  claimed: number;
+  realised: number;
+  edge: number;
+  corr: number;
+  action: "trusted" | "downweighted" | "filtered" | "insufficient";
+}
+
+interface VaLearningStats {
+  keysLoaded: number;
+  lineCorrections: number;
+  familyCorrections: number;
+  filtered: string[];
+  sampleCorrections: Array<{
+    marketKey: string;
+    n: number;
+    correction: number;
+    edge: number;
+  }>;
+}
+
 interface TicketBacktest {
   weeksScanned: number;
   ticketsBuilt: number;
@@ -92,6 +116,7 @@ interface TicketBacktest {
   edge: number | null;
   tickets: TicketBacktestItem[];
   ticketBuckets: TicketBacktestBucket[];
+  marketReliability?: MarketReliabilityItem[];
 }
 
 interface VaScanResponse {
@@ -108,6 +133,7 @@ interface VaScanResponse {
   ticketBacktest?: TicketBacktest;
   reason?: string;
   error?: string;
+  learning?: VaLearningStats;
 }
 
 type BacktestStatus = "idle" | "running" | "done" | "error";
@@ -148,6 +174,7 @@ export default function ValueAccumulatorPage() {
   const [ticketBacktestResult, setTicketBacktestResult] = useState<VaScanResponse | null>(null);
   const [ticketBacktestError, setTicketBacktestError] = useState<string | null>(null);
   const [ticketBacktestOpen, setTicketBacktestOpen] = useState(false);
+  const [learning, setLearning] = useState<VaLearningStats | null>(null);
 
   async function runBacktest() {
     if (backtestStatus === "running") return;
@@ -188,6 +215,7 @@ export default function ValueAccumulatorPage() {
       const data = (await res.json()) as VaScanResponse;
       if (!data.ok) throw new Error(data.reason || data.error || "Ticket backtest failed");
       setTicketBacktestResult(data);
+      if (data.learning) setLearning(data.learning);
       setTicketBacktestStatus("done");
       setTicketBacktestOpen(true);
     } catch (e) {
@@ -213,6 +241,7 @@ export default function ValueAccumulatorPage() {
       const data = (await res.json()) as TicketsResponse;
       setTickets(data.tickets ?? []);
       setScanId(data.scanId);
+      if (data.learning) setLearning(data.learning);
     } catch (e) {
       setError(String(e));
       setTickets([]);
@@ -232,6 +261,7 @@ export default function ValueAccumulatorPage() {
         if (cancelled) return;
         setTickets(data.tickets ?? []);
         setScanId(data.scanId);
+        if (data.learning) setLearning(data.learning);
         setLoading(false);
       })
       .catch((e) => {
@@ -251,6 +281,12 @@ export default function ValueAccumulatorPage() {
 
   const hasTickets = tickets.length > 0;
   const hasQualifiedLegs = tickets.some((t) => t.legs.length > 0);
+
+  const activeLearning = learning ?? ticketBacktestResult?.learning ?? null;
+  const hasLearningActive = Boolean(
+    activeLearning &&
+      activeLearning.lineCorrections + activeLearning.familyCorrections + activeLearning.filtered.length > 0
+  );
 
   return (
     <div style={{ background: "#f7f8fa", minHeight: "100vh", padding: "0 16px 48px" }}>
@@ -438,6 +474,13 @@ export default function ValueAccumulatorPage() {
         )}
 
         {/* Tickets */}
+        {!loading && hasLearningActive && activeLearning && (
+          <div style={{ fontSize: 13, color: "#4b5563", marginBottom: 16 }}>
+            Learning active: {activeLearning.lineCorrections} line corrections ·{" "}
+            {activeLearning.familyCorrections} family corrections ·{" "}
+            {activeLearning.filtered.length} filtered
+          </div>
+        )}
         {!loading && hasTickets && (
           <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
             {tickets.map((ticket, idx) => (
@@ -1056,6 +1099,135 @@ export default function ValueAccumulatorPage() {
                       ) : (
                         <div style={{ fontSize: 13, color: "#6b7280", padding: "8px 0" }}>
                           No bucket reached 3 settled tickets yet — run more scans first.
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {ticketBacktestResult.ticketBacktest && (
+                    <div style={{ marginTop: 24 }}>
+                      <div
+                        style={{
+                          fontSize: 11,
+                          color: "#6b7280",
+                          textTransform: "uppercase",
+                          fontWeight: 600,
+                          letterSpacing: "0.02em",
+                          marginBottom: 8,
+                        }}
+                      >
+                        Market Reliability
+                      </div>
+                      {ticketBacktestResult.ticketBacktest.marketReliability &&
+                      ticketBacktestResult.ticketBacktest.marketReliability.length > 0 ? (
+                        <div style={{ overflowX: "auto" }}>
+                          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                            <thead>
+                              <tr style={{ textAlign: "left", borderBottom: "1px solid #e5e7eb" }}>
+                                {["Market Key", "N", "Claimed", "Realised", "Edge", "Corr", "Action"].map((h) => (
+                                  <th
+                                    key={h}
+                                    style={{
+                                      padding: "8px 6px",
+                                      color: "#6b7280",
+                                      fontWeight: 600,
+                                      fontSize: 11,
+                                      textTransform: "uppercase",
+                                    }}
+                                  >
+                                    {h}
+                                  </th>
+                                ))}
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {ticketBacktestResult.ticketBacktest.marketReliability
+                                .slice()
+                                .sort((a, b) => b.n - a.n)
+                                .map((item) => {
+                                  const corr = item.corr;
+                                  let action: "trusted" | "downweighted" | "filtered" | "insufficient";
+                                  if (item.n < 20) {
+                                    action = "insufficient";
+                                  } else if (item.n >= 30 && corr < 0.75) {
+                                    action = "filtered";
+                                  } else if (corr < 0.9) {
+                                    action = "downweighted";
+                                  } else {
+                                    action = "trusted";
+                                  }
+
+                                  const palette =
+                                    action === "trusted"
+                                      ? { bg: "#ecfdf5", fg: "#0a7d4f" }
+                                      : action === "downweighted"
+                                      ? { bg: "#fef3c7", fg: "#d97706" }
+                                      : action === "filtered"
+                                      ? { bg: "#fef2f2", fg: "#dc2626" }
+                                      : { bg: "#f3f4f6", fg: "#6b7280" };
+
+                                  return (
+                                    <tr key={item.marketKey} style={{ borderBottom: "1px solid #f3f4f6" }}>
+                                      <td
+                                        style={{
+                                          padding: "10px 6px",
+                                          color: "#111827",
+                                          fontWeight: 600,
+                                          fontFamily: "monospace",
+                                          fontSize: 12,
+                                        }}
+                                      >
+                                        {item.marketKey}
+                                      </td>
+                                      <td style={{ padding: "10px 6px", color: "#374151" }}>{item.n}</td>
+                                      <td style={{ padding: "10px 6px", color: "#374151" }}>
+                                        {(item.claimed * 100).toFixed(1)}%
+                                      </td>
+                                      <td style={{ padding: "10px 6px", color: "#111827", fontWeight: 600 }}>
+                                        {(item.realised * 100).toFixed(1)}%
+                                      </td>
+                                      <td
+                                        style={{
+                                          padding: "10px 6px",
+                                          fontWeight: 600,
+                                          color:
+                                            item.edge >= 0
+                                              ? "#0a7d4f"
+                                              : item.edge >= -0.05
+                                              ? "#d97706"
+                                              : "#dc2626",
+                                        }}
+                                      >
+                                        {item.edge >= 0 ? "+" : ""}
+                                        {(item.edge * 100).toFixed(1)}%
+                                      </td>
+                                      <td style={{ padding: "10px 6px", color: "#374151", fontFamily: "monospace" }}>
+                                        {item.corr.toFixed(3)}
+                                      </td>
+                                      <td style={{ padding: "10px 6px" }}>
+                                        <span
+                                          style={{
+                                            background: palette.bg,
+                                            color: palette.fg,
+                                            padding: "2px 8px",
+                                            borderRadius: 4,
+                                            fontWeight: 600,
+                                            textTransform: "lowercase",
+                                            fontSize: 11,
+                                          }}
+                                        >
+                                          {action}
+                                        </span>
+                                      </td>
+                                    </tr>
+                                  );
+                                })}
+                            </tbody>
+                          </table>
+                        </div>
+                      ) : (
+                        <div style={{ fontSize: 13, color: "#6b7280", padding: "8px 0" }}>
+                          No market reliability data available yet.
                         </div>
                       )}
                     </div>

@@ -36,6 +36,13 @@
       "when": 1789239026891,
       "tag": "0004_add_va_tables",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1789630169185,
+      "tag": "0005_add_market_stats",
+      "breakpoints": true
     }
   ]
 }

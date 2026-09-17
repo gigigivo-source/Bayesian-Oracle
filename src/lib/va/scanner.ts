@@ -12,7 +12,7 @@ import {
 import { matchEngineMarketToBookmaker, type TeamContext } from "./marketMap";
 import { buildTickets, getWeekStartForLegs, type VaLeg, type VaTicket, type VaTicketLeg } from "./ticket";
 import { db } from "@/db";
-import { vaLegs } from "@/db/schema";
+import { vaLegs, marketStats } from "@/db/schema";
 
 const ALLOWED_LEAGUES = new Set([
   "eng.1",
@@ -62,6 +62,174 @@ function getStatFamily(marketName: string, family: string): string {
   )
     return "goals";
   return "other";
+}
+
+/**
+ * Maps a candidate market + selection + family to a normalised marketKey
+ * for self-learning market calibration.
+ *
+ * Rules:
+ *   - "Total Goals O/U 1.5" + "Over 1.5" -> "Goals:TotalO/U:1.5:Over"
+ *   - "Total Goals O/U 3.5" + "Under 3.5" -> "Goals:TotalO/U:3.5:Under"
+ *   - "Both Teams To Score" + "Yes" -> "Goals:BTTS:Yes"
+ *   - "Total Corners O/U 8.5" + "Over 8.5" -> "Corners:TotalO/U:8.5:Over"
+ *   - "{Team} Corners O/U 4.5" + "Over 4.5" -> "Corners:Team:4.5:Over"
+ *   - "Total Cards O/U 2.5" + "Under 2.5" -> "Cards:TotalO/U:2.5:Under"
+ *   - "{Team} Cards O/U 1.5" + "Over 1.5" -> "Cards:Team:1.5:Over"
+ *   - anything else -> family + ":Other:" + market
+ */
+export function marketKeyOf(market: string, selection: string, family: string): string {
+  const fam = (family || "").trim();
+  const normalizedFam =
+    fam.toLowerCase() === "goals"
+      ? "Goals"
+      : fam.toLowerCase() === "corners"
+      ? "Corners"
+      : fam.toLowerCase() === "cards"
+      ? "Cards"
+      : fam
+      ? fam.charAt(0).toUpperCase() + fam.slice(1)
+      : family;
+
+  const m = (market || "").trim();
+  const s = (selection || "").trim();
+
+  // Helper to extract line: e.g. "Over 1.5" -> "1.5", or "Total Goals O/U 1.5" -> "1.5"
+  const extractLine = (str1: string, str2: string): string | null => {
+    const match = str1.match(/(\d+(?:\.\d+)?)/) || str2.match(/(\d+(?:\.\d+)?)/);
+    return match ? match[1] : null;
+  };
+
+  // Helper to extract direction: "Over" or "Under"
+  const extractDir = (sel: string): string => {
+    if (/^over\b/i.test(sel)) return "Over";
+    if (/^under\b/i.test(sel)) return "Under";
+    return sel;
+  };
+
+  // 1. Total Goals O/U
+  if (/^total\s+goals\s+o\/u/i.test(m)) {
+    const line = extractLine(m, s);
+    const dir = extractDir(s);
+    if (line) return `Goals:TotalO/U:${line}:${dir}`;
+  }
+
+  // 2. Both Teams To Score (BTTS)
+  if (/^(?:both\s+teams\s+to\s+score|btts)$/i.test(m) || /both\s+teams\s+to\s+score/i.test(m)) {
+    const sel = /^(?:yes|y)$/i.test(s) ? "Yes" : /^(?:no|n)$/i.test(s) ? "No" : s;
+    return `Goals:BTTS:${sel}`;
+  }
+
+  // 3. Total Corners O/U
+  if (/^total\s+corners\s+o\/u/i.test(m)) {
+    const line = extractLine(m, s);
+    const dir = extractDir(s);
+    if (line) return `Corners:TotalO/U:${line}:${dir}`;
+  }
+
+  // 4. {Team} Corners O/U
+  if (/corners\s+o\/u/i.test(m)) {
+    const line = extractLine(m, s);
+    const dir = extractDir(s);
+    if (line) return `Corners:Team:${line}:${dir}`;
+  }
+
+  // 5. Total Cards O/U
+  if (/^total\s+cards\s+o\/u/i.test(m)) {
+    const line = extractLine(m, s);
+    const dir = extractDir(s);
+    if (line) return `Cards:TotalO/U:${line}:${dir}`;
+  }
+
+  // 6. {Team} Cards O/U
+  if (/cards\s+o\/u/i.test(m)) {
+    const line = extractLine(m, s);
+    const dir = extractDir(s);
+    if (line) return `Cards:Team:${line}:${dir}`;
+  }
+
+  // 7. anything else -> family + ":Other:" + market
+  return `${normalizedFam}:Other:${market}`;
+}
+
+function clamp(v: number, min: number, max: number): number {
+  return Math.min(Math.max(v, min), max);
+}
+
+export interface MarketStatItem {
+  marketKey: string;
+  family: string;
+  n: number;
+  claimedSum: number;
+  realisedSum: number;
+}
+
+function aggregateByFamily(
+  stats: Map<string, MarketStatItem>,
+  targetFamily: string
+): { n: number; claimedSum: number; realisedSum: number } | null {
+  const normTarget = (targetFamily || "").toLowerCase();
+  let n = 0;
+  let claimedSum = 0;
+  let realisedSum = 0;
+  let found = false;
+
+  for (const s of stats.values()) {
+    if (s.family.toLowerCase() === normTarget) {
+      n += s.n;
+      claimedSum += s.claimedSum;
+      realisedSum += s.realisedSum;
+      found = true;
+    }
+  }
+
+  if (!found || claimedSum <= 0) return null;
+  return { n, claimedSum, realisedSum };
+}
+
+export interface MarketCorrectionResult {
+  key: string;
+  adjustedProb: number;
+  correction: number;
+  level: "line" | "family" | "none";
+  filtered: boolean;
+}
+
+export function applyMarketCorrection(
+  leg: { market: string; selection: string; statFamily: string; modelProbability: number },
+  stats: Map<string, MarketStatItem>
+): MarketCorrectionResult {
+  const key = marketKeyOf(leg.market, leg.selection, leg.statFamily);
+
+  // Level 1: per-line correction
+  const lineStats = stats.get(key);
+  let correction = 1.0;
+  let level: "line" | "family" | "none" = "none";
+
+  if (lineStats && lineStats.n >= 20 && lineStats.claimedSum > 0) {
+    correction = clamp(lineStats.realisedSum / lineStats.claimedSum, 0.6, 1.2);
+    level = "line";
+  } else {
+    // Level 2: family fallback
+    const famStats = aggregateByFamily(stats, leg.statFamily);
+    if (famStats && famStats.n >= 40 && famStats.claimedSum > 0) {
+      correction = clamp(famStats.realisedSum / famStats.claimedSum, 0.6, 1.2);
+      level = "family";
+    }
+  }
+
+  // Hard filter: proven bad market
+  const filterStats = lineStats ?? null;
+  const filtered = Boolean(
+    filterStats &&
+      filterStats.n >= 30 &&
+      filterStats.claimedSum > 0 &&
+      filterStats.realisedSum / filterStats.claimedSum < 0.75
+  );
+
+  const adjustedProb = clamp(leg.modelProbability * correction, 0.02, 0.98);
+
+  return { key, adjustedProb, correction, level, filtered };
 }
 
 /**
@@ -122,11 +290,27 @@ async function fetchMatchesForLeague(leagueSlug: string, days: number): Promise<
   }
 }
 
+export interface VaLearningCorrection {
+  marketKey: string;
+  n: number;
+  correction: number;
+  edge: number;
+}
+
+export interface VaLearningStats {
+  keysLoaded: number;
+  lineCorrections: number;
+  familyCorrections: number;
+  filtered: string[];
+  sampleCorrections: VaLearningCorrection[];
+}
+
 export interface ScanResult {
   matchesScanned: number;
   marketsEvaluated: number;
   legsQualified: number;
   legs: VaLeg[];
+  learning?: VaLearningStats;
 }
 
 export type VaScanMode = "value" | "stack";
@@ -173,6 +357,33 @@ async function runScan(fixtures: FixtureLite[], scanId: string, mode: VaScanMode
   let marketsEvaluated = 0;
   const qualified: VaLeg[] = [];
   const coverage = new LeagueCoverage();
+
+  // CHANGE B — live scanner reads and applies marketStats
+  // At the START of runScan (live only, not backtest), read the full
+  // marketStats table into memory (single query, cache in a local Map).
+  const stats = new Map<string, MarketStatItem>();
+  if (typeof db?.select === "function") {
+    try {
+      const rows = await db.select().from(marketStats);
+      for (const r of rows) {
+        stats.set(r.marketKey, {
+          marketKey: r.marketKey,
+          family: r.family,
+          n: r.n,
+          claimedSum: Number(r.claimedSum),
+          realisedSum: Number(r.realisedSum),
+        });
+      }
+    } catch (err) {
+      console.error("[VA] failed to load marketStats", err);
+    }
+  }
+
+  console.log(`[VA] loaded marketStats: ${stats.size} keys`);
+
+  let lineCorrections = 0;
+  let familyCorrections = 0;
+  const filteredOut: string[] = [];
 
   for (const fx of fixtures) {
     const matchLabel = `${fx.home.name} vs ${fx.away.name}`;
@@ -234,15 +445,34 @@ async function runScan(fixtures: FixtureLite[], scanId: string, mode: VaScanMode
       if (!matched) continue;
 
       const realOdds = matched.odds;
-      const ev = hitRate * realOdds - 1;
-      const implied = 1 / realOdds;
-
       const statFamily = getStatFamily(m.name, m.family);
+
+      // BEFORE the qualification filters, compute:
+      const corrResult = applyMarketCorrection(
+        { market: m.name, selection: m.selection, statFamily, modelProbability: hitRate },
+        stats
+      );
+
+      if (corrResult.level === "line") {
+        lineCorrections++;
+      } else if (corrResult.level === "family") {
+        familyCorrections++;
+      }
+
+      // Hard filter: proven bad market
+      if (corrResult.filtered) {
+        filteredOut.push(corrResult.key);
+        continue;
+      }
+
+      const adjustedProb = corrResult.adjustedProb;
+      const ev = adjustedProb * realOdds - 1;
+      const implied = 1 / realOdds;
 
       // f. Qualify leg only if all true (mode-specific filters).
       if (mode === "stack") {
         if (realOdds < 1.03 || realOdds > 1.70) continue;
-        if (hitRate < 0.62) continue;
+        if (adjustedProb < 0.62) continue;
         if (statFamily !== "goals" && statFamily !== "cards" && statFamily !== "corners") continue;
         // Stack mode does not apply the EV or isDataQualityOk() gates.
       } else {
@@ -252,7 +482,7 @@ async function runScan(fixtures: FixtureLite[], scanId: string, mode: VaScanMode
         // - 1.30 <= bookmaker_odds <=2.00
         // - Data quality Real or Mixed (Synthetic excluded)
         if (ev <= 0.03) continue;
-        if (hitRate < 0.55) continue;
+        if (adjustedProb < 0.55) continue;
         if (realOdds < 1.3 || realOdds > 2.0) continue;
         if (!isDataQualityOk(engineResult.match.dataCompletenessScore)) continue;
       }
@@ -268,7 +498,7 @@ async function runScan(fixtures: FixtureLite[], scanId: string, mode: VaScanMode
         market: m.name,
         selection: m.selection,
         statFamily,
-        modelProbability: hitRate,
+        modelProbability: adjustedProb,
         bookmakerOdds: realOdds,
         bookmakerName: matched.bookmaker,
         impliedProbability: implied,
@@ -335,6 +565,42 @@ async function runScan(fixtures: FixtureLite[], scanId: string, mode: VaScanMode
   }
 
   // 6. Log
+  console.log(
+    `[VA] applied corrections: ${lineCorrections} line-level, ${familyCorrections} family-level, ${filteredOut.length} filtered`
+  );
+
+  const sampleCorrections: VaLearningCorrection[] = Array.from(stats.values())
+    .filter((s) => s.n >= 20 && s.claimedSum > 0)
+    .map((s) => {
+      const corr = clamp(s.realisedSum / s.claimedSum, 0.6, 1.2);
+      const claimedRate = s.claimedSum / s.n;
+      const realisedRate = s.realisedSum / s.n;
+      const edge = realisedRate - claimedRate;
+      return {
+        marketKey: s.marketKey,
+        n: s.n,
+        correction: Math.round(corr * 1000) / 1000,
+        edge: Math.round(edge * 1000) / 1000,
+        delta: Math.abs(corr - 1.0),
+      };
+    })
+    .sort((a, b) => b.delta - a.delta)
+    .slice(0, 20)
+    .map(({ marketKey, n, correction, edge }) => ({
+      marketKey,
+      n,
+      correction,
+      edge,
+    }));
+
+  const learning: VaLearningStats = {
+    keysLoaded: stats.size,
+    lineCorrections,
+    familyCorrections,
+    filtered: filteredOut,
+    sampleCorrections,
+  };
+
   const uncovered = coverage.uncoveredLeagues();
   if (uncovered.length > 0) {
     console.log(`[VA] scan ${scanId}: skipped leagues (no Bzzoiro coverage): ${uncovered.join(", ")}`);
@@ -346,6 +612,7 @@ async function runScan(fixtures: FixtureLite[], scanId: string, mode: VaScanMode
     marketsEvaluated,
     legsQualified: qualified.length,
     legs: qualified,
+    learning,
   };
 }
 
@@ -374,6 +641,16 @@ export interface TicketBacktestBucket {
   diff: number;
 }
 
+export interface MarketReliabilityItem {
+  marketKey: string;
+  n: number;
+  claimed: number;
+  realised: number;
+  edge: number;
+  corr: number;
+  action: "trusted" | "downweighted" | "filtered" | "insufficient";
+}
+
 export interface TicketBacktestData {
   weeksScanned: number;
   ticketsBuilt: number;
@@ -385,6 +662,7 @@ export interface TicketBacktestData {
   edge: number | null;
   tickets: BacktestTicketItem[];
   ticketBuckets: TicketBacktestBucket[];
+  marketReliability?: MarketReliabilityItem[];
 }
 
 export interface BacktestSampleTicket extends VaTicket {
@@ -753,21 +1031,51 @@ async function runBacktestScan(fixtures: FixtureLite[], scanId: string): Promise
     cardsByEvent.set(eventId, cardTotals(summary));
   }
 
+  const accumulatedStats = new Map<
+    string,
+    { family: string; n: number; claimedSum: number; realisedSum: number }
+  >();
+
   for (const ticket of builtTickets) {
     const legStatuses = ticket.legs.map((leg) => {
       const marketLower = leg.market.toLowerCase();
       const isCardsLeg =
         leg.statFamily === "cards" || marketLower.includes("card") || marketLower.includes("booking");
-      if (isCardsLeg) {
-        return settleCardsLeg(
-          leg.market,
-          leg.selection,
-          leg.homeTeam,
-          leg.awayTeam,
-          cardsByEvent.get(leg.eventId)
-        );
+      const status = isCardsLeg
+        ? settleCardsLeg(
+            leg.market,
+            leg.selection,
+            leg.homeTeam,
+            leg.awayTeam,
+            cardsByEvent.get(leg.eventId)
+          )
+        : settleBacktestLeg(leg.market, leg.selection, results.get(leg.eventId));
+
+      if (status !== "unknown") {
+        const key = marketKeyOf(leg.market, leg.selection, leg.statFamily);
+        const normFam =
+          leg.statFamily.toLowerCase() === "goals"
+            ? "Goals"
+            : leg.statFamily.toLowerCase() === "corners"
+            ? "Corners"
+            : leg.statFamily.toLowerCase() === "cards"
+            ? "Cards"
+            : leg.statFamily
+            ? leg.statFamily.charAt(0).toUpperCase() + leg.statFamily.slice(1)
+            : "Goals";
+        const cur = accumulatedStats.get(key) ?? {
+          family: normFam,
+          n: 0,
+          claimedSum: 0,
+          realisedSum: 0,
+        };
+        cur.n += 1;
+        cur.claimedSum += leg.modelProbability;
+        cur.realisedSum += status === "won" ? 1 : 0;
+        accumulatedStats.set(key, cur);
       }
-      return settleBacktestLeg(leg.market, leg.selection, results.get(leg.eventId));
+
+      return status;
     });
     ticket.status = legStatuses.includes("lost")
       ? "lost"
@@ -775,6 +1083,30 @@ async function runBacktestScan(fixtures: FixtureLite[], scanId: string): Promise
         ? "pending"
         : "won";
   }
+
+  // CHANGE A — backtest upserts marketStats
+  // Full rebuild: DELETE all rows from marketStats and INSERT fresh rows
+  if (typeof db?.delete === "function" && typeof db?.insert === "function") {
+    try {
+      await db.delete(marketStats);
+      const rows = Array.from(accumulatedStats.entries()).map(([marketKey, stat]) => ({
+        marketKey,
+        family: stat.family,
+        n: stat.n,
+        claimedSum: stat.claimedSum.toString(),
+        realisedSum: stat.realisedSum.toString(),
+        lastUpdated: new Date(),
+      }));
+      for (let i = 0; i < rows.length; i += 50) {
+        const batch = rows.slice(i, i + 50);
+        await db.insert(marketStats).values(batch);
+      }
+    } catch (err) {
+      console.error("[VA] failed to update marketStats in DB", err);
+    }
+  }
+
+  console.log(`[backtest] updated marketStats for ${accumulatedStats.size} market keys`);
 
   // Aggregate and return:
   const won = builtTickets.filter((t) => t.status === "won").length;
@@ -837,6 +1169,34 @@ async function runBacktestScan(fixtures: FixtureLite[], scanId: string): Promise
     })
     .sort((a, b) => a.claimed - b.claimed);
 
+  const marketReliability: MarketReliabilityItem[] = Array.from(accumulatedStats.entries())
+    .map(([marketKey, stat]) => {
+      const corr = stat.claimedSum > 0 ? stat.realisedSum / stat.claimedSum : 1.0;
+      const claimed = stat.n > 0 ? stat.claimedSum / stat.n : 0;
+      const realised = stat.n > 0 ? stat.realisedSum / stat.n : 0;
+      const edge = realised - claimed;
+      let action: "trusted" | "downweighted" | "filtered" | "insufficient";
+      if (stat.n < 20) {
+        action = "insufficient";
+      } else if (stat.n >= 30 && corr < 0.75) {
+        action = "filtered";
+      } else if (corr < 0.9) {
+        action = "downweighted";
+      } else {
+        action = "trusted";
+      }
+      return {
+        marketKey,
+        n: stat.n,
+        claimed: round4(claimed),
+        realised: round4(realised),
+        edge: round4(edge),
+        corr: round4(corr),
+        action,
+      };
+    })
+    .sort((a, b) => b.n - a.n);
+
   const ticketBacktest: TicketBacktestData = {
     weeksScanned,
     ticketsBuilt: ticketsBuiltCount,
@@ -848,6 +1208,7 @@ async function runBacktestScan(fixtures: FixtureLite[], scanId: string): Promise
     edge,
     tickets: ticketsOut,
     ticketBuckets,
+    marketReliability,
   };
 
   console.log(
