@@ -580,16 +580,33 @@ async function runBacktestScan(fixtures: FixtureLite[], scanId: string): Promise
     return actual < line ? "won" : "lost";
   };
 
-  // Steps 1-3: run the engine on each finished match, qualify legs with the
-  // SAME filters as stack mode, and pool every qualified leg across matches:
-  //   - fairOddsWorst 1.03 .. 1.70
+  // Steps 1-3: run the engine on each finished match, resolve the matching
+  // Bzzoiro event, fetch its real odds, and qualify legs with the SAME filters
+  // as stack mode. No model-derived odds are allowed into this pool:
+  //   - real Bzzoiro odds 1.03 .. 1.70
   //   - hitRate >= 0.62
   //   - statFamily in {Goals, Corners, Cards}
   //   - no EV filter
   const pooled: VaLeg[] = [];
   const fixtureById = new Map<string, FixtureLite>();
+  let matchesProcessed = 0;
   for (const fx of fixtures) {
+    matchesProcessed += 1;
     fixtureById.set(fx.id, fx);
+
+    let resolution: BzzoiroResolution;
+    try {
+      resolution = await resolveBzzoiroEvent(fx);
+    } catch {
+      resolution = {
+        eventId: null,
+        status: "no-match",
+        eventsInRange: 0,
+        relatedInRange: 0,
+        toleranceDays: BZ_WIDE_RANGE_DAYS,
+      };
+    }
+    if (!resolution.eventId) continue;
 
     let engineResult;
     try {
@@ -600,6 +617,16 @@ async function runBacktestScan(fixtures: FixtureLite[], scanId: string): Promise
     const markets = engineResult.markets ?? [];
     marketsEvaluated += markets.length;
 
+    let bookmakerOdds: VaBookmakerOdds[] = [];
+    try {
+      bookmakerOdds = await fetchOddsForEvent(resolution.eventId);
+    } catch {
+      bookmakerOdds = [];
+    }
+    // No event odds means this fixture cannot contribute a real-priced leg.
+    if (bookmakerOdds.length === 0) continue;
+
+    const teams: TeamContext = { home: fx.home.name, away: fx.away.name };
     for (const m of markets) {
       const hitRate = m.hitRate;
       if (typeof hitRate !== "number" || !Number.isFinite(hitRate)) continue;
@@ -608,7 +635,10 @@ async function runBacktestScan(fixtures: FixtureLite[], scanId: string): Promise
       if (hitRate < 0.62) continue;
       if (statFamily !== "goals" && statFamily !== "corners" && statFamily !== "cards") continue;
 
-      const realOdds = m.fairOddsWorst;
+      const matched = matchEngineMarketToBookmaker(m.name, m.selection, bookmakerOdds, teams);
+      if (!matched) continue;
+
+      const realOdds = matched.odds;
       if (typeof realOdds !== "number" || !Number.isFinite(realOdds)) continue;
       if (realOdds < 1.03 || realOdds > 1.70) continue;
 
@@ -628,7 +658,7 @@ async function runBacktestScan(fixtures: FixtureLite[], scanId: string): Promise
         statFamily,
         modelProbability: hitRate,
         bookmakerOdds: realOdds,
-        bookmakerName: "Model Fair",
+        bookmakerName: matched.bookmaker,
         impliedProbability: implied,
         ev,
         oddsAtBuild: new Date(),
@@ -824,6 +854,10 @@ async function runBacktestScan(fixtures: FixtureLite[], scanId: string): Promise
     `[VA] backtest scan ${scanId}: ${fixtures.length} matches, ${marketsEvaluated} markets, ` +
       `${allQualifiedLegs.length} qualified legs, ${weeksScanned} weeks, ${ticketsBuiltCount} tickets built ` +
       `(${won} won, ${lost} lost, ${pending} pending)`
+  );
+  console.log(
+    `[backtest] ${matchesProcessed} matches, ${allQualifiedLegs.length} legs with real odds, ` +
+      `${ticketsBuiltCount} tickets, ${won}W/${lost}L/${pending}P`
   );
 
   return {
