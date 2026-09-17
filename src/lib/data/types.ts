@@ -102,7 +102,8 @@ export type StatSourceName =
   | "Highlightly"
   | "worldcup2026"
   | "TheSportsDB"
-  | "GitHubDatasets";
+  | "GitHubDatasets"
+  | "OpenFootAPI";
 
 // ─── Query shape (what the aggregator needs to find a match) ──────────────────
 

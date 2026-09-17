@@ -319,7 +319,8 @@ describe("StatsAggregator priority and readiness", () => {
 
     expect(priority[0]).toBe("SportScore");
     expect(priority[1]).toBe("API-Football");
-    expect(priority[2]).toBe("StatsBomb");
+    expect(priority[2]).toBe("OpenFootAPI");
+    expect(priority[3]).toBe("StatsBomb");
     // Understat (Big-5 xG) is consulted before the German-only OpenLigaDB.
     expect(priority.indexOf("Understat")).toBeLessThan(priority.indexOf("OpenLigaDB"));
     // Historical CSV is always the last resort.
@@ -353,12 +354,19 @@ describe("StatsAggregator priority and readiness", () => {
       new StatsAggregator().sourceReadiness({ ...MATCH, leagueSlug: "eng.1" }).map((r) => [r.source, r]),
     );
 
-    // OpenLigaDB covers German football only; Understat covers the Big 5 top flights.
-    expect(german["OpenLigaDB"].applicable).toBe(true);
-    expect(german["Understat"].applicable).toBe(true);
-    expect(english["OpenLigaDB"].applicable).toBe(false);
-    expect(english["Understat"].applicable).toBe(true);
-    // Unkeyed, non-league-scoped sources have no gate to evaluate.
+    // Deregistered 2026-09-17 (dead sources): no handler, so the gate cannot
+    // be evaluated — applicable is null and registered is false.
+    expect(german["OpenLigaDB"].registered).toBe(false);
+    expect(german["OpenLigaDB"].applicable).toBeNull();
+    expect(english["OpenLigaDB"].applicable).toBeNull();
+    expect(german["Understat"].registered).toBe(false);
+    expect(german["Understat"].applicable).toBeNull();
+    expect(english["Understat"].applicable).toBeNull();
+    // Registered sources still evaluate their gate normally.
+    expect(english["SportScore"].registered).toBe(true);
     expect(english["SportScore"].applicable).toBe(true);
+    expect(english["TheSportsDB"].registered).toBe(true);
+    expect(english["TheSportsDB"].applicable).toBe(true);
+    expect(english["OpenFootAPI"].registered).toBe(true);
   });
 });

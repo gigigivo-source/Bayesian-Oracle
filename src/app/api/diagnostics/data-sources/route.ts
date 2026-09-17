@@ -89,6 +89,12 @@ const PROBES: Record<StatSourceName, SourceProbe> = {
     url: "https://raw.githubusercontent.com/schochastics/football-data/main/README.md",
     note: "historical CSV backfill — matches located by date + teams, not ESPN ids",
   },
+  "OpenFootAPI": {
+    host: "openfootapi.com",
+    url: "https://openfootapi.com/v1/health",
+    keyEnv: ["OPENFOOT_API_KEY"],
+    note: "optional xG fallback (free tier) — null without a key, never throws",
+  },
 };
 
 /** Outcomes that prove the host was actually contacted. */

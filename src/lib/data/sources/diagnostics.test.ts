@@ -276,9 +276,9 @@ describe("TheSportsDB", () => {
     delete process.env.THESPORTSDB_KEY;
     const { calls } = stubFetch([
       {
-        match: /\/api\/v1\/json\/3\/events\.php\?id=123456/,
+        match: /\/api\/v1\/json\/3\/lookupevent\.php\?id=123456/,
         body: {
-          event: [
+          events: [
             {
               idEvent: "123456",
               strHomeTeam: "Arsenal",
@@ -301,8 +301,67 @@ describe("TheSportsDB", () => {
     );
     expect(payload).not.toBeNull();
     expect(payload!.away.goals).toBe(2);
-    expect(calls[0]).toContain("/api/v1/json/3/events.php");
+    expect(payload!.home.shots).toBe(14);
+    expect(calls[0]).toContain("/api/v1/json/3/lookupevent.php");
     expect(lines.some((l) => l.includes("[TheSportsDB] Using free test key (rate-limited)."))).toBe(true);
+  });
+
+  it("falls back to searchteams + eventslast last-5 averages when the event has no scores yet (pre-match)", async () => {
+    delete process.env.THESPORTSDB_KEY;
+    stubFetch([
+      {
+        match: /\/api\/v1\/json\/3\/lookupevent\.php\?id=999/,
+        body: {
+          events: [
+            {
+              idEvent: "999",
+              strHomeTeam: "Arsenal",
+              strAwayTeam: "Chelsea",
+              intHomeScore: null,
+              intAwayScore: null,
+            },
+          ],
+        },
+      },
+      {
+        match: /searchteams\.php\?t=Arsenal/,
+        body: { teams: [{ idTeam: "133604", strTeam: "Arsenal" }] },
+      },
+      {
+        match: /searchteams\.php\?t=Chelsea/,
+        body: { teams: [{ idTeam: "133610", strTeam: "Chelsea" }] },
+      },
+      {
+        match: /eventslast\.php\?id=133604/,
+        body: {
+          results: [
+            { strHomeTeam: "Arsenal", strAwayTeam: "Fulham", intHomeScore: "2", intAwayScore: "0" },
+            { strHomeTeam: "Liverpool", strAwayTeam: "Arsenal", intHomeScore: "1", intAwayScore: "1" },
+          ],
+        },
+      },
+      {
+        match: /eventslast\.php\?id=133610/,
+        body: {
+          results: [
+            { strHomeTeam: "Chelsea", strAwayTeam: "Spurs", intHomeScore: "1", intAwayScore: "1" },
+          ],
+        },
+      },
+    ]);
+    const lines: string[] = [];
+    const payload = await thesportsdbSource.fetch(
+      { ...MATCH, eventId: "tsdb:999" },
+      makeCtx({}, lines),
+    );
+    expect(payload).not.toBeNull();
+    // Arsenal: scored (2+1)/2 = 1.5, conceded (0+1)/2 = 0.5.
+    expect(payload!.home.goals).toBeCloseTo(1.5, 2);
+    expect(payload!.home.goalsConceded).toBeCloseTo(0.5, 2);
+    // Chelsea: 1 scored / 1 conceded across its single usable result.
+    expect(payload!.away.goals).toBeCloseTo(1, 2);
+    expect(payload!.away.goalsConceded).toBeCloseTo(1, 2);
+    expect(lines.some((l) => l.includes("eventslast last-5"))).toBe(true);
   });
 });
 
@@ -544,13 +603,13 @@ describe("aggregator summary + diagnostics", () => {
     const result = await agg.fetchWithTrace(MATCH);
     expect(result.stats).toBeNull();
 
-    // The walk covers the full 11-slot priority list; unregistered slots are
+    // The walk covers the full 12-slot priority list; unregistered slots are
     // named as failures too (here "no handler"), so every source is accounted
     // for in the summary line.
     const summary = lines.find((l) => l.startsWith("[aggregator]"));
     expect(summary).toBeTruthy();
     expect(summary).toContain("eng.1:401879288");
-    expect(summary).toContain("11 sources tried");
+    expect(summary).toContain("12 sources tried");
     expect(summary).toContain("SportScore (id unresolved)");
     expect(summary).toContain("API-Football (no key)");
     expect(summary).toContain("→ SYNTHETIC");
@@ -563,7 +622,7 @@ describe("aggregator summary + diagnostics", () => {
     expect(bySource["API-Football"].reason).toBe("key-missing");
     expect(bySource["API-Football"].short).toBe("no key");
     // Every priority slot appears exactly once.
-    expect(diag.perSourceFailures).toHaveLength(11);
+    expect(diag.perSourceFailures).toHaveLength(12);
   });
 
   it("names HTTP 403 failures with their status code in the summary + trace", async () => {

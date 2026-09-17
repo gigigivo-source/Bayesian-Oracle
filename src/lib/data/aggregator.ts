@@ -26,7 +26,7 @@
 // At the end of EVERY walk a summary line is logged and stored for
 // GET /api/diagnostics/data-sources (diagnostics.perSourceFailures):
 //
-//   [aggregator] eng.1:401879288 — 11 sources tried.
+//   [aggregator] eng.1:401879288 — 12 sources tried.
 //     Failed: API-Football (403), FBref (403), TheSportsDB (no key), … → SYNTHETIC
 //
 // so a silent synthetic fallback can never happen again: every skipped or
@@ -57,22 +57,28 @@ import {
  *
  *   1. SportScore      — no key, broadest live coverage
  *   2. API-Football    — keyed, most complete per-match stat set
- *   3. StatsBomb       — open data, no key
- *   4. datafc          — optional keyed/self-hosted endpoint
- *   5. worldcup2026    — tournament-scoped supplement
- *   6. FBref           — scraped advanced stats (needs `fbref:`-namespaced ids)
- *   7. TheSportsDB     — keyed tier
- *   8. Understat       — xG, Big-5 leagues only
- *   9. OpenLigaDB      — German leagues only
- *  10. Highlightly     — keyed
- *  11. GitHubDatasets  — historical, last resort
+ *   3. OpenFootAPI     — keyed xG fallback (optional; null without a key)
+ *   4. StatsBomb       — open data, no key
+ *   5. datafc          — optional keyed/self-hosted endpoint
+ *   6. worldcup2026    — tournament-scoped supplement
+ *   7. FBref           — scraped advanced stats (needs `fbref:`-namespaced ids)
+ *   8. TheSportsDB     — keyed tier
+ *   9. Understat       — xG, Big-5 leagues only
+ *  10. OpenLigaDB      — German leagues only
+ *  11. Highlightly     — keyed
+ *  12. GitHubDatasets  — historical, last resort
  *
  * League-scoped sources (Understat, OpenLigaDB) sit after the general ones:
  * their `available()` gate rejects every other league anyway, and where both
  * apply Understat's xG coverage is the richer signal.
+ *
+ * NOTE 2026-09-17: deregistered sources stay listed here (the priority order
+ * is the documented data-quality policy) but have no handler in
+ * SOURCE_HANDLERS, so the walk reports them as "no handler registered"
+ * without any network attempt.
  */
 const DEFAULT_PRIORITY: StatSourceName[] = [
-  "SportScore", "API-Football", "StatsBomb", "datafc",
+  "SportScore", "API-Football", "OpenFootAPI", "StatsBomb", "datafc",
   "worldcup2026", "FBref", "TheSportsDB",
   "Understat", "OpenLigaDB", "Highlightly", "GitHubDatasets",
 ];
@@ -90,6 +96,7 @@ const SOURCE_ENV_REQUIREMENTS: Partial<Record<StatSourceName, string[]>> = {
   "API-Football": ["API_FOOTBALL_KEY", "FOOTBALL_API_KEY"],
   "Highlightly": ["HIGHLIGHTLY_KEY"],
   "datafc": ["DATAFCC_ENDPOINT"],
+  "OpenFootAPI": ["OPENFOOT_API_KEY"],
 };
 
 /**
@@ -805,9 +812,9 @@ export class StatsAggregator {
    * End-of-walk bookkeeping + the summary log that MUST appear at the end of
    * every aggregator call:
    *
-   *   [aggregator] eng.1:401879288 — 11 sources tried. Failed: API-Football (403),
+   *   [aggregator] eng.1:401879288 — 12 sources tried. Failed: API-Football (403),
    *     FBref (403), TheSportsDB (no key), … → SYNTHETIC
-   *   [aggregator] eng.1:401879288 — 11 sources tried. Failed: StatsBomb (no data)
+   *   [aggregator] eng.1:401879288 — 12 sources tried. Failed: StatsBomb (no data)
    *     → source API-Football (52 fields)
    *
    * Every failed source carries its exact reason; the same trace is stored in

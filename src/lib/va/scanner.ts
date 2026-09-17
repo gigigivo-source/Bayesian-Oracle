@@ -10,6 +10,7 @@ import {
   type BzzoiroResolution,
   type VaBookmakerOdds,
 } from "./oddsFetcher";
+import { fetchMatchXg } from "./xgFetcher";
 import { matchEngineMarketToBookmaker, type TeamContext } from "./marketMap";
 import { buildTickets, getWeekStartForLegs, type VaLeg, type VaTicket, type VaTicketLeg } from "./ticket";
 import { db } from "@/db";
@@ -433,9 +434,30 @@ async function runScan(fixtures: FixtureLite[], scanId: string, mode: VaScanMode
       } catch {
         summary = null;
       }
+
+      // Fetch xG for this match (fail soft — null if unavailable)
+      let xgData = null;
+      try {
+        xgData = await fetchMatchXg(String(bzEventId));
+      } catch {
+        xgData = null;
+      }
+
+      // Attach xG to the summary object so realLambdas can pick it up
+      // (read as sum.__homeXg / sum.__awayXg — layer 1 of the xG chain).
+      // Object.assign preserves every original field for other callers.
+      const enrichedSummary = (
+        summary
+          ? Object.assign(Object.create(Object.getPrototypeOf(summary)), summary, {
+              __homeXg: xgData?.homeXg ?? null,
+              __awayXg: xgData?.awayXg ?? null,
+            })
+          : { __homeXg: xgData?.homeXg ?? null, __awayXg: xgData?.awayXg ?? null }
+      ) as MatchSummary;
+
       const profiledEngine = optionalEngineExport("runEngineFromRealWithProfiles");
       if (typeof profiledEngine === "function") {
-        engineResult = await runEngineFromRealWithProfiles(fx, summary, null, "B");
+        engineResult = await runEngineFromRealWithProfiles(fx, enrichedSummary, null, "B");
       } else {
         // Keep older test doubles working while the production export is present.
         const legacyEngine = optionalEngineExport("runEngineFrom" + "Real");
@@ -910,9 +932,30 @@ async function runBacktestScan(fixtures: FixtureLite[], scanId: string): Promise
       } catch {
         summary = null;
       }
+
+      // Fetch xG for this match (fail soft — null if unavailable)
+      let xgData = null;
+      try {
+        xgData = await fetchMatchXg(String(resolution.eventId));
+      } catch {
+        xgData = null;
+      }
+
+      // Attach xG to the summary object so realLambdas can pick it up
+      // (read as sum.__homeXg / sum.__awayXg — layer 1 of the xG chain).
+      // Object.assign preserves every original field for other callers.
+      const enrichedSummary = (
+        summary
+          ? Object.assign(Object.create(Object.getPrototypeOf(summary)), summary, {
+              __homeXg: xgData?.homeXg ?? null,
+              __awayXg: xgData?.awayXg ?? null,
+            })
+          : { __homeXg: xgData?.homeXg ?? null, __awayXg: xgData?.awayXg ?? null }
+      ) as MatchSummary;
+
       const profiledEngine = optionalEngineExport("runEngineFromRealWithProfiles");
       if (typeof profiledEngine === "function") {
-        engineResult = await runEngineFromRealWithProfiles(fx, summary, null, "B");
+        engineResult = await runEngineFromRealWithProfiles(fx, enrichedSummary, null, "B");
       } else {
         // Keep older test doubles working while the production export is present.
         const legacyEngine = optionalEngineExport("runEngineFrom" + "Real");
