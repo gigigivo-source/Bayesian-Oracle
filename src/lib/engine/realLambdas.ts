@@ -8,6 +8,7 @@ import type { LambdaSet } from "./lambdas";
 import type { DeepStatsVector } from "./types";
 import type { FixtureLite, MatchSummary } from "../espn";
 import type { TeamStatProfile } from "./sofascore";
+import type { CanonicalMatchStats } from "../data/types";
 
 // Mesh profiles carry an optional list of contributing real-data providers.
 type ProfileWithProviders = TeamStatProfile & { providers?: string[] };
@@ -40,10 +41,91 @@ export interface RealLambdaResult {
   deepStats:    DeepStatsVector;
 }
 
+/** Which xG layer grounded the goal lambdas (highest-preference layer used). */
+export type XgSource = "bzzoiro" | "aggregator" | "proxy" | "anchor";
+
+/** Minimal structural view of the legacy enrichment xG (oracle.ts concept). */
+export interface XgEnrichmentLike {
+  data: {
+    homeXG: number | null;
+    awayXG: number | null;
+  };
+}
+
+export interface ResolvedXg {
+  realHomeXG: number | null;
+  realAwayXG: number | null;
+  xgSource: XgSource;
+}
+
+/**
+ * Resolve real xG through the three-layer preference chain (plus the
+ * league-anchor fallback):
+ *   1. Real xG from Bzzoiro stats (sum.__homeXg / sum.__awayXg)
+ *   2. Real xG from stats aggregator (stats.home.xg / stats.away.xg)
+ *   3. Shot-based proxy from mesh distributions
+ *      (xG ≈ (Shots − SOT) × 0.05 + SOT × 0.30 — the standard academic proxy)
+ *   4. League-anchor fallback (nulls — existing behaviour downstream)
+ *
+ * Pure (no logging) so unit tests can pin the preference order exactly.
+ */
+export function resolveRealXg(
+  sum: MatchSummary | null,
+  stats?: CanonicalMatchStats | null,
+  profiles?: RealProfiles,
+  enrichment?: XgEnrichmentLike | null,
+): ResolvedXg {
+  // xG grounding preference (highest to lowest):
+  //   1. Real xG from Bzzoiro stats (sum.__homeXg / sum.__awayXg)
+  //   2. Real xG from stats aggregator (stats.home.xg / stats.away.xg)
+  //   3. Shot-based proxy from mesh distributions
+  //   4. League-anchor fallback (existing behaviour)
+  let realHomeXG: number | null =
+    (sum as unknown as { __homeXg?: number | null } | null)?.__homeXg ??
+    stats?.home.xg ??
+    enrichment?.data.homeXG ??
+    null;
+  let realAwayXG: number | null =
+    (sum as unknown as { __awayXg?: number | null } | null)?.__awayXg ??
+    stats?.away.xg ??
+    enrichment?.data.awayXG ??
+    null;
+  let xgSource: XgSource =
+    (sum as unknown as { __homeXg?: number | null } | null)?.__homeXg != null ? "bzzoiro"
+    : stats?.home.xg != null ? "aggregator"
+    : "anchor";
+
+  // Layer 3 — shot-based proxy from mesh distributions
+  // (uses the same conversion used by academic xG proxies:
+  //  xG ≈ (Shots - SOT) × 0.05 + SOT × 0.30)
+  if (realHomeXG == null && profiles?.home?.shots?.mean != null
+      && profiles.home.sot?.mean != null) {
+    const shots = profiles.home.shots.mean;
+    const sot   = profiles.home.sot.mean;
+    realHomeXG = Math.max(0.15, Math.min(4.5,
+      (shots - sot) * 0.05 + sot * 0.30
+    ));
+    xgSource = "proxy";
+  }
+  if (realAwayXG == null && profiles?.away?.shots?.mean != null
+      && profiles.away.sot?.mean != null) {
+    const shots = profiles.away.shots.mean;
+    const sot   = profiles.away.sot.mean;
+    realAwayXG = Math.max(0.15, Math.min(4.5,
+      (shots - sot) * 0.05 + sot * 0.30
+    ));
+    if (xgSource === "anchor") xgSource = "proxy";
+  }
+
+  return { realHomeXG, realAwayXG, xgSource };
+}
+
 export function buildRealLambdas(
   fx:       FixtureLite,
   sum:      MatchSummary | null,
   profiles?: RealProfiles,
+  stats?:    CanonicalMatchStats | null,
+  enrichment?: XgEnrichmentLike | null,
 ): RealLambdaResult {
   const notes: string[] = [];
   let completeness = 30;
@@ -181,6 +263,17 @@ export function buildRealLambdas(
     }
   }
 
+  // ── xG grounding: three-layer preference chain ───────────────────────────
+  // Layers 1-2 are REAL xG (Bzzoiro per-shot totals attached to the summary by
+  // the scanner, then the stats aggregator / legacy enrichment); layer 3 is
+  // the shot-based proxy from mesh distributions; the anchor fallback leaves
+  // nulls and the goal computation below runs exactly as before.
+  const { realHomeXG, realAwayXG, xgSource } = resolveRealXg(sum, stats, profiles, enrichment);
+  console.log(
+    `[engine] xG source for ${fx.home.name} vs ${fx.away.name}: ${xgSource} ` +
+    `(${realHomeXG?.toFixed(2) ?? "anchor"} / ${realAwayXG?.toFixed(2) ?? "anchor"})`
+  );
+
   // ── Step 1: Expected total goals from form + anchors ──────────────────────
   let totalGoals: number;
   let homeShare:  number;
@@ -285,6 +378,18 @@ export function buildRealLambdas(
 
   homeGoals  = clamp(homeGoals, 0.15, 5.0);
   awayGoals  = clamp(awayGoals, 0.15, 5.0);
+
+  // Ground the goal lambdas on real xG whenever a layer above the anchor
+  // produced one (65% real / 35% model — the same blend weights the O/U
+  // market anchor uses). Nulls (anchor) leave the form/anchor blend untouched.
+  if (realHomeXG != null) {
+    homeGoals = clamp(0.35 * homeGoals + 0.65 * realHomeXG, 0.15, 5.0);
+    notes.push(`xG GROUNDED (${xgSource}): home λ blended toward real xG ${realHomeXG.toFixed(2)} → ${homeGoals.toFixed(2)}.`);
+  }
+  if (realAwayXG != null) {
+    awayGoals = clamp(0.35 * awayGoals + 0.65 * realAwayXG, 0.15, 5.0);
+    notes.push(`xG GROUNDED (${xgSource}): away λ blended toward real xG ${realAwayXG.toFixed(2)} → ${awayGoals.toFixed(2)}.`);
+  }
   totalGoals = homeGoals + awayGoals;
 
   // ── Step 3: Derive secondary stats from anchored goal expectation ──────────

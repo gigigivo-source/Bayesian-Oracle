@@ -151,7 +151,9 @@ export function runEngineFromReal(
   profiles?: RealProfiles,
   opts?:    SelectOptions,
 ): EngineResult {
-  const { lam, completeness, notes, deepStats } = buildRealLambdas(fx, sum, profiles);
+  // Layer-2 xG: the aggregator stats (when the caller ran the walk) flow into
+  // the lambda builder so stats.home.xg / stats.away.xg ground the goal λ.
+  const { lam, completeness, notes, deepStats } = buildRealLambdas(fx, sum, profiles, opts?.stats ?? null);
 
   const stage = /final/i.test(fx.statusDetail ?? "")
     ? "Final"
@@ -206,10 +208,39 @@ export async function runEngineFromRealWithProfiles(
     profiles = undefined;
   }
 
+  // ── Fast path: mesh profiles present → skip the aggregator walk ───────────
+  // The mesh wins on source quality and the 12-source walk returns SYNTHETIC
+  // for every fixture while costing ~5s per match. When BOTH profiles carry
+  // samples the aggregator cannot add anything, so skip it entirely.
+  const haveMesh =
+    (profiles?.home?.samples ?? 0) > 0 &&
+    (profiles?.away?.samples ?? 0) > 0;
+
+  if (haveMesh) {
+    console.log(
+      `[engine] mesh profiles present for ${fx.home.name} vs ${fx.away.name} ` +
+      `— skipping aggregator walk (saves ~5s)`
+    );
+    const fastOpts: SelectOptions = {
+      stats: null,
+      context:       buildRankingContext(fx, sum),
+      sourceQuality: buildSourceQuality(sum, null, profiles),
+      rankingMode,
+    };
+    const fastResult = runEngineFromReal(fx, sum, profiles, fastOpts);
+    // In-play re-calibration — lock markets already decided mid-match
+    if (fx.state === "in" && liveStats) {
+      applyLiveLock(fx, fastResult, liveStats);
+    }
+    return fastResult;
+  }
+
   // ── Canonical stats from the multi-source aggregator (fail-soft) ──────────
   // Grounds the 12-factor ranking in REAL per-match stats. Null when no source
   // has anything for the fixture — the stats-backed factors are then excluded
   // and their weight redistributed (no simulated values).
+  // NOTE: only reached when the mesh fast-path above misses (rare). Budget is
+  // 4s — most sources fail fast and the slow ones never succeed anyway.
   let stats: CanonicalMatchStats | null = null;
   try {
     stats = await Promise.race([
@@ -223,7 +254,7 @@ export async function runEngineFromRealWithProfiles(
         // historical team stats instead of an empty /fixtures/statistics call.
         state:      fx.state,
       }),
-      new Promise<null>((resolve) => setTimeout(() => resolve(null), 25_000)),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 4_000)),
     ]);
   } catch {
     stats = null;
