@@ -14,9 +14,16 @@ export interface ScanResult {
 }
 
 /**
- * Runs the live VA scan (mode=stack, finished=false) in-process from the
- * /value-accumulator page. No HTTP hop, so no CRON_SECRET is needed and the
- * secret never reaches the browser.
+ * Runs the live VA scan (mode=stack, finished=false) in-process and AWAITS it.
+ * No HTTP hop, so no CRON_SECRET is needed and the secret never reaches the
+ * caller.
+ *
+ * The /value-accumulator page no longer uses this: both of its chips start a
+ * BACKGROUND scan (POST /api/va/scan?background=true) and poll
+ * GET /api/va/tickets/status, so the browser is never blocked for the 4-6
+ * minutes a scan takes. This action is kept for callers that want the full scan
+ * body in-process (scripts, server-side code, and the behaviour contract its
+ * test pins).
  *
  * Scans take 4-6 minutes. Neon closes idle connections well before that, so
  * we ping the DB every 60s for the duration of the scan; otherwise the ticket

@@ -1,7 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { runLiveScan } from "./actions";
+import { useCallback, useEffect, useState } from "react";
 
 interface VaTicketLeg {
   match: string;
@@ -142,6 +141,37 @@ type BacktestStatus = "idle" | "running" | "done" | "error";
 type TicketBacktestStatus = "idle" | "running" | "done" | "error";
 type LiveScanStatus = "idle" | "running" | "done" | "error";
 
+/** Which chip owns the background job that is currently running. */
+type BackgroundScanKind = "live" | "backtest";
+
+/** va_scan_lock.mode as reported by GET /api/va/tickets/status. */
+type ScanLockMode = "value" | "stack" | "backtest";
+
+interface ScanStatusResponse {
+  running: boolean;
+  mode: ScanLockMode | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  scanId: string | null;
+  error: string | null;
+  elapsedSeconds: number | null;
+}
+
+/** Both chips poll the status endpoint at this interval while a job runs. */
+const STATUS_POLL_MS = 15_000;
+
+/**
+ * On mount, a job that finished this recently is reported with a toast — the
+ * "you closed the tab, here is what happened while you were away" case. Older
+ * completions are history, not news.
+ */
+const RESUME_TOAST_WINDOW_MS = 60_000;
+
+/** Ticket-count phrasing shared by the completion toasts. */
+function ticketsPhrase(count: number): string {
+  return `${count} ticket${count === 1 ? "" : "s"}`;
+}
+
 /** Small inline spinner shared by the chip and the backtest sheet. */
 const spinnerStyle = {
   width: 12,
@@ -153,14 +183,33 @@ const spinnerStyle = {
   animation: "va-spin 0.8s linear infinite",
 } as const;
 
+/** One poll of the background-job status endpoint; null when it is unreadable. */
+async function fetchScanStatus(): Promise<ScanStatusResponse | null> {
+  try {
+    const res = await fetch("/api/va/tickets/status", { cache: "no-store" });
+    if (!res.ok) return null;
+    return (await res.json()) as ScanStatusResponse;
+  } catch {
+    return null; // a failed poll costs one cycle — polling carries on
+  }
+}
+
 /**
  * Value Accumulator tickets view.
  *
- * The live scan is triggered via a Next.js server action (`runLiveScan`), which
- * runs the scan in-process on the server. The CRON_SECRET that protects the
- * /api/va/scan HTTP route is therefore never needed in — and never reaches —
- * the browser. Scans also still run on the Vercel cron schedule or via an
- * authenticated curl call from a trusted machine.
+ * Both scan chips run in BACKGROUND mode: they POST /api/va/scan?background=true,
+ * which claims a va_scan_lock row, fires the scan without awaiting it and
+ * answers `{ ok: true, status: "started" }` in about a second. This page then
+ * polls GET /api/va/tickets/status every 15s, so the browser is never blocked
+ * for the 4-6 minutes a scan takes and the tab can be closed — on remount the
+ * page asks the status endpoint once and either resumes polling a job that is
+ * still running or reports one that finished in the last minute.
+ *
+ * Auth: the live (unfinished) scan is still protected by CRON_SECRET, and the
+ * browser sends it as `Authorization: Bearer NEXT_PUBLIC_CRON_SECRET` — the same
+ * convention the Sure Bet Corners verification chip uses (see .env.example;
+ * leave both unset in local development and the route stays open). The backtest
+ * chip needs no secret because ?finished=true is unauthenticated by design.
  */
 export default function ValueAccumulatorPage() {
   const [tickets, setTickets] = useState<VaTicketRow[]>([]);
@@ -180,26 +229,155 @@ export default function ValueAccumulatorPage() {
   const [liveScanError, setLiveScanError] = useState<string | null>(null);
   const [liveScanErrorOpen, setLiveScanErrorOpen] = useState(false);
   const [liveScanToast, setLiveScanToast] = useState<string | null>(null);
+  /**
+   * The background job this page is waiting on: which chip started it (or
+   * adopted it on remount) and the va_scan_lock mode that identifies it. Non-null
+   * == "started/polling"; null == idle. There is no client-side timeout — polling
+   * only stops when that mode reports done or error.
+   */
+  const [bgScan, setBgScan] = useState<{ kind: BackgroundScanKind; mode: ScanLockMode } | null>(null);
 
-  async function startLiveScan() {
-    if (liveScanStatus === "running") return;
-    setLiveScanStatus("running");
-    setLiveScanError(null);
-    setLiveScanToast(null);
+  /** Refreshes the ticket list and hands the rows back to the caller. */
+  const loadTickets = useCallback(async (specificScanId?: string): Promise<VaTicketRow[]> => {
+    setLoading(true);
+    setError(null);
     try {
-      // Server action — runs in-process on the server, no HTTP hop, no secret.
-      const result = await runLiveScan();
-      if (!result.ok) throw new Error(result.error || "Live scan failed");
-      setLiveScanStatus("done");
-      await loadTickets();
-      const n = result.ticketsBuilt ?? 0;
-      setLiveScanToast(`Scan complete — ${n} ticket${n === 1 ? "" : "s"} built`);
-      setLiveScanStatus("idle");
+      const url = specificScanId ? `/api/va/tickets?scanId=${encodeURIComponent(specificScanId)}` : "/api/va/tickets";
+      const res = await fetch(url, { cache: "no-store" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = (await res.json()) as TicketsResponse;
+      const rows = data.tickets ?? [];
+      setTickets(rows);
+      setScanId(data.scanId);
+      if (data.learning) setLearning(data.learning);
+      return rows;
     } catch (e) {
-      setLiveScanError(e instanceof Error ? e.message : String(e));
+      setError(String(e));
+      setTickets([]);
+      return [];
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  /** Puts the chip that owns a background job into its "Running…" state. */
+  const markRunning = useCallback((kind: BackgroundScanKind) => {
+    if (kind === "live") {
+      setLiveScanStatus("running");
+      setLiveScanError(null);
+    } else {
+      setTicketBacktestStatus("running");
+      setTicketBacktestError(null);
+      setTicketBacktestResult(null);
+    }
+  }, []);
+
+  /** Clears a chip's "Running…" state without touching the other one. */
+  const markIdle = useCallback((kind: BackgroundScanKind) => {
+    if (kind === "live") setLiveScanStatus("idle");
+    else setTicketBacktestStatus("idle");
+  }, []);
+
+  /** Reports a failed job on the chip that owns it (error bottom-sheet). */
+  const markFailed = useCallback((kind: BackgroundScanKind, message: string) => {
+    if (kind === "live") {
+      setLiveScanError(message);
       setLiveScanStatus("error");
       setLiveScanErrorOpen(true);
+    } else {
+      setTicketBacktestError(message);
+      setTicketBacktestStatus("error");
+      setTicketBacktestOpen(true);
     }
+  }, []);
+
+  /** A job finished: refresh the tickets, toast, and open the sheet for a backtest. */
+  const markDone = useCallback(
+    async (kind: BackgroundScanKind, status: ScanStatusResponse) => {
+      const rows = await loadTickets();
+      if (kind === "backtest") {
+        // A detached job's response body is not persisted, so the per-day
+        // settlement tables are unavailable here — the sheet says so and shows
+        // the scan id. The ticket list below is the durable output.
+        setTicketBacktestResult({ ok: true, scanId: status.scanId ?? undefined });
+        setTicketBacktestStatus("done");
+        setTicketBacktestOpen(true);
+        setLiveScanToast(`Backtest complete — ${ticketsPhrase(rows.length)} refreshed`);
+        return;
+      }
+      setLiveScanStatus("idle");
+      setLiveScanToast(`Scan complete — ${ticketsPhrase(rows.length)} ready`);
+    },
+    [loadTickets],
+  );
+
+  /**
+   * Starts a background scan and enters the polling state. Both chips share this
+   * path; only the query string and the expected lock mode differ.
+   */
+  const startBackgroundScan = useCallback(
+    async (kind: BackgroundScanKind) => {
+      if (bgScan) return; // one job at a time — the server enforces it too (409)
+      const expectedMode: ScanLockMode = kind === "live" ? "stack" : "backtest";
+      const query =
+        kind === "live"
+          ? "/api/va/scan?mode=stack&background=true"
+          : "/api/va/scan?mode=stack&finished=true&background=true";
+
+      setLiveScanToast(null);
+      markRunning(kind);
+
+      try {
+        const res = await fetch(query, {
+          method: "POST",
+          cache: "no-store",
+          // Only the live (unfinished) scan is secret-protected; the header is
+          // harmless when CRON_SECRET is unset.
+          headers: { Authorization: `Bearer ${process.env.NEXT_PUBLIC_CRON_SECRET ?? ""}` },
+        });
+        // Parsed before the status is judged, so the server's own reason reaches
+        // the error sheet instead of a bare "HTTP 500".
+        const data = (await res.json().catch(() => null)) as {
+          ok?: boolean;
+          status?: string;
+          error?: string;
+          reason?: string;
+        } | null;
+
+        if (res.status === 409) {
+          // A scan is already running — adopt it instead of erroring, so the
+          // page still reports the outcome of the job that is in flight.
+          const status = await fetchScanStatus();
+          const adoptedMode: ScanLockMode = status?.mode ?? expectedMode;
+          const adoptedKind: BackgroundScanKind = adoptedMode === "backtest" ? "backtest" : "live";
+          if (adoptedKind !== kind) markIdle(kind); // this chip never started a job
+          markRunning(adoptedKind);
+          setBgScan({ kind: adoptedKind, mode: adoptedMode });
+          return;
+        }
+
+        if (res.status === 401) {
+          throw new Error(
+            "Unauthorized — set NEXT_PUBLIC_CRON_SECRET to the same value as CRON_SECRET " +
+              "(see .env.example), or start the scan server-side with the bearer secret.",
+          );
+        }
+        if (!res.ok || !data?.ok) {
+          throw new Error(data?.error ?? data?.reason ?? `Scan failed to start (HTTP ${res.status})`);
+        }
+
+        // "started": the server answered in ~1s and the scan runs detached.
+        setBgScan({ kind, mode: expectedMode });
+      } catch (e) {
+        setBgScan(null);
+        markFailed(kind, e instanceof Error ? e.message : String(e));
+      }
+    },
+    [bgScan, markFailed, markIdle, markRunning],
+  );
+
+  function startLiveScan() {
+    void startBackgroundScan("live");
   }
 
   function closeLiveScanError() {
@@ -238,28 +416,8 @@ export default function ValueAccumulatorPage() {
     setBacktestStatus("idle");
   }
 
-  async function runTicketBacktest() {
-    if (ticketBacktestStatus === "running") return;
-    setTicketBacktestStatus("running");
-    setTicketBacktestError(null);
-    setTicketBacktestResult(null);
-    try {
-      const res = await fetch("/api/va/scan?mode=stack&finished=true", {
-        method: "POST",
-        cache: "no-store",
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = (await res.json()) as VaScanResponse;
-      if (!data.ok) throw new Error(data.reason || data.error || "Ticket backtest failed");
-      setTicketBacktestResult(data);
-      if (data.learning) setLearning(data.learning);
-      setTicketBacktestStatus("done");
-      setTicketBacktestOpen(true);
-    } catch (e) {
-      setTicketBacktestError(e instanceof Error ? e.message : String(e));
-      setTicketBacktestStatus("error");
-      setTicketBacktestOpen(true);
-    }
+  function runTicketBacktest() {
+    void startBackgroundScan("backtest");
   }
 
   function closeTicketBacktest() {
@@ -267,26 +425,96 @@ export default function ValueAccumulatorPage() {
     setTicketBacktestStatus("idle");
   }
 
+  /**
+   * POLLING — every 15s while a background job is ours to wait for. Stops on
+   * done (refresh + toast, plus the sheet for a backtest) or on error (error
+   * sheet). A job that is still running, a status we cannot read, and a mode
+   * that is not ours all simply keep the poll going: there is no client timeout.
+   */
+  useEffect(() => {
+    if (!bgScan) return;
+    const { kind, mode } = bgScan;
+    let cancelled = false;
 
-  async function loadTickets(specificScanId?: string) {
-    setLoading(true);
-    setError(null);
-    try {
-      const url = specificScanId ? `/api/va/tickets?scanId=${encodeURIComponent(specificScanId)}` : "/api/va/tickets";
-      const res = await fetch(url, { cache: "no-store" });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = (await res.json()) as TicketsResponse;
-      setTickets(data.tickets ?? []);
-      setScanId(data.scanId);
-      if (data.learning) setLearning(data.learning);
-    } catch (e) {
-      setError(String(e));
-      setTickets([]);
-    } finally {
-      setLoading(false);
-    }
-  }
+    const tick = async () => {
+      const status = await fetchScanStatus();
+      if (cancelled || !status) return;
+      if (status.running) return; // still in flight — poll again
+      if (status.mode !== mode) return; // a different scan's row — not ours
+      setBgScan(null); // stop polling before any awaiting, so it cannot re-fire
+      if (status.error) {
+        markFailed(kind, status.error);
+        return;
+      }
+      if (!status.completedAt) {
+        // Neither done, nor errored, nor running: the row went STALE (its
+        // process died — a recycled serverless function, a killed dev server)
+        // and nothing will ever flip it to done. Say so instead of reporting a
+        // completion that never happened.
+        markFailed(
+          kind,
+          "The scan stopped reporting before it finished (its job record went stale after 15 minutes). " +
+            "Whatever it wrote is on this page, but the run is incomplete — start it again if you need the rest.",
+        );
+        return;
+      }
+      await markDone(kind, status);
+    };
 
+    const id = setInterval(() => {
+      void tick();
+    }, STATUS_POLL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [bgScan, markDone, markFailed]);
+
+  /**
+   * RESUME — on mount, ask the status endpoint once. A job still running (this
+   * tab was reopened, or the scan was started elsewhere) puts the owning chip
+   * back into "Running…" and restarts polling; a job that finished within the
+   * last 60s is reported with a toast; anything older is just history.
+   */
+  useEffect(() => {
+    let cancelled = false;
+
+    const resume = async () => {
+      const status = await fetchScanStatus();
+      if (cancelled || !status || !status.mode) return;
+
+      if (status.running) {
+        const kind: BackgroundScanKind = status.mode === "backtest" ? "backtest" : "live";
+        markRunning(kind);
+        setBgScan({ kind, mode: status.mode });
+        return;
+      }
+
+      if (status.error || !status.completedAt) return;
+      const ageMs = Date.now() - new Date(status.completedAt).getTime();
+      if (ageMs < 0 || ageMs > RESUME_TOAST_WINDOW_MS) return;
+
+      const rows = await loadTickets();
+      if (cancelled) return;
+      const what = status.mode === "backtest" ? "Backtest" : "Scan";
+      setLiveScanToast(`${what} finished while you were away — ${ticketsPhrase(rows.length)} ready`);
+      if (status.mode === "backtest") {
+        setTicketBacktestResult({ ok: true, scanId: status.scanId ?? undefined });
+        setTicketBacktestStatus("done");
+        setTicketBacktestOpen(true);
+      }
+    };
+
+    void resume();
+    return () => {
+      cancelled = true;
+    };
+  }, [loadTickets, markRunning]);
+
+  // Initial ticket load. Kept as its own inline fetch (rather than a call to
+  // loadTickets) so the effect body does not set state synchronously — the
+  // resume effect above runs alongside it and only re-loads the list when a
+  // background job finished in the last minute.
   useEffect(() => {
     let cancelled = false;
     fetch("/api/va/tickets", { cache: "no-store" })
@@ -345,7 +573,7 @@ export default function ValueAccumulatorPage() {
           </p>
           <div style={{ marginTop: 16, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
             <span style={{ fontSize: 13, color: "#6b7280", fontWeight: 500 }}>
-              Scan is run from the server. Refresh to see latest tickets.
+              Scans run in the background on the server — start one and close the tab if you like.
             </span>
             <button
               type="button"
@@ -377,7 +605,7 @@ export default function ValueAccumulatorPage() {
             <button
               type="button"
               onClick={startLiveScan}
-              disabled={liveScanStatus === "running"}
+              disabled={bgScan !== null}
               style={{
                 background: "#ecfdf5",
                 color: "#0a7d4f",
@@ -386,7 +614,7 @@ export default function ValueAccumulatorPage() {
                 padding: "4px 12px",
                 fontSize: 13,
                 fontWeight: 600,
-                cursor: liveScanStatus === "running" ? "default" : "pointer",
+                cursor: bgScan !== null ? "default" : "pointer",
                 display: "inline-flex",
                 alignItems: "center",
                 gap: 6,
@@ -395,7 +623,7 @@ export default function ValueAccumulatorPage() {
               {liveScanStatus === "running" ? (
                 <>
                   <span style={spinnerStyle} aria-hidden="true" />
-                  Scanning…
+                  Running…
                 </>
               ) : (
                 "Run Live Scan"
@@ -404,7 +632,7 @@ export default function ValueAccumulatorPage() {
             <button
               type="button"
               onClick={runTicketBacktest}
-              disabled={ticketBacktestStatus === "running"}
+              disabled={bgScan !== null}
               style={{
                 background: "#ecfdf5",
                 color: "#0a7d4f",
@@ -413,7 +641,7 @@ export default function ValueAccumulatorPage() {
                 padding: "4px 12px",
                 fontSize: 13,
                 fontWeight: 600,
-                cursor: ticketBacktestStatus === "running" ? "default" : "pointer",
+                cursor: bgScan !== null ? "default" : "pointer",
                 display: "inline-flex",
                 alignItems: "center",
                 gap: 6,
@@ -436,8 +664,9 @@ export default function ValueAccumulatorPage() {
           </div>
         </div>
 
-        {/* Live scan in-progress banner */}
-        {liveScanStatus === "running" && (
+        {/* Background scan in-progress banner — shown for either chip while its
+            detached job is being polled. */}
+        {bgScan !== null && (
           <div
             role="status"
             style={{
@@ -455,8 +684,15 @@ export default function ValueAccumulatorPage() {
               style={{ ...spinnerStyle, border: "2px solid #fde68a", borderTopColor: "#d97706" }}
               aria-hidden="true"
             />
-            <div style={{ fontSize: 13, color: "#92400e", fontWeight: 500 }}>
-              Scan running — this takes 4-6 minutes. Matches are being analysed. Do not close this tab.
+            <div>
+              <div style={{ fontSize: 13, color: "#92400e", fontWeight: 500 }}>
+                Scan running in the background. You can close this tab. Results will appear here when
+                ready.
+              </div>
+              <div style={{ fontSize: 12, color: "#b45309", marginTop: 4 }}>
+                {bgScan.kind === "backtest" ? "Ticket backtest" : "Live scan"} · status polled every
+                15s
+              </div>
             </div>
           </div>
         )}
@@ -1113,6 +1349,25 @@ export default function ValueAccumulatorPage() {
 
               {ticketBacktestStatus === "error" && (
                 <div style={{ color: "#dc2626", fontSize: 14, padding: "8px 0" }}>{ticketBacktestError}</div>
+              )}
+
+              {/* Background job: the scan finished, but a detached job's response
+                  body is not persisted, so the per-day settlement tables this
+                  sheet normally renders are unavailable. Say so plainly instead
+                  of showing an empty sheet. */}
+              {ticketBacktestStatus === "done" && !ticketBacktestResult?.ticketBacktest && (
+                <div style={{ padding: "8px 0 16px" }}>
+                  <div style={{ fontSize: 14, fontWeight: 600, color: "#111827" }}>
+                    Backtest finished in the background.
+                  </div>
+                  <div style={{ fontSize: 13, color: "#6b7280", marginTop: 6, lineHeight: 1.6 }}>
+                    {ticketBacktestResult?.scanId ? `Scan ${ticketBacktestResult.scanId}. ` : ""}
+                    The per-day won/lost tables are only returned by a foreground run (POST
+                    /api/va/scan with finished=true and no background flag), because the detached
+                    job has nowhere to persist its response body. The ticket list on this page has
+                    been refreshed with the scan output.
+                  </div>
+                </div>
               )}
 
               {ticketBacktestStatus === "done" && ticketBacktestResult?.ticketBacktest && (

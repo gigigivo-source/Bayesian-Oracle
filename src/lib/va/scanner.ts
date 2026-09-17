@@ -19,6 +19,7 @@ import {
 } from "./xgFetcher";
 import { matchEngineMarketToBookmaker, type TeamContext } from "./marketMap";
 import { buildTickets, getWeekStartForLegs, type VaLeg, type VaTicket, type VaTicketLeg } from "./ticket";
+import { FIXTURE_BATCH_SIZE, runFixtureBatches } from "./parallel";
 import { db } from "@/db";
 import { vaLegs, marketStats } from "@/db/schema";
 
@@ -492,6 +493,21 @@ export async function scanValueLegs(scanId: string, days = 7, mode: VaScanMode =
   return runScan(capped, scanId, mode);
 }
 
+/**
+ * What one fixture contributes to a live scan. Fixtures are processed in
+ * parallel batches (see src/lib/va/parallel.ts), so the per-fixture counters
+ * and legs are collected here and folded together in fixture order afterwards —
+ * which is what keeps the leg ordering (and so the ticket builder's output)
+ * identical to the old sequential loop.
+ */
+interface LiveFixtureOutcome {
+  legs: VaLeg[];
+  marketsEvaluated: number;
+  lineCorrections: number;
+  familyCorrections: number;
+  filteredOut: string[];
+}
+
 async function runScan(fixtures: FixtureLite[], scanId: string, mode: VaScanMode): Promise<ScanResult> {
   let marketsEvaluated = 0;
   const qualified: VaLeg[] = [];
@@ -524,11 +540,34 @@ async function runScan(fixtures: FixtureLite[], scanId: string, mode: VaScanMode
   let familyCorrections = 0;
   const filteredOut: string[] = [];
 
-  for (const fx of fixtures) {
+  /**
+   * One fixture's contribution to the scan.
+   *
+   * Fixtures are processed in batches of FIXTURE_BATCH_SIZE (8) by
+   * runFixtureBatches — see src/lib/va/parallel.ts for the contract (at most 8
+   * in flight, index-addressed results, per-fixture try/catch). Each worker
+   * returns its own outcome and the aggregation below replays the outcomes in
+   * FIXTURE ORDER, so `qualified` — and therefore the ticket builder's input —
+   * is exactly what the old sequential loop produced. Same legs, same order,
+   * same determinism; the only difference is the wall clock.
+   */
+  const processFixture = async (fx: FixtureLite): Promise<LiveFixtureOutcome> => {
+    const outcome: LiveFixtureOutcome = {
+      legs: [],
+      marketsEvaluated: 0,
+      lineCorrections: 0,
+      familyCorrections: 0,
+      filteredOut: [],
+    };
     const matchLabel = `${fx.home.name} vs ${fx.away.name}`;
 
     // a. Leagues already proven absent from Bzzoiro are skipped without a retry.
-    if (coverage.isUncovered(fx.leagueSlug)) continue;
+    //    Under batching the gate only sees coverage recorded by EARLIER batches,
+    //    so up to FIXTURE_BATCH_SIZE fixtures of a league can be probing at once
+    //    before it is blacklisted (the sequential loop managed with exactly 2).
+    //    Bounded by the batch size, and still far cheaper than the sequential
+    //    round trips it replaced.
+    if (coverage.isUncovered(fx.leagueSlug)) return outcome;
 
     // b. Resolve the Bzzoiro event for this fixture: kickoff date ±2 days,
     //    widened once to ±5 days (in-memory cached per match).
@@ -550,7 +589,7 @@ async function runScan(fixtures: FixtureLite[], scanId: string, mode: VaScanMode
     if (!bzEventId) {
       // No Bzzoiro event for this match — skip it entirely (no odds, no fabricated prices)
       console.log(`[VA] no Bzzoiro event for ${matchLabel} after widening to ±${BZ_WIDE_RANGE_DAYS} days`);
-      continue;
+      return outcome;
     }
     console.log(`[VA] resolved Bzzoiro event ${bzEventId} for ${matchLabel}`);
 
@@ -567,6 +606,7 @@ async function runScan(fixtures: FixtureLite[], scanId: string, mode: VaScanMode
       // Fetch xG for this match (fail soft — nulls if unavailable).
       // LIVE path: /events/{id}/stats/ is null until full-time, so ground the
       // lambdas with rolling team xG averages (last 5 finished matches each).
+      // Served from team_xg_cache whenever the team has not played since.
       const xgData = await fetchLiveXg(String(bzEventId));
       logXgAttachment(fx, xgData);
 
@@ -584,10 +624,10 @@ async function runScan(fixtures: FixtureLite[], scanId: string, mode: VaScanMode
         engineResult = legacyEngine(fx, null);
       }
     } catch {
-      continue;
+      return outcome;
     }
     const markets = engineResult.markets ?? [];
-    marketsEvaluated += markets.length;
+    outcome.marketsEvaluated += markets.length;
 
     // d. Fetch odds for that event (consensus preferred, fail soft to [])
     let bookmakerOdds: VaBookmakerOdds[] = [];
@@ -596,7 +636,7 @@ async function runScan(fixtures: FixtureLite[], scanId: string, mode: VaScanMode
     } catch {
       bookmakerOdds = [];
     }
-    if (bookmakerOdds.length === 0) continue;
+    if (bookmakerOdds.length === 0) return outcome;
 
     // e. For each engine market, match to bookmaker
     for (const m of markets) {
@@ -618,14 +658,14 @@ async function runScan(fixtures: FixtureLite[], scanId: string, mode: VaScanMode
       );
 
       if (corrResult.level === "line") {
-        lineCorrections++;
+        outcome.lineCorrections++;
       } else if (corrResult.level === "family") {
-        familyCorrections++;
+        outcome.familyCorrections++;
       }
 
       // Hard filter: proven bad market
       if (corrResult.filtered) {
-        filteredOut.push(corrResult.key);
+        outcome.filteredOut.push(corrResult.key);
         continue;
       }
 
@@ -675,8 +715,29 @@ async function runScan(fixtures: FixtureLite[], scanId: string, mode: VaScanMode
         scannedAt: new Date(),
       };
 
-      qualified.push(leg);
+      outcome.legs.push(leg);
     }
+
+    return outcome;
+  };
+
+  const outcomes = await runFixtureBatches<FixtureLite, LiveFixtureOutcome>(
+    fixtures,
+    (fx) => processFixture(fx),
+    FIXTURE_BATCH_SIZE,
+    (fx) => fx.id,
+  );
+
+  // Aggregate in fixture order (RULE 2/RULE 4): the batch runner writes each
+  // outcome to its own index, so this replay is identical to the old loop's
+  // in-line accumulation — including for fixtures whose worker threw (null).
+  for (const outcome of outcomes) {
+    if (!outcome) continue;
+    marketsEvaluated += outcome.marketsEvaluated;
+    lineCorrections += outcome.lineCorrections;
+    familyCorrections += outcome.familyCorrections;
+    filteredOut.push(...outcome.filteredOut);
+    qualified.push(...outcome.legs);
   }
 
   // Source-of-truth cleanup (applies in BOTH modes): at most one qualified leg
@@ -944,6 +1005,12 @@ export async function settleBacktestTickets(tickets: VaTicket[], results: Map<st
  * corners + cards from the ESPN match summary boxscore with one fetchSummary
  * call per match maximum), and aggregate results across all simulated days.
  */
+/** What one finished match contributes to the backtest pool (folded in order). */
+interface BacktestFixtureOutcome {
+  legs: VaLeg[];
+  marketsEvaluated: number;
+}
+
 async function runBacktestScan(fixtures: FixtureLite[], scanId: string): Promise<BacktestScanResult> {
   let marketsEvaluated = 0;
 
@@ -1028,10 +1095,19 @@ async function runBacktestScan(fixtures: FixtureLite[], scanId: string): Promise
   //   - no EV filter
   const pooled: VaLeg[] = [];
   const fixtureById = new Map<string, FixtureLite>();
-  let matchesProcessed = 0;
-  for (const fx of fixtures) {
-    matchesProcessed += 1;
-    fixtureById.set(fx.id, fx);
+  for (const fx of fixtures) fixtureById.set(fx.id, fx);
+  // Every finished match fed in is "processed", exactly as the sequential loop
+  // counted it before any skip (it incremented first, then continued).
+  const matchesProcessed = fixtures.length;
+
+  /**
+   * One finished match's contribution to the backtest pool. Runs inside
+   * runFixtureBatches (batches of 8, index-addressed results, per-fixture
+   * try/catch — see src/lib/va/parallel.ts), so a 30-day backtest no longer
+   * pays every Bzzoiro/ESPN round trip in series.
+   */
+  const processFixture = async (fx: FixtureLite): Promise<BacktestFixtureOutcome> => {
+    const outcome: BacktestFixtureOutcome = { legs: [], marketsEvaluated: 0 };
 
     let resolution: BzzoiroResolution;
     try {
@@ -1045,7 +1121,7 @@ async function runBacktestScan(fixtures: FixtureLite[], scanId: string): Promise
         toleranceDays: BZ_WIDE_RANGE_DAYS,
       };
     }
-    if (!resolution.eventId) continue;
+    if (!resolution.eventId) return outcome;
 
     let engineResult;
     try {
@@ -1060,7 +1136,8 @@ async function runBacktestScan(fixtures: FixtureLite[], scanId: string): Promise
       // BACKTEST path: the match is finished, so /events/{id}/stats/ now
       // carries the real per-match xG; fall back to the same rolling team
       // averages as the live path when it carries nothing (keeps backtest
-      // grounding consistent with live).
+      // grounding consistent with live). Finished-match xG is permanent in
+      // match_xg_cache, so a re-run of the same window costs zero requests.
       const xgData = await fetchFinishedXg(String(resolution.eventId));
       logXgAttachment(fx, xgData);
 
@@ -1078,10 +1155,10 @@ async function runBacktestScan(fixtures: FixtureLite[], scanId: string): Promise
         engineResult = legacyEngine(fx, null);
       }
     } catch {
-      continue;
+      return outcome;
     }
     const markets = engineResult.markets ?? [];
-    marketsEvaluated += markets.length;
+    outcome.marketsEvaluated += markets.length;
 
     let bookmakerOdds: VaBookmakerOdds[] = [];
     try {
@@ -1090,7 +1167,7 @@ async function runBacktestScan(fixtures: FixtureLite[], scanId: string): Promise
       bookmakerOdds = [];
     }
     // No event odds means this fixture cannot contribute a real-priced leg.
-    if (bookmakerOdds.length === 0) continue;
+    if (bookmakerOdds.length === 0) return outcome;
 
     const teams: TeamContext = { home: fx.home.name, away: fx.away.name };
     for (const m of markets) {
@@ -1114,7 +1191,7 @@ async function runBacktestScan(fixtures: FixtureLite[], scanId: string): Promise
       const ev = cappedProb * realOdds - 1;
       const implied = 1 / realOdds;
 
-      pooled.push({
+      outcome.legs.push({
         scanId,
         eventId: fx.id,
         matchLabel: `${fx.home.name} vs ${fx.away.name}`,
@@ -1134,6 +1211,24 @@ async function runBacktestScan(fixtures: FixtureLite[], scanId: string): Promise
         scannedAt: new Date(),
       });
     }
+
+    return outcome;
+  };
+
+  const outcomes = await runFixtureBatches<FixtureLite, BacktestFixtureOutcome>(
+    fixtures,
+    (fx) => processFixture(fx),
+    FIXTURE_BATCH_SIZE,
+    (fx) => fx.id,
+  );
+
+  // Fold the per-fixture outcomes in FIXTURE ORDER: `pooled` ends up in the
+  // same order the sequential loop produced, which is what the daily
+  // re-pooling and the ticket builder below depend on.
+  for (const outcome of outcomes) {
+    if (!outcome) continue;
+    marketsEvaluated += outcome.marketsEvaluated;
+    pooled.push(...outcome.legs);
   }
 
   // Step 4: global dedup by (eventId, family), keeping the highest hitRate.
@@ -1256,14 +1351,24 @@ async function runBacktestScan(fixtures: FixtureLite[], scanId: string): Promise
     }
   }
   const cardsByEvent = new Map<string, { home: number; away: number; total: number } | null>();
-  for (const eventId of eventsNeedingSummary) {
-    const fx = fixtureById.get(eventId);
-    const result = results.get(eventId);
-    if (!fx || !result) continue;
-    const summary = await getSummary(fx);
-    result.corners = cornerTotalFromSummary(summary);
-    cardsByEvent.set(eventId, cardTotals(summary));
-  }
+  // Summaries are fetched with the same batched parallelism as the fixtures
+  // (getSummary is promise-cached per fixture, so a match is still fetched at
+  // most once). Each worker writes only to its own event's entries, so
+  // completion order cannot change the settlement below.
+  await runFixtureBatches<string, { eventId: string }>(
+    Array.from(eventsNeedingSummary),
+    async (eventId) => {
+      const fx = fixtureById.get(eventId);
+      const result = results.get(eventId);
+      if (!fx || !result) return null;
+      const summary = await getSummary(fx);
+      result.corners = cornerTotalFromSummary(summary);
+      cardsByEvent.set(eventId, cardTotals(summary));
+      return { eventId };
+    },
+    FIXTURE_BATCH_SIZE,
+    (eventId) => eventId,
+  );
 
   const accumulatedStats = new Map<
     string,
