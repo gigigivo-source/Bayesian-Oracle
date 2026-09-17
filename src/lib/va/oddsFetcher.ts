@@ -76,11 +76,7 @@ interface BzEventRow {
  *                the whole window: a coverage gap, which lets the caller skip
  *                the rest of the league instead of re-probing every fixture.
  */
-export type BzzoiroResolutionStatus =
-  | "resolved"
-  | "no-match"
-  | "no-events"
-  | "network-error";
+export type BzzoiroResolutionStatus = "resolved" | "no-match" | "no-events";
 
 export interface BzzoiroResolution {
   /** Bzzoiro event id as a string, or null when nothing matched. */
@@ -105,8 +101,7 @@ const BZOOIRO_BASE = (() => {
   const raw = (process.env.BZOOIRO_BASE ?? "https://sports.bzzoiro.com/api/v2").trim();
   return raw.replace(/\/+$/, "");
 })();
-const BZ_CONNECT_TIMEOUT_MS = 20000;
-const ODDS_REQUEST_TIMEOUT_MS = 8000;
+const TIMEOUT_MS = 8000;
 const PAGE_LIMIT = 200; // API max
 const CACHE_TTL_MS = 30 * 60 * 1000; // event/fixture lists are safe to reuse within a scan window
 /** First attempt: kickoff date ±2 days. */
@@ -122,7 +117,7 @@ function getApiKey(): string {
 }
 
 /** Shared GET with 8s timeout. Returns parsed JSON or null on any failure (fail soft). */
-async function bzGet<T>(path: string, timeoutMs = BZ_CONNECT_TIMEOUT_MS): Promise<T | null> {
+async function bzGet<T>(path: string): Promise<T | null> {
   const key = getApiKey();
   if (!key) {
     if (!warnedNoKey) {
@@ -133,7 +128,7 @@ async function bzGet<T>(path: string, timeoutMs = BZ_CONNECT_TIMEOUT_MS): Promis
   }
   const url = `${BZOOIRO_BASE}${path}`;
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
   try {
     const res = await fetch(url, {
       headers: { Authorization: `Token ${key}` },
@@ -263,15 +258,10 @@ function shiftDate(dateKey: string, days: number): string {
  * Fetch Bzzoiro fixtures for an inclusive [dateFrom, dateTo] window
  * (follows pagination, cached per window, fail soft to []).
  */
-interface EventsInRange {
-  rows: BzEventRow[];
-  networkError: boolean;
-}
-
-async function getEventsInRange(dateFrom: string, dateTo: string): Promise<EventsInRange> {
+async function getEventsInRange(dateFrom: string, dateTo: string): Promise<BzEventRow[]> {
   const cacheKey = `${dateFrom}|${dateTo}`;
   const hit = cached(eventsByRange, cacheKey);
-  if (hit) return { rows: hit, networkError: false };
+  if (hit) return hit;
 
   const rows: BzEventRow[] = [];
   let offset = 0;
@@ -279,20 +269,18 @@ async function getEventsInRange(dateFrom: string, dateTo: string): Promise<Event
     const query = `date_from=${dateFrom}&date_to=${dateTo}`;
     const path = `/events/?${query}&limit=${PAGE_LIMIT}&offset=${offset}`;
     const data = await bzGet<BzPage<BzEventRow>>(path);
-    if (data === null) return { rows: [], networkError: true };
     const batch = pageRows(data);
     rows.push(...batch);
     console.log(`[VA][Bzzoiro] GET /events/?${query} → ${batch.length} events`);
-    if (!data.next || batch.length === 0) break;
+    if (!data?.next || batch.length === 0) break;
     offset += batch.length;
   }
 
   store(eventsByRange, cacheKey, rows);
-  return { rows, networkError: false };
+  return rows;
 }
 
 export interface BzzoiroMatchRef {
-  leagueSlug?: string;
   date: string; // ISO kickoff
   home: { name: string };
   away: { name: string };
@@ -383,13 +371,10 @@ export async function resolveBzzoiroEvent(fx: BzzoiroMatchRef): Promise<BzzoiroR
 
   let events: BzEventRow[] = [];
   let toleranceDays = BZ_RANGE_DAYS;
-  let networkError = false;
 
   for (const days of [BZ_RANGE_DAYS, BZ_WIDE_RANGE_DAYS]) {
     toleranceDays = days;
-    const fetched = await getEventsInRange(shiftDate(kickoffDate, -days), shiftDate(kickoffDate, days));
-    events = fetched.rows;
-    networkError ||= fetched.networkError;
+    events = await getEventsInRange(shiftDate(kickoffDate, -days), shiftDate(kickoffDate, days));
     const best = pickEvent(events, homeName, awayName, kickoffMs, days);
     if (best) {
       const resolved: BzzoiroResolution = {
@@ -407,12 +392,9 @@ export async function resolveBzzoiroEvent(fx: BzzoiroMatchRef): Promise<BzzoiroR
   // Nothing matched even at ±5 days. Distinguish "the feed has no idea these
   // teams exist" (coverage gap) from "the teams are there but nothing paired".
   const relatedInRange = countRelated(events, homeName, awayName);
-  if (networkError) {
-    console.log(`[VA] Bzzoiro network error for ${fx.leagueSlug ?? "unknown league"} — not counting toward blacklist`);
-  }
   const missed: BzzoiroResolution = {
     eventId: null,
-    status: networkError ? "network-error" : relatedInRange === 0 ? "no-events" : "no-match",
+    status: relatedInRange === 0 ? "no-events" : "no-match",
     eventsInRange: events.length,
     relatedInRange,
     toleranceDays,
@@ -451,7 +433,7 @@ export async function fetchOddsForEvent(bzzoiroEventId: string): Promise<VaBookm
   if (!idTrim || !/^\d+$/.test(idTrim)) return [];
 
   const path = `/odds/?event_id=${encodeURIComponent(idTrim)}&limit=${PAGE_LIMIT}`;
-  const data = await bzGet<BzPage<BzOddsRow> | BzOddsRow[]>(path, ODDS_REQUEST_TIMEOUT_MS);
+  const data = await bzGet<BzPage<BzOddsRow> | BzOddsRow[]>(path);
   const rows = pageRows(data);
   console.log(`[VA][Bzzoiro] GET /odds/?event_id=${idTrim} → ${rows.length} rows`);
   if (rows.length === 0) return [];

@@ -397,8 +397,7 @@ class LeagueCoverage {
       this.emptyByLeague.delete(leagueSlug);
       return;
     }
-    if (resolution.status === "network-error") return;
-    if (resolution.status !== "no-match" && resolution.status !== "no-events") return;
+    if (resolution.status !== "no-events") return; // names didn't match, but the league IS carried
 
     const count = (this.emptyByLeague.get(leagueSlug) ?? 0) + 1;
     this.emptyByLeague.set(leagueSlug, count);
@@ -578,7 +577,7 @@ async function runScan(fixtures: FixtureLite[], scanId: string, mode: VaScanMode
     } catch {
       resolution = {
         eventId: null,
-        status: "network-error",
+        status: "no-match",
         eventsInRange: 0,
         relatedInRange: 0,
         toleranceDays: BZ_WIDE_RANGE_DAYS,
@@ -588,12 +587,8 @@ async function runScan(fixtures: FixtureLite[], scanId: string, mode: VaScanMode
 
     const bzEventId = resolution.eventId;
     if (!bzEventId) {
-      // Network failures skip only this fixture and never affect league coverage.
-      if (resolution.status === "network-error") {
-        console.log(`[VA] network error resolving ${matchLabel} — skipping this fixture only`);
-      } else {
-        console.log(`[VA] no Bzzoiro event for ${matchLabel} after widening to ±${BZ_WIDE_RANGE_DAYS} days`);
-      }
+      // No Bzzoiro event for this match — skip it entirely (no odds, no fabricated prices)
+      console.log(`[VA] no Bzzoiro event for ${matchLabel} after widening to ±${BZ_WIDE_RANGE_DAYS} days`);
       return outcome;
     }
     console.log(`[VA] resolved Bzzoiro event ${bzEventId} for ${matchLabel}`);
@@ -1120,7 +1115,7 @@ async function runBacktestScan(fixtures: FixtureLite[], scanId: string): Promise
     } catch {
       resolution = {
         eventId: null,
-        status: "network-error",
+        status: "no-match",
         eventsInRange: 0,
         relatedInRange: 0,
         toleranceDays: BZ_WIDE_RANGE_DAYS,
