@@ -1,5 +1,5 @@
 // Value Accumulator — Scanner (independent, no accumulator reuse)
-import { fetchScoreboard, type FixtureLite } from "@/lib/espn";
+import { fetchScoreboard, fetchSummary, type FixtureLite, type MatchSummary } from "@/lib/espn";
 import { leagueTier } from "@/lib/leaguePriority";
 import { runEngineFromReal } from "@/lib/engine";
 import {
@@ -349,7 +349,7 @@ async function runScan(fixtures: FixtureLite[], scanId: string, mode: VaScanMode
   };
 }
 
-// ─── Finished-match backtest (?finished=true): 1 ticket per finished match via stack-mode builder ───
+// ─── Finished-match backtest (?finished=true): weekly multi-match tickets via stack-mode builder ───
 const BACKTEST_LEAGUES = ["eng.1", "esp.1", "ita.1", "ger.1", "fra.1"];
 
 /** Final result of a finished match; corners stays null unless the ESPN boxscore supplies it. */
@@ -358,7 +358,7 @@ export type BacktestLegStatus = "won" | "lost" | "unknown";
 export type BacktestTicketStatus = "won" | "lost" | "pending";
 
 export interface BacktestTicketItem {
-  matchLabel: string;
+  weekLabel: string;
   legsCount: number;
   combinedOdds: number;
   claimedProbability: number;
@@ -375,7 +375,8 @@ export interface TicketBacktestBucket {
 }
 
 export interface TicketBacktestData {
-  matchesWithTicket: number;
+  weeksScanned: number;
+  ticketsBuilt: number;
   won: number;
   lost: number;
   pending: number;
@@ -389,6 +390,7 @@ export interface TicketBacktestData {
 export interface BacktestSampleTicket extends VaTicket {
   status: BacktestTicketStatus;
   matchLabel?: string;
+  weekLabel?: string;
 }
 
 /** runBacktestScan result: the qualified legs plus the settled combination samples. */
@@ -483,19 +485,112 @@ export async function settleBacktestTickets(tickets: VaTicket[], results: Map<st
 }
 
 /**
- * Backtest scan: runs engine for each finished match in the 30-day window,
+ * Backtest scan: runs the engine for each finished match in the 30-day window,
  * qualifies legs with stack-mode filters (odds 1.03..1.70, hitRate >= 0.62,
- * families {Goals, Corners, Cards}, deduped per family), builds at most ONE
- * ticket per match via buildTickets(legs, "stack") keeping the highest-kelly
- * ticket, settles each ticket against the match result, and aggregates results.
+ * families {Goals, Corners, Cards}), pools every qualified leg across ALL
+ * matches, dedups globally per (eventId, family) keeping the highest hitRate,
+ * groups the pool by ISO week (Monday-based, UTC), builds tickets per week via
+ * buildTickets(weekLegs, "stack") — the same builder the live scanner uses, so
+ * tickets are multi-match (6-8 legs when available, combined odds 4.5-7.5) —
+ * settles each ticket against the finished results (goals from the scoreboard
+ * final scores, corners + cards from the ESPN match summary boxscore with one
+ * fetchSummary call per match maximum), and aggregates results.
  */
 async function runBacktestScan(fixtures: FixtureLite[], scanId: string): Promise<BacktestScanResult> {
   let marketsEvaluated = 0;
-  const allQualifiedLegs: VaLeg[] = [];
-  const builtTickets: BacktestSampleTicket[] = [];
 
+  // Backtest-only settlement helpers (local to this scan — the live scan path
+  // and the exported settleBacktestLeg / settleBacktestTickets are untouched).
+
+  /** ISO week label (Monday-based, UTC) for a kickoff: YYYY-MM-DD. */
+  const isoWeekMondayUtc = (kickoff: Date | string): string => {
+    const date = kickoff instanceof Date ? kickoff : new Date(kickoff);
+    const monday = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+    const day = monday.getUTCDay(); // 0 = Sunday … 6 = Saturday
+    monday.setUTCDate(monday.getUTCDate() + (day === 0 ? -6 : 1 - day));
+    return monday.toISOString().slice(0, 10);
+  };
+
+  /** Numeric O/U line from a selection ("Over 2.5" → 2.5); null when absent. */
+  const parseLine = (selection: string): number | null => {
+    const lineMatch = selection.match(/(\d+(?:\.\d+)?)/);
+    return lineMatch ? Number(lineMatch[1]) : null;
+  };
+
+  /** Card totals (yellow + red) from a cached summary boxscore; null = no card data. */
+  const cardTotals = (
+    summary: MatchSummary | null | undefined
+  ): { home: number; away: number; total: number } | null => {
+    const box = summary?.boxscore;
+    if (!box) return null;
+    const hasAny =
+      box.homeYellowCards !== null ||
+      box.awayYellowCards !== null ||
+      box.homeRedCards !== null ||
+      box.awayRedCards !== null;
+    if (!hasAny) return null;
+    const home = (box.homeYellowCards ?? 0) + (box.homeRedCards ?? 0);
+    const away = (box.awayYellowCards ?? 0) + (box.awayRedCards ?? 0);
+    return { home, away, total: home + away };
+  };
+
+  /** Corner total from a cached summary boxscore; null = no corner data. */
+  const cornerTotalFromSummary = (summary: MatchSummary | null | undefined): number | null => {
+    const box = summary?.boxscore;
+    if (!box || (box.homeCorners === null && box.awayCorners === null)) return null;
+    return (box.homeCorners ?? 0) + (box.awayCorners ?? 0);
+  };
+
+  /** Which side a team-scoped cards market ("{Team} Cards O/U N") refers to; null when unparseable. */
+  const cardsMarketSide = (market: string, homeTeam: string, awayTeam: string): "home" | "away" | null => {
+    const teamPart = market.match(/^(.*?)\s+cards?\s+o\/u/i)?.[1]?.trim();
+    if (!teamPart) return null;
+    const normalise = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, "");
+    const want = normalise(teamPart);
+    if (!want) return null;
+    if (normalise(homeTeam) === want) return "home";
+    if (normalise(awayTeam) === want) return "away";
+    return null;
+  };
+
+  /** Settle one cards leg (total or team-scoped O/U) from cached card totals. */
+  const settleCardsLeg = (
+    market: string,
+    selection: string,
+    homeTeam: string,
+    awayTeam: string,
+    totals: { home: number; away: number; total: number } | null | undefined
+  ): BacktestLegStatus => {
+    if (!totals) return "unknown";
+    const line = parseLine(selection);
+    const isOver = /^over\b/i.test(selection);
+    const isUnder = /^under\b/i.test(selection);
+    if (line === null || (!isOver && !isUnder)) return "unknown";
+    let actual: number;
+    if (market.toLowerCase().startsWith("total cards")) {
+      actual = totals.total;
+    } else {
+      // Team-specific line ("{Team} Cards O/U N"); anything else (cards
+      // handicap, cards exact, …) stays unknown for this leg only.
+      const side = cardsMarketSide(market, homeTeam, awayTeam);
+      if (!side) return "unknown";
+      actual = side === "home" ? totals.home : totals.away;
+    }
+    if (isOver) return actual > line ? "won" : "lost";
+    return actual < line ? "won" : "lost";
+  };
+
+  // Steps 1-3: run the engine on each finished match, qualify legs with the
+  // SAME filters as stack mode, and pool every qualified leg across matches:
+  //   - fairOddsWorst 1.03 .. 1.70
+  //   - hitRate >= 0.62
+  //   - statFamily in {Goals, Corners, Cards}
+  //   - no EV filter
+  const pooled: VaLeg[] = [];
+  const fixtureById = new Map<string, FixtureLite>();
   for (const fx of fixtures) {
-    // 1a. Run the engine (runEngineFromReal(fx, null)) — same as today.
+    fixtureById.set(fx.id, fx);
+
     let engineResult;
     try {
       engineResult = runEngineFromReal(fx, null);
@@ -505,19 +600,11 @@ async function runBacktestScan(fixtures: FixtureLite[], scanId: string): Promise
     const markets = engineResult.markets ?? [];
     marketsEvaluated += markets.length;
 
-    // 1b. Qualify legs using the SAME filters as stack mode:
-    //      - realOdds 1.03 .. 1.70
-    //      - hitRate >= 0.62
-    //      - statFamily in {Goals, Corners, Cards}
-    //      - no EV filter
-    //      - per-(eventId, family) dedup
-    const matchQualified: VaLeg[] = [];
     for (const m of markets) {
       const hitRate = m.hitRate;
       if (typeof hitRate !== "number" || !Number.isFinite(hitRate)) continue;
 
       const statFamily = getStatFamily(m.name, m.family);
-
       if (hitRate < 0.62) continue;
       if (statFamily !== "goals" && statFamily !== "corners" && statFamily !== "cards") continue;
 
@@ -528,7 +615,7 @@ async function runBacktestScan(fixtures: FixtureLite[], scanId: string): Promise
       const ev = hitRate * realOdds - 1;
       const implied = 1 / realOdds;
 
-      matchQualified.push({
+      pooled.push({
         scanId,
         eventId: fx.id,
         matchLabel: `${fx.home.name} vs ${fx.away.name}`,
@@ -548,76 +635,123 @@ async function runBacktestScan(fixtures: FixtureLite[], scanId: string): Promise
         scannedAt: new Date(),
       });
     }
+  }
 
-    // per-(eventId, family) dedup — keep only the highest-EV leg for each statFamily
-    const bestByFamily = new Map<string, VaLeg>();
-    for (const leg of matchQualified) {
-      const current = bestByFamily.get(leg.statFamily);
-      if (!current || leg.ev > current.ev) {
-        bestByFamily.set(leg.statFamily, leg);
-      }
+  // Step 4: global dedup by (eventId, family), keeping the highest hitRate.
+  const bestByPair = new Map<string, VaLeg>();
+  for (const leg of pooled) {
+    const key = `${leg.eventId}|${leg.statFamily}`;
+    const current = bestByPair.get(key);
+    if (!current || leg.modelProbability > current.modelProbability) {
+      bestByPair.set(key, leg);
     }
-    const qualifiedLegs = Array.from(bestByFamily.values());
-    if (qualifiedLegs.length === 0) continue;
-    allQualifiedLegs.push(...qualifiedLegs);
+  }
+  const allQualifiedLegs = Array.from(bestByPair.values());
 
-    // 1c. Build a ticket from those legs using buildTickets(legs, "stack")
-    const ticketsForMatch = buildTickets(qualifiedLegs, "stack");
-    if (ticketsForMatch.length === 0) continue;
+  // Step 5: group legs by ISO week (Monday-based, UTC).
+  const legsByWeek = new Map<string, VaLeg[]>();
+  for (const leg of allQualifiedLegs) {
+    const weekLabel = isoWeekMondayUtc(leg.kickoff);
+    const bucket = legsByWeek.get(weekLabel);
+    if (bucket) bucket.push(leg);
+    else legsByWeek.set(weekLabel, [leg]);
+  }
 
-    // 2. IMPORTANT: build only ONE ticket per match. If buildTickets
-    //    returns multiple, keep only the one with the highest kellyScore.
-    let bestTicket = ticketsForMatch[0];
-    for (let i = 1; i < ticketsForMatch.length; i++) {
-      if (ticketsForMatch[i].kellyScore > bestTicket.kellyScore) {
-        bestTicket = ticketsForMatch[i];
-      }
+  // Step 6: one buildTickets(weekLegs, "stack") call per week — the same
+  // builder the live scanner uses, so tickets are multi-match.
+  const builtTickets: BacktestSampleTicket[] = [];
+  const weekLabels = Array.from(legsByWeek.keys()).sort();
+  for (const weekLabel of weekLabels) {
+    const weekLegs = legsByWeek.get(weekLabel) ?? [];
+    const ticketsForWeek = buildTickets(weekLegs, "stack");
+    for (const ticket of ticketsForWeek) {
+      builtTickets.push({ ...ticket, status: "pending" as BacktestTicketStatus, weekLabel });
     }
+  }
 
-    // 1d. Settle every leg of the ticket against the finished match result:
-    //      - Total Goals O/U: over/under vs homeScore + awayScore
-    //      - Total Corners O/U: over/under vs ESPN boxscore corner count
-    //      - Both Teams To Score: Yes = both scored, No = not both
-    //      - Cards O/U: mark leg as unknown (no card data in ESPN feed)
-    //    Any leg with an unknown result → ticket status "pending".
-    //    Else: won if all legs won, lost if any leg lost.
-    let cornerTotal: number | null = null;
-    const hasCorners = bestTicket.legs.some(
-      (l) => l.statFamily === "corners" || l.market.toLowerCase().includes("corner")
+  // Step 7: settle each ticket's legs against the finished match results.
+  // Goals/BTTS settle from the scoreboard final scores; corners and cards
+  // settle from the ESPN match summary boxscore. Summaries are cached per
+  // fixture id — one fetchSummary call per match maximum — and a single
+  // cached summary serves both the corners and the cards legs of a ticket.
+  const summaryCache = new Map<string, Promise<MatchSummary | null>>();
+  const getSummary = (fx: FixtureLite): Promise<MatchSummary | null> => {
+    const cached = summaryCache.get(fx.id);
+    if (cached) return cached;
+    const pending = fetchSummary(fx.leagueSlug, fx.id).then(
+      (summary) => summary,
+      () => null
     );
-    if (hasCorners) {
-      cornerTotal = await fetchEventCornerTotal(fx.leagueSlug, fx.id);
-    }
+    summaryCache.set(fx.id, pending);
+    return pending;
+  };
 
-    const matchResult: BacktestMatchResult = {
+  // Final scores for every fixture are already known; corners fill in below.
+  const results = new Map<string, BacktestMatchResult>();
+  for (const fx of fixtures) {
+    results.set(fx.id, {
       leagueSlug: fx.leagueSlug,
       homeScore: Number(fx.home.score),
       awayScore: Number(fx.away.score),
-      corners: cornerTotal,
-    };
-
-    const legStatuses = bestTicket.legs.map((leg) =>
-      settleBacktestLeg(leg.market, leg.selection, matchResult)
-    );
-
-    const ticketStatus: BacktestTicketStatus = legStatuses.includes("unknown")
-      ? "pending"
-      : legStatuses.every((s) => s === "won")
-      ? "won"
-      : "lost";
-
-    builtTickets.push({
-      ...bestTicket,
-      status: ticketStatus,
-      matchLabel: `${fx.home.name} vs ${fx.away.name}`,
+      corners: null,
     });
   }
 
-  // 3. Aggregate and return:
+  // Only matches with corners/cards legs in a built ticket need a summary.
+  const eventsNeedingSummary = new Set<string>();
+  for (const ticket of builtTickets) {
+    for (const leg of ticket.legs) {
+      const marketLower = leg.market.toLowerCase();
+      if (
+        leg.statFamily === "corners" ||
+        leg.statFamily === "cards" ||
+        marketLower.includes("corner") ||
+        marketLower.includes("card") ||
+        marketLower.includes("booking")
+      ) {
+        eventsNeedingSummary.add(leg.eventId);
+      }
+    }
+  }
+  const cardsByEvent = new Map<string, { home: number; away: number; total: number } | null>();
+  for (const eventId of eventsNeedingSummary) {
+    const fx = fixtureById.get(eventId);
+    const result = results.get(eventId);
+    if (!fx || !result) continue;
+    const summary = await getSummary(fx);
+    result.corners = cornerTotalFromSummary(summary);
+    cardsByEvent.set(eventId, cardTotals(summary));
+  }
+
+  for (const ticket of builtTickets) {
+    const legStatuses = ticket.legs.map((leg) => {
+      const marketLower = leg.market.toLowerCase();
+      const isCardsLeg =
+        leg.statFamily === "cards" || marketLower.includes("card") || marketLower.includes("booking");
+      if (isCardsLeg) {
+        return settleCardsLeg(
+          leg.market,
+          leg.selection,
+          leg.homeTeam,
+          leg.awayTeam,
+          cardsByEvent.get(leg.eventId)
+        );
+      }
+      return settleBacktestLeg(leg.market, leg.selection, results.get(leg.eventId));
+    });
+    ticket.status = legStatuses.includes("lost")
+      ? "lost"
+      : legStatuses.includes("unknown")
+        ? "pending"
+        : "won";
+  }
+
+  // Aggregate and return:
   const won = builtTickets.filter((t) => t.status === "won").length;
   const lost = builtTickets.filter((t) => t.status === "lost").length;
   const pending = builtTickets.filter((t) => t.status === "pending").length;
-  const matchesWithTicket = builtTickets.length;
+  const weeksScanned = weekLabels.length;
+  const ticketsBuiltCount = builtTickets.length;
   const settledCount = won + lost;
 
   const round4 = (v: number) => Math.round(v * 10000) / 10000;
@@ -636,15 +770,13 @@ async function runBacktestScan(fixtures: FixtureLite[], scanId: string): Promise
       ? round4(realisedRate - claimedAverage)
       : null;
 
-  // Newest first, capped at 50 for response size
-  const sortedTickets = [...builtTickets].sort((a, b) => {
-    const timeA = a.legs[0]?.kickoff ? new Date(a.legs[0].kickoff).getTime() : 0;
-    const timeB = b.legs[0]?.kickoff ? new Date(b.legs[0].kickoff).getTime() : 0;
-    return timeB - timeA;
-  });
+  // Newest week first, capped at 50 for response size
+  const sortedTickets = [...builtTickets].sort((a, b) =>
+    (b.weekLabel ?? "").localeCompare(a.weekLabel ?? "")
+  );
 
   const ticketsOut: BacktestTicketItem[] = sortedTickets.slice(0, 50).map((t) => ({
-    matchLabel: t.matchLabel ?? (t.legs[0] ? t.legs[0].match : "Unknown match"),
+    weekLabel: t.weekLabel ?? "Unknown week",
     legsCount: t.legs.length,
     combinedOdds: round4(t.combinedOdds),
     claimedProbability: round4(t.combinedProbability),
@@ -676,7 +808,8 @@ async function runBacktestScan(fixtures: FixtureLite[], scanId: string): Promise
     .sort((a, b) => a.claimed - b.claimed);
 
   const ticketBacktest: TicketBacktestData = {
-    matchesWithTicket,
+    weeksScanned,
+    ticketsBuilt: ticketsBuiltCount,
     won,
     lost,
     pending,
@@ -689,7 +822,7 @@ async function runBacktestScan(fixtures: FixtureLite[], scanId: string): Promise
 
   console.log(
     `[VA] backtest scan ${scanId}: ${fixtures.length} matches, ${marketsEvaluated} markets, ` +
-      `${allQualifiedLegs.length} qualified legs, ${matchesWithTicket} tickets built ` +
+      `${allQualifiedLegs.length} qualified legs, ${weeksScanned} weeks, ${ticketsBuiltCount} tickets built ` +
       `(${won} won, ${lost} lost, ${pending} pending)`
   );
 

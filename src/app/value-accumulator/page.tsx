@@ -65,7 +65,7 @@ interface VaScanSettled {
 }
 
 interface TicketBacktestItem {
-  matchLabel: string;
+  weekLabel: string;
   legsCount: number;
   combinedOdds: number;
   claimedProbability: number;
@@ -82,7 +82,8 @@ interface TicketBacktestBucket {
 }
 
 interface TicketBacktest {
-  matchesWithTicket: number;
+  weeksScanned: number;
+  ticketsBuilt: number;
   won: number;
   lost: number;
   pending: number;
@@ -833,7 +834,8 @@ export default function ValueAccumulatorPage() {
                 <div style={{ fontSize: 16, fontWeight: 700, color: "#111827" }}>Ticket Backtest</div>
                 {ticketBacktestStatus === "done" && ticketBacktestResult?.ticketBacktest && (
                   <div style={{ fontSize: 13, color: "#6b7280", marginTop: 4 }}>
-                    {ticketBacktestResult.ticketBacktest.matchesWithTicket} matches with a ticket ·{" "}
+                    {ticketBacktestResult.ticketBacktest.weeksScanned} weeks ·{" "}
+                    {ticketBacktestResult.ticketBacktest.ticketsBuilt} tickets ·{" "}
                     {ticketBacktestResult.ticketBacktest.won} won ·{" "}
                     {ticketBacktestResult.ticketBacktest.lost} lost ·{" "}
                     {ticketBacktestResult.ticketBacktest.pending} pending
@@ -947,7 +949,7 @@ export default function ValueAccumulatorPage() {
                                 ? { bg: "#fef2f2", fg: "#dc2626" }
                                 : { bg: "#f3f4f6", fg: "#6b7280" };
                             return (
-                              <tr key={`${t.matchLabel}-${idx}`} style={{ borderBottom: "1px solid #f3f4f6" }}>
+                              <tr key={`${t.weekLabel}-${idx}`} style={{ borderBottom: "1px solid #f3f4f6" }}>
                                 <td style={{ padding: "10px 6px", color: "#111827", fontWeight: 600 }}>
                                   {t.legsCount}
                                 </td>

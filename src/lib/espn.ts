@@ -353,6 +353,21 @@ export interface MatchSummary {
   homeFormation:   string | null;
   awayFormation:   string | null;
   venue:           string | null;
+  boxscore:        EspnBoxscoreStats | null;
+}
+
+/**
+ * Per-team set-piece/discipline counts from the ESPN summary boxscore.
+ * Every field is null when the boxscore omits that stat — null means "no
+ * data", never zero, so settlement can tell 0 cards apart from a missing feed.
+ */
+export interface EspnBoxscoreStats {
+  homeCorners:     number | null;
+  awayCorners:     number | null;
+  homeYellowCards: number | null;
+  awayYellowCards: number | null;
+  homeRedCards:    number | null;
+  awayRedCards:    number | null;
 }
 
 // ─── ESPN Summary API shapes ──────────────────────────────────────────────────
@@ -399,6 +414,13 @@ interface EspnSummary {
     }>;
   }>;
   gameInfo?: { venue?: { fullName?: string } };
+  boxscore?: {
+    teams?: Array<{
+      homeAway?:   string;
+      team?:       { displayName?: string };
+      statistics?: Array<{ name?: string; displayValue?: string }>;
+    }>;
+  };
 }
 
 // ─── Form builder ────────────────────────────────────────────────────────────
@@ -430,6 +452,41 @@ function buildForm(entry: EspnFormEntry): TeamForm | null {
 
   const n = games.length || 1;
   return { teamId, teamName: entry.team.displayName ?? "", games, gfAvg: gf / n, gaAvg: ga / n, points: pts };
+}
+
+// ─── Boxscore builder ────────────────────────────────────────────────────────
+
+function parseBoxscoreStat(
+  stats: Array<{ name?: string; displayValue?: string }> | undefined,
+  statName: string,
+): number | null {
+  const entry = stats?.find((s) => s.name === statName);
+  if (!entry) return null;
+  const value = Number(entry.displayValue);
+  return Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+/**
+ * Read the corners/cards counts out of an ESPN summary payload's boxscore.
+ * Sides resolve by `homeAway` with an index fallback (home first), mirroring
+ * the settlement boxscore reader. Null when the payload carries no boxscore
+ * or none of the stats we read — callers treat that as "no data".
+ */
+function parseSummaryBoxscore(data: EspnSummary): EspnBoxscoreStats | null {
+  const teams = data.boxscore?.teams;
+  if (!teams || teams.length < 2) return null;
+  const home = teams.find((t) => t.homeAway === "home") ?? teams[0];
+  const away = teams.find((t) => t.homeAway === "away") ?? teams[1];
+  const stats: EspnBoxscoreStats = {
+    homeCorners:     parseBoxscoreStat(home.statistics, "wonCorners"),
+    awayCorners:     parseBoxscoreStat(away.statistics, "wonCorners"),
+    homeYellowCards: parseBoxscoreStat(home.statistics, "yellowCards"),
+    awayYellowCards: parseBoxscoreStat(away.statistics, "yellowCards"),
+    homeRedCards:    parseBoxscoreStat(home.statistics, "redCards"),
+    awayRedCards:    parseBoxscoreStat(away.statistics, "redCards"),
+  };
+  const hasAny = Object.values(stats).some((v) => v !== null);
+  return hasAny ? stats : null;
 }
 
 // ─── Public: match summary ────────────────────────────────────────────────────
@@ -481,6 +538,7 @@ export async function fetchSummary(slug: string, eventId: string): Promise<Match
     homeFormation,
     awayFormation,
     venue:           data.gameInfo?.venue?.fullName ?? null,
+    boxscore:        parseSummaryBoxscore(data),
   };
 }
 
