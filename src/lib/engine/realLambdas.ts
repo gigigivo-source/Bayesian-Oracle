@@ -13,6 +13,41 @@ import type { CanonicalMatchStats } from "../data/types";
 // Mesh profiles carry an optional list of contributing real-data providers.
 type ProfileWithProviders = TeamStatProfile & { providers?: string[] };
 
+/**
+ * Corner λ ceilings.
+ *
+ * No team averages more than ~9 corners in a match over a season and no match
+ * averages more than ~13, so anything above these numbers is a small-sample
+ * artifact of the mesh blend rather than a real expectation.
+ */
+export const MAX_TEAM_CORNERS  = 9.0;
+export const MAX_TOTAL_CORNERS = 13.0;
+
+/**
+ * Sample-size-aware shrinkage of the model corner λ toward the mesh mean.
+ *
+ * The generic blend() below applies a fixed 65% mesh weight no matter how many
+ * matches the mesh actually saw. Corners have huge match-to-match variance
+ * (std ≈ 3–4 on a mean of ~5), so a 5-match mesh mean is mostly noise and
+ * trusting it at 65% manufactures fake Over/Under edges. The weight here grows
+ * with the sample size and saturates at 0.65 — n / (n + 10):
+ *
+ *   n = 5  → 0.33     n = 10 → 0.50     n = 20 → 0.65 (saturation)
+ *
+ * The result is hard-capped at MAX_TEAM_CORNERS: no team averages more than 9
+ * corners per match, so a mesh mean of 15 (a 3-match hot streak) must not be
+ * able to push the λ above it.
+ *
+ * Pure and exported so the shrinkage is unit-testable in isolation.
+ */
+export function shrinkCorners(model: number, meshMean: number, samples: number): number {
+  const n = Number.isFinite(samples) ? Math.max(0, samples) : 0;
+  if (!(meshMean > 0) || n <= 0) return Math.min(model, MAX_TEAM_CORNERS);
+  const meshWeight = Math.min(0.65, n / (n + 10));
+  const blended    = model * (1 - meshWeight) + meshMean * meshWeight;
+  return Math.min(blended, MAX_TEAM_CORNERS);
+}
+
 export interface RealProfiles {
   home: ProfileWithProviders | null;
   away: ProfileWithProviders | null;
@@ -448,6 +483,8 @@ export function buildRealLambdas(
   }
 
   // ── Step 4: Blend real per-team stat distributions (65% real / 35% model) ─
+  // Corners are the exception: they use sample-size-aware shrinkage with a
+  // per-team ceiling instead of the fixed 65% weight (see shrinkCorners).
   const blend = (model: number, real: number | undefined, w = 0.65) =>
     real && real > 0 ? model * (1 - w) + real * w : model;
 
@@ -455,7 +492,7 @@ export function buildRealLambdas(
     const p = profiles.home;
     sec.homeShots    = blend(sec.homeShots,    p.shots.mean);
     sec.homeSot      = blend(sec.homeSot,      p.sot.mean);
-    sec.homeCorners  = blend(sec.homeCorners,  p.corners.mean);
+    sec.homeCorners  = shrinkCorners(sec.homeCorners, p.corners.mean, p.samples);
     sec.homeCards    = blend(sec.homeCards,    p.cards.mean);
     sec.homeFouls    = blend(sec.homeFouls,    p.fouls.mean);
     sec.homeOffsides = blend(sec.homeOffsides, p.offsides.mean);
@@ -470,7 +507,7 @@ export function buildRealLambdas(
     const p = profiles.away;
     sec.awayShots    = blend(sec.awayShots,    p.shots.mean);
     sec.awaySot      = blend(sec.awaySot,      p.sot.mean);
-    sec.awayCorners  = blend(sec.awayCorners,  p.corners.mean);
+    sec.awayCorners  = shrinkCorners(sec.awayCorners, p.corners.mean, p.samples);
     sec.awayCards    = blend(sec.awayCards,    p.cards.mean);
     sec.awayFouls    = blend(sec.awayFouls,    p.fouls.mean);
     sec.awayOffsides = blend(sec.awayOffsides, p.offsides.mean);
@@ -479,6 +516,19 @@ export function buildRealLambdas(
     completeness += 12;
     const src = (profiles.away as ProfileWithProviders).providers?.join(" + ") ?? "ESPN";
     notes.push(`REAL DATA [${src}]: ${fx.away.name} last-${p.samples} spreads (shots ${p.shots.mean.toFixed(1)}±${p.shots.std.toFixed(1)}, corners ${p.corners.mean.toFixed(1)}±${p.corners.std.toFixed(1)}, cards ${p.cards.mean.toFixed(1)}±${p.cards.std.toFixed(1)}).`);
+  }
+
+  // ── Step 4b: total corners ceiling ─────────────────────────────────────────
+  // No match averages more than 13 corners over a season. When the two team
+  // λ's sum past that, scale both down proportionally — the surplus is a
+  // small-sample artifact of the mesh blend, not signal.
+  const rawTotalCorners = sec.homeCorners + sec.awayCorners;
+  const expTotalCorners = Math.min(rawTotalCorners, MAX_TOTAL_CORNERS);
+  if (expTotalCorners < rawTotalCorners) {
+    const cornerScale = expTotalCorners / rawTotalCorners;
+    sec.homeCorners *= cornerScale;
+    sec.awayCorners *= cornerScale;
+    notes.push(`CORNERS CAP: model total ${rawTotalCorners.toFixed(2)} exceeds the ${MAX_TOTAL_CORNERS.toFixed(1)} seasonal maximum — scaled ×${cornerScale.toFixed(2)} to ${expTotalCorners.toFixed(2)} (home ${sec.homeCorners.toFixed(2)} / away ${sec.awayCorners.toFixed(2)}).`);
   }
 
   notes.push(`Adjusted λ: Goals ${homeGoals.toFixed(2)}–${awayGoals.toFixed(2)} | importance ×${importanceMult.toFixed(2)} | tactical ×${tacticalGoalMult.toFixed(2)} | player form ×${playerGoalBoostHome.toFixed(2)}/${playerGoalBoostAway.toFixed(2)}.`);

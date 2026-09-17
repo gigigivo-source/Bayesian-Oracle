@@ -106,6 +106,20 @@ function familyCapExceeded(legs: VaLeg[]): boolean {
   return Array.from(counts.values()).some((n) => n > FAMILY_CAP);
 }
 
+/**
+ * ONE LEG PER MATCH — a ticket carries at most one leg from any given
+ * eventId, full stop (both value and stack mode).
+ *
+ * Two legs from the same match (the Roma corners + Roma goals double, say)
+ * are not independent legs: they are the same 90 minutes priced twice, so
+ * they win or lose together and the per-leg correlation discount above badly
+ * under-prices the combined risk. The FAMILY CAP below is a separate rule —
+ * it limits each stat family to 2 legs *across different matches*.
+ */
+function eventSeen(ticket: VaLeg[], leg: VaLeg): boolean {
+  return ticket.some((l) => l.eventId === leg.eventId);
+}
+
 export function getWeekStartForLegs(legs: VaLeg[]): string {
   if (legs.length === 0) {
     // default to current week's Monday CAT
@@ -238,7 +252,8 @@ export function buildTickets(legs: VaLeg[], mode: "value" | "stack" = "value"): 
       if (i === seedIdx) continue;
       const candidate = sorted[i];
       if ((appearanceCount.get(candidate) ?? 0) >= 2) continue; // appear in ≤2 tickets total
-      if (currentTicket.some((l) => l.eventId === candidate.eventId)) continue;
+      // ONE LEG PER MATCH: reject any candidate whose eventId is already in the ticket.
+      if (eventSeen(currentTicket, candidate)) continue;
       // FAMILY CAP: at most 2 legs from the same statFamily in one ticket.
       if (currentTicket.filter((l) => l.statFamily === candidate.statFamily).length >= FAMILY_CAP) continue;
 
@@ -455,9 +470,9 @@ function buildStackTickets(legs: VaLeg[]): VaTicket[] {
 
   const remainingStackCount = () => sorted.filter((_, idx) => !usedStackIndices.has(idx)).length;
 
-  // Stack-mode shape rule: at most 1 leg per (eventId, statFamily) pair.
-  const pairSeen = (ticket: VaLeg[], leg: VaLeg) =>
-    ticket.some((l) => l.eventId === leg.eventId && l.statFamily === leg.statFamily);
+  // Stack-mode shape rule: ONE LEG PER MATCH — at most 1 leg per eventId,
+  // regardless of stat family (was: at most 1 per (eventId, statFamily) pair,
+  // which let the same match contribute two legs).
 
   while (remainingStackCount() > 0) {
     const currentTicket: VaLeg[] = [];
@@ -466,7 +481,8 @@ function buildStackTickets(legs: VaLeg[]): VaTicket[] {
     for (let i = 0; i < sorted.length && currentTicket.length < 8; i++) {
       if (usedStackIndices.has(i)) continue;
       const candidate = sorted[i];
-      if (pairSeen(currentTicket, candidate)) continue;
+      // ONE LEG PER MATCH: reject any candidate whose eventId is already in the ticket.
+      if (eventSeen(currentTicket, candidate)) continue;
       // FAMILY CAP: at most 2 legs from the same statFamily in one ticket.
       if (currentTicket.filter((l) => l.statFamily === candidate.statFamily).length >= FAMILY_CAP) continue;
 
@@ -511,11 +527,10 @@ function buildStackTickets(legs: VaLeg[]): VaTicket[] {
 
     function consider(combo: VaLeg[]) {
       if (combo.length === 0 || combo.length > 8) return;
-      const pairs = new Set<string>();
+      const events = new Set<string>();
       for (const l of combo) {
-        const key = `${l.eventId}|${l.statFamily}`;
-        if (pairs.has(key)) return; // at most 1 leg per (eventId, statFamily) pair
-        pairs.add(key);
+        if (events.has(l.eventId)) return; // ONE LEG PER MATCH
+        events.add(l.eventId);
       }
       if (familyCapExceeded(combo)) return; // FAMILY CAP
       const prod = combo.reduce((acc, l) => acc * l.bookmakerOdds, 1);
@@ -535,7 +550,7 @@ function buildStackTickets(legs: VaLeg[]): VaTicket[] {
     let gOdds = 1;
     for (const candidate of sorted) {
       if (greedy.length >= 8) break;
-      if (pairSeen(greedy, candidate)) continue;
+      if (eventSeen(greedy, candidate)) continue; // ONE LEG PER MATCH
       if (greedy.filter((l) => l.statFamily === candidate.statFamily).length >= FAMILY_CAP) continue; // FAMILY CAP
       const tentative = gOdds * candidate.bookmakerOdds;
       if (tentative > 7.5) continue;

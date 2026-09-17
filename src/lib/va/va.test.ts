@@ -7,7 +7,11 @@ import {
   type BacktestMatchResult,
   marketKeyOf,
   applyMarketCorrection,
+  capModelProbability,
+  MAX_LEG_MODEL_PROBABILITY,
 } from "./scanner";
+import type { FixtureLite } from "@/lib/espn";
+import type { StatDistribution, TeamStatProfile } from "@/lib/engine/sofascore";
 
 // scanner.ts pulls in the db layer at module scope; stub it for unit tests without DATABASE_URL.
 vi.mock("@/db", () => ({
@@ -886,5 +890,268 @@ describe("Engine — xG preference chain (realLambdas)", () => {
     // Legacy attach (no source key) still reports the plain bzzoiro layer.
     const legacy = resolveRealXg({ __homeXg: 1.85 } as never, null, undefined);
     expect(legacy.xgSource).toBe("bzzoiro");
+  });
+});
+
+// ─── Corners mesh shrinkage, one leg per match, leg probability cap ───────────
+//
+// FIX 1 — realLambdas.shrinkCorners(): sample-size-aware shrinkage of the model
+// corner λ toward the mesh mean, with per-team (9.0) and per-match (13.0)
+// ceilings. Corners swing 3-4 per match on a mean of ~5, so a 5-match mesh mean
+// must not be trusted at the fixed 0.65 weight the other stats use.
+//
+// FIX 2 — ticket.ts: at most one leg per eventId, full stop (both modes).
+//
+// FIX 3 — scanner.ts: a leg's model probability is capped at 0.90 before the EV
+// maths and before it is stored / ticketed.
+
+describe("Engine — corners mesh shrinkage (realLambdas)", () => {
+  it("1. blends with weight samples/(samples+10): 5 matches → 5/15, giving 5.83 not 6.625", async () => {
+    const { shrinkCorners } = await import("@/lib/engine/realLambdas");
+
+    const modelCorners = 5.0;
+    const meshMean     = 7.5;
+    const samples      = 5;
+
+    // meshWeight = min(0.65, 5 / 15) = 1/3
+    const blended = shrinkCorners(modelCorners, meshMean, samples);
+
+    expect(blended).toBeCloseTo(5.0 * (1 - 5 / 15) + 7.5 * (5 / 15), 6); // 5.8333
+    expect(blended).toBeCloseTo(5.83, 2);
+
+    // The old fixed-0.65 weight gave 6.625 — the shrinkage must NOT.
+    const oldFixedWeight = modelCorners * 0.35 + meshMean * 0.65;
+    expect(oldFixedWeight).toBeCloseTo(6.625, 3);
+    expect(blended).not.toBeCloseTo(oldFixedWeight, 2);
+    expect(blended).toBeLessThan(oldFixedWeight);
+  });
+
+  it("1b. the weight grows with the sample size and saturates at 0.65", async () => {
+    const { shrinkCorners } = await import("@/lib/engine/realLambdas");
+
+    // n = 20 → 20/30 = 0.65, i.e. the old fixed weight is the large-sample limit.
+    expect(shrinkCorners(5.0, 7.5, 20)).toBeCloseTo(5.0 * 0.35 + 7.5 * 0.65, 6);
+    expect(shrinkCorners(5.0, 7.5, 40)).toBeCloseTo(shrinkCorners(5.0, 7.5, 20), 6);
+
+    // Small samples trust the mesh less than large ones.
+    expect(shrinkCorners(5.0, 7.5, 5)).toBeLessThan(shrinkCorners(5.0, 7.5, 10));
+    expect(shrinkCorners(5.0, 7.5, 10)).toBeLessThan(shrinkCorners(5.0, 7.5, 20));
+  });
+
+  it("2. never exceeds 9.0 per team, even when the mesh mean is a wild 15", async () => {
+    const { shrinkCorners, MAX_TEAM_CORNERS } = await import("@/lib/engine/realLambdas");
+
+    expect(MAX_TEAM_CORNERS).toBe(9.0);
+
+    // Large sample → weight 0.65 → 5.0*0.35 + 15*0.65 = 11.5 → capped at 9.0.
+    const large = shrinkCorners(5.0, 15, 40);
+    expect(large).toBe(MAX_TEAM_CORNERS);
+    expect(large).toBeLessThan(5.0 * 0.35 + 15 * 0.65);
+
+    // Small sample, same wild mean → 5.0*(2/3) + 15*(1/3) = 8.33, under the cap.
+    const small = shrinkCorners(5.0, 15, 5);
+    expect(small).toBeCloseTo(5.0 * (1 - 5 / 15) + 15 * (5 / 15), 6);
+    expect(small).toBeLessThanOrEqual(MAX_TEAM_CORNERS);
+    expect(small).toBeLessThan(large);
+  });
+
+  // End-to-end through the shipped builder: a Serie A fixture whose mesh claims
+  // 15 corners per match for both sides (a small-sample hot streak).
+  function serieAFixture(): FixtureLite {
+    const team = (side: "home" | "away", name: string, abbrev: string) => ({
+      id: `${side}-id`, name, shortName: name, abbrev,
+      logo: null, color: null, score: null, homeAway: side,
+    });
+    return {
+      id: "serie-a-1",
+      leagueSlug: "ita.1",
+      leagueName: "Serie A",
+      date: "2026-09-20T18:45:00Z",
+      state: "pre",
+      statusDetail: "Scheduled",
+      venue: null,
+      home: team("home", "Roma", "ROM"),
+      away: team("away", "Inter Milan", "INT"),
+      neutralSite: false,
+    } as unknown as FixtureLite;
+  }
+
+  function profile(samples: number, cornersMean: number): TeamStatProfile {
+    const d = (mean: number): StatDistribution => ({ mean, std: mean * 0.35, n: samples });
+    return {
+      teamId: "team-1", samples,
+      shots: d(12.5), sot: d(4.4), corners: d(cornersMean), cards: d(2.1),
+      fouls: d(11.5), offsides: d(2.0), saves: d(3.1), possession: d(50),
+      passes: d(420), passAccuracy: d(82), crosses: d(16), longBalls: d(24),
+      tackles: d(16), clearances: d(18), interceptions: d(11), blockedShots: d(4),
+    };
+  }
+
+  it("2b. end-to-end: buildRealLambdas caps team corners at 9.0 and the match total at 13.0", async () => {
+    const { buildRealLambdas, MAX_TEAM_CORNERS, MAX_TOTAL_CORNERS } =
+      await import("@/lib/engine/realLambdas");
+
+    const { lam, notes } = buildRealLambdas(serieAFixture(), null, {
+      home: profile(40, 15),
+      away: profile(40, 15),
+    });
+
+    // Uncapped this would be 5.3*0.35 + 15*0.65 ≈ 11.6 per side (23.2 in total).
+    expect(lam.homeCorners).toBeLessThanOrEqual(MAX_TEAM_CORNERS);
+    expect(lam.awayCorners).toBeLessThanOrEqual(MAX_TEAM_CORNERS);
+    expect(lam.homeCorners + lam.awayCorners).toBeCloseTo(MAX_TOTAL_CORNERS, 6);
+    expect(notes.some((n) => n.startsWith("CORNERS CAP"))).toBe(true);
+  });
+
+  it("2c. end-to-end: a 5-match mesh pulls the corners λ toward its mean far less than a 40-match mesh", async () => {
+    const { buildRealLambdas } = await import("@/lib/engine/realLambdas");
+
+    // Mesh mean well below the model λ, and low enough that neither the 9.0
+    // team cap nor the 13.0 total cap binds — so what is measured here is the
+    // sample-size shrinkage itself.
+    const base  = buildRealLambdas(serieAFixture(), null, undefined);
+    const thin  = buildRealLambdas(serieAFixture(), null, { home: profile(5, 3),  away: profile(5, 3)  });
+    const thick = buildRealLambdas(serieAFixture(), null, { home: profile(40, 3), away: profile(40, 3) });
+
+    const modelHome = base.lam.homeCorners;
+    expect(modelHome).toBeGreaterThan(thin.lam.homeCorners);   // the mesh does pull it down
+    expect(thin.lam.homeCorners).toBeGreaterThan(thick.lam.homeCorners);
+
+    // Distance from the model λ shrinks as the sample grows.
+    expect(Math.abs(thin.lam.homeCorners - modelHome))
+      .toBeLessThan(Math.abs(thick.lam.homeCorners - modelHome));
+  });
+
+  it("2d. end-to-end: the 13.0 total ceiling dominates even when the team cap does not bind first", async () => {
+    const { buildRealLambdas, MAX_TOTAL_CORNERS } = await import("@/lib/engine/realLambdas");
+
+    // A 5-match mesh of 15 corners: weight 1/3 gives ~8.6/~8.2 per side, so the
+    // 9.0 team cap never fires — but 16.8 in total still breaches the ceiling.
+    const thin = buildRealLambdas(serieAFixture(), null, { home: profile(5, 15), away: profile(5, 15) });
+
+    expect(thin.lam.homeCorners).toBeLessThan(9.0);
+    expect(thin.lam.homeCorners + thin.lam.awayCorners).toBeCloseTo(MAX_TOTAL_CORNERS, 6);
+    expect(thin.notes.some((n) => n.startsWith("CORNERS CAP"))).toBe(true);
+  });
+});
+
+describe("Value Accumulator — one leg per eventId", () => {
+  function leg(overrides: Partial<VaLeg> & { eventId: string }): VaLeg {
+    const kickoff = overrides.kickoff ?? new Date("2026-09-20T18:45:00Z");
+    const bookmakerOdds = overrides.bookmakerOdds ?? 1.28;
+    return {
+      scanId: "scan_x",
+      eventId: overrides.eventId,
+      matchLabel: `${overrides.homeTeam ?? "H"} vs ${overrides.awayTeam ?? "A"}`,
+      homeTeam: overrides.homeTeam ?? "H",
+      awayTeam: overrides.awayTeam ?? "A",
+      leagueSlug: "ita.1",
+      kickoff,
+      market: overrides.market ?? "Total Corners O/U 9.5",
+      selection: overrides.selection ?? "Over 9.5",
+      statFamily: overrides.statFamily ?? "corners",
+      modelProbability: overrides.modelProbability ?? 0.85,
+      bookmakerOdds,
+      bookmakerName: "1xBet",
+      impliedProbability: 1 / bookmakerOdds,
+      ev: overrides.ev ?? 0.088,
+      oddsAtBuild: new Date("2026-09-18T09:00:00Z"),
+      scannedAt: new Date("2026-09-18T09:00:00Z"),
+    };
+  }
+
+  it("3. stack mode: 2 legs from the same eventId → only 1 enters the ticket", () => {
+    // The two Roma/Inter legs are the top-2 by EV, so the greedy fill is
+    // actively tempted to take both. Under the old rule (1 leg per
+    // eventId+family pair) the stack came out with 8 legs; the second Roma leg
+    // must now be rejected.
+    const legs: VaLeg[] = [
+      leg({ eventId: "roma-inter", statFamily: "corners", ev: 0.095, homeTeam: "Roma", awayTeam: "Inter Milan" }),
+      leg({ eventId: "roma-inter", statFamily: "goals",   ev: 0.090, homeTeam: "Roma", awayTeam: "Inter Milan" }),
+      leg({ eventId: "juve-milan", statFamily: "cards",   ev: 0.088, homeTeam: "Juventus", awayTeam: "Milan" }),
+      leg({ eventId: "napoli-lazio", statFamily: "shots", ev: 0.087, homeTeam: "Napoli", awayTeam: "Lazio" }),
+      leg({ eventId: "atalanta-fiore", statFamily: "goals", ev: 0.086, homeTeam: "Atalanta", awayTeam: "Fiorentina" }),
+      leg({ eventId: "bologna-torino", statFamily: "corners", ev: 0.085, homeTeam: "Bologna", awayTeam: "Torino" }),
+      leg({ eventId: "udinese-como", statFamily: "cards", ev: 0.084, homeTeam: "Udinese", awayTeam: "Como" }),
+      leg({ eventId: "genoa-parma", statFamily: "shots", ev: 0.083, homeTeam: "Genoa", awayTeam: "Parma" }),
+    ];
+
+    const tickets = buildTickets(legs, "stack");
+
+    expect(tickets.length).toBeGreaterThan(0);
+    for (const ticket of tickets) {
+      const ids = ticket.legs.map((l) => l.eventId);
+      // One leg per match, full stop.
+      expect(new Set(ids).size).toBe(ids.length);
+      expect(ids.filter((id) => id === "roma-inter")).toHaveLength(1);
+    }
+    // The rejected twin leg leaves the stack one leg short of the 8 it had before.
+    expect(tickets[0].legs).toHaveLength(7);
+  });
+
+  it("3b. value mode: 2 legs from the same eventId → only 1 enters the ticket", () => {
+    const legs: VaLeg[] = [
+      leg({ eventId: "roma-inter", statFamily: "corners", ev: 0.30, bookmakerOdds: 1.5, homeTeam: "Roma", awayTeam: "Inter Milan" }),
+      leg({ eventId: "roma-inter", statFamily: "goals",   ev: 0.29, bookmakerOdds: 1.5, homeTeam: "Roma", awayTeam: "Inter Milan" }),
+      leg({ eventId: "juve-milan", statFamily: "cards",   ev: 0.28, bookmakerOdds: 1.5, homeTeam: "Juventus", awayTeam: "Milan" }),
+      leg({ eventId: "napoli-lazio", statFamily: "shots", ev: 0.27, bookmakerOdds: 1.5, homeTeam: "Napoli", awayTeam: "Lazio" }),
+    ];
+
+    const tickets = buildTickets(legs, "value");
+
+    expect(tickets.length).toBeGreaterThan(0);
+    for (const ticket of tickets) {
+      const ids = ticket.legs.map((l) => l.eventId);
+      expect(new Set(ids).size).toBe(ids.length);
+      expect(ids.filter((id) => id === "roma-inter")).toHaveLength(1);
+    }
+  });
+
+  it("3c. the family cap of 2 still applies across different matches", () => {
+    const legs: VaLeg[] = [
+      leg({ eventId: "m1", statFamily: "corners", ev: 0.095, homeTeam: "T1", awayTeam: "T2" }),
+      leg({ eventId: "m2", statFamily: "corners", ev: 0.090, homeTeam: "T3", awayTeam: "T4" }),
+      leg({ eventId: "m3", statFamily: "corners", ev: 0.088, homeTeam: "T5", awayTeam: "T6" }),
+      leg({ eventId: "m4", statFamily: "goals",   ev: 0.087, homeTeam: "T7", awayTeam: "T8" }),
+      leg({ eventId: "m5", statFamily: "cards",   ev: 0.086, homeTeam: "T9", awayTeam: "T10" }),
+      leg({ eventId: "m6", statFamily: "shots",   ev: 0.085, homeTeam: "T11", awayTeam: "T12" }),
+      leg({ eventId: "m7", statFamily: "goals",   ev: 0.084, homeTeam: "T13", awayTeam: "T14" }),
+    ];
+
+    const tickets = buildTickets(legs, "stack");
+
+    expect(tickets.length).toBeGreaterThan(0);
+    for (const ticket of tickets) {
+      const ids = ticket.legs.map((l) => l.eventId);
+      expect(new Set(ids).size).toBe(ids.length);
+      const corners = ticket.legs.filter((l) => l.statFamily === "corners").length;
+      expect(corners).toBeLessThanOrEqual(2);
+    }
+  });
+});
+
+describe("Value Accumulator — leg probability cap", () => {
+  it("4. a leg with hitRate 0.95 is capped at 0.90 before the EV maths", () => {
+    expect(MAX_LEG_MODEL_PROBABILITY).toBe(0.90);
+
+    const hitRate = 0.95;
+    const odds    = 1.10; // what a 95% corners leg is priced at
+
+    const cappedProb = capModelProbability(hitRate);
+    expect(cappedProb).toBe(0.90);
+
+    // Uncapped, the leg looks like +4.5% EV and would clear the 0.03 value gate;
+    // capped, the same leg is negative EV and is correctly rejected.
+    expect(hitRate * odds - 1).toBeCloseTo(0.045, 3);
+    expect(hitRate * odds - 1).toBeGreaterThan(0.03);
+    expect(cappedProb * odds - 1).toBeCloseTo(-0.01, 3);
+    expect(cappedProb * odds - 1).toBeLessThan(0);
+  });
+
+  it("4b. probabilities at or below 0.90 pass through untouched", () => {
+    expect(capModelProbability(0.90)).toBe(0.90);
+    expect(capModelProbability(0.85)).toBe(0.85);
+    expect(capModelProbability(0.62)).toBe(0.62);
+    expect(capModelProbability(0.98)).toBe(0.90);
   });
 });
