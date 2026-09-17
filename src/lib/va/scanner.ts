@@ -10,7 +10,13 @@ import {
   type BzzoiroResolution,
   type VaBookmakerOdds,
 } from "./oddsFetcher";
-import { fetchMatchXg } from "./xgFetcher";
+import {
+  fetchEventDetail,
+  fetchMatchTeamXg,
+  fetchMatchXg,
+  type TeamXgAverage,
+  type XgResult,
+} from "./xgFetcher";
 import { matchEngineMarketToBookmaker, type TeamContext } from "./marketMap";
 import { buildTickets, getWeekStartForLegs, type VaLeg, type VaTicket, type VaTicketLeg } from "./ticket";
 import { db } from "@/db";
@@ -22,6 +28,112 @@ function optionalEngineExport(name: string): unknown {
   } catch {
     return undefined;
   }
+}
+
+// ─── xG attachment (Bzzoiro) ──────────────────────────────────────────────────
+
+/**
+ * Normalised xG attachment handed to the engine's lambda grounding
+ * (realLambdas reads sum.__homeXg / sum.__awayXg — layer 1 of the xG chain —
+ * and sum.__homeXgSource for logging).
+ */
+interface VaXgAttachment {
+  homeXg: number | null;
+  awayXg: number | null;
+  homeSamples: number;
+  awaySamples: number;
+  source: "bzzoiro-match" | "bzzoiro-team-avg" | null;
+}
+
+const NO_XG: VaXgAttachment = {
+  homeXg: null,
+  awayXg: null,
+  homeSamples: 0,
+  awaySamples: 0,
+  source: null,
+};
+
+function xgFromTeamAverages(xgData: {
+  home: TeamXgAverage | null;
+  away: TeamXgAverage | null;
+}): VaXgAttachment {
+  return {
+    homeXg: xgData.home?.xgFor ?? null,
+    awayXg: xgData.away?.xgFor ?? null,
+    homeSamples: xgData.home?.samples ?? 0,
+    awaySamples: xgData.away?.samples ?? 0,
+    source: xgData.home || xgData.away ? "bzzoiro-team-avg" : null,
+  };
+}
+
+/**
+ * LIVE path: /events/{id}/stats/ is null until the match is finished, so
+ * upcoming fixtures are grounded with rolling team xG averages instead —
+ * GET /events/{id}/ for the team ids, then each side's last 5 finished
+ * matches (fetchMatchTeamXg). Fail soft: NO_XG on any error.
+ */
+async function fetchLiveXg(bzEventId: string): Promise<VaXgAttachment> {
+  try {
+    const evt = await fetchEventDetail(bzEventId);
+    if (evt?.homeTeamId == null || evt?.awayTeamId == null) return NO_XG;
+    return xgFromTeamAverages(await fetchMatchTeamXg(evt.homeTeamId, evt.awayTeamId, 5));
+  } catch {
+    return NO_XG;
+  }
+}
+
+/**
+ * BACKTEST path: the match is finished, so /events/{id}/stats/ now carries the
+ * real per-match xG (fetchMatchXg). When it returns nothing (stats not
+ * populated, thin coverage), fall back to the same rolling team averages as
+ * the live path — keeps backtest grounding consistent with live.
+ */
+async function fetchFinishedXg(bzEventId: string): Promise<VaXgAttachment> {
+  let xgMatch: XgResult | null = null;
+  try {
+    xgMatch = await fetchMatchXg(bzEventId);
+  } catch {
+    xgMatch = null;
+  }
+  if (xgMatch) {
+    return {
+      homeXg: xgMatch.homeXg,
+      awayXg: xgMatch.awayXg,
+      homeSamples: xgMatch.homeXg != null ? 1 : 0,
+      awaySamples: xgMatch.awayXg != null ? 1 : 0,
+      source: xgMatch.source,
+    };
+  }
+  return fetchLiveXg(bzEventId);
+}
+
+/** Attach the xG keys to the summary object; Object.assign preserves every original field for other callers. */
+function attachXgToSummary(summary: MatchSummary | null, xg: VaXgAttachment): MatchSummary {
+  return (
+    summary
+      ? Object.assign(Object.create(Object.getPrototypeOf(summary)), summary, {
+          __homeXg: xg.homeXg,
+          __awayXg: xg.awayXg,
+          __homeXgSource: xg.source,
+          __awayXgSource: xg.source,
+        })
+      : {
+          __homeXg: xg.homeXg,
+          __awayXg: xg.awayXg,
+          __homeXgSource: xg.source,
+          __awayXgSource: xg.source,
+        }
+  ) as MatchSummary;
+}
+
+/** One log line whenever xG is attached to a fixture. */
+function logXgAttachment(fx: FixtureLite, xg: VaXgAttachment): void {
+  const fmt = (v: number | null) => (v != null ? v.toFixed(2) : "—");
+  console.log(
+    `[VA][xg] ${fx.home.name} vs ${fx.away.name}: ` +
+      `home=${fmt(xg.homeXg)} away=${fmt(xg.awayXg)} ` +
+      `(samples ${xg.homeSamples}/${xg.awaySamples}${xg.source ? `, ${xg.source}` : ""})`
+  );
 }
 
 const ALLOWED_LEAGUES = new Set([
@@ -435,25 +547,15 @@ async function runScan(fixtures: FixtureLite[], scanId: string, mode: VaScanMode
         summary = null;
       }
 
-      // Fetch xG for this match (fail soft — null if unavailable)
-      let xgData = null;
-      try {
-        xgData = await fetchMatchXg(String(bzEventId));
-      } catch {
-        xgData = null;
-      }
+      // Fetch xG for this match (fail soft — nulls if unavailable).
+      // LIVE path: /events/{id}/stats/ is null until full-time, so ground the
+      // lambdas with rolling team xG averages (last 5 finished matches each).
+      const xgData = await fetchLiveXg(String(bzEventId));
+      logXgAttachment(fx, xgData);
 
       // Attach xG to the summary object so realLambdas can pick it up
       // (read as sum.__homeXg / sum.__awayXg — layer 1 of the xG chain).
-      // Object.assign preserves every original field for other callers.
-      const enrichedSummary = (
-        summary
-          ? Object.assign(Object.create(Object.getPrototypeOf(summary)), summary, {
-              __homeXg: xgData?.homeXg ?? null,
-              __awayXg: xgData?.awayXg ?? null,
-            })
-          : { __homeXg: xgData?.homeXg ?? null, __awayXg: xgData?.awayXg ?? null }
-      ) as MatchSummary;
+      const enrichedSummary = attachXgToSummary(summary, xgData);
 
       const profiledEngine = optionalEngineExport("runEngineFromRealWithProfiles");
       if (typeof profiledEngine === "function") {
@@ -933,25 +1035,17 @@ async function runBacktestScan(fixtures: FixtureLite[], scanId: string): Promise
         summary = null;
       }
 
-      // Fetch xG for this match (fail soft — null if unavailable)
-      let xgData = null;
-      try {
-        xgData = await fetchMatchXg(String(resolution.eventId));
-      } catch {
-        xgData = null;
-      }
+      // Fetch xG for this match (fail soft — nulls if unavailable).
+      // BACKTEST path: the match is finished, so /events/{id}/stats/ now
+      // carries the real per-match xG; fall back to the same rolling team
+      // averages as the live path when it carries nothing (keeps backtest
+      // grounding consistent with live).
+      const xgData = await fetchFinishedXg(String(resolution.eventId));
+      logXgAttachment(fx, xgData);
 
       // Attach xG to the summary object so realLambdas can pick it up
       // (read as sum.__homeXg / sum.__awayXg — layer 1 of the xG chain).
-      // Object.assign preserves every original field for other callers.
-      const enrichedSummary = (
-        summary
-          ? Object.assign(Object.create(Object.getPrototypeOf(summary)), summary, {
-              __homeXg: xgData?.homeXg ?? null,
-              __awayXg: xgData?.awayXg ?? null,
-            })
-          : { __homeXg: xgData?.homeXg ?? null, __awayXg: xgData?.awayXg ?? null }
-      ) as MatchSummary;
+      const enrichedSummary = attachXgToSummary(summary, xgData);
 
       const profiledEngine = optionalEngineExport("runEngineFromRealWithProfiles");
       if (typeof profiledEngine === "function") {

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { matchEngineMarketToBookmaker } from "./marketMap";
 import { buildTickets, type VaLeg } from "./ticket";
 import type { VaBookmakerOdds } from "./oddsFetcher";
@@ -676,5 +676,215 @@ describe("Value Accumulator — Self-learning market reliability", () => {
     };
     const result = applyMarketCorrection(leg, mockStats);
     expect(result.filtered).toBe(true);
+  });
+});
+
+// ─── Bzzoiro xG fetcher + engine xG chain ─────────────────────────────────────
+//
+// The real per-match xG lives at GET /events/{id}/stats/ but every value is
+// null until the match is finished, so the live scanner grounds on rolling
+// team averages (GET /events/?team_id=&status=finished) instead. These tests
+// mock the fetch layer — no real network calls.
+
+describe("Value Accumulator — Bzzoiro xG fetcher", () => {
+  // xgFetcher reads BZOOIRO_BASE at module scope, so every test gets a fresh
+  // copy with the test base URL (same convention as eventResolution.test.ts).
+  async function freshXgModule() {
+    vi.resetModules();
+    return import("./xgFetcher");
+  }
+
+  interface FetchRoute {
+    match: (url: string) => boolean;
+    body: unknown;
+    status?: number;
+  }
+
+  /** Stub global fetch with URL-routed JSON responses; returns the mock. */
+  function stubFetch(routes: FetchRoute[]) {
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      const route = routes.find((r) => r.match(url));
+      if (!route) throw new Error(`unexpected fetch: ${url}`);
+      const status = route.status ?? 200;
+      return {
+        ok: status >= 200 && status < 300,
+        status,
+        json: async () => route.body,
+      } as unknown as Response;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  const statsBody = (home: unknown, away: unknown) => ({
+    stats: { home: { xg: home }, away: { xg: away } },
+  });
+
+  beforeEach(() => {
+    vi.stubEnv("BZOOIRO_KEY", "test-key");
+    vi.stubEnv("BZOOIRO_BASE", "https://sports.bzzoiro.test/api/v2");
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+  });
+
+  it("1. fetchMatchXg returns null when BZOOIRO_KEY is unset", async () => {
+    vi.stubEnv("BZOOIRO_KEY", "");
+    const { fetchMatchXg } = await freshXgModule();
+    const fetchMock = vi.fn(async () => {
+      throw new Error("must not hit the network without a key");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchMatchXg("223510")).resolves.toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("2. fetchMatchXg parses a mocked /events/{id}/stats/ response (actual xG)", async () => {
+    const { fetchMatchXg } = await freshXgModule();
+    const fetchMock = stubFetch([
+      {
+        match: (url) => url.endsWith("/events/223510/stats/"),
+        body: statsBody({ actual: 1.82, estimated: false }, { actual: 0.75, estimated: false }),
+      },
+    ]);
+
+    await expect(fetchMatchXg("223510")).resolves.toEqual({
+      homeXg: 1.82,
+      awayXg: 0.75,
+      source: "bzzoiro-match",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0][0])).toContain("/events/223510/stats/");
+  });
+
+  it("2b. fetchMatchXg falls back to xg.estimated when xg.actual is null", async () => {
+    const { fetchMatchXg } = await freshXgModule();
+    stubFetch([
+      {
+        match: (url) => url.endsWith("/events/223511/stats/"),
+        body: statsBody({ actual: null, estimated: 1.4 }, { actual: null, estimated: null }),
+      },
+    ]);
+
+    // One-sided: the estimated home value is kept, the away side stays null.
+    await expect(fetchMatchXg("223511")).resolves.toEqual({
+      homeXg: 1.4,
+      awayXg: null,
+      source: "bzzoiro-match",
+    });
+  });
+
+  it("3. fetchMatchXg returns null when both xg fields are null", async () => {
+    const { fetchMatchXg } = await freshXgModule();
+    stubFetch([
+      {
+        match: (url) => url.endsWith("/events/999/stats/"),
+        // Upcoming match: every stats value is null until full-time.
+        body: statsBody({ actual: null, estimated: null }, { actual: null, estimated: null }),
+      },
+    ]);
+
+    await expect(fetchMatchXg("999")).resolves.toBeNull();
+  });
+
+  it("4. fetchTeamXgAverage averages xG for across 3 finished matches", async () => {
+    const { fetchTeamXgAverage } = await freshXgModule();
+    const teamId = 101;
+    const fetchMock = stubFetch([
+      {
+        match: (url) =>
+          url.includes(`/events/?team_id=${teamId}`) &&
+          url.includes("status=finished") &&
+          url.includes("limit=5"),
+        body: {
+          count: 3,
+          next: null,
+          previous: null,
+          results: [
+            { id: 3001, home_team_id: 101, away_team_id: 202, event_date: "2026-09-10", status: "finished" },
+            { id: 3002, home_team_id: 202, away_team_id: 101, event_date: "2026-09-03", status: "finished" },
+            { id: 3003, home_team_id: 101, away_team_id: 303, event_date: "2026-08-27", status: "finished" },
+          ],
+        },
+      },
+      { match: (url) => url.endsWith("/events/3001/stats/"), body: statsBody({ actual: 2.0 }, { actual: 1.0 }) },
+      { match: (url) => url.endsWith("/events/3002/stats/"), body: statsBody({ actual: 0.5 }, { actual: 1.5 }) },
+      { match: (url) => url.endsWith("/events/3003/stats/"), body: statsBody({ actual: 1.1 }, { actual: 0.9 }) },
+    ]);
+
+    // Team 101: home in matches 1 & 3, away in match 2.
+    // xgFor     = (2.0 + 1.5 + 1.1) / 3 = 1.53
+    // xgAgainst = (1.0 + 0.5 + 0.9) / 3 = 0.80
+    await expect(fetchTeamXgAverage(teamId, 5)).resolves.toEqual({
+      teamId: 101,
+      xgFor: 1.53,
+      xgAgainst: 0.8,
+      samples: 3,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(4); // 1 team list + 3 match stats
+  });
+
+  it("5. fetchTeamXgAverage returns null when all 3 match stats return null", async () => {
+    const { fetchTeamXgAverage } = await freshXgModule();
+    stubFetch([
+      {
+        match: (url) => url.includes("/events/?team_id=101") && url.includes("status=finished"),
+        body: {
+          count: 3,
+          next: null,
+          previous: null,
+          results: [
+            { id: 3001, home_team_id: 101, away_team_id: 202, event_date: "2026-09-10", status: "finished" },
+            { id: 3002, home_team_id: 202, away_team_id: 101, event_date: "2026-09-03", status: "finished" },
+            { id: 3003, home_team_id: 101, away_team_id: 303, event_date: "2026-08-27", status: "finished" },
+          ],
+        },
+      },
+      {
+        match: (url) => /\/events\/300\d\/stats\/$/.test(url),
+        body: statsBody({ actual: null, estimated: null }, { actual: null, estimated: null }),
+      },
+    ]);
+
+    await expect(fetchTeamXgAverage(101, 5)).resolves.toBeNull();
+  });
+});
+
+describe("Engine — xG preference chain (realLambdas)", () => {
+  it("6. sum.__homeXg = 1.85 → realHomeXG = 1.85", async () => {
+    const { resolveRealXg } = await import("@/lib/engine/realLambdas");
+    const sum = { __homeXg: 1.85, __awayXg: 0.9 } as never;
+
+    const { realHomeXG, realAwayXG } = resolveRealXg(sum, null, undefined);
+    expect(realHomeXG).toBe(1.85);
+    expect(realAwayXG).toBe(0.9);
+  });
+
+  it("6b. __homeXgSource names the grounding layer for logging; without it the layer is 'bzzoiro'", async () => {
+    const { resolveRealXg } = await import("@/lib/engine/realLambdas");
+
+    // Live scanner attaches the rolling-average source label.
+    const live = resolveRealXg(
+      { __homeXg: 1.4, __homeXgSource: "bzzoiro-team-avg" } as never,
+      null,
+      undefined,
+    );
+    expect(live.xgSource).toBe("bzzoiro-team-avg");
+
+    // Backtest attaches the per-match source label.
+    const backtest = resolveRealXg(
+      { __homeXg: 1.82, __homeXgSource: "bzzoiro-match" } as never,
+      null,
+      undefined,
+    );
+    expect(backtest.xgSource).toBe("bzzoiro-match");
+
+    // Legacy attach (no source key) still reports the plain bzzoiro layer.
+    const legacy = resolveRealXg({ __homeXg: 1.85 } as never, null, undefined);
+    expect(legacy.xgSource).toBe("bzzoiro");
   });
 });
