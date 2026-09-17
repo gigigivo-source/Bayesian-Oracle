@@ -7,7 +7,7 @@
 // the single primitive both scanner loops now run on.
 //
 // Contract (mirrors the ticket that introduced it):
-//   RULE 1 — at most `FIXTURE_BATCH_SIZE` (8) fixtures in flight. Bzzoiro's free
+//   RULE 1 — at most `FIXTURE_BATCH_SIZE` (3) fixtures in flight. Bzzoiro's free
 //            tier rate-limits aggressively; more concurrency costs more than it
 //            saves.
 //   RULE 2 — order preservation. The results array is pre-sized and each worker
@@ -24,7 +24,22 @@
 // point.
 
 /** Maximum number of fixtures processed concurrently. */
-export const FIXTURE_BATCH_SIZE = 8;
+export const FIXTURE_BATCH_SIZE = 3;
+
+/** Retry one connection-level failure once; application errors fail fast. */
+export async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (error) {
+    const code = (error as { cause?: { code?: string }; code?: string })?.cause?.code
+      ?? (error as { code?: string })?.code;
+    if (code === "UND_ERR_CONNECT_TIMEOUT" || code === "ECONNRESET" || code === "ETIMEDOUT") {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      return fn();
+    }
+    throw error;
+  }
+}
 
 /**
  * Per-fixture worker. Return `null` to drop the fixture from the compacted
@@ -60,7 +75,7 @@ export async function runFixtureBatches<T, R>(
     await Promise.all(
       batch.map(async (item, j) => {
         try {
-          results[i + j] = await worker(item, i + j);
+          results[i + j] = await withRetry(() => worker(item, i + j));
         } catch (err) {
           // RULE 3 — one fixture failing must not abort the batch.
           console.error(`[VA] fixture ${label(item, i + j)} failed:`, err);
