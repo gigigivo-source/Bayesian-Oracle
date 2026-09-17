@@ -355,6 +355,23 @@ export function applyMarketCorrection(
 }
 
 /**
+ * LEG-LEVEL PROBABILITY CAP.
+ *
+ * A leg claiming 92% on a corners market is priced by the bookmaker at 1.08 or
+ * lower — at or under the 1.03 stack-mode minimum. So a model probability above
+ * 0.90 is either a genuinely safe bet that the book has already priced fairly
+ * (no EV to be had) or the model being overconfident. Either way the "edge" is
+ * fake, so the model probability is capped before the EV calculation and
+ * before the leg is stored / put in a ticket.
+ */
+export const MAX_LEG_MODEL_PROBABILITY = 0.90;
+
+/** Cap a leg's model probability at MAX_LEG_MODEL_PROBABILITY. */
+export function capModelProbability(modelProbability: number): number {
+  return Math.min(modelProbability, MAX_LEG_MODEL_PROBABILITY);
+}
+
+/**
  * A league is declared "not covered by Bzzoiro" once this many of its matches
  * come back with zero events across the widened (±5 day) range. One probe could
  * be a blip (a timeout, a single missing fixture); two in a row is the feed
@@ -613,13 +630,17 @@ async function runScan(fixtures: FixtureLite[], scanId: string, mode: VaScanMode
       }
 
       const adjustedProb = corrResult.adjustedProb;
-      const ev = adjustedProb * realOdds - 1;
+      // LEG CAP: the model probability a leg carries into the EV maths and into
+      // the ticket never exceeds MAX_LEG_MODEL_PROBABILITY (0.90) — see the
+      // constant's doc for why a leg above that is fake EV, not real EV.
+      const cappedProb = capModelProbability(adjustedProb);
+      const ev = cappedProb * realOdds - 1;
       const implied = 1 / realOdds;
 
       // f. Qualify leg only if all true (mode-specific filters).
       if (mode === "stack") {
         if (realOdds < 1.03 || realOdds > 1.70) continue;
-        if (adjustedProb < 0.62) continue;
+        if (cappedProb < 0.62) continue;
         if (statFamily !== "goals" && statFamily !== "cards" && statFamily !== "corners") continue;
         // Stack mode does not apply the EV or isDataQualityOk() gates.
       } else {
@@ -629,7 +650,7 @@ async function runScan(fixtures: FixtureLite[], scanId: string, mode: VaScanMode
         // - 1.30 <= bookmaker_odds <=2.00
         // - Data quality Real or Mixed (Synthetic excluded)
         if (ev <= 0.03) continue;
-        if (adjustedProb < 0.55) continue;
+        if (cappedProb < 0.55) continue;
         if (realOdds < 1.3 || realOdds > 2.0) continue;
         if (!isDataQualityOk(engineResult.match.dataCompletenessScore)) continue;
       }
@@ -645,7 +666,7 @@ async function runScan(fixtures: FixtureLite[], scanId: string, mode: VaScanMode
         market: m.name,
         selection: m.selection,
         statFamily,
-        modelProbability: adjustedProb,
+        modelProbability: cappedProb,
         bookmakerOdds: realOdds,
         bookmakerName: matched.bookmaker,
         impliedProbability: implied,
@@ -1087,7 +1108,10 @@ async function runBacktestScan(fixtures: FixtureLite[], scanId: string): Promise
       if (typeof realOdds !== "number" || !Number.isFinite(realOdds)) continue;
       if (realOdds < 1.03 || realOdds > 1.70) continue;
 
-      const ev = hitRate * realOdds - 1;
+      // LEG CAP: the backtest mirrors the live scanner, so legs carry the same
+      // capped model probability (and the EV that follows from it).
+      const cappedProb = capModelProbability(hitRate);
+      const ev = cappedProb * realOdds - 1;
       const implied = 1 / realOdds;
 
       pooled.push({
@@ -1101,7 +1125,7 @@ async function runBacktestScan(fixtures: FixtureLite[], scanId: string): Promise
         market: m.name,
         selection: m.selection,
         statFamily,
-        modelProbability: hitRate,
+        modelProbability: cappedProb,
         bookmakerOdds: realOdds,
         bookmakerName: matched.bookmaker,
         impliedProbability: implied,
