@@ -84,6 +84,10 @@ const SPORT_KEYS: Record<string, string> = {
   "ita.1": "soccer_italy_serie_a",
   "ger.1": "soccer_germany_bundesliga",
   "fra.1": "soccer_france_ligue_one",
+  "ned.1": "soccer_netherlands_eredivisie",
+  "por.1": "soccer_portugal_primeira_liga",
+  "bel.1": "soccer_belgium_first_div_a",
+  "tur.1": "soccer_turkey_super_lig",
   "uefa.champions": "soccer_uefa_champs_league",
   "uefa.europa": "soccer_uefa_europa_league",
 };
