@@ -289,12 +289,13 @@ export interface MarketStatItem {
 function aggregateByFamily(
   stats: Map<string, MarketStatItem>,
   targetFamily: string
-): { n: number; claimedSum: number; realisedSum: number; keyCount: number } | null {
+): { n: number; claimedSum: number; realisedSum: number; keyCount: number; maxKeyShare: number } | null {
   const normTarget = (targetFamily || "").toLowerCase();
   let n = 0;
   let claimedSum = 0;
   let realisedSum = 0;
   let keyCount = 0;
+  let maxKeyN = 0;
   let found = false;
 
   for (const s of stats.values()) {
@@ -303,12 +304,14 @@ function aggregateByFamily(
       claimedSum += s.claimedSum;
       realisedSum += s.realisedSum;
       keyCount += 1;
+      if (s.n > maxKeyN) maxKeyN = s.n;
       found = true;
     }
   }
 
   if (!found || claimedSum <= 0) return null;
-  return { n, claimedSum, realisedSum, keyCount };
+  const maxKeyShare = n > 0 ? maxKeyN / n : 1;
+  return { n, claimedSum, realisedSum, keyCount, maxKeyShare };
 }
 
 export interface MarketCorrectionResult {
@@ -340,7 +343,7 @@ export function applyMarketCorrection(
     // goals overclaiming drags Over 2.5 goals down with it). Below 3 distinct
     // keys, no correction fires — the same as if no data existed.
     const famStats = aggregateByFamily(stats, leg.statFamily);
-    if (famStats && famStats.n >= 40 && famStats.keyCount >= 3 && famStats.claimedSum > 0) {
+    if (famStats && famStats.n >= 40 && famStats.keyCount >= 3 && famStats.claimedSum > 0 && famStats.maxKeyShare <= 0.60) {
       correction = clamp(famStats.realisedSum / famStats.claimedSum, 0.6, 1.2);
       level = "family";
     }
