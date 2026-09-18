@@ -91,7 +91,10 @@ const { runEngineFromRealWithProfiles, fetchLeagueRealOdds } = vi.hoisted(() => 
     match: { dataCompletenessScore: 80 },
     markets: [] as Array<{ name: string; selection: string; family?: string; hitRate: number }>,
   }));
-  const fetchLeagueRealOdds = vi.fn(async (_leagueSlug: string) => [] as RealBookOdds[]);
+  const fetchLeagueRealOdds = vi.fn(
+    async (_leagueSlug: string, _earliestKickoff?: Date | null, _forceRefresh?: boolean) =>
+      [] as RealBookOdds[],
+  );
   return { runEngineFromRealWithProfiles, fetchLeagueRealOdds };
 });
 vi.mock("@/lib/engine", () => ({
@@ -103,7 +106,10 @@ vi.mock("./realOddsFetcher", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./realOddsFetcher")>();
   return {
     ...actual,
-    fetchLeagueRealOdds: (leagueSlug: string) => fetchLeagueRealOdds(leagueSlug),
+    // Forward every argument: the scanner passes the league's earliest kickoff
+    // (cache TTL) and the ?freshOdds=true forceRefresh flag through here.
+    fetchLeagueRealOdds: (leagueSlug: string, earliestKickoff?: Date | null, forceRefresh?: boolean) =>
+      fetchLeagueRealOdds(leagueSlug, earliestKickoff, forceRefresh),
   };
 });
 
@@ -1514,17 +1520,18 @@ describe("Value Accumulator — shared performScan + runLiveScan server action",
 
 // ─── Real bookmaker odds (The Odds API) wired into the scanner ────────────────
 //
-// Quota protection is the whole point of the per-league pre-fetch: the free tier
-// is 500 requests/month and ONE request covers every fixture of a league, so a
-// scan must cost one call per league (0 when the 12h cache is warm) — never one
-// call per fixture.
+// Quota protection is the whole point of the demand-driven fetch: the free tier
+// is 500 requests/month, each (region × market) costs a credit, and ONE request
+// covers every fixture of a league. So a league is only fetched once the engine
+// has qualified at least 3 legs in it (1 credit-pair instead of one per fixture),
+// and a league that qualifies 0-2 legs costs nothing at all.
 describe("Value Accumulator — real bookmaker odds in the scan", () => {
-  function fixture(id: string, leagueSlug: string, home: string, away: string): FixtureLite {
+  function fixture(id: string, leagueSlug: string, home: string, away: string, date = "2026-09-15T19:00:00Z"): FixtureLite {
     return {
       id,
       leagueSlug,
       leagueName: leagueSlug,
-      date: "2026-09-15T19:00:00Z",
+      date,
       state: "pre",
       statusDetail: "Scheduled",
       venue: null,
@@ -1539,7 +1546,9 @@ describe("Value Accumulator — real bookmaker odds in the scan", () => {
     { bookmaker: "Consensus", marketLabel: "Goals Over/Under", line: 2.5, selection: "Over 2.5", odds: 1.2 },
   ];
 
-  // Real bookmaker prices, ONE payload covering BOTH eng.1 fixtures.
+  // Real bookmaker prices, ONE payload covering every priced eng.1 fixture
+  // (Newcastle is deliberately absent: the API carries the league but not that
+  // fixture, so that leg must keep its Consensus price).
   const realEngOdds: RealBookOdds[] = [
     { fixtureHome: "Arsenal", fixtureAway: "Chelsea", bookmaker: "Bet365", marketLabel: "totals", line: 2.5, selection: "Over", odds: 1.5 },
     { fixtureHome: "Liverpool", fixtureAway: "Everton", bookmaker: "Pinnacle", marketLabel: "totals", line: 2.5, selection: "Over", odds: 1.55 },
@@ -1558,15 +1567,23 @@ describe("Value Accumulator — real bookmaker odds in the scan", () => {
       logs.push(args.map(String).join(" "));
     });
 
-    // 3 fixtures across 2 leagues (eng.1 ×2, esp.1 ×1).
+    // 6 fixtures across 2 leagues (eng.1 ×3, esp.1 ×3) — each league carries
+    // enough qualified legs (>= the threshold of 3) to justify ONE request.
     fetchScoreboard.mockImplementation(async (slug?: string) => {
       if (slug === "eng.1") {
         return [
-          fixture("e1", "eng.1", "Arsenal", "Chelsea"),
-          fixture("e2", "eng.1", "Liverpool", "Everton"),
+          fixture("e1", "eng.1", "Arsenal", "Chelsea", "2026-09-15T19:00:00Z"),
+          fixture("e2", "eng.1", "Liverpool", "Everton", "2026-09-15T20:00:00Z"),
+          fixture("e3", "eng.1", "Newcastle", "Brighton", "2026-09-15T21:00:00Z"),
         ];
       }
-      if (slug === "esp.1") return [fixture("s1", "esp.1", "Real Madrid", "Getafe")];
+      if (slug === "esp.1") {
+        return [
+          fixture("s1", "esp.1", "Real Madrid", "Getafe", "2026-09-16T19:00:00Z"),
+          fixture("s2", "esp.1", "Barcelona", "Sevilla", "2026-09-16T20:00:00Z"),
+          fixture("s3", "esp.1", "Valencia", "Villarreal", "2026-09-16T21:00:00Z"),
+        ];
+      }
       return [];
     });
 
@@ -1591,12 +1608,13 @@ describe("Value Accumulator — real bookmaker odds in the scan", () => {
     vi.restoreAllMocks();
   });
 
-  it("13. QUOTA PROTECTION: 3 fixtures across 2 leagues → fetchLeagueRealOdds is called exactly 2 times", async () => {
+  it("13. QUOTA PROTECTION: 6 fixtures across 2 leagues → fetchLeagueRealOdds is called exactly 2 times", async () => {
     const { scanValueLegs } = await import("./scanner");
 
     const result = await scanValueLegs("scan_quota", 7, "stack");
 
-    // One call per league, never one per fixture.
+    // One call per league (never one per fixture) — and only because each
+    // league qualified >= 3 legs.
     expect(fetchLeagueRealOdds).toHaveBeenCalledTimes(2);
     expect(Array.from(new Set(result.legs.map((l) => l.leagueSlug))).sort()).toEqual(["eng.1", "esp.1"]);
     expect(fetchLeagueRealOdds.mock.calls.map((c) => c[0]).sort()).toEqual(["eng.1", "esp.1"]);
@@ -1616,6 +1634,14 @@ describe("Value Accumulator — real bookmaker odds in the scan", () => {
     expect(arsenal?.oddsSource).toBe("real");
     expect(arsenal?.ev).toBeCloseTo(0.63 * 1.5 - 1, 6);
 
+    // The eng.1 payload carries no price for Newcastle → Consensus, even though
+    // the league itself WAS fetched.
+    const newcastle = byMatch.get("Newcastle");
+    expect(newcastle?.bookmakerOdds).toBeCloseTo(1.2, 6);
+    expect(newcastle?.bookmakerName).toBe("Consensus");
+    expect(newcastle?.oddsSource).toBe("consensus");
+    expect(newcastle?.ev).toBeCloseTo(0.63 * 1.2 - 1, 6);
+
     // Real Madrid (esp.1) has no The Odds API coverage in this scan → Consensus.
     const real = byMatch.get("Real Madrid");
     expect(real?.bookmakerOdds).toBeCloseTo(1.2, 6);
@@ -1632,13 +1658,68 @@ describe("Value Accumulator — real bookmaker odds in the scan", () => {
     const { scanValueLegs } = await import("./scanner");
 
     const result = await scanValueLegs("scan_count", 7, "stack");
-    expect(result.legs).toHaveLength(3);
+    expect(result.legs).toHaveLength(6);
     expect(result.legs.filter((l) => l.oddsSource === "real")).toHaveLength(2);
 
     const tickets = buildTickets(result.legs, "stack");
-    expect(tickets).toHaveLength(1);
-    expect(tickets[0].realOddsCount).toBe(2);
-    expect(tickets[0].legs.filter((l) => l.oddsSource === "real")).toHaveLength(2);
+    expect(tickets.length).toBeGreaterThan(0);
+    // Every ticket's realOddsCount is exactly the number of real-priced legs it
+    // actually carries — and the real legs do make it into a ticket.
+    for (const ticket of tickets) {
+      expect(ticket.realOddsCount).toBe(ticket.legs.filter((l) => l.oddsSource === "real").length);
+    }
+    const realLegsInTickets = tickets.reduce(
+      (sum, t) => sum + t.legs.filter((l) => l.oddsSource === "real").length,
+      0,
+    );
+    expect(realLegsInTickets).toBe(2);
+  });
+
+  // ─── Demand-driven threshold (spec items 7 & 8) ───────────────────────────
+  // The Odds API is only asked for a league once the engine has qualified
+  // enough legs there to make the request worth a credit.
+
+  it("16. a league with 2 qualified legs is NOT fetched (threshold 3)", async () => {
+    const { scanValueLegs } = await import("./scanner");
+
+    // Only esp.1 fixtures, and only two of them → 2 qualified legs in esp.1.
+    fetchScoreboard.mockImplementation(async (slug?: string) =>
+      slug === "esp.1"
+        ? [
+            fixture("s1", "esp.1", "Real Madrid", "Getafe"),
+            fixture("s2", "esp.1", "Barcelona", "Sevilla"),
+          ]
+        : [],
+    );
+
+    const result = await scanValueLegs("scan_threshold_skip", 7, "stack");
+
+    // Not a single request for the league…
+    expect(fetchLeagueRealOdds).not.toHaveBeenCalled();
+    expect(fetchLeagueRealOdds.mock.calls.map((c) => c[0])).not.toContain("esp.1");
+
+    // …its two legs are still qualified, priced at Consensus, and the skip is
+    // logged with the leg count and the threshold.
+    expect(result.legs).toHaveLength(2);
+    expect(result.legs.every((l) => l.leagueSlug === "esp.1")).toBe(true);
+    expect(result.legs.every((l) => l.oddsSource === "consensus")).toBe(true);
+    expect(logs).toContain("[VA][odds-api] skipping esp.1 — only 2 qualified legs (threshold 3)");
+  });
+
+  it("17. a league with 3 qualified legs IS fetched (once, with the earliest kickoff)", async () => {
+    const { scanValueLegs } = await import("./scanner");
+
+    // The shared beforeEach serves exactly 3 eng.1 fixtures → 3 qualified legs.
+    const result = await scanValueLegs("scan_threshold_fetch", 7, "stack");
+
+    const engCalls = fetchLeagueRealOdds.mock.calls.filter((c) => c[0] === "eng.1");
+    expect(engCalls).toHaveLength(1);
+    // The earliest kickoff in the league drives the cache TTL (24h vs 6h).
+    expect(engCalls[0][1]).toEqual(new Date("2026-09-15T19:00:00Z"));
+    // forceRefresh defaults to false: a normal scan may serve the cache.
+    expect(engCalls[0][2]).toBe(false);
+    expect(logs).not.toContain("[VA][odds-api] skipping eng.1 — only 3 qualified legs (threshold 3)");
+    expect(result.legs.filter((l) => l.oddsSource === "real")).toHaveLength(2);
   });
 });
 

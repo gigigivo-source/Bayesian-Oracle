@@ -7,25 +7,29 @@
 //             `btts` is a paid-tier market: requesting it on the free tier fails
 //             the whole call with 422 INVALID_MARKET, so it is not requested.
 //
-// Free tier is 500 requests/month, so quota is the binding constraint and this
-// module is built around three hard rules:
+// Free tier is 500 requests/month and The Odds API charges 1 credit per
+// (region × market) per request, so quota is the binding constraint and this
+// module is built around four hard rules:
 //
-//   1. ONE CALL PER LEAGUE — never per fixture. The scanner pre-fetches every
-//      unique league in a scan once, then every fixture of that league is
-//      priced from the in-memory result. A scan with 40 fixtures across 6
-//      leagues costs 6 calls, not 40.
-//   2. 12-HOUR CACHE — results are persisted in `league_odds_cache`. A valid
-//      row (now() < expires_at) is served with ZERO HTTP calls, so repeated
-//      scans inside the same 12h window cost nothing. Worst case is
-//      7 leagues × 2 windows/day = 14 calls/day = ~420/month at the extreme,
-//      and far less in practice (the scanner rarely covers all 7 leagues).
-//   3. FAIL SOFT — unset key, unsupported league, network error, non-200, or
+//   1. ONE REGION — `regions=uk` only (1 region, not the eu+uk pair), so the
+//      h2h + totals request costs 2 credits instead of 4. Unibet UK, Pinnacle
+//      and Betfair UK are all in that region.
+//   2. ONE CALL PER LEAGUE — never per fixture, and only for leagues that
+//      actually need a price (the scanner fetches AFTER qualification and
+//      skips leagues with fewer than 3 qualified legs). One response carries
+//      every fixture of the league.
+//   3. 24h CACHE, 6h NEAR KICKOFF — results are persisted in
+//      `league_odds_cache`. A valid row (now() < expires_at) is served with
+//      ZERO HTTP calls. The TTL comes from ttlForLeague(): 24h normally, but
+//      6h for a league whose earliest unpriced kickoff is inside 24h, so the
+//      prices on the matches that are about to be played stay fresh.
+//   4. FAIL SOFT — unset key, unsupported league, network error, non-200, or
 //      an unparseable body all return [] and the caller falls back to Bzzoiro
 //      Consensus. Nothing here ever throws, and no price is ever fabricated.
 //
 // Cache discipline: ONLY successful 200 responses with a parseable body are
 // written. A failed fetch is never cached — otherwise a transient outage would
-// be served as "no real odds" for the next 12 hours.
+// be served as "no real odds" for the next 6-24 hours.
 //
 // Corners and Cards are NOT served by The Odds API. BTTS is a paid-tier market
 // we do not request (see the URL builder). Those legs always resolve to null
@@ -50,8 +54,28 @@ const ODDS_API_BASE = (() => {
   return raw.replace(/\/+$/, "");
 })();
 const TIMEOUT_MS = 8000;
-/** Cache TTL — one league is fetched at most once per 12 hours. */
-export const ODDS_CACHE_TTL_MS = 12 * 60 * 60 * 1000;
+/** Default cache TTL — one league is fetched at most once per 24 hours. */
+export const ODDS_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+/** Shortened TTL for a league whose next unpriced kickoff is inside 24 hours. */
+export const ODDS_CACHE_TTL_NEAR_KICKOFF_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * Cache lifetime for one league, driven by the earliest kickoff still to be
+ * priced in that league:
+ *
+ *   - no known kickoff            → 24h (nothing time-critical to keep fresh)
+ *   - earliest kickoff >= 24h out → 24h (one fetch a day is plenty)
+ *   - earliest kickoff <  24h out → 6h  (kicking off soon: prices move fast)
+ *
+ * This is what keeps a daily refresh cheap while a match day still gets a
+ * handful of refreshes instead of stale morning prices.
+ */
+export function ttlForLeague(earliestKickoff: Date | null): number {
+  if (!earliestKickoff) return ODDS_CACHE_TTL_MS;
+  const hoursUntil =
+    (earliestKickoff.getTime() - Date.now()) / 3_600_000;
+  return hoursUntil < 24 ? ODDS_CACHE_TTL_NEAR_KICKOFF_MS : ODDS_CACHE_TTL_MS;
+}
 
 /** App leagueSlug → The Odds API sport key. Anything absent is not served. */
 const SPORT_KEYS: Record<string, string> = {
@@ -341,14 +365,20 @@ async function readCache(leagueSlug: string): Promise<RealBookOdds[] | null> {
 }
 
 /**
- * UPSERT the parsed rows with a 12h expiry. Called ONLY after a successful 200
- * with a parseable body: a failure must never be served for 12 hours.
- * A write failure is logged and swallowed — the caller still gets the rows.
+ * UPSERT the parsed rows with the league's TTL (see ttlForLeague). Called ONLY
+ * after a successful 200 with a parseable body: a failure must never be served
+ * for the life of a cache row. A write failure is logged and swallowed — the
+ * caller still gets the rows.
  */
-async function writeCache(leagueSlug: string, sportKey: string, rows: RealBookOdds[]): Promise<void> {
+async function writeCache(
+  leagueSlug: string,
+  sportKey: string,
+  rows: RealBookOdds[],
+  ttlMs: number = ODDS_CACHE_TTL_MS,
+): Promise<void> {
   try {
     const now = new Date();
-    const expiresAt = new Date(now.getTime() + ODDS_CACHE_TTL_MS);
+    const expiresAt = new Date(now.getTime() + ttlMs);
     await db
       .insert(leagueOddsCache)
       .values({ leagueSlug, sportKey, responseJson: rows, fetchedAt: now, expiresAt })
@@ -368,13 +398,25 @@ async function writeCache(leagueSlug: string, sportKey: string, rows: RealBookOd
 
 /**
  * Real bookmaker odds for every fixture of one league. ONE HTTP call per
- * league per 12h at most (cached), never per fixture.
+ * league per cache window at most (cached), never per fixture.
+ *
+ * @param earliestKickoff earliest kickoff still to be priced in this league;
+ *   drives the cache TTL (24h normally, 6h when the kickoff is inside 24h).
+ *   `null`/omitted means unknown → the 24h default.
+ * @param forceRefresh `true` skips the cache READ (`?freshOdds=true` on
+ *   /api/va/scan) so the scan always prices from a fresh response. The
+ *   response is still written to the cache on success, and failures are still
+ *   never cached.
  *
  * Returns [] when: ODDS_API_KEY is unset, the league has no sport key (no
  * request is made at all), a cache miss is followed by a failed fetch, or the
  * body is unparseable. The caller must fall back to Bzzoiro Consensus.
  */
-export async function fetchLeagueRealOdds(leagueSlug: string): Promise<RealBookOdds[]> {
+export async function fetchLeagueRealOdds(
+  leagueSlug: string,
+  earliestKickoff?: Date | null,
+  forceRefresh?: boolean,
+): Promise<RealBookOdds[]> {
   if (!getApiKey()) {
     if (!warnedNoKey) {
       console.log("[VA][odds-api] ODDS_API_KEY not set — every leg uses Bzzoiro Consensus");
@@ -389,13 +431,25 @@ export async function fetchLeagueRealOdds(leagueSlug: string): Promise<RealBookO
     return [];
   }
 
-  const cached = await readCache(leagueSlug);
-  if (cached) return cached;
+  const ttlMs = ttlForLeague(earliestKickoff ?? null);
+
+  if (forceRefresh) {
+    console.log(
+      `[VA][odds-api] FORCE REFRESH ${leagueSlug}: freshOdds=true — cache read skipped` +
+        ` (ttl ${Math.round(ttlMs / 3_600_000)}h)`,
+    );
+  } else {
+    const cached = await readCache(leagueSlug);
+    if (cached) return cached;
+  }
 
   const path =
     `/sports/${sportKey}/odds` +
     `?apiKey=${encodeURIComponent(getApiKey())}` +
-    `&regions=eu,uk` +
+    // ONE region: The Odds API bills 1 credit per (region × market), so the
+    // `uk` region alone costs h2h + totals = 2 credits per league instead of
+    // the 4 that `eu,uk` costs. Unibet UK, Pinnacle and Betfair UK live in it.
+    `&regions=uk` +
     // `btts` is NOT part of The Odds API free tier. Asking for it makes the whole
     // request fail with 422 INVALID_MARKET ("Markets not supported by this
     // endpoint: btts") — no fixtures at all, so every leg silently fell back to
@@ -423,7 +477,7 @@ export async function fetchLeagueRealOdds(leagueSlug: string): Promise<RealBookO
       ` · quota remaining: ${outcome.quotaRemaining ?? "unknown"}`,
   );
 
-  await writeCache(leagueSlug, sportKey, rows);
+  await writeCache(leagueSlug, sportKey, rows, ttlMs);
   return rows;
 }
 

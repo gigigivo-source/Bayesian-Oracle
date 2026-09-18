@@ -336,4 +336,133 @@ describe("Value Accumulator — real bookmaker odds (The Odds API)", () => {
     // …and `h2h,totals` is the complete value, not a prefix of a longer list.
     expect(url).toMatch(/markets=h2h,totals&/);
   });
+
+  // ─── Quota reductions: single region, demand-driven fetch, TTL, freshOdds ──
+  // The Odds API bills 1 credit per (region × market): `regions=uk` with
+  // h2h,totals costs 2 credits per league instead of 4.
+
+  it("14. the request URL asks for regions=uk only (never eu,uk)", async () => {
+    process.env.ODDS_API_KEY = "test-key";
+    fetchMock.mockResolvedValue(jsonResponse([apiEvent("Arsenal", "Chelsea", [totalsMarket(2.5, 1.85, 1.95)])]));
+    const { fetchLeagueRealOdds } = await import("./realOddsFetcher");
+
+    await fetchLeagueRealOdds("eng.1");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const url = String(fetchMock.mock.calls[0][0]);
+    expect(url).toContain("regions=uk");
+    expect(url).not.toContain("eu,uk");
+    // `uk` is the complete region value, not a prefix of a longer list.
+    expect(url).toMatch(/[?&]regions=uk&/);
+    // The rest of the request is untouched.
+    expect(url).toContain("markets=h2h,totals");
+    expect(url).toContain("oddsFormat=decimal");
+  });
+
+  it("15. ttlForLeague: 24h when the earliest kickoff is 3 days out", async () => {
+    const { ttlForLeague, ODDS_CACHE_TTL_MS } = await import("./realOddsFetcher");
+
+    const threeDaysOut = new Date(Date.now() + 3 * 24 * 3600 * 1000);
+    expect(ttlForLeague(threeDaysOut)).toBe(24 * 3600 * 1000);
+    expect(ttlForLeague(threeDaysOut)).toBe(ODDS_CACHE_TTL_MS);
+  });
+
+  it("16. ttlForLeague: 6h when the earliest kickoff is 12h out", async () => {
+    const { ttlForLeague, ODDS_CACHE_TTL_NEAR_KICKOFF_MS } = await import("./realOddsFetcher");
+
+    const twelveHoursOut = new Date(Date.now() + 12 * 3600 * 1000);
+    expect(ttlForLeague(twelveHoursOut)).toBe(6 * 3600 * 1000);
+    expect(ttlForLeague(twelveHoursOut)).toBe(ODDS_CACHE_TTL_NEAR_KICKOFF_MS);
+
+    // Exactly on the boundary: 24h out still gets the long TTL, 23h gets 6h.
+    expect(ttlForLeague(new Date(Date.now() + 24.5 * 3600 * 1000))).toBe(24 * 3600 * 1000);
+    expect(ttlForLeague(new Date(Date.now() + 23 * 3600 * 1000))).toBe(6 * 3600 * 1000);
+  });
+
+  it("17. ttlForLeague: 24h when the earliest kickoff is null (or unknown)", async () => {
+    const { ttlForLeague, ODDS_CACHE_TTL_MS } = await import("./realOddsFetcher");
+
+    expect(ttlForLeague(null)).toBe(24 * 3600 * 1000);
+    expect(ttlForLeague(null)).toBe(ODDS_CACHE_TTL_MS);
+  });
+
+  it("18. forceRefresh=true skips the cache READ (?freshOdds=true)", async () => {
+    process.env.ODDS_API_KEY = "test-key";
+    const cached: RealBookOdds[] = [
+      { fixtureHome: "Arsenal", fixtureAway: "Chelsea", bookmaker: "Bet365", marketLabel: "totals", line: 2.5, selection: "Over", odds: 1.9 },
+    ];
+    dbState.cacheRows.set("eng.1", {
+      leagueSlug: "eng.1",
+      sportKey: "soccer_epl",
+      responseJson: cached,
+      fetchedAt: new Date(Date.now() - 60_000).toISOString(),
+      // Well inside its TTL — a normal call would be served from here.
+      expiresAt: new Date(Date.now() + 20 * 60 * 60 * 1000).toISOString(),
+    });
+    fetchMock.mockResolvedValue(
+      jsonResponse([apiEvent("Arsenal", "Chelsea", [totalsMarket(2.5, 2.4, 1.62)])]),
+    );
+    const { fetchLeagueRealOdds } = await import("./realOddsFetcher");
+
+    const rows = await fetchLeagueRealOdds("eng.1", null, true);
+
+    // The stale-but-valid cache row is ignored: the HTTP call fires and the
+    // returned rows are the freshly fetched ones.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(rows).toEqual([
+      { fixtureHome: "Arsenal", fixtureAway: "Chelsea", bookmaker: "Bet365", marketLabel: "totals", line: 2.5, selection: "Over", odds: 2.4 },
+      { fixtureHome: "Arsenal", fixtureAway: "Chelsea", bookmaker: "Bet365", marketLabel: "totals", line: 2.5, selection: "Under", odds: 1.62 },
+    ]);
+    expect(rows).not.toEqual(cached);
+    expect(logs.some((l) => l.includes("FORCE REFRESH") && l.includes("eng.1"))).toBe(true);
+    // No CACHE HIT is ever logged on a forced refresh.
+    expect(logs.some((l) => l.includes("CACHE HIT"))).toBe(false);
+  });
+
+  it("19. forceRefresh=true still WRITES the cache on success", async () => {
+    process.env.ODDS_API_KEY = "test-key";
+    const earliestKickoff = new Date(Date.now() + 3 * 24 * 3600 * 1000);
+    fetchMock.mockResolvedValue(
+      jsonResponse([apiEvent("Arsenal", "Chelsea", [totalsMarket(2.5, 1.85, 1.95)])]),
+    );
+    const { fetchLeagueRealOdds } = await import("./realOddsFetcher");
+
+    const rows = await fetchLeagueRealOdds("eng.1", earliestKickoff, true);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(rows).toHaveLength(2);
+    expect(dbState.writes).toHaveLength(1);
+    const written = dbState.writes[0];
+    expect(written.leagueSlug).toBe("eng.1");
+    expect(written.sportKey).toBe("soccer_epl");
+    expect(written.responseJson).toEqual(rows);
+    // A kickoff 3 days out → the 24h TTL, not the 6h one.
+    const ttl = new Date(written.expiresAt as string).getTime() - Date.now();
+    expect(ttl).toBeGreaterThan(23 * 3600 * 1000);
+    expect(ttl).toBeLessThanOrEqual(24 * 3600 * 1000 + 5_000);
+  });
+
+  it("20. the cache write uses the 6h TTL when the earliest kickoff is inside 24h", async () => {
+    process.env.ODDS_API_KEY = "test-key";
+    fetchMock.mockResolvedValue(jsonResponse([apiEvent("Arsenal", "Chelsea", [totalsMarket(2.5, 1.85, 1.95)])]));
+    const { fetchLeagueRealOdds } = await import("./realOddsFetcher");
+
+    await fetchLeagueRealOdds("eng.1", new Date(Date.now() + 12 * 3600 * 1000));
+
+    expect(dbState.writes).toHaveLength(1);
+    const ttl = new Date(dbState.writes[0].expiresAt as string).getTime() - Date.now();
+    expect(ttl).toBeGreaterThan(5.9 * 3600 * 1000);
+    expect(ttl).toBeLessThanOrEqual(6 * 3600 * 1000 + 5_000);
+  });
+
+  it("21. a failed forced refresh writes NO cache row", async () => {
+    process.env.ODDS_API_KEY = "test-key";
+    fetchMock.mockResolvedValue(jsonResponse({ message: "quota exceeded" }, { status: 429, quota: "0" }));
+    const { fetchLeagueRealOdds } = await import("./realOddsFetcher");
+
+    await expect(fetchLeagueRealOdds("eng.1", null, true)).resolves.toEqual([]);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(dbState.writes).toHaveLength(0);
+  });
 });

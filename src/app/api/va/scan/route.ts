@@ -12,12 +12,19 @@ function getCronSecret(): string {
  * Runs the VA scan; ?finished=true skips authentication for local backtests.
  * All other requests retain the existing CRON_SECRET authentication check.
  *
+ * `?freshOdds=true` bypasses the `league_odds_cache` read for every league the
+ * scan actually fetches, so every leg is priced from a response fetched right
+ * now (the response is still cached afterwards). Omit it for the normal scan,
+ * which serves cached odds with ZERO Odds API requests when they are still
+ * inside their TTL.
+ *
  * The scan itself lives in `@/lib/va/performScan` so the in-app server action
  * (`runLiveScan`) can share it without an HTTP hop or the bearer secret.
  */
 export async function POST(req: Request) {
   const url = new URL(req.url);
   const finished = url.searchParams.get("finished") === "true";
+  const forceRefresh = url.searchParams.get("freshOdds") === "true";
 
   if (!finished) {
     // Protected by CRON_SECRET header
@@ -38,6 +45,6 @@ export async function POST(req: Request) {
   const modeParam = url.searchParams.get("mode")?.trim().toLowerCase();
   const mode: VaScanMode = modeParam === "stack" ? "stack" : "value";
 
-  const result = await performScan(mode, finished);
+  const result = await performScan(mode, finished, forceRefresh);
   return Response.json(result.body, { status: result.status });
 }
