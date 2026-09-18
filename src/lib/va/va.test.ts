@@ -732,6 +732,102 @@ describe("Value Accumulator — Self-learning market reliability", () => {
   });
 });
 
+describe("Value Accumulator — family correction requires 3+ keys", () => {
+  // The family-level aggregate must not fire off a single market key: when a
+  // family holds only one overclaiming line (e.g. Under 3.5 goals at corr
+  // 0.647), that correction used to be applied to every leg in the family —
+  // including unrelated markets like Over 2.5 goals. Below 3 distinct keys the
+  // family fallback is skipped entirely (same as no data).
+
+  it("1. does NOT fire the family fallback when only 1 key exists in the family (n>=40): correction stays 1.0", () => {
+    // Single Goals row: n=46, claimedSum=46, realisedSum=29.762 → corr 0.647.
+    const mockStats = new Map([
+      [
+        "Goals:TotalO/U:3.5:Under",
+        {
+          marketKey: "Goals:TotalO/U:3.5:Under",
+          family: "Goals",
+          n: 46,
+          claimedSum: 46,
+          realisedSum: 29.762,
+        },
+      ],
+    ]);
+    // A DIFFERENT goals leg (its own key has no stats, so the line level
+    // misses and the old code fell through to the poisoned family aggregate).
+    const leg = {
+      market: "Total Goals O/U 2.5",
+      selection: "Over 2.5",
+      statFamily: "Goals",
+      modelProbability: 0.80,
+    };
+    const result = applyMarketCorrection(leg, mockStats);
+    expect(result.level).toBe("none");
+    expect(result.correction).toBe(1.0);
+    expect(result.adjustedProb).toBe(0.80);
+    expect(result.filtered).toBe(false);
+  });
+
+  it("2. DOES fire the family fallback when 3 keys exist in the family (total n>=40): correction is the aggregate ratio", () => {
+    const mockStats = new Map([
+      [
+        "Goals:TotalO/U:1.5:Over",
+        { marketKey: "Goals:TotalO/U:1.5:Over", family: "Goals", n: 20, claimedSum: 16, realisedSum: 13 },
+      ],
+      [
+        "Goals:TotalO/U:2.5:Over",
+        { marketKey: "Goals:TotalO/U:2.5:Over", family: "Goals", n: 14, claimedSum: 10, realisedSum: 8 },
+      ],
+      [
+        "Goals:BTTS:Yes",
+        { marketKey: "Goals:BTTS:Yes", family: "Goals", n: 12, claimedSum: 7, realisedSum: 4 },
+      ],
+    ]);
+    // Aggregate: n=46, claimedSum=33, realisedSum=25 → ratio 25/33 ≈ 0.7576.
+    const leg = {
+      market: "Total Goals O/U 3.5",
+      selection: "Under 3.5",
+      statFamily: "Goals",
+      modelProbability: 0.80,
+    };
+    const result = applyMarketCorrection(leg, mockStats);
+    expect(result.level).toBe("family");
+    expect(result.correction).toBeCloseTo(25 / 33, 3);
+    expect(result.adjustedProb).toBeCloseTo(0.8 * (25 / 33), 3);
+    expect(result.filtered).toBe(false);
+  });
+
+  it("3. line-level correction still works with 1 key in the family (unchanged)", () => {
+    // Single Goals row for the leg's OWN market key: the line level does not
+    // care about the family key count at all.
+    const mockStats = new Map([
+      [
+        "Goals:TotalO/U:2.5:Over",
+        {
+          marketKey: "Goals:TotalO/U:2.5:Over",
+          family: "Goals",
+          n: 46,
+          claimedSum: 46,
+          realisedSum: 29.762,
+        },
+      ],
+    ]);
+    const leg = {
+      market: "Total Goals O/U 2.5",
+      selection: "Over 2.5",
+      statFamily: "Goals",
+      modelProbability: 0.80,
+    };
+    const result = applyMarketCorrection(leg, mockStats);
+    expect(result.level).toBe("line");
+    expect(result.correction).toBeCloseTo(0.647, 3);
+    expect(result.adjustedProb).toBeCloseTo(0.8 * 0.647, 3);
+    // Unchanged hard-filter behaviour (existing test d): the line itself is
+    // proven bad (n>=30, corr 0.647 < 0.75), so the leg is filtered too.
+    expect(result.filtered).toBe(true);
+  });
+});
+
 // ─── Bzzoiro xG fetcher + engine xG chain ─────────────────────────────────────
 //
 // The real per-match xG lives at GET /events/{id}/stats/ but every value is
