@@ -828,6 +828,112 @@ describe("Value Accumulator — family correction requires 3+ keys", () => {
   });
 });
 
+describe("Value Accumulator — family correction dominance guard", () => {
+  // When one key contributes more than 60% of the family's total samples,
+  // the family aggregate is not representative — it effectively becomes the
+  // dominant key's correction masquerading as a family-wide one, which can
+  // push already-overclaimed OTHER legs even higher (e.g. Corners O7.5:Over
+  // dominates with 38/46 samples, so O8.5 and O9.5 get mis-corrected upward).
+  // The family fallback must be skipped in that case; the line-level path
+  // for the dominant key itself is untouched.
+
+  it("1. family correction does NOT fire when one key has >60% of the family's total samples (dominant Corners O7.5:Over: 38/46)", () => {
+    // Corners: 3 keys, total n=46. O7.5:Over dominates at 38 samples (83%).
+    // O8.5:Over has only n=5 (too few for a line hit), O9.5:Over n=3.
+    // Family aggregate corr ≈ 50/46 ≈ 1.087 (under-claimed on aggregate,
+    // because O7.5:Over is 38*1.057/38 ≈ 1.057). But O8.5/O9.5 are
+    // over-claimed, so applying 1.087 to them would inflate claims further.
+    const mockStats = new Map([
+      [
+        "Corners:TotalO/U:7.5:Over",
+        { marketKey: "Corners:TotalO/U:7.5:Over", family: "Corners", n: 38, claimedSum: 38, realisedSum: 40.166 }, // corr ≈ 1.057
+      ],
+      [
+        "Corners:TotalO/U:8.5:Over",
+        { marketKey: "Corners:TotalO/U:8.5:Over", family: "Corners", n: 5, claimedSum: 4, realisedSum: 2.8 },
+      ],
+      [
+        "Corners:TotalO/U:9.5:Over",
+        { marketKey: "Corners:TotalO/U:9.5:Over", family: "Corners", n: 3, claimedSum: 2, realisedSum: 1.2 },
+      ],
+    ]);
+    const leg = {
+      market: "Total Corners O/U 8.5",
+      selection: "Over 8.5",
+      statFamily: "Corners",
+      modelProbability: 0.80,
+    };
+    const result = applyMarketCorrection(leg, mockStats);
+    // maxKeyShare = 38/46 ≈ 0.826 > 0.60 → family correction must NOT fire.
+    expect(result.level).toBe("none");
+    expect(result.correction).toBe(1.0);
+    expect(result.adjustedProb).toBe(0.80);
+    expect(result.filtered).toBe(false);
+  });
+
+  it("2. family correction DOES fire when samples are evenly spread (~33% each, maxKeyShare ≤ 0.60)", () => {
+    // 3 keys with ~equal n (16/15/15 = 46 total) → maxKeyShare ≈ 0.348 ≤ 0.60.
+    // The aggregate correction should be applied.
+    const mockStats = new Map([
+      [
+        "Corners:TotalO/U:7.5:Over",
+        { marketKey: "Corners:TotalO/U:7.5:Over", family: "Corners", n: 16, claimedSum: 12, realisedSum: 13 },
+      ],
+      [
+        "Corners:TotalO/U:8.5:Over",
+        { marketKey: "Corners:TotalO/U:8.5:Over", family: "Corners", n: 15, claimedSum: 10, realisedSum: 11 },
+      ],
+      [
+        "Corners:TotalO/U:9.5:Over",
+        { marketKey: "Corners:TotalO/U:9.5:Over", family: "Corners", n: 15, claimedSum: 8, realisedSum: 9 },
+      ],
+    ]);
+    // Total n=46, claimedSum=30, realisedSum=33 → ratio 33/30 = 1.100 (clamped).
+    const leg = {
+      market: "Total Corners O/U 10.5",
+      selection: "Over 10.5",
+      statFamily: "Corners",
+      modelProbability: 0.70,
+    };
+    const result = applyMarketCorrection(leg, mockStats);
+    expect(result.level).toBe("family");
+    expect(result.correction).toBeCloseTo(33 / 30, 3);
+    expect(result.adjustedProb).toBeCloseTo(0.70 * (33 / 30), 3);
+    expect(result.filtered).toBe(false);
+  });
+
+  it("3. line-level correction still fires for the dominant key itself (n>=20), unchanged", () => {
+    // O7.5:Over has n=38 (>=20), so a leg with that exact market key must
+    // still get the line correction (≈1.057) regardless of the dominance guard
+    // on the family fallback.
+    const mockStats = new Map([
+      [
+        "Corners:TotalO/U:7.5:Over",
+        { marketKey: "Corners:TotalO/U:7.5:Over", family: "Corners", n: 38, claimedSum: 38, realisedSum: 40.166 }, // corr ≈ 1.057
+      ],
+      [
+        "Corners:TotalO/U:8.5:Over",
+        { marketKey: "Corners:TotalO/U:8.5:Over", family: "Corners", n: 5, claimedSum: 4, realisedSum: 2.8 },
+      ],
+      [
+        "Corners:TotalO/U:9.5:Over",
+        { marketKey: "Corners:TotalO/U:9.5:Over", family: "Corners", n: 3, claimedSum: 2, realisedSum: 1.2 },
+      ],
+    ]);
+    const leg = {
+      market: "Total Corners O/U 7.5",
+      selection: "Over 7.5",
+      statFamily: "Corners",
+      modelProbability: 0.80,
+    };
+    const result = applyMarketCorrection(leg, mockStats);
+    expect(result.level).toBe("line");
+    expect(result.correction).toBeCloseTo(40.166 / 38, 3);
+    expect(result.adjustedProb).toBeCloseTo(0.80 * (40.166 / 38), 3);
+    expect(result.filtered).toBe(false);
+  });
+});
+
 // ─── Bzzoiro xG fetcher + engine xG chain ─────────────────────────────────────
 //
 // The real per-match xG lives at GET /events/{id}/stats/ but every value is
