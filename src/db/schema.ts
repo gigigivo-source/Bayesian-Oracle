@@ -309,6 +309,8 @@ export const vaTickets = pgTable("va_tickets", {
   createdAt:           timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   /** "real" | "consensus" | null — dominant odds source across the ticket's legs. */
   oddsSource:          text("odds_source"),
+  /** How many of the ticket's legs are priced at real bookmaker odds. */
+  realOddsCount:       integer("real_odds_count"),
 });
 
 export const vaScanLock = pgTable("va_scan_lock", {

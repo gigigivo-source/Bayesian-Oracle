@@ -1641,3 +1641,65 @@ describe("Value Accumulator — real bookmaker odds in the scan", () => {
     expect(tickets[0].legs.filter((l) => l.oddsSource === "real")).toHaveLength(2);
   });
 });
+
+// ─── Ticket-level realOddsCount ───────────────────────────────────────────────
+//
+// The per-leg oddsSource lives inside the legs jsonb; performScan attaches the
+// ticket-level count right after buildTickets and persists it to
+// va_tickets.real_odds_count so the page can read it without recounting legs.
+describe("Value Accumulator — realOddsCount on the ticket output", () => {
+  function makeCountLeg(
+    eventId: string,
+    statFamily: string,
+    oddsSource: "real" | "consensus",
+    kickoff: Date,
+  ): VaLeg {
+    const bookmakerOdds = 1.4;
+    const modelProbability = 0.75;
+    return {
+      scanId: "count_scan",
+      eventId,
+      matchLabel: `H${eventId} vs A${eventId}`,
+      homeTeam: `H${eventId}`,
+      awayTeam: `A${eventId}`,
+      leagueSlug: "eng.1",
+      kickoff,
+      market: "Total Goals O/U 2.5",
+      selection: "Over 2.5",
+      statFamily,
+      modelProbability,
+      bookmakerOdds,
+      bookmakerName: oddsSource === "real" ? "Bet365" : "Consensus",
+      impliedProbability: 1 / bookmakerOdds,
+      ev: modelProbability * bookmakerOdds - 1,
+      oddsAtBuild: new Date("2026-09-13T09:00:00Z"),
+      scannedAt: new Date("2026-09-13T09:00:00Z"),
+      oddsSource,
+    };
+  }
+
+  // 4 legs @ 1.40 → combinedOdds 1.4^4 ≈ 3.84, inside the value-mode [3.0, 4.5]
+  // window; distinct eventIds and one leg per stat family keep the ticket valid.
+  function fourLegPool(sources: Array<"real" | "consensus">): VaLeg[] {
+    const families = ["goals", "corners", "cards", "shots"];
+    return sources.map((oddsSource, i) =>
+      makeCountLeg(`ev${i}`, families[i], oddsSource, new Date(`2026-09-1${4 + i}T12:00:00Z`)),
+    );
+  }
+
+  it("1. a ticket with 2 'real' legs and 2 'consensus' legs has realOddsCount === 2", () => {
+    const tickets = buildTickets(fourLegPool(["real", "consensus", "real", "consensus"]));
+    expect(tickets).toHaveLength(1);
+    expect(tickets[0].legs).toHaveLength(4);
+    expect(tickets[0].realOddsCount).toBe(2);
+    expect(tickets[0].legs.filter((l) => l.oddsSource === "real")).toHaveLength(2);
+  });
+
+  it("2. a ticket with all 'consensus' legs has realOddsCount === 0", () => {
+    const tickets = buildTickets(fourLegPool(["consensus", "consensus", "consensus", "consensus"]));
+    expect(tickets).toHaveLength(1);
+    expect(tickets[0].legs).toHaveLength(4);
+    expect(tickets[0].realOddsCount).toBe(0);
+    expect(tickets[0].legs.filter((l) => l.oddsSource === "real")).toHaveLength(0);
+  });
+});

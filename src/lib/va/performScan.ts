@@ -103,6 +103,16 @@ export async function performScan(mode: VaScanMode, finished: boolean): Promise<
     scanResult = await scanValueLegs(scanId, 7, mode);
     const built = buildTickets(scanResult.legs, mode);
 
+    // Ticket-level real odds count: the per-leg oddsSource lives inside the
+    // legs jsonb, but the page reads a ticket-level `realOddsCount`, so attach
+    // it here (right after the builder, before persisting) and store it in
+    // va_tickets.real_odds_count below.
+    for (const ticket of built) {
+      ticket.realOddsCount = ticket.legs.filter(
+        (l: any) => l.oddsSource === "real"
+      ).length;
+    }
+
     // Write tickets to va_tickets. Once written, immutable — never updated by later scans.
     const persistCount = built.length;
     const weekStart = getMondayCat();
@@ -125,6 +135,7 @@ export async function performScan(mode: VaScanMode, finished: boolean): Promise<
             stakePercent: ticket.stakePercent,
             isRecommended: ticket.isRecommended,
             isReferenceOnly: ticket.isReferenceOnly,
+            realOddsCount: ticket.realOddsCount,
             status: "pending",
           })
           .returning({ id: vaTickets.id });
