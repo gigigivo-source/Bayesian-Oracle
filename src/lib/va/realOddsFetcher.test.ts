@@ -465,4 +465,66 @@ describe("Value Accumulator — real bookmaker odds (The Odds API)", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(dbState.writes).toHaveLength(0);
   });
+
+  // ─── Expanded sport-key coverage (eredivisie, primeira, UCL, UEL, …) ──────
+
+  it('22. fetchLeagueRealOdds("ned.1") attempts a fetch (not a [] return from no key)', async () => {
+    process.env.ODDS_API_KEY = "test-key";
+    fetchMock.mockResolvedValue(jsonResponse([]));
+    const { fetchLeagueRealOdds } = await import("./realOddsFetcher");
+
+    await fetchLeagueRealOdds("ned.1");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0][0])).toContain("/sports/soccer_netherlands_eredivisie/odds");
+  });
+
+  it('23. fetchLeagueRealOdds("por.1") attempts a fetch', async () => {
+    process.env.ODDS_API_KEY = "test-key";
+    fetchMock.mockResolvedValue(jsonResponse([]));
+    const { fetchLeagueRealOdds } = await import("./realOddsFetcher");
+
+    await fetchLeagueRealOdds("por.1");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0][0])).toContain("/sports/soccer_portugal_primeira_liga/odds");
+  });
+
+  it('24. fetchLeagueRealOdds("uefa.champions") attempts a fetch', async () => {
+    process.env.ODDS_API_KEY = "test-key";
+    fetchMock.mockResolvedValue(jsonResponse([]));
+    const { fetchLeagueRealOdds } = await import("./realOddsFetcher");
+
+    await fetchLeagueRealOdds("uefa.champions");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0][0])).toContain("/sports/soccer_uefa_champs_league/odds");
+  });
+
+  it('25. an unmapped slug (e.g. "arg.1") returns [] with ZERO fetch calls', async () => {
+    process.env.ODDS_API_KEY = "test-key";
+    const { fetchLeagueRealOdds } = await import("./realOddsFetcher");
+
+    await expect(fetchLeagueRealOdds("arg.1")).resolves.toEqual([]);
+    expect(fetchMock).toHaveBeenCalledTimes(0);
+  });
+
+  it("26. the request URL for a newly mapped league contains the correct sport key", async () => {
+    process.env.ODDS_API_KEY = "test-key";
+    fetchMock.mockResolvedValue(jsonResponse([]));
+    const { fetchLeagueRealOdds } = await import("./realOddsFetcher");
+
+    // bel.1 and tur.1 are newly mapped; uefa.europa was already covered but
+    // still must resolve to the correct free-tier sport key.
+    await fetchLeagueRealOdds("bel.1");
+    expect(String(fetchMock.mock.calls[0][0])).toContain("soccer_belgium_first_div_a");
+
+    await fetchLeagueRealOdds("tur.1");
+    expect(String(fetchMock.mock.calls[1][0])).toContain("soccer_turkey_super_lig");
+
+    await fetchLeagueRealOdds("uefa.europa");
+    expect(String(fetchMock.mock.calls[2][0])).toContain("soccer_uefa_europa_league");
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
 });
