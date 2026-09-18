@@ -4,6 +4,7 @@ import { clamp } from "./stats";
 import { getAnchors, deriveFromGoals } from "./statisticalAnchors";
 import { calculateXg } from "./xg";
 import { getRefereeProfile, refereeMultipliers } from "./referee";
+import { analyseFormationMismatch, getFormationProfile } from "./players";
 import type { LambdaSet } from "./lambdas";
 import type { DeepStatsVector } from "./types";
 import type { FixtureLite, MatchSummary } from "../espn";
@@ -17,11 +18,36 @@ type ProfileWithProviders = TeamStatProfile & { providers?: string[] };
  * Corner λ ceilings.
  *
  * No team averages more than ~9 corners in a match over a season and no match
- * averages more than ~13, so anything above these numbers is a small-sample
+ * averages more than ~11, so anything above these numbers is a small-sample
  * artifact of the mesh blend rather than a real expectation.
  */
 export const MAX_TEAM_CORNERS  = 9.0;
-export const MAX_TOTAL_CORNERS = 13.0;
+export const MAX_TOTAL_CORNERS = 11.0;
+
+/**
+ * Ceiling for the combined corner multiplier (tactical × formation × wing-focus).
+ *
+ * The three multipliers compound: 1.12 (attacking-vs-defensive) × 1.15
+ * (formation mismatch) × 1.05 (wing-focus) ≈ 1.35. Against a 10.2 anchor that
+ * manufactures base λ near 13.8 before the total cap. No real top-5 league
+ * match sustains that — clamp the product at 1.15.
+ */
+export const MAX_COMBINED_CORNER_MULT = 1.15;
+
+/**
+ * Clamp the combined tactical × formation × wing-focus corner multiplier.
+ * Pure and exported so the cap is unit-testable in isolation.
+ */
+export function combineCornerMultipliers(
+  tacticalCornerMult: number,
+  formationMult: number,
+  wingMult: number,
+): number {
+  return Math.min(
+    MAX_COMBINED_CORNER_MULT,
+    tacticalCornerMult * formationMult * wingMult,
+  );
+}
 
 /**
  * Sample-size-aware shrinkage of the model corner λ toward the mesh mean.
@@ -239,6 +265,11 @@ export function buildRealLambdas(
   let tacticalCornerMult = 1.0;
   let tacticalCardMult   = 1.0;
 
+  // Formation + wing-focus corner multipliers, split from fmm.cornerMultiplier
+  // in Step 1c so the combined product can be capped at 1.15.
+  let formationMult = 1.0;
+  let wingMult      = 1.0;
+
   if (homeStyle === "attacking" && awayStyle === "defensive") {
     tacticalGoalMult = 0.92; tacticalCornerMult = 1.12; tacticalCardMult = 1.10;
     notes.push(`TACTICAL: ${fx.home.name} (attacking) vs ${fx.away.name} (defensive) — frustration corners, tactical fouls, fewer goals.`);
@@ -378,10 +409,20 @@ export function buildRealLambdas(
   // formation-specific goal/corner/card multipliers on top of form-derived λ.
   if (sum?.homeFormation && sum?.awayFormation) {
     try {
-      const { analyseFormationMismatch } = require("./players") as { analyseFormationMismatch: (h: string, a: string) => { goalMultiplier: number; cornerMultiplier: number; cardMultiplier: number; description: string } };
       const fmm = analyseFormationMismatch(sum.homeFormation, sum.awayFormation);
       totalGoals   = clamp(totalGoals   * fmm.goalMultiplier,   0.5, 7.0);
-      tacticalCornerMult *= fmm.cornerMultiplier;
+      // Split fmm.cornerMultiplier (formation base × 1.05 wing-focus when
+      // either side has wingFocus > 0.80) so the combined product can be
+      // capped at MAX_COMBINED_CORNER_MULT at the application site below.
+      // tacticalCornerMult stays style-only here — it is combined later.
+      try {
+        const hProf = getFormationProfile(sum.homeFormation);
+        const aProf = getFormationProfile(sum.awayFormation);
+        wingMult = hProf.wingFocus > 0.80 || aProf.wingFocus > 0.80 ? 1.05 : 1.0;
+      } catch {
+        wingMult = 1.0;
+      }
+      formationMult = wingMult !== 0 ? fmm.cornerMultiplier / wingMult : fmm.cornerMultiplier;
       tacticalCardMult   *= fmm.cardMultiplier;
       completeness += 5;
       notes.push(`FORMATION: ${sum.homeFormation} vs ${sum.awayFormation} — ${fmm.description.slice(0, 80)}`);
@@ -456,8 +497,12 @@ export function buildRealLambdas(
   // ── Step 3: Derive secondary stats from anchored goal expectation ──────────
   const sec = deriveFromGoals(totalGoals, homeShare, anchors);
 
-  sec.homeCorners *= tacticalCornerMult;
-  sec.awayCorners *= tacticalCornerMult;
+  const combinedCornerMult = combineCornerMultipliers(tacticalCornerMult, formationMult, wingMult);
+  if (combinedCornerMult < tacticalCornerMult * formationMult * wingMult) {
+    notes.push(`CORNERS MULT CAP: tactical × formation × wing ${(tacticalCornerMult * formationMult * wingMult).toFixed(3)} exceeds the ${MAX_COMBINED_CORNER_MULT.toFixed(2)} ceiling — clamped to ${combinedCornerMult.toFixed(2)} (tactical ${tacticalCornerMult.toFixed(2)} × formation ${formationMult.toFixed(3)} × wing ${wingMult.toFixed(2)}).`);
+  }
+  sec.homeCorners *= combinedCornerMult;
+  sec.awayCorners *= combinedCornerMult;
   sec.homeCards   *= tacticalCardMult;
   sec.awayCards   *= tacticalCardMult;
 
@@ -519,7 +564,7 @@ export function buildRealLambdas(
   }
 
   // ── Step 4b: total corners ceiling ─────────────────────────────────────────
-  // No match averages more than 13 corners over a season. When the two team
+  // No match averages more than 11 corners over a season. When the two team
   // λ's sum past that, scale both down proportionally — the surplus is a
   // small-sample artifact of the mesh blend, not signal.
   const rawTotalCorners = sec.homeCorners + sec.awayCorners;
@@ -575,7 +620,7 @@ export function buildRealLambdas(
   // ── DeepStatsVector for UI ─────────────────────────────────────────────────
   const tacticsInsight = homeStyle === "balanced" && awayStyle === "balanced"
     ? `Standard tactical setup: ${fx.home.name} (${homeStyle}) vs ${fx.away.name} (${awayStyle}).`
-    : `${fx.home.name} plays ${homeStyle} style vs ${fx.away.name} ${awayStyle} approach. Goal ×${tacticalGoalMult.toFixed(2)}, corners ×${tacticalCornerMult.toFixed(2)}, cards ×${tacticalCardMult.toFixed(2)}.`;
+    : `${fx.home.name} plays ${homeStyle} style vs ${fx.away.name} ${awayStyle} approach. Goal ×${tacticalGoalMult.toFixed(2)}, corners ×${combinedCornerMult.toFixed(2)}, cards ×${tacticalCardMult.toFixed(2)}.`;
 
   const importanceInsight = isFriendly
     ? "Low importance (Friendly/Pre-season). Rotated squads, lower intensity, fewer goals & cards."
