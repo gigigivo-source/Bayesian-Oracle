@@ -3,7 +3,9 @@
 // Provider: The Odds API (v4) — https://api.the-odds-api.com/v4
 //   Auth:    ?apiKey=${ODDS_API_KEY}
 //   Endpoint: GET /sports/{sport_key}/odds  — ONE call returns EVERY fixture of
-//             that league (h2h + totals + btts, all bookmakers, decimal odds).
+//             that league (h2h + totals, all bookmakers, decimal odds).
+//             `btts` is a paid-tier market: requesting it on the free tier fails
+//             the whole call with 422 INVALID_MARKET, so it is not requested.
 //
 // Free tier is 500 requests/month, so quota is the binding constraint and this
 // module is built around three hard rules:
@@ -25,8 +27,9 @@
 // written. A failed fetch is never cached — otherwise a transient outage would
 // be served as "no real odds" for the next 12 hours.
 //
-// Corners and Cards are NOT served by The Odds API. Those legs always resolve
-// to null here and the scanner keeps their Consensus price.
+// Corners and Cards are NOT served by The Odds API. BTTS is a paid-tier market
+// we do not request (see the URL builder). Those legs always resolve to null
+// here and the scanner keeps their Consensus price.
 
 import { eq } from "drizzle-orm";
 import { db } from "@/db";
@@ -393,7 +396,13 @@ export async function fetchLeagueRealOdds(leagueSlug: string): Promise<RealBookO
     `/sports/${sportKey}/odds` +
     `?apiKey=${encodeURIComponent(getApiKey())}` +
     `&regions=eu,uk` +
-    `&markets=h2h,totals,btts` +
+    // `btts` is NOT part of The Odds API free tier. Asking for it makes the whole
+    // request fail with 422 INVALID_MARKET ("Markets not supported by this
+    // endpoint: btts") — no fixtures at all, so every leg silently fell back to
+    // Consensus. BTTS legs therefore resolve to null here and keep their
+    // Consensus price; the parser below still handles a btts market, so if we
+    // ever move to a paid tier, just add `btts` back to this list.
+    `&markets=h2h,totals` +
     `&oddsFormat=decimal` +
     `&dateFormat=iso`;
 

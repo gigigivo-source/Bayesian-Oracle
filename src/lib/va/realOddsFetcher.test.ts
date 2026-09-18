@@ -316,4 +316,24 @@ describe("Value Accumulator — real bookmaker odds (The Odds API)", () => {
     expect(logs.some((l) => l.includes("487"))).toBe(true);
     expect(logs.some((l) => l.includes("quota remaining: 487"))).toBe(true);
   });
+
+  it("13. requests only free-tier markets: markets=h2h,totals and NO btts", async () => {
+    process.env.ODDS_API_KEY = "test-key";
+    fetchMock.mockResolvedValue(
+      jsonResponse([apiEvent("Arsenal", "Chelsea", [totalsMarket(2.5, 1.85, 1.95)])]),
+    );
+    const { fetchLeagueRealOdds } = await import("./realOddsFetcher");
+
+    await fetchLeagueRealOdds("eng.1");
+
+    // The Odds API free tier does not serve `btts`: asking for it fails the WHOLE
+    // request with 422 INVALID_MARKET ("Markets not supported by this endpoint:
+    // btts"), so every fixture of the league falls back to Bzzoiro Consensus.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const url = String(fetchMock.mock.calls[0][0]);
+    expect(url).toContain("markets=h2h,totals");
+    expect(url).not.toContain("btts");
+    // …and `h2h,totals` is the complete value, not a prefix of a longer list.
+    expect(url).toMatch(/markets=h2h,totals&/);
+  });
 });
