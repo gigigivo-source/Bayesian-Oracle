@@ -18,8 +18,8 @@ import type { StatDistribution, TeamStatProfile } from "@/lib/engine/sofascore";
 // The chain is shaped so both scanner.ts (`insert().values()`, `select().from()`,
 // `delete()`) and performScan.ts (`select().from().orderBy().limit()`,
 // `insert().values().returning()`, `delete().where()`) resolve to empty arrays.
-const { dbInsertValues, dbDelete, dbSelectFrom, keepDbAlive, fetchScoreboard } = vi.hoisted(() => {
-  const dbInsertValues = vi.fn(() => {
+const { dbInsertValues, dbDelete, dbSelectFrom, dbUpdateSet, keepDbAlive, fetchScoreboard } = vi.hoisted(() => {
+  const dbInsertValues = vi.fn((..._args: unknown[]) => {
     const p = Promise.resolve([]) as Promise<never[]> & { returning: () => Promise<never[]> };
     p.returning = () => Promise.resolve([]);
     return p;
@@ -35,28 +35,31 @@ const { dbInsertValues, dbDelete, dbSelectFrom, keepDbAlive, fetchScoreboard } =
       where: () => { limit: () => Promise<never[]> };
     };
     p.orderBy = () => ({ limit: () => Promise.resolve([]) });
-    // league_odds_cache reads: select().from().where().limit(1) — empty = cache miss.
     p.where = () => ({ limit: () => Promise.resolve([]) });
     return p;
   });
+  const dbUpdateSet = vi.fn((..._args: unknown[]) => ({ where: () => Promise.resolve([]) }));
   const keepDbAlive = vi.fn(async () => undefined);
   const fetchScoreboard = vi.fn(async (_slug?: string, _range?: string): Promise<FixtureLite[]> => []);
-  return { dbInsertValues, dbDelete, dbSelectFrom, keepDbAlive, fetchScoreboard };
+  return { dbInsertValues, dbDelete, dbSelectFrom, dbUpdateSet, keepDbAlive, fetchScoreboard };
 });
 vi.mock("@/db", () => ({
   db: {
     insert: () => ({ values: dbInsertValues }),
     delete: dbDelete,
     select: () => ({ from: dbSelectFrom }),
+    update: () => ({ set: dbUpdateSet }),
   },
   keepDbAlive: () => keepDbAlive(),
 }));
 vi.mock("@/db/schema", () => ({
-  vaLegs: {},
+  vaLegs: { runId: "runId" },
   marketStats: {},
   vaScanLock: {},
   vaTickets: {},
   leagueOddsCache: {},
+  vaBacktestRuns: { runId: "runId" },
+  vaBacktestTickets: { runId: "runId" },
 }));
 
 // External boundaries of the scanner: ESPN (fixtures) and Bzzoiro (odds). Mocked
@@ -1782,5 +1785,129 @@ describe("Value Accumulator — realOddsCount on the ticket output", () => {
     expect(tickets[0].legs).toHaveLength(4);
     expect(tickets[0].realOddsCount).toBe(0);
     expect(tickets[0].legs.filter((l) => l.oddsSource === "real")).toHaveLength(0);
+  });
+});
+
+describe("Value Accumulator — persist backtest runs and tickets", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("inserts va_backtest_runs with status=running then updates to done", async () => {
+    const { runBacktestScan } = await import("./scanner");
+    await runBacktestScan([], "scan_bt_1");
+    const firstInsert = dbInsertValues.mock.calls[0]?.[0] as { status?: string; runId?: string };
+    expect(firstInsert).toEqual(expect.objectContaining({ status: "running", runId: expect.stringMatching(/^va_bt_/) }));
+    const doneUpdate = dbUpdateSet.mock.calls.find((c) => (c[0] as { status?: string })?.status === "done");
+    expect(doneUpdate?.[0]).toEqual(expect.objectContaining({ status: "done", completedAt: expect.any(Date) }));
+  });
+
+  it("inserts every ticket buildTickets returns, all sharing one runId", async () => {
+    const { runBacktestScan } = await import("./scanner");
+    const ticketMod = await import("./ticket");
+    const fakeTickets = [
+      {
+        scanId: "s",
+        weekStart: "2026-08-17",
+        legs: [{ eventId: "1", market: "Total Goals O/U 0.5", selection: "Over 0.5", homeTeam: "A", awayTeam: "B", modelProbability: 0.7, odds: 1.2, kickoff: new Date(), statFamily: "goals" }],
+        combinedOdds: 1.2,
+        combinedProbability: 0.7,
+        independentProbability: 0.7,
+        combinedEv: 0,
+        kellyScore: 0,
+        stakePercent: 0,
+        isRecommended: true,
+        isReferenceOnly: false,
+        realOddsCount: 0,
+      },
+      {
+        scanId: "s",
+        weekStart: "2026-08-17",
+        legs: [{ eventId: "2", market: "Total Goals O/U 0.5", selection: "Over 0.5", homeTeam: "C", awayTeam: "D", modelProbability: 0.7, odds: 1.3, kickoff: new Date(), statFamily: "goals" }],
+        combinedOdds: 1.3,
+        combinedProbability: 0.6,
+        independentProbability: 0.6,
+        combinedEv: 0,
+        kellyScore: 0,
+        stakePercent: 0,
+        isRecommended: false,
+        isReferenceOnly: false,
+        realOddsCount: 0,
+      },
+    ];
+    vi.spyOn(ticketMod, "buildTickets").mockReturnValue(fakeTickets as never);
+
+    const kickoff = new Date();
+    kickoff.setUTCDate(kickoff.getUTCDate() - 12);
+    const fx = {
+      id: "fx1",
+      leagueSlug: "eng.1",
+      leagueName: "EPL",
+      date: kickoff.toISOString(),
+      state: "post" as const,
+      statusDetail: "FT",
+      venue: null,
+      home: { id: "h", name: "A", abbrev: "A", logo: null, score: "2", record: null },
+      away: { id: "a", name: "B", abbrev: "B", logo: null, score: "1", record: null },
+      neutralSite: false,
+    } as unknown as FixtureLite;
+
+    const odds = await import("./oddsFetcher");
+    vi.mocked(odds.resolveBzzoiroEvent).mockResolvedValue({
+      eventId: "99",
+      status: "resolved",
+      eventsInRange: 1,
+      relatedInRange: 1,
+      toleranceDays: 2,
+    });
+    vi.mocked(odds.fetchOddsForEvent).mockResolvedValue([
+      { bookmaker: "Consensus", marketLabel: "Goals Over/Under", line: 0.5, selection: "Over 0.5", odds: 1.2 },
+    ]);
+    runEngineFromRealWithProfiles.mockReturnValue({
+      match: { dataCompletenessScore: 80 },
+      markets: [{ name: "Total Goals O/U 0.5", selection: "Over 0.5", family: "goals", hitRate: 0.7 }],
+    });
+
+    await runBacktestScan([fx], "scan_bt_all");
+
+    const ticketInserts = dbInsertValues.mock.calls.filter(
+      (c) => c[0] && typeof c[0] === "object" && c[0] !== null && "simulatedDay" in (c[0] as object),
+    );
+    expect(ticketInserts.length).toBeGreaterThanOrEqual(2);
+    const runIds = new Set(ticketInserts.map((c) => (c[0] as { runId: string }).runId));
+    expect(runIds.size).toBe(1);
+    expect(Array.from(runIds)[0]).toMatch(/^va_bt_/);
+  });
+
+  it("different runs get different runId values", async () => {
+    const { runBacktestScan } = await import("./scanner");
+    await runBacktestScan([], "scan_a");
+    await runBacktestScan([], "scan_b");
+    const runInserts = dbInsertValues.mock.calls
+      .map((c) => c[0])
+      .filter((v) => v && typeof v === "object" && "status" in v && (v as { status: string }).status === "running") as Array<{ runId: string }>;
+    expect(runInserts.length).toBeGreaterThanOrEqual(2);
+    expect(runInserts[0].runId).not.toBe(runInserts[1].runId);
+  });
+
+  it("a crash mid-run writes status=error with completedAt", async () => {
+    const { runBacktestScan } = await import("./scanner");
+    const exploding = {
+      length: 1,
+      [Symbol.iterator]() {
+        throw new Error("boom");
+      },
+    } as unknown as FixtureLite[];
+    await expect(runBacktestScan(exploding, "scan_crash")).rejects.toThrow("boom");
+    const errUpdate = dbUpdateSet.mock.calls.find((c) => (c[0] as { status?: string })?.status === "error");
+    expect(errUpdate?.[0]).toEqual(
+      expect.objectContaining({ status: "error", completedAt: expect.any(Date), error: "boom" }),
+    );
   });
 });

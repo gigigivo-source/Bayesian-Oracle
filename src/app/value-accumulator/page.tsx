@@ -64,6 +64,47 @@ interface TicketsResponse {
   learning?: VaLearningStats;
 }
 
+interface VaBacktestRunRow {
+  id: number;
+  runId: string;
+  status: string | null;
+  startedAt: string;
+  completedAt: string | null;
+  daysSimulated: number;
+  matchesProcessed: number;
+  ticketsBuilt: number;
+  won: number;
+  lost: number;
+  pending: number;
+  realisedRate: number | string | null;
+  claimedAverage: number | string | null;
+  edge: number | string | null;
+  error: string | null;
+}
+
+interface VaBacktestTicketLeg {
+  match?: string;
+  matchLabel?: string;
+  market: string;
+  selection: string;
+  odds?: number;
+  bookmakerOdds?: number;
+  modelProbability?: number;
+  outcome?: string;
+}
+
+interface VaBacktestTicketRow {
+  id: number;
+  runId: string;
+  simulatedDay: string;
+  weekStart: string | null;
+  legs: VaBacktestTicketLeg[];
+  combinedOdds: number | string;
+  combinedProbability: number | string;
+  status: string;
+  createdAt: string;
+}
+
 interface BacktestBucket {
   claimed: number;
   n: number;
@@ -201,6 +242,10 @@ export default function ValueAccumulatorPage() {
   const [liveScanError, setLiveScanError] = useState<string | null>(null);
   const [liveScanErrorOpen, setLiveScanErrorOpen] = useState(false);
   const [liveScanToast, setLiveScanToast] = useState<string | null>(null);
+  const [btHistoryOpen, setBtHistoryOpen] = useState(false);
+  const [btViewAllRuns, setBtViewAllRuns] = useState(false);
+  const [btRuns, setBtRuns] = useState<VaBacktestRunRow[]>([]);
+  const [btTickets, setBtTickets] = useState<VaBacktestTicketRow[]>([]);
 
   async function startLiveScan() {
     if (liveScanStatus === "running") return;
@@ -307,6 +352,19 @@ export default function ValueAccumulatorPage() {
       setLoading(false);
     }
   }
+
+  useEffect(() => {
+    fetch("/api/va/backtest-tickets", { cache: "no-store" })
+      .then((r) => r.json())
+      .then((data: { ok?: boolean; runs?: VaBacktestRunRow[]; tickets?: VaBacktestTicketRow[] }) => {
+        setBtRuns(data.runs ?? []);
+        setBtTickets(data.tickets ?? []);
+      })
+      .catch(() => {
+        setBtRuns([]);
+        setBtTickets([]);
+      });
+  }, [ticketBacktestStatus]);
 
   useEffect(() => {
     let cancelled = false;
@@ -843,6 +901,196 @@ export default function ValueAccumulatorPage() {
             ))}
           </div>
         )}
+
+
+        {/* Backtest History — persisted runs, separate from the live ticket list */}
+        <div style={{ marginTop: 32 }}>
+          <button
+            type="button"
+            onClick={() => setBtHistoryOpen((o) => !o)}
+            style={{
+              background: "white",
+              border: "1px solid #e5e7eb",
+              borderRadius: 12,
+              padding: "14px 20px",
+              width: "100%",
+              textAlign: "left",
+              cursor: "pointer",
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+            }}
+          >
+            <span style={{ fontSize: 15, fontWeight: 700, color: "#111827" }}>Backtest History</span>
+            <span style={{ fontSize: 12, color: "#6b7280" }}>{btHistoryOpen ? "Hide" : "Show"}</span>
+          </button>
+          {btHistoryOpen && (
+            <div
+              style={{
+                background: "white",
+                border: "1px solid #e5e7eb",
+                borderTop: "none",
+                borderRadius: "0 0 12px 12px",
+                padding: 20,
+              }}
+            >
+              {(() => {
+                const totalTickets = btRuns.reduce((s, r) => s + (r.ticketsBuilt ?? 0), 0);
+                const wonN = btRuns.reduce((s, r) => s + (r.won ?? 0), 0);
+                const lostN = btRuns.reduce((s, r) => s + (r.lost ?? 0), 0);
+                const settled = wonN + lostN;
+                const rate = settled > 0 ? ((wonN / settled) * 100).toFixed(1) : "—";
+                const latest = btRuns[0];
+                const latestTickets = latest
+                  ? btTickets.filter((t) => t.runId === latest.runId)
+                  : [];
+                const showTickets =
+                  latestTickets.length >= 20 ? latestTickets : btTickets;
+                const sorted = [...showTickets].sort((a, b) =>
+                  (b.simulatedDay ?? "").localeCompare(a.simulatedDay ?? ""),
+                );
+                const outcomeBadge = (outcome?: string) => {
+                  const o = (outcome ?? "unknown").toLowerCase();
+                  const palette =
+                    o === "won"
+                      ? { bg: "#ecfdf5", fg: "#0a7d4f", label: "WON" }
+                      : o === "lost"
+                      ? { bg: "#fef2f2", fg: "#dc2626", label: "LOST" }
+                      : { bg: "#f3f4f6", fg: "#6b7280", label: "UNKNOWN" };
+                  return (
+                    <span
+                      style={{
+                        background: palette.bg,
+                        color: palette.fg,
+                        padding: "2px 8px",
+                        borderRadius: 4,
+                        fontWeight: 600,
+                        fontSize: 11,
+                      }}
+                    >
+                      {palette.label}
+                    </span>
+                  );
+                };
+                return (
+                  <>
+                    <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 16 }}>
+                      {btRuns.length} runs · {totalTickets} tickets · {wonN}W / {lostN}L ({rate}%)
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setBtViewAllRuns((v) => !v)}
+                      style={{
+                        background: "#f3f4f6",
+                        border: "1px solid #e5e7eb",
+                        borderRadius: 8,
+                        padding: "6px 12px",
+                        fontSize: 12,
+                        fontWeight: 600,
+                        color: "#374151",
+                        cursor: "pointer",
+                        marginBottom: 16,
+                      }}
+                    >
+                      {btViewAllRuns ? "Hide runs" : "View all runs"}
+                    </button>
+                    {btViewAllRuns && (
+                      <div style={{ marginBottom: 16, display: "flex", flexDirection: "column", gap: 8 }}>
+                        {btRuns.map((r) => (
+                          <div
+                            key={r.runId}
+                            style={{
+                              fontSize: 12,
+                              color: "#374151",
+                              fontFamily: "monospace",
+                              padding: "8px 10px",
+                              background: "#f9fafb",
+                              borderRadius: 8,
+                            }}
+                          >
+                            {r.runId} · {r.status} · {r.ticketsBuilt} tickets · {r.won}W/{r.lost}L
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+                      {sorted.map((ticket) => {
+                        const odds = Number(ticket.combinedOdds);
+                        const claimed = Number(ticket.combinedProbability);
+                        return (
+                          <div
+                            key={ticket.id}
+                            style={{
+                              border: "1px solid #e5e7eb",
+                              borderRadius: 10,
+                              padding: 14,
+                            }}
+                          >
+                            <div
+                              style={{
+                                fontSize: 11,
+                                color: "#6b7280",
+                                fontWeight: 700,
+                                letterSpacing: "0.04em",
+                                marginBottom: 6,
+                              }}
+                            >
+                              SIMULATED DAY: {ticket.simulatedDay}
+                            </div>
+                            <div style={{ fontSize: 13, fontWeight: 600, color: "#111827", marginBottom: 10 }}>
+                              ODDS {Number.isFinite(odds) ? odds.toFixed(2) : "—"} · CLAIMED{" "}
+                              {Number.isFinite(claimed) ? `${(claimed * 100).toFixed(1)}%` : "—"} · STATUS:{" "}
+                              {ticket.status.toUpperCase()}
+                            </div>
+                            <div style={{ overflowX: "auto" }}>
+                              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                                <thead>
+                                  <tr style={{ textAlign: "left", borderBottom: "1px solid #e5e7eb" }}>
+                                    {["MATCH", "MARKET", "SELECTION", "ODDS", "PROB", "OUTCOME"].map((h) => (
+                                      <th
+                                        key={h}
+                                        style={{
+                                          padding: "6px 4px",
+                                          color: "#6b7280",
+                                          fontWeight: 600,
+                                          fontSize: 10,
+                                        }}
+                                      >
+                                        {h}
+                                      </th>
+                                    ))}
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {(ticket.legs ?? []).map((leg, i) => (
+                                    <tr key={i} style={{ borderBottom: "1px solid #f3f4f6" }}>
+                                      <td style={{ padding: "8px 4px" }}>{leg.match ?? leg.matchLabel ?? "—"}</td>
+                                      <td style={{ padding: "8px 4px" }}>{leg.market}</td>
+                                      <td style={{ padding: "8px 4px" }}>{leg.selection}</td>
+                                      <td style={{ padding: "8px 4px" }}>
+                                        {Number(leg.odds ?? leg.bookmakerOdds ?? 0).toFixed(2)}
+                                      </td>
+                                      <td style={{ padding: "8px 4px" }}>
+                                        {leg.modelProbability != null
+                                          ? `${(Number(leg.modelProbability) * 100).toFixed(1)}%`
+                                          : "—"}
+                                      </td>
+                                      <td style={{ padding: "8px 4px" }}>{outcomeBadge(leg.outcome)}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </>
+                );
+              })()}
+            </div>
+          )}
+        </div>
 
         {/* Edge case: 1-2 legs */}
         {!loading && tickets.length === 0 && scanId && (

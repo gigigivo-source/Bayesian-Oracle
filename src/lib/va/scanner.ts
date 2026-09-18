@@ -19,9 +19,10 @@ import {
 } from "./xgFetcher";
 import { matchEngineMarketToBookmaker, type TeamContext } from "./marketMap";
 import { fetchLeagueRealOdds, bestPriceFor, type RealBookOdds } from "./realOddsFetcher";
-import { buildTickets, getWeekStartForLegs, type VaLeg, type VaTicket, type VaTicketLeg } from "./ticket";
+import { buildTickets, getWeekStartForLegs, type VaLeg, type VaTicket } from "./ticket";
 import { db } from "@/db";
-import { vaLegs, marketStats } from "@/db/schema";
+import { vaLegs, marketStats, vaBacktestRuns, vaBacktestTickets } from "@/db/schema";
+import { eq } from "drizzle-orm";
 
 function optionalEngineExport(name: string): unknown {
   try {
@@ -1123,11 +1124,33 @@ export async function settleBacktestTickets(tickets: VaTicket[], results: Map<st
  * corners + cards from the ESPN match summary boxscore with one fetchSummary
  * call per match maximum), and aggregate results across all simulated days.
  */
-async function runBacktestScan(
+export async function runBacktestScan(
   fixtures: FixtureLite[],
   scanId: string,
   forceRefresh = false,
 ): Promise<BacktestScanResult> {
+  const runId = `va_bt_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+  let matchesProcessed = 0;
+  let daysSimulated = 0;
+  let ticketsBuiltCount = 0;
+  let won = 0;
+  let lost = 0;
+  let pending = 0;
+  let realisedRate: number | null = null;
+  let claimedAverage: number | null = null;
+  let edge: number | null = null;
+
+  try {
+    await db.insert(vaBacktestRuns).values({
+      runId,
+      status: "running",
+      startedAt: new Date(),
+    });
+  } catch (err) {
+    console.error("[VA] failed to insert va_backtest_runs", err);
+  }
+
+  try {
   let marketsEvaluated = 0;
 
   // Backtest-only settlement helpers (local to this scan — the live scan path
@@ -1211,7 +1234,7 @@ async function runBacktestScan(
   //   - no EV filter
   const pooled: VaLeg[] = [];
   const fixtureById = new Map<string, FixtureLite>();
-  let matchesProcessed = 0;
+  matchesProcessed = 0;
 
   // NO real-odds pre-fetch: the backtest mirrors the live path's demand-driven
   // fetch (below the pooling loop), so a league the backtest cannot qualify
@@ -1391,7 +1414,7 @@ async function runBacktestScan(
   const todayUtc = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
   const firstDay = todayUtc - 30 * DAY_MS;
   const lastDay = todayUtc - 8 * DAY_MS;
-  const daysSimulated = Math.max(0, Math.round((lastDay - firstDay) / DAY_MS) + 1);
+  daysSimulated = Math.max(0, Math.round((lastDay - firstDay) / DAY_MS) + 1);
 
   const builtTickets: BacktestSampleTicket[] = [];
   for (let dayOffset = 0; dayOffset < daysSimulated; dayOffset++) {
@@ -1421,13 +1444,15 @@ async function runBacktestScan(
     // (c) SAME builder as live.
     const ticketsForDay = buildTickets(dedupedDayPool, "stack");
 
-    // (d) Skip days with no ticket; keep only the first (recommended) one.
+    // (d) Skip days with no ticket; persist every ticket the builder returns.
     if (ticketsForDay.length === 0) continue;
-    builtTickets.push({
-      ...ticketsForDay[0],
-      status: "pending" as BacktestTicketStatus,
-      weekLabel: dayLabel,
-    });
+    for (const ticket of ticketsForDay) {
+      builtTickets.push({
+        ...ticket,
+        status: "pending" as BacktestTicketStatus,
+        weekLabel: dayLabel,
+      });
+    }
   }
 
   // Step 7: settle each ticket's legs against the finished match results.
@@ -1528,6 +1553,7 @@ async function runBacktestScan(
         accumulatedStats.set(key, cur);
       }
 
+      Object.assign(leg, { outcome: status });
       return status;
     });
     ticket.status = legStatuses.includes("lost")
@@ -1562,24 +1588,24 @@ async function runBacktestScan(
   console.log(`[backtest] updated marketStats for ${accumulatedStats.size} market keys`);
 
   // Aggregate and return:
-  const won = builtTickets.filter((t) => t.status === "won").length;
-  const lost = builtTickets.filter((t) => t.status === "lost").length;
-  const pending = builtTickets.filter((t) => t.status === "pending").length;
-  const ticketsBuiltCount = builtTickets.length;
+  won = builtTickets.filter((t) => t.status === "won").length;
+  lost = builtTickets.filter((t) => t.status === "lost").length;
+  pending = builtTickets.filter((t) => t.status === "pending").length;
+  ticketsBuiltCount = builtTickets.length;
   const settledCount = won + lost;
 
   const round4 = (v: number) => Math.round(v * 10000) / 10000;
   const round3 = (v: number) => Math.round(v * 1000) / 1000;
 
-  const realisedRate = settledCount > 0 ? round4(won / settledCount) : null;
+  realisedRate = settledCount > 0 ? round4(won / settledCount) : null;
 
   const settledTickets = builtTickets.filter((t) => t.status === "won" || t.status === "lost");
-  const claimedAverage =
+  claimedAverage =
     settledCount > 0
       ? round4(settledTickets.reduce((sum, t) => sum + t.combinedProbability, 0) / settledCount)
       : null;
 
-  const edge =
+  edge =
     realisedRate !== null && claimedAverage !== null
       ? round4(realisedRate - claimedAverage)
       : null;
@@ -1678,6 +1704,54 @@ async function runBacktestScan(
       `marketKeys=${accumulatedStats.size} won=${won} lost=${lost} pending=${pending}`
   );
 
+
+  try {
+    for (const ticket of builtTickets) {
+      const simulatedDay = ticket.weekLabel ?? "";
+      const settledAt =
+        ticket.status === "won" || ticket.status === "lost" ? new Date() : null;
+      await db.insert(vaBacktestTickets).values({
+        runId,
+        simulatedDay,
+        weekStart: getWeekStartForLegs(ticket.legs as unknown as VaLeg[]),
+        legs: ticket.legs,
+        combinedOdds: String(ticket.combinedOdds),
+        combinedProbability: String(ticket.combinedProbability),
+        independentProbability:
+          ticket.independentProbability != null ? String(ticket.independentProbability) : null,
+        combinedEv: ticket.combinedEv != null ? String(ticket.combinedEv) : null,
+        kellyScore: ticket.kellyScore != null ? String(ticket.kellyScore) : null,
+        stakePercent: ticket.stakePercent != null ? String(ticket.stakePercent) : null,
+        realOddsCount: ticket.realOddsCount ?? null,
+        status: ticket.status,
+        settledAt,
+      });
+    }
+  } catch (err) {
+    console.error("[VA] failed to insert va_backtest_tickets", err);
+  }
+
+  try {
+    await db
+      .update(vaBacktestRuns)
+      .set({
+        status: "done",
+        completedAt: new Date(),
+        daysSimulated,
+        matchesProcessed,
+        ticketsBuilt: ticketsBuiltCount,
+        won,
+        lost,
+        pending,
+        realisedRate: realisedRate != null ? String(realisedRate) : null,
+        claimedAverage: claimedAverage != null ? String(claimedAverage) : null,
+        edge: edge != null ? String(edge) : null,
+      })
+      .where(eq(vaBacktestRuns.runId, runId));
+  } catch (err) {
+    console.error("[VA] failed to update va_backtest_runs", err);
+  }
+
   return {
     matchesScanned: fixtures.length,
     marketsEvaluated,
@@ -1686,4 +1760,29 @@ async function runBacktestScan(
     tickets: builtTickets,
     ticketBacktest,
   };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    try {
+      await db
+        .update(vaBacktestRuns)
+        .set({
+          status: "error",
+          completedAt: new Date(),
+          daysSimulated,
+          matchesProcessed,
+          ticketsBuilt: ticketsBuiltCount,
+          won,
+          lost,
+          pending,
+          realisedRate: realisedRate != null ? String(realisedRate) : null,
+          claimedAverage: claimedAverage != null ? String(claimedAverage) : null,
+          edge: edge != null ? String(edge) : null,
+          error: message,
+        })
+        .where(eq(vaBacktestRuns.runId, runId));
+    } catch (updateErr) {
+      console.error("[VA] failed to mark va_backtest_runs as error", updateErr);
+    }
+    throw err;
+  }
 }

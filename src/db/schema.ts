@@ -319,6 +319,43 @@ export const vaScanLock = pgTable("va_scan_lock", {
   scanId:   text("scan_id").notNull(),
 });
 
+// Backtest history — isolated from live va_tickets / va_scan_lock.
+export const vaBacktestRuns = pgTable("va_backtest_runs", {
+  id:                serial("id").primaryKey(),
+  runId:             text("run_id").notNull().unique(),
+  status:            text("status"),
+  startedAt:         timestamp("started_at").defaultNow().notNull(),
+  completedAt:       timestamp("completed_at"),
+  daysSimulated:     integer("days_simulated").notNull().default(0),
+  matchesProcessed:  integer("matches_processed").notNull().default(0),
+  ticketsBuilt:      integer("tickets_built").notNull().default(0),
+  won:               integer("won").notNull().default(0),
+  lost:              integer("lost").notNull().default(0),
+  pending:           integer("pending").notNull().default(0),
+  realisedRate:      numeric("realised_rate"),
+  claimedAverage:    numeric("claimed_average"),
+  edge:              numeric("edge"),
+  error:             text("error"),
+});
+
+export const vaBacktestTickets = pgTable("va_backtest_tickets", {
+  id:                     serial("id").primaryKey(),
+  runId:                  text("run_id").notNull(),
+  simulatedDay:           text("simulated_day").notNull(),
+  weekStart:              text("week_start"),
+  legs:                   jsonb("legs").notNull(),
+  combinedOdds:           numeric("combined_odds").notNull(),
+  combinedProbability:    numeric("combined_probability").notNull(),
+  independentProbability: numeric("independent_probability"),
+  combinedEv:             numeric("combined_ev"),
+  kellyScore:             numeric("kelly_score"),
+  stakePercent:           numeric("stake_percent"),
+  realOddsCount:          integer("real_odds_count"),
+  status:                 text("status").notNull(),
+  settledAt:              timestamp("settled_at"),
+  createdAt:              timestamp("created_at").defaultNow().notNull(),
+});
+
 export const marketStats = pgTable("market_stats", {
   marketKey:   text("market_key").primaryKey(),
   family:      text("family").notNull(),
