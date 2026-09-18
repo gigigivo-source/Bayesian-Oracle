@@ -287,6 +287,8 @@ export const vaLegs = pgTable("va_legs", {
   ev:                 real("ev").notNull(),
   oddsAtBuild:        timestamp("odds_at_build", { withTimezone: true }).notNull(),
   scannedAt:          timestamp("scanned_at", { withTimezone: true }).defaultNow().notNull(),
+  /** "real" = priced from The Odds API, "consensus" = Bzzoiro Consensus fallback. */
+  oddsSource:         text("odds_source"),
 });
 
 export const vaTickets = pgTable("va_tickets", {
@@ -305,6 +307,8 @@ export const vaTickets = pgTable("va_tickets", {
   status:              text("status").notNull().default("pending"),
   settledAt:           timestamp("settled_at", { withTimezone: true }),
   createdAt:           timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  /** "real" | "consensus" | null — dominant odds source across the ticket's legs. */
+  oddsSource:          text("odds_source"),
 });
 
 export const vaScanLock = pgTable("va_scan_lock", {
@@ -324,6 +328,23 @@ export const marketStats = pgTable("market_stats", {
 
 export type MarketStatRow = typeof marketStats.$inferSelect;
 export type NewMarketStat = typeof marketStats.$inferInsert;
+
+// ─── The Odds API league cache (quota protection) ─────────────────────────────
+// The Odds API free tier allows 500 requests/month. ONE request returns every
+// fixture of a league, so the Value Accumulator scanner calls it at most once
+// per league per 12h and reuses the parsed rows for every fixture of that
+// league in every scan inside the TTL. Failures are never cached (see
+// src/lib/va/realOddsFetcher.ts).
+export const leagueOddsCache = pgTable("league_odds_cache", {
+  leagueSlug:   text("league_slug").primaryKey(),
+  sportKey:     text("sport_key").notNull(),
+  responseJson: jsonb("response_json").notNull(),
+  fetchedAt:    timestamp("fetched_at", { withTimezone: true }).defaultNow().notNull(),
+  expiresAt:    timestamp("expires_at", { withTimezone: true }).notNull(),
+});
+
+export type LeagueOddsCacheRow = typeof leagueOddsCache.$inferSelect;
+export type NewLeagueOddsCache = typeof leagueOddsCache.$inferInsert;
 
 // ─── Legacy aliases (kept for backward compat with older routes) ───────────────
 /** @deprecated use `bankroll` */
