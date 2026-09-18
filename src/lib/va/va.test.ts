@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { matchEngineMarketToBookmaker } from "./marketMap";
 import { buildTickets, type VaLeg } from "./ticket";
 import type { VaBookmakerOdds } from "./oddsFetcher";
+import type { RealBookOdds } from "./realOddsFetcher";
 import {
   settleBacktestTickets,
   type BacktestMatchResult,
@@ -31,12 +32,15 @@ const { dbInsertValues, dbDelete, dbSelectFrom, keepDbAlive, fetchScoreboard } =
   const dbSelectFrom = vi.fn(() => {
     const p = Promise.resolve([]) as Promise<never[]> & {
       orderBy: () => { limit: () => Promise<never[]> };
+      where: () => { limit: () => Promise<never[]> };
     };
     p.orderBy = () => ({ limit: () => Promise.resolve([]) });
+    // league_odds_cache reads: select().from().where().limit(1) — empty = cache miss.
+    p.where = () => ({ limit: () => Promise.resolve([]) });
     return p;
   });
   const keepDbAlive = vi.fn(async () => undefined);
-  const fetchScoreboard = vi.fn(async (): Promise<FixtureLite[]> => []);
+  const fetchScoreboard = vi.fn(async (_slug?: string, _range?: string): Promise<FixtureLite[]> => []);
   return { dbInsertValues, dbDelete, dbSelectFrom, keepDbAlive, fetchScoreboard };
 });
 vi.mock("@/db", () => ({
@@ -47,7 +51,13 @@ vi.mock("@/db", () => ({
   },
   keepDbAlive: () => keepDbAlive(),
 }));
-vi.mock("@/db/schema", () => ({ vaLegs: {}, marketStats: {}, vaScanLock: {}, vaTickets: {} }));
+vi.mock("@/db/schema", () => ({
+  vaLegs: {},
+  marketStats: {},
+  vaScanLock: {},
+  vaTickets: {},
+  leagueOddsCache: {},
+}));
 
 // External boundaries of the scanner: ESPN (fixtures) and Bzzoiro (odds). Mocked
 // the same way scannerCoverage.test.ts does so performScan runs end-to-end offline.
@@ -55,7 +65,7 @@ vi.mock("@/lib/espn", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/espn")>();
   return {
     ...actual,
-    fetchScoreboard: () => fetchScoreboard(),
+    fetchScoreboard: (slug: string, range: string) => fetchScoreboard(slug, range),
     fetchSummary: vi.fn(async () => null),
   };
 });
@@ -71,6 +81,29 @@ vi.mock("./oddsFetcher", async (importOriginal) => {
       toleranceDays: 5,
     })),
     fetchOddsForEvent: vi.fn(async () => [] as VaBookmakerOdds[]),
+  };
+});
+
+// The scanner runs the real engine for every fixture. Stub it so the scan tests
+// below (real-odds wiring, quota protection) run offline and deterministically.
+const { runEngineFromRealWithProfiles, fetchLeagueRealOdds } = vi.hoisted(() => {
+  const runEngineFromRealWithProfiles = vi.fn(() => ({
+    match: { dataCompletenessScore: 80 },
+    markets: [] as Array<{ name: string; selection: string; family?: string; hitRate: number }>,
+  }));
+  const fetchLeagueRealOdds = vi.fn(async (_leagueSlug: string) => [] as RealBookOdds[]);
+  return { runEngineFromRealWithProfiles, fetchLeagueRealOdds };
+});
+vi.mock("@/lib/engine", () => ({
+  runEngineFromRealWithProfiles: () => runEngineFromRealWithProfiles(),
+}));
+// Only the network boundary of realOddsFetcher is stubbed — bestPriceFor stays
+// real, so the scan exercises the actual matching rules.
+vi.mock("./realOddsFetcher", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./realOddsFetcher")>();
+  return {
+    ...actual,
+    fetchLeagueRealOdds: (leagueSlug: string) => fetchLeagueRealOdds(leagueSlug),
   };
 });
 
@@ -126,6 +159,7 @@ describe("Value Accumulator — Partitioner", () => {
       ev: overrides.ev,
       oddsAtBuild: new Date(),
       scannedAt: new Date(),
+      oddsSource: "consensus",
     };
     // Apply overrides with nullish coalescing where needed
     return {
@@ -394,6 +428,7 @@ describe("Value Accumulator — Stack mode", () => {
       ev: overrides.ev ?? 0.088,
       oddsAtBuild: new Date(),
       scannedAt: new Date(),
+      oddsSource: "consensus",
     };
     return { ...base, ...overrides };
   }
@@ -471,17 +506,17 @@ describe("Value Accumulator — Stack mode", () => {
 describe("Value Accumulator — Immutability and Lock", () => {
   it("8. ticket immutability — second scan does not mutate first scan's tickets (logic)", () => {
     const legs1: VaLeg[] = [
-      { scanId: "scan1", eventId: "1", matchLabel: "A vs B", homeTeam: "A", awayTeam: "B", leagueSlug: "eng.1", kickoff: new Date("2026-09-13T12:00:00Z"), market: "Total Goals O/U 2.5", selection: "Over 2.5", statFamily: "goals", modelProbability: 0.7, bookmakerOdds: 1.5, bookmakerName: "1xBet", impliedProbability: 0.666, ev: 0.26, oddsAtBuild: new Date(), scannedAt: new Date() },
-      { scanId: "scan1", eventId: "2", matchLabel: "C vs D", homeTeam: "C", awayTeam: "D", leagueSlug: "eng.1", kickoff: new Date("2026-09-13T15:30:00Z"), market: "Total Corners O/U 9.5", selection: "Over 9.5", statFamily: "corners", modelProbability: 0.68, bookmakerOdds: 1.5, bookmakerName: "1xBet", impliedProbability: 0.666, ev: 0.258, oddsAtBuild: new Date(), scannedAt: new Date() },
-      { scanId: "scan1", eventId: "3", matchLabel: "E vs F", homeTeam: "E", awayTeam: "F", leagueSlug: "eng.1", kickoff: new Date("2026-09-13T19:00:00Z"), market: "Total Cards O/U 3.5", selection: "Over 3.5", statFamily: "cards", modelProbability: 0.66, bookmakerOdds: 1.5, bookmakerName: "1xBet", impliedProbability: 0.666, ev: 0.254, oddsAtBuild: new Date(), scannedAt: new Date() },
+      { scanId: "scan1", eventId: "1", matchLabel: "A vs B", homeTeam: "A", awayTeam: "B", leagueSlug: "eng.1", kickoff: new Date("2026-09-13T12:00:00Z"), market: "Total Goals O/U 2.5", selection: "Over 2.5", statFamily: "goals", modelProbability: 0.7, bookmakerOdds: 1.5, bookmakerName: "1xBet", impliedProbability: 0.666, ev: 0.26, oddsAtBuild: new Date(), scannedAt: new Date(), oddsSource: "consensus" },
+      { scanId: "scan1", eventId: "2", matchLabel: "C vs D", homeTeam: "C", awayTeam: "D", leagueSlug: "eng.1", kickoff: new Date("2026-09-13T15:30:00Z"), market: "Total Corners O/U 9.5", selection: "Over 9.5", statFamily: "corners", modelProbability: 0.68, bookmakerOdds: 1.5, bookmakerName: "1xBet", impliedProbability: 0.666, ev: 0.258, oddsAtBuild: new Date(), scannedAt: new Date(), oddsSource: "consensus" },
+      { scanId: "scan1", eventId: "3", matchLabel: "E vs F", homeTeam: "E", awayTeam: "F", leagueSlug: "eng.1", kickoff: new Date("2026-09-13T19:00:00Z"), market: "Total Cards O/U 3.5", selection: "Over 3.5", statFamily: "cards", modelProbability: 0.66, bookmakerOdds: 1.5, bookmakerName: "1xBet", impliedProbability: 0.666, ev: 0.254, oddsAtBuild: new Date(), scannedAt: new Date(), oddsSource: "consensus" },
     ];
     const tickets1 = buildTickets(legs1);
     const snapshot = JSON.stringify(tickets1);
 
     const legs2: VaLeg[] = [
-      { scanId: "scan2", eventId: "4", matchLabel: "G vs H", homeTeam: "G", awayTeam: "H", leagueSlug: "eng.1", kickoff: new Date("2026-09-14T12:00:00Z"), market: "Total Goals O/U 2.5", selection: "Over 2.5", statFamily: "goals", modelProbability: 0.72, bookmakerOdds: 1.5, bookmakerName: "Bet365", impliedProbability: 0.666, ev: 0.404, oddsAtBuild: new Date(), scannedAt: new Date() },
-      { scanId: "scan2", eventId: "5", matchLabel: "I vs J", homeTeam: "I", awayTeam: "J", leagueSlug: "eng.1", kickoff: new Date("2026-09-14T15:00:00Z"), market: "Total Corners O/U 9.5", selection: "Over 9.5", statFamily: "corners", modelProbability: 0.7, bookmakerOdds: 1.5, bookmakerName: "Bet365", impliedProbability: 0.666, ev: 0.33, oddsAtBuild: new Date(), scannedAt: new Date() },
-      { scanId: "scan2", eventId: "6", matchLabel: "K vs L", homeTeam: "K", awayTeam: "L", leagueSlug: "eng.1", kickoff: new Date("2026-09-14T18:00:00Z"), market: "Total Cards O/U 3.5", selection: "Over 3.5", statFamily: "cards", modelProbability: 0.68, bookmakerOdds: 1.5, bookmakerName: "Bet365", impliedProbability: 0.666, ev: 0.258, oddsAtBuild: new Date(), scannedAt: new Date() },
+      { scanId: "scan2", eventId: "4", matchLabel: "G vs H", homeTeam: "G", awayTeam: "H", leagueSlug: "eng.1", kickoff: new Date("2026-09-14T12:00:00Z"), market: "Total Goals O/U 2.5", selection: "Over 2.5", statFamily: "goals", modelProbability: 0.72, bookmakerOdds: 1.5, bookmakerName: "Bet365", impliedProbability: 0.666, ev: 0.404, oddsAtBuild: new Date(), scannedAt: new Date(), oddsSource: "consensus" },
+      { scanId: "scan2", eventId: "5", matchLabel: "I vs J", homeTeam: "I", awayTeam: "J", leagueSlug: "eng.1", kickoff: new Date("2026-09-14T15:00:00Z"), market: "Total Corners O/U 9.5", selection: "Over 9.5", statFamily: "corners", modelProbability: 0.7, bookmakerOdds: 1.5, bookmakerName: "Bet365", impliedProbability: 0.666, ev: 0.33, oddsAtBuild: new Date(), scannedAt: new Date(), oddsSource: "consensus" },
+      { scanId: "scan2", eventId: "6", matchLabel: "K vs L", homeTeam: "K", awayTeam: "L", leagueSlug: "eng.1", kickoff: new Date("2026-09-14T18:00:00Z"), market: "Total Cards O/U 3.5", selection: "Over 3.5", statFamily: "cards", modelProbability: 0.68, bookmakerOdds: 1.5, bookmakerName: "Bet365", impliedProbability: 0.666, ev: 0.258, oddsAtBuild: new Date(), scannedAt: new Date(), oddsSource: "consensus" },
     ];
     const tickets2 = buildTickets(legs2);
 
@@ -528,6 +563,7 @@ describe("Value Accumulator — Finished backtest settlement", () => {
       scanId: "backtest", eventId, matchLabel: `${home} vs ${away}`, homeTeam: home, awayTeam: away,
       leagueSlug: "eng.1", kickoff: new Date("2026-09-10T15:00:00Z"), market, selection, statFamily: "goals",
       modelProbability: 0.85, bookmakerOdds: 1.3, bookmakerName: "Consensus", impliedProbability: 1 / 1.3, ev: 0.1,
+      oddsSource: "consensus",
     });
     // Ticket 1 wins every leg (Over 0.5 beats 2-1, BTTS "No" beats 0-0); Over 3.5 reaches neither result.
     const wonTickets = buildTickets([
@@ -575,6 +611,7 @@ describe("Value Accumulator — Correlation discount", () => {
       ev: modelProbability * bookmakerOdds - 1,
       oddsAtBuild: new Date(),
       scannedAt: new Date(),
+      oddsSource: "consensus",
     };
   }
 
@@ -1308,6 +1345,7 @@ describe("Value Accumulator — one leg per eventId", () => {
       ev: overrides.ev ?? 0.088,
       oddsAtBuild: new Date("2026-09-18T09:00:00Z"),
       scannedAt: new Date("2026-09-18T09:00:00Z"),
+      oddsSource: "consensus",
     };
   }
 
@@ -1471,5 +1509,135 @@ describe("Value Accumulator — shared performScan + runLiveScan server action",
     // Interval cleared: no more pings after completion.
     await vi.advanceTimersByTimeAsync(60_000 * 3);
     expect(keepDbAlive).toHaveBeenCalledTimes(2);
+  });
+});
+
+// ─── Real bookmaker odds (The Odds API) wired into the scanner ────────────────
+//
+// Quota protection is the whole point of the per-league pre-fetch: the free tier
+// is 500 requests/month and ONE request covers every fixture of a league, so a
+// scan must cost one call per league (0 when the 12h cache is warm) — never one
+// call per fixture.
+describe("Value Accumulator — real bookmaker odds in the scan", () => {
+  function fixture(id: string, leagueSlug: string, home: string, away: string): FixtureLite {
+    return {
+      id,
+      leagueSlug,
+      leagueName: leagueSlug,
+      date: "2026-09-15T19:00:00Z",
+      state: "pre",
+      statusDetail: "Scheduled",
+      venue: null,
+      home: { id: `${id}h`, name: home, abbrev: home.slice(0, 3), logo: null, score: null, record: null } as FixtureLite["home"],
+      away: { id: `${id}a`, name: away, abbrev: away.slice(0, 3), logo: null, score: null, record: null } as FixtureLite["away"],
+      neutralSite: false,
+    };
+  }
+
+  // Consensus price the Bzzoiro fallback serves for every fixture in this scan.
+  const consensusOdds: VaBookmakerOdds[] = [
+    { bookmaker: "Consensus", marketLabel: "Goals Over/Under", line: 2.5, selection: "Over 2.5", odds: 1.2 },
+  ];
+
+  // Real bookmaker prices, ONE payload covering BOTH eng.1 fixtures.
+  const realEngOdds: RealBookOdds[] = [
+    { fixtureHome: "Arsenal", fixtureAway: "Chelsea", bookmaker: "Bet365", marketLabel: "totals", line: 2.5, selection: "Over", odds: 1.5 },
+    { fixtureHome: "Liverpool", fixtureAway: "Everton", bookmaker: "Pinnacle", marketLabel: "totals", line: 2.5, selection: "Over", odds: 1.55 },
+  ];
+
+  const stackMarket = [
+    { name: "Total Goals O/U 2.5", selection: "Over 2.5", family: "goals", hitRate: 0.63 },
+  ];
+
+  let logs: string[];
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    logs = [];
+    vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+      logs.push(args.map(String).join(" "));
+    });
+
+    // 3 fixtures across 2 leagues (eng.1 ×2, esp.1 ×1).
+    fetchScoreboard.mockImplementation(async (slug?: string) => {
+      if (slug === "eng.1") {
+        return [
+          fixture("e1", "eng.1", "Arsenal", "Chelsea"),
+          fixture("e2", "eng.1", "Liverpool", "Everton"),
+        ];
+      }
+      if (slug === "esp.1") return [fixture("s1", "esp.1", "Real Madrid", "Getafe")];
+      return [];
+    });
+
+    const odds = await import("./oddsFetcher");
+    vi.mocked(odds.resolveBzzoiroEvent).mockResolvedValue({
+      eventId: "555",
+      status: "resolved",
+      eventsInRange: 30,
+      relatedInRange: 1,
+      toleranceDays: 2,
+    });
+    vi.mocked(odds.fetchOddsForEvent).mockResolvedValue(consensusOdds);
+
+    runEngineFromRealWithProfiles.mockReturnValue({
+      match: { dataCompletenessScore: 80 },
+      markets: stackMarket,
+    });
+    fetchLeagueRealOdds.mockImplementation(async (slug: string) => (slug === "eng.1" ? realEngOdds : []));
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("13. QUOTA PROTECTION: 3 fixtures across 2 leagues → fetchLeagueRealOdds is called exactly 2 times", async () => {
+    const { scanValueLegs } = await import("./scanner");
+
+    const result = await scanValueLegs("scan_quota", 7, "stack");
+
+    // One call per league, never one per fixture.
+    expect(fetchLeagueRealOdds).toHaveBeenCalledTimes(2);
+    expect(Array.from(new Set(result.legs.map((l) => l.leagueSlug))).sort()).toEqual(["eng.1", "esp.1"]);
+    expect(fetchLeagueRealOdds.mock.calls.map((c) => c[0]).sort()).toEqual(["eng.1", "esp.1"]);
+  });
+
+  it("14. a leg with a real price uses it; a leg without falls back to Consensus", async () => {
+    const { scanValueLegs } = await import("./scanner");
+
+    const result = await scanValueLegs("scan_real_odds", 7, "stack");
+    const byMatch = new Map(result.legs.map((l) => [l.homeTeam, l]));
+
+    // Arsenal (eng.1) has a real bookmaker price: 1.50 @ Bet365, not the 1.20
+    // consensus, and the EV is computed from that price (0.63 × 1.50 − 1).
+    const arsenal = byMatch.get("Arsenal");
+    expect(arsenal?.bookmakerOdds).toBeCloseTo(1.5, 6);
+    expect(arsenal?.bookmakerName).toBe("Bet365");
+    expect(arsenal?.oddsSource).toBe("real");
+    expect(arsenal?.ev).toBeCloseTo(0.63 * 1.5 - 1, 6);
+
+    // Real Madrid (esp.1) has no The Odds API coverage in this scan → Consensus.
+    const real = byMatch.get("Real Madrid");
+    expect(real?.bookmakerOdds).toBeCloseTo(1.2, 6);
+    expect(real?.bookmakerName).toBe("Consensus");
+    expect(real?.oddsSource).toBe("consensus");
+    expect(real?.ev).toBeCloseTo(0.63 * 1.2 - 1, 6);
+
+    // One log line per real price found (not per evaluated market).
+    expect(logs.filter((l) => l.startsWith("[VA][odds]"))).toHaveLength(2);
+    expect(logs).toContain("[VA][odds] Arsenal vs Chelsea | Total Goals O/U 2.5 / Over 2.5 → 1.500 (Bet365)");
+  });
+
+  it("15. realOddsCount counts only the legs priced at real bookmaker odds", async () => {
+    const { scanValueLegs } = await import("./scanner");
+
+    const result = await scanValueLegs("scan_count", 7, "stack");
+    expect(result.legs).toHaveLength(3);
+    expect(result.legs.filter((l) => l.oddsSource === "real")).toHaveLength(2);
+
+    const tickets = buildTickets(result.legs, "stack");
+    expect(tickets).toHaveLength(1);
+    expect(tickets[0].realOddsCount).toBe(2);
+    expect(tickets[0].legs.filter((l) => l.oddsSource === "real")).toHaveLength(2);
   });
 });

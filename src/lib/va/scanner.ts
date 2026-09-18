@@ -18,6 +18,7 @@ import {
   type XgResult,
 } from "./xgFetcher";
 import { matchEngineMarketToBookmaker, type TeamContext } from "./marketMap";
+import { fetchLeagueRealOdds, bestPriceFor, type RealBookOdds } from "./realOddsFetcher";
 import { buildTickets, getWeekStartForLegs, type VaLeg, type VaTicket, type VaTicketLeg } from "./ticket";
 import { db } from "@/db";
 import { vaLegs, marketStats } from "@/db/schema";
@@ -533,6 +534,22 @@ async function runScan(fixtures: FixtureLite[], scanId: string, mode: VaScanMode
   let familyCorrections = 0;
   const filteredOut: string[] = [];
 
+  // REAL ODDS PRE-FETCH — ONE call per league, never per fixture.
+  // The Odds API returns every fixture of a league in a single response and the
+  // free tier is 500 requests/month, so we fetch each unique league once (the
+  // fetcher itself serves a 12h cache and makes ZERO HTTP calls on a hit) and
+  // price every fixture of that league from the result. A scan with 40 matches
+  // across 6 leagues costs 6 calls at most, and 0 on a warm cache.
+  const uniqueLeagues = [...new Set(fixtures.map((fx) => fx.leagueSlug))];
+  const realOddsByLeague = new Map<string, RealBookOdds[]>();
+  for (const lg of uniqueLeagues) {
+    try {
+      realOddsByLeague.set(lg, await fetchLeagueRealOdds(lg));
+    } catch {
+      realOddsByLeague.set(lg, []);
+    }
+  }
+
   for (const fx of fixtures) {
     const matchLabel = `${fx.home.name} vs ${fx.away.name}`;
 
@@ -617,7 +634,29 @@ async function runScan(fixtures: FixtureLite[], scanId: string, mode: VaScanMode
       const matched = matchEngineMarketToBookmaker(m.name, m.selection, bookmakerOdds, teams);
       if (!matched) continue;
 
-      const realOdds = matched.odds;
+      // Real bookmaker price when The Odds API covers this fixture + market
+      // (pre-fetched per league above — no HTTP call here). Corners, cards and
+      // everything else the API does not serve returns null and keeps Consensus.
+      const leagueOdds = realOddsByLeague.get(fx.leagueSlug) ?? [];
+      const realBookPrice = bestPriceFor(leagueOdds, fx.home.name, fx.away.name, m.name, m.selection);
+
+      const finalOdds = realBookPrice ? realBookPrice.odds : matched.odds;
+      const finalBookmaker = realBookPrice ? realBookPrice.bookmaker : matched.bookmaker;
+      const oddsSource: "real" | "consensus" = realBookPrice ? "real" : "consensus";
+
+      if (realBookPrice) {
+        console.log(
+          `[VA][odds] ${fx.home.name} vs ${fx.away.name} | ` +
+            `${m.name} / ${m.selection} → ${finalOdds.toFixed(3)} ` +
+            `(${realBookPrice.bookmaker})`,
+        );
+      }
+
+      // From here on the leg is priced at the real bookmaker price when there
+      // is one: EV, implied probability, the odds-band filters and the stored
+      // leg all use it. Otherwise finalOdds === the Consensus price and the
+      // behaviour is byte-for-byte what it was before this change.
+      const realOdds = finalOdds;
       const statFamily = getStatFamily(m.name, m.family);
 
       // BEFORE the qualification filters, compute:
@@ -677,11 +716,12 @@ async function runScan(fixtures: FixtureLite[], scanId: string, mode: VaScanMode
         statFamily,
         modelProbability: cappedProb,
         bookmakerOdds: realOdds,
-        bookmakerName: matched.bookmaker,
+        bookmakerName: finalBookmaker,
         impliedProbability: implied,
         ev,
         oddsAtBuild: new Date(),
         scannedAt: new Date(),
+        oddsSource,
       };
 
       qualified.push(leg);
@@ -730,6 +770,7 @@ async function runScan(fixtures: FixtureLite[], scanId: string, mode: VaScanMode
         ev: l.ev,
         oddsAtBuild: new Date(l.oddsAtBuild as Date),
         scannedAt: new Date(),
+        oddsSource: l.oddsSource,
       }));
       // Insert in batches of 50 to avoid too large payload
       for (let i = 0; i < rows.length; i += 50) {
@@ -1038,6 +1079,20 @@ async function runBacktestScan(fixtures: FixtureLite[], scanId: string): Promise
   const pooled: VaLeg[] = [];
   const fixtureById = new Map<string, FixtureLite>();
   let matchesProcessed = 0;
+
+  // REAL ODDS PRE-FETCH — ONE call per league, never per fixture (same quota
+  // protection as the live path: the fetcher serves a 12h cache, so a warm
+  // cache costs ZERO requests no matter how many backtest matches we walk).
+  const uniqueLeagues = [...new Set(fixtures.map((fx) => fx.leagueSlug))];
+  const realOddsByLeague = new Map<string, RealBookOdds[]>();
+  for (const lg of uniqueLeagues) {
+    try {
+      realOddsByLeague.set(lg, await fetchLeagueRealOdds(lg));
+    } catch {
+      realOddsByLeague.set(lg, []);
+    }
+  }
+
   for (const fx of fixtures) {
     matchesProcessed += 1;
     fixtureById.set(fx.id, fx);
@@ -1113,7 +1168,25 @@ async function runBacktestScan(fixtures: FixtureLite[], scanId: string): Promise
       const matched = matchEngineMarketToBookmaker(m.name, m.selection, bookmakerOdds, teams);
       if (!matched) continue;
 
-      const realOdds = matched.odds;
+      // Real bookmaker price when The Odds API covers this fixture + market
+      // (pre-fetched per league above). Corners and cards return null here and
+      // keep their Consensus price — The Odds API does not serve them.
+      const leagueOdds = realOddsByLeague.get(fx.leagueSlug) ?? [];
+      const realBookPrice = bestPriceFor(leagueOdds, fx.home.name, fx.away.name, m.name, m.selection);
+
+      const finalOdds = realBookPrice ? realBookPrice.odds : matched.odds;
+      const finalBookmaker = realBookPrice ? realBookPrice.bookmaker : matched.bookmaker;
+      const oddsSource: "real" | "consensus" = realBookPrice ? "real" : "consensus";
+
+      if (realBookPrice) {
+        console.log(
+          `[VA][odds] ${fx.home.name} vs ${fx.away.name} | ` +
+            `${m.name} / ${m.selection} → ${finalOdds.toFixed(3)} ` +
+            `(${realBookPrice.bookmaker})`,
+        );
+      }
+
+      const realOdds = finalOdds;
       if (typeof realOdds !== "number" || !Number.isFinite(realOdds)) continue;
       if (realOdds < 1.03 || realOdds > 1.70) continue;
 
@@ -1136,11 +1209,12 @@ async function runBacktestScan(fixtures: FixtureLite[], scanId: string): Promise
         statFamily,
         modelProbability: cappedProb,
         bookmakerOdds: realOdds,
-        bookmakerName: matched.bookmaker,
+        bookmakerName: finalBookmaker,
         impliedProbability: implied,
         ev,
         oddsAtBuild: new Date(),
         scannedAt: new Date(),
+        oddsSource,
       });
     }
   }

@@ -16,6 +16,25 @@ interface VaTicketLeg {
   bookmaker: string;
   eventId: string;
   modelProbability: number;
+  /** "real" = real bookmaker price, "consensus" = Bzzoiro fair line. Absent on tickets built before this existed. */
+  oddsSource?: "real" | "consensus";
+}
+
+/** Legs priced at real bookmaker odds (older tickets carry no oddsSource and count as 0). */
+function realOddsCountOf(ticket: VaTicketRow): number {
+  return ticket.realOddsCount ?? ticket.legs.filter((leg) => leg.oddsSource === "real").length;
+}
+
+/**
+ * EV of the real-priced legs alone: (Π modelProbability) × (Π real odds) − 1.
+ * "—" when no leg in the ticket has a real bookmaker price.
+ */
+function realOddsEvOf(ticket: VaTicketRow): string {
+  const real = ticket.legs.filter((leg) => leg.oddsSource === "real");
+  if (real.length === 0) return "—";
+  const prob = real.reduce((acc, leg) => acc * leg.modelProbability, 1);
+  const odds = real.reduce((acc, leg) => acc * leg.odds, 1);
+  return `${((prob * odds - 1) * 100).toFixed(1)}%`;
 }
 
 interface VaTicketRow {
@@ -34,6 +53,8 @@ interface VaTicketRow {
   status: string;
   settledAt: string | null;
   createdAt: string;
+  /** Number of legs priced at real bookmaker odds (absent on tickets built before this existed). */
+  realOddsCount?: number;
 }
 
 interface TicketsResponse {
@@ -672,6 +693,11 @@ export default function ValueAccumulatorPage() {
                   </div>
                 </div>
 
+                {/* Real-odds coverage line */}
+                <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 8 }}>
+                  {realOddsCountOf(ticket)} of {ticket.legs.length} legs at real bookmaker odds
+                </div>
+
                 {/* Legs table */}
                 <div style={{ overflowX: "auto", marginBottom: 16 }}>
                   <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
@@ -709,7 +735,42 @@ export default function ValueAccumulatorPage() {
                           </td>
                           <td style={{ padding: "10px 6px", color: "#374151" }}>{leg.market}</td>
                           <td style={{ padding: "10px 6px", color: "#111827", fontWeight: 600 }}>{leg.selection}</td>
-                          <td style={{ padding: "10px 6px", color: "#111827" }}>{leg.odds.toFixed(2)}</td>
+                          <td style={{ padding: "10px 6px", color: "#111827" }}>
+                            {leg.odds.toFixed(2)}
+                            {leg.oddsSource === "real" ? (
+                              <span
+                                style={{
+                                  marginLeft: 6,
+                                  background: "#ecfdf5",
+                                  color: "#0a7d4f",
+                                  border: "1px solid #a7f3d0",
+                                  borderRadius: 4,
+                                  padding: "1px 5px",
+                                  fontSize: 10,
+                                  fontWeight: 700,
+                                  whiteSpace: "nowrap",
+                                }}
+                              >
+                                {leg.bookmaker}
+                              </span>
+                            ) : (
+                              <span
+                                style={{
+                                  marginLeft: 6,
+                                  background: "#f3f4f6",
+                                  color: "#6b7280",
+                                  border: "1px solid #e5e7eb",
+                                  borderRadius: 4,
+                                  padding: "1px 5px",
+                                  fontSize: 10,
+                                  fontWeight: 600,
+                                  whiteSpace: "nowrap",
+                                }}
+                              >
+                                fair line
+                              </span>
+                            )}
+                          </td>
                           <td style={{ padding: "10px 6px", color: leg.ev > 0 ? "#0a7d4f" : "#dc2626", fontWeight: 600 }}>
                             {(leg.ev * 100).toFixed(1)}%
                           </td>
@@ -772,6 +833,11 @@ export default function ValueAccumulatorPage() {
                     <div style={{ color: "#6b7280", fontSize: 11, textTransform: "uppercase", fontWeight: 600 }}>Kelly</div>
                     <div style={{ color: "#374151", fontWeight: 600 }}>{ticket.kellyScore.toFixed(4)}</div>
                   </div>
+                </div>
+
+                {/* Real-odds EV — EV of the real-priced legs alone */}
+                <div style={{ marginTop: 8, fontSize: 12, color: "#6b7280" }}>
+                  Real-odds EV: {realOddsEvOf(ticket)}
                 </div>
               </div>
             ))}

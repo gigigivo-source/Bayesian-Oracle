@@ -19,6 +19,13 @@ export interface VaLeg {
   ev: number;
   oddsAtBuild?: Date | string;
   scannedAt?: Date | string;
+  /**
+   * Where this leg's price came from:
+   *   "real"      — a real bookmaker price (The Odds API)
+   *   "consensus" — Bzzoiro Consensus (fallback; also used for the families
+   *                 The Odds API does not serve, i.e. corners and cards)
+   */
+  oddsSource: "real" | "consensus";
 }
 
 export interface VaTicketLeg {
@@ -34,6 +41,8 @@ export interface VaTicketLeg {
   bookmaker: string;
   eventId: string;
   modelProbability: number;
+  /** Mirrors VaLeg.oddsSource so the UI can badge each leg row. */
+  oddsSource: "real" | "consensus";
 }
 
 export interface VaTicket {
@@ -55,6 +64,8 @@ export interface VaTicket {
   stakePercent: number;
   isRecommended: boolean;
   isReferenceOnly: boolean;
+  /** How many of this ticket's legs are priced at real bookmaker odds. */
+  realOddsCount: number;
 }
 
 function toDate(d: Date | string): Date {
@@ -210,6 +221,7 @@ export function buildTickets(legs: VaLeg[], mode: "value" | "stack" = "value"): 
       bookmaker: l.bookmakerName,
       eventId: l.eventId,
       modelProbability: l.modelProbability,
+      oddsSource: l.oddsSource,
     }));
 
     tickets.push({
@@ -225,6 +237,7 @@ export function buildTickets(legs: VaLeg[], mode: "value" | "stack" = "value"): 
       stakePercent: stats.stakePercent,
       isRecommended: recommended,
       isReferenceOnly: false,
+      realOddsCount: ticketLegs.filter((l) => l.oddsSource === "real").length,
     });
 
     // Controlled reuse: bump each leg's appearance count; a leg is skipped by
@@ -448,6 +461,7 @@ function buildStackTickets(legs: VaLeg[]): VaTicket[] {
       bookmaker: l.bookmakerName,
       eventId: l.eventId,
       modelProbability: l.modelProbability,
+      oddsSource: l.oddsSource,
     }));
     return {
       scanId: ticketLegs[0].scanId,
@@ -462,6 +476,7 @@ function buildStackTickets(legs: VaLeg[]): VaTicket[] {
       stakePercent: stats.stakePercent,
       isRecommended: recommended,
       isReferenceOnly: false,
+      realOddsCount: ticketLegs.filter((l) => l.oddsSource === "real").length,
     };
   }
 
