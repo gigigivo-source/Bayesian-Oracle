@@ -289,11 +289,12 @@ export interface MarketStatItem {
 function aggregateByFamily(
   stats: Map<string, MarketStatItem>,
   targetFamily: string
-): { n: number; claimedSum: number; realisedSum: number } | null {
+): { n: number; claimedSum: number; realisedSum: number; keyCount: number } | null {
   const normTarget = (targetFamily || "").toLowerCase();
   let n = 0;
   let claimedSum = 0;
   let realisedSum = 0;
+  let keyCount = 0;
   let found = false;
 
   for (const s of stats.values()) {
@@ -301,12 +302,13 @@ function aggregateByFamily(
       n += s.n;
       claimedSum += s.claimedSum;
       realisedSum += s.realisedSum;
+      keyCount += 1;
       found = true;
     }
   }
 
   if (!found || claimedSum <= 0) return null;
-  return { n, claimedSum, realisedSum };
+  return { n, claimedSum, realisedSum, keyCount };
 }
 
 export interface MarketCorrectionResult {
@@ -332,9 +334,13 @@ export function applyMarketCorrection(
     correction = clamp(lineStats.realisedSum / lineStats.claimedSum, 0.6, 1.2);
     level = "line";
   } else {
-    // Level 2: family fallback
+    // Level 2: family fallback — only when at least 3 distinct market keys
+    // contribute to the aggregate. With 1-2 keys a single overclaiming line
+    // can dominate the sum and poison every leg in the family (e.g. Under 3.5
+    // goals overclaiming drags Over 2.5 goals down with it). Below 3 distinct
+    // keys, no correction fires — the same as if no data existed.
     const famStats = aggregateByFamily(stats, leg.statFamily);
-    if (famStats && famStats.n >= 40 && famStats.claimedSum > 0) {
+    if (famStats && famStats.n >= 40 && famStats.keyCount >= 3 && famStats.claimedSum > 0) {
       correction = clamp(famStats.realisedSum / famStats.claimedSum, 0.6, 1.2);
       level = "family";
     }
