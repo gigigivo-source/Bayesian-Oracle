@@ -381,6 +381,116 @@ export function capModelProbability(modelProbability: number): number {
   return Math.min(modelProbability, MAX_LEG_MODEL_PROBABILITY);
 }
 
+// ─── Demand-driven real odds (The Odds API quota) ─────────────────────────────
+//
+// The Odds API charges 1 credit per (region × market) per request — 2 credits
+// for `regions=uk&markets=h2h,totals`. Rather than pre-fetching every league a
+// scan touches, the odds request for a league is only spent once the engine has
+// qualified enough legs to want them.
+//
+// This block is the whole mechanism:
+//   - qualification runs on the Bzzoiro Consensus price (no HTTP),
+//   - the pool is deduped by (eventId, statFamily) so the count reflects the
+//     legs that actually survive,
+//   - leagues below MIN_QUALIFIED_LEGS_PER_LEAGUE are skipped with a log line,
+//   - surviving leagues get ONE call with their earliest kickoff (for the TTL),
+//   - every pooled leg is then re-priced from its league's rows, and the
+//     price-dependent filters are re-applied. A leg whose real price lands
+//     outside the mode's band is dropped exactly as it would have been had the
+//     real price been known during qualification.
+
+/** Qualified legs a league needs before its real odds are worth a request. */
+const MIN_QUALIFIED_LEGS_PER_LEAGUE = 3;
+
+/**
+ * One leg per (eventId, statFamily) — the highest-EV leg wins (the backtest
+ * mirror picks the highest modelProbability instead, matching its own dedup).
+ */
+function dedupeLegsByEventFamily(legs: VaLeg[], pick: "ev" | "modelProbability" = "ev"): VaLeg[] {
+  const bestByPair = new Map<string, VaLeg>();
+  for (const leg of legs) {
+    const key = `${leg.eventId}|${leg.statFamily}`;
+    const current = bestByPair.get(key);
+    if (!current || (pick === "ev" ? leg.ev > current.ev : leg.modelProbability > current.modelProbability)) {
+      bestByPair.set(key, leg);
+    }
+  }
+  return Array.from(bestByPair.values());
+}
+
+/**
+ * Real odds for every league whose qualified-leg demand justifies a request.
+ * Leagues with fewer than MIN_QUALIFIED_LEGS_PER_LEAGUE legs are skipped (and
+ * logged) so they keep their Consensus prices and cost nothing.
+ *
+ * `legs` must already be deduped (see dedupeLegsByEventFamily) so the count is
+ * the number of legs the scan will actually use. Each fetched league is passed
+ * the earliest kickoff among its legs, which sets the cache TTL.
+ */
+async function fetchDemandedLeagueOdds(
+  legs: VaLeg[],
+  forceRefresh: boolean,
+): Promise<Map<string, RealBookOdds[]>> {
+  const byLeague = new Map<string, VaLeg[]>();
+  for (const leg of legs) {
+    const list = byLeague.get(leg.leagueSlug);
+    if (list) list.push(leg);
+    else byLeague.set(leg.leagueSlug, [leg]);
+  }
+
+  const realOddsByLeague = new Map<string, RealBookOdds[]>();
+  for (const [leagueSlug, leagueLegs] of byLeague) {
+    if (leagueLegs.length < MIN_QUALIFIED_LEGS_PER_LEAGUE) {
+      console.log(
+        `[VA][odds-api] skipping ${leagueSlug} — only ${leagueLegs.length} qualified legs (threshold ${MIN_QUALIFIED_LEGS_PER_LEAGUE})`,
+      );
+      continue;
+    }
+    const earliestKickoff = leagueLegs.reduce<Date | null>((earliest, leg) => {
+      const kickoff = new Date(leg.kickoff as Date);
+      if (!Number.isFinite(kickoff.getTime())) return earliest;
+      return earliest === null || kickoff.getTime() < earliest.getTime() ? kickoff : earliest;
+    }, null);
+    try {
+      realOddsByLeague.set(leagueSlug, await fetchLeagueRealOdds(leagueSlug, earliestKickoff, forceRefresh));
+    } catch {
+      realOddsByLeague.set(leagueSlug, []);
+    }
+  }
+  return realOddsByLeague;
+}
+
+/**
+ * Replace a leg's Consensus price with the best real bookmaker price for the
+ * same fixture + market + selection. Returns the price used, or null when no
+ * bookmaker prices that leg (corners, cards, a league or fixture the API does
+ * not carry) — in which case the leg keeps its Consensus price.
+ */
+function applyRealPrice(
+  leg: VaLeg,
+  options: RealBookOdds[],
+): { odds: number; bookmaker: string } | null {
+  if (options.length === 0) return null;
+  const best = bestPriceFor(options, leg.homeTeam, leg.awayTeam, leg.market, leg.selection);
+  if (!best) return null;
+  leg.bookmakerOdds = best.odds;
+  leg.bookmakerName = best.bookmaker;
+  leg.impliedProbability = 1 / best.odds;
+  leg.ev = leg.modelProbability * best.odds - 1;
+  leg.oddsSource = "real";
+  return best;
+}
+
+/**
+ * The price-dependent qualification filters, re-applied after a real price has
+ * replaced the Consensus price. Everything else (model probability, stat
+ * family, data quality) is independent of the price and was already checked.
+ */
+function passesPriceFilters(leg: VaLeg, mode: VaScanMode): boolean {
+  if (mode === "stack") return leg.bookmakerOdds >= 1.03 && leg.bookmakerOdds <= 1.70;
+  return leg.ev > 0.03 && leg.bookmakerOdds >= 1.3 && leg.bookmakerOdds <= 2.0;
+}
+
 /**
  * A league is declared "not covered by Bzzoiro" once this many of its matches
  * come back with zero events across the widened (±5 day) range. One probe could
@@ -464,7 +574,12 @@ export interface ScanResult {
 
 export type VaScanMode = "value" | "stack";
 
-export async function scanValueLegs(scanId: string, days = 7, mode: VaScanMode = "value"): Promise<ScanResult> {
+export async function scanValueLegs(
+  scanId: string,
+  days = 7,
+  mode: VaScanMode = "value",
+  forceRefresh = false,
+): Promise<ScanResult> {
   // 1. Fetch matches in next days from fixture feed, leagues only allowed
   const leagueSlugs = Array.from(ALLOWED_LEAGUES);
   const allFixtures: FixtureLite[] = [];
@@ -499,10 +614,15 @@ export async function scanValueLegs(scanId: string, days = 7, mode: VaScanMode =
   // Cap at 40 matches per run
   const capped = deduped.slice(0, 40);
 
-  return runScan(capped, scanId, mode);
+  return runScan(capped, scanId, mode, forceRefresh);
 }
 
-async function runScan(fixtures: FixtureLite[], scanId: string, mode: VaScanMode): Promise<ScanResult> {
+async function runScan(
+  fixtures: FixtureLite[],
+  scanId: string,
+  mode: VaScanMode,
+  forceRefresh = false,
+): Promise<ScanResult> {
   let marketsEvaluated = 0;
   const qualified: VaLeg[] = [];
   const coverage = new LeagueCoverage();
@@ -534,21 +654,10 @@ async function runScan(fixtures: FixtureLite[], scanId: string, mode: VaScanMode
   let familyCorrections = 0;
   const filteredOut: string[] = [];
 
-  // REAL ODDS PRE-FETCH — ONE call per league, never per fixture.
-  // The Odds API returns every fixture of a league in a single response and the
-  // free tier is 500 requests/month, so we fetch each unique league once (the
-  // fetcher itself serves a 12h cache and makes ZERO HTTP calls on a hit) and
-  // price every fixture of that league from the result. A scan with 40 matches
-  // across 6 leagues costs 6 calls at most, and 0 on a warm cache.
-  const uniqueLeagues = [...new Set(fixtures.map((fx) => fx.leagueSlug))];
-  const realOddsByLeague = new Map<string, RealBookOdds[]>();
-  for (const lg of uniqueLeagues) {
-    try {
-      realOddsByLeague.set(lg, await fetchLeagueRealOdds(lg));
-    } catch {
-      realOddsByLeague.set(lg, []);
-    }
-  }
+  // NO real-odds pre-fetch here any more: The Odds API is only consulted AFTER
+  // the engine has qualified legs (see the demand-driven fetch below the loop).
+  // The free tier is 500 requests/month and each (region × market) costs a
+  // credit, so a league that contributes 0-2 legs must not cost anything.
 
   for (const fx of fixtures) {
     const matchLabel = `${fx.home.name} vs ${fx.away.name}`;
@@ -634,29 +743,14 @@ async function runScan(fixtures: FixtureLite[], scanId: string, mode: VaScanMode
       const matched = matchEngineMarketToBookmaker(m.name, m.selection, bookmakerOdds, teams);
       if (!matched) continue;
 
-      // Real bookmaker price when The Odds API covers this fixture + market
-      // (pre-fetched per league above — no HTTP call here). Corners, cards and
-      // everything else the API does not serve returns null and keeps Consensus.
-      const leagueOdds = realOddsByLeague.get(fx.leagueSlug) ?? [];
-      const realBookPrice = bestPriceFor(leagueOdds, fx.home.name, fx.away.name, m.name, m.selection);
-
-      const finalOdds = realBookPrice ? realBookPrice.odds : matched.odds;
-      const finalBookmaker = realBookPrice ? realBookPrice.bookmaker : matched.bookmaker;
-      const oddsSource: "real" | "consensus" = realBookPrice ? "real" : "consensus";
-
-      if (realBookPrice) {
-        console.log(
-          `[VA][odds] ${fx.home.name} vs ${fx.away.name} | ` +
-            `${m.name} / ${m.selection} → ${finalOdds.toFixed(3)} ` +
-            `(${realBookPrice.bookmaker})`,
-        );
-      }
-
-      // From here on the leg is priced at the real bookmaker price when there
-      // is one: EV, implied probability, the odds-band filters and the stored
-      // leg all use it. Otherwise finalOdds === the Consensus price and the
-      // behaviour is byte-for-byte what it was before this change.
-      const realOdds = finalOdds;
+      // QUALIFICATION PRICE — the Bzzoiro Consensus price. The Odds API is not
+      // consulted yet (demand-driven fetch below): its price, when there is
+      // one, is applied to every surviving leg by applyRealPrice(). Corners,
+      // cards and everything else the API does not serve never get a real price
+      // and therefore always keep Consensus.
+      const realOdds = matched.odds;
+      const finalBookmaker = matched.bookmaker;
+      const oddsSource: "real" | "consensus" = "consensus";
       const statFamily = getStatFamily(m.name, m.family);
 
       // BEFORE the qualification filters, compute:
@@ -728,18 +822,49 @@ async function runScan(fixtures: FixtureLite[], scanId: string, mode: VaScanMode
     }
   }
 
+  // ── DEMAND-DRIVEN REAL ODDS (after qualification) ─────────────────────────
+  // Order: qualify on Consensus (above) → group the surviving legs by league →
+  // ONE call per league with >= MIN_QUALIFIED_LEGS_PER_LEAGUE legs → re-price
+  // every leg from its league's rows. Leagues under the threshold cost zero
+  // credits and keep their Consensus prices, as do legs The Odds API does not
+  // price.
+  const demandPool = dedupeLegsByEventFamily(qualified);
+  const realOddsByLeague = await fetchDemandedLeagueOdds(demandPool, forceRefresh);
+
+  if (realOddsByLeague.size > 0) {
+    const repriced: VaLeg[] = [];
+    for (const leg of qualified) {
+      const realBookPrice = applyRealPrice(leg, realOddsByLeague.get(leg.leagueSlug) ?? []);
+      if (realBookPrice) {
+        // A real price outside the mode's odds band (or under the value-mode EV
+        // floor) drops the leg here, exactly as it would have been dropped had
+        // the real price been known during qualification.
+        if (!passesPriceFilters(leg, mode)) continue;
+        console.log(
+          `[VA][odds] ${leg.homeTeam} vs ${leg.awayTeam} | ` +
+            `${leg.market} / ${leg.selection} → ${leg.bookmakerOdds.toFixed(3)} ` +
+            `(${leg.bookmakerName})`,
+        );
+      }
+      repriced.push(leg);
+    }
+    if (repriced.length !== qualified.length) {
+      console.log(
+        `[VA][odds] ${qualified.length - repriced.length} leg(s) dropped: real price outside the ${mode}-mode odds band`,
+      );
+    }
+    qualified.length = 0;
+    qualified.push(...repriced);
+  } else if (qualified.length > 0) {
+    console.log(
+      "[VA][odds-api] no league met the qualified-leg threshold — every leg keeps its Consensus price (0 requests used)",
+    );
+  }
+
   // Source-of-truth cleanup (applies in BOTH modes): at most one qualified leg
   // per (eventId, statFamily) pair — if several markets from the same match
   // land in the same stat family, keep only the highest-EV one.
-  const bestByPair = new Map<string, VaLeg>();
-  for (const leg of qualified) {
-    const key = `${leg.eventId}|${leg.statFamily}`;
-    const current = bestByPair.get(key);
-    if (!current || leg.ev > current.ev) {
-      bestByPair.set(key, leg);
-    }
-  }
-  const uniqueQualified = Array.from(bestByPair.values());
+  const uniqueQualified = dedupeLegsByEventFamily(qualified);
   if (uniqueQualified.length !== qualified.length) {
     console.log(`[VA] dedup (eventId, statFamily): ${qualified.length} -> ${uniqueQualified.length} qualified legs`);
     qualified.length = 0;
@@ -916,10 +1041,14 @@ async function fetchFinishedFixtures(days: number): Promise<FixtureLite[]> {
   return fixtures;
 }
 
-export async function scanFinishedLegs(scanId: string, _mode: VaScanMode = "value"): Promise<FinishedScanResult> {
+export async function scanFinishedLegs(
+  scanId: string,
+  _mode: VaScanMode = "value",
+  forceRefresh = false,
+): Promise<FinishedScanResult> {
   void _mode;
   const fixtures = await fetchFinishedFixtures(30);
-  const backtestResult = await runBacktestScan(fixtures, scanId);
+  const backtestResult = await runBacktestScan(fixtures, scanId, forceRefresh);
   const results = new Map(
     fixtures.map((fx): [string, BacktestMatchResult] => [
       fx.id,
@@ -994,7 +1123,11 @@ export async function settleBacktestTickets(tickets: VaTicket[], results: Map<st
  * corners + cards from the ESPN match summary boxscore with one fetchSummary
  * call per match maximum), and aggregate results across all simulated days.
  */
-async function runBacktestScan(fixtures: FixtureLite[], scanId: string): Promise<BacktestScanResult> {
+async function runBacktestScan(
+  fixtures: FixtureLite[],
+  scanId: string,
+  forceRefresh = false,
+): Promise<BacktestScanResult> {
   let marketsEvaluated = 0;
 
   // Backtest-only settlement helpers (local to this scan — the live scan path
@@ -1080,18 +1213,9 @@ async function runBacktestScan(fixtures: FixtureLite[], scanId: string): Promise
   const fixtureById = new Map<string, FixtureLite>();
   let matchesProcessed = 0;
 
-  // REAL ODDS PRE-FETCH — ONE call per league, never per fixture (same quota
-  // protection as the live path: the fetcher serves a 12h cache, so a warm
-  // cache costs ZERO requests no matter how many backtest matches we walk).
-  const uniqueLeagues = [...new Set(fixtures.map((fx) => fx.leagueSlug))];
-  const realOddsByLeague = new Map<string, RealBookOdds[]>();
-  for (const lg of uniqueLeagues) {
-    try {
-      realOddsByLeague.set(lg, await fetchLeagueRealOdds(lg));
-    } catch {
-      realOddsByLeague.set(lg, []);
-    }
-  }
+  // NO real-odds pre-fetch: the backtest mirrors the live path's demand-driven
+  // fetch (below the pooling loop), so a league the backtest cannot qualify
+  // 3 legs in costs nothing.
 
   for (const fx of fixtures) {
     matchesProcessed += 1;
@@ -1168,25 +1292,12 @@ async function runBacktestScan(fixtures: FixtureLite[], scanId: string): Promise
       const matched = matchEngineMarketToBookmaker(m.name, m.selection, bookmakerOdds, teams);
       if (!matched) continue;
 
-      // Real bookmaker price when The Odds API covers this fixture + market
-      // (pre-fetched per league above). Corners and cards return null here and
-      // keep their Consensus price — The Odds API does not serve them.
-      const leagueOdds = realOddsByLeague.get(fx.leagueSlug) ?? [];
-      const realBookPrice = bestPriceFor(leagueOdds, fx.home.name, fx.away.name, m.name, m.selection);
-
-      const finalOdds = realBookPrice ? realBookPrice.odds : matched.odds;
-      const finalBookmaker = realBookPrice ? realBookPrice.bookmaker : matched.bookmaker;
-      const oddsSource: "real" | "consensus" = realBookPrice ? "real" : "consensus";
-
-      if (realBookPrice) {
-        console.log(
-          `[VA][odds] ${fx.home.name} vs ${fx.away.name} | ` +
-            `${m.name} / ${m.selection} → ${finalOdds.toFixed(3)} ` +
-            `(${realBookPrice.bookmaker})`,
-        );
-      }
-
-      const realOdds = finalOdds;
+      // QUALIFICATION PRICE — the Bzzoiro Consensus price; the demand-driven
+      // fetch below the loop applies The Odds API prices to the legs that
+      // survive. Corners and cards never get one (the API does not serve them).
+      const realOdds = matched.odds;
+      const finalBookmaker = matched.bookmaker;
+      const oddsSource: "real" | "consensus" = "consensus";
       if (typeof realOdds !== "number" || !Number.isFinite(realOdds)) continue;
       if (realOdds < 1.03 || realOdds > 1.70) continue;
 
@@ -1217,6 +1328,31 @@ async function runBacktestScan(fixtures: FixtureLite[], scanId: string): Promise
         oddsSource,
       });
     }
+  }
+
+  // ── DEMAND-DRIVEN REAL ODDS (after pooling, same as the live path) ────────
+  // ONE call per league with >= MIN_QUALIFIED_LEGS_PER_LEAGUE pooled legs, then
+  // every leg is re-priced from its league's rows. The backtest reproduces the
+  // stack-mode filters, so a real price outside 1.03..1.70 drops the leg.
+  const demandPool = dedupeLegsByEventFamily(pooled, "modelProbability");
+  const realOddsByLeague = await fetchDemandedLeagueOdds(demandPool, forceRefresh);
+
+  if (realOddsByLeague.size > 0) {
+    const repriced: VaLeg[] = [];
+    for (const leg of pooled) {
+      const realBookPrice = applyRealPrice(leg, realOddsByLeague.get(leg.leagueSlug) ?? []);
+      if (realBookPrice) {
+        if (!passesPriceFilters(leg, "stack")) continue;
+        console.log(
+          `[VA][odds] ${leg.homeTeam} vs ${leg.awayTeam} | ` +
+            `${leg.market} / ${leg.selection} → ${leg.bookmakerOdds.toFixed(3)} ` +
+            `(${leg.bookmakerName})`,
+        );
+      }
+      repriced.push(leg);
+    }
+    pooled.length = 0;
+    pooled.push(...repriced);
   }
 
   // Step 4: global dedup by (eventId, family), keeping the highest hitRate.

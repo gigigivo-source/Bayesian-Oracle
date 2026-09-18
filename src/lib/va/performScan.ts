@@ -33,7 +33,17 @@ export function getMondayCat(): string {
   return `${y}-${m}-${d}`;
 }
 
-export async function performScan(mode: VaScanMode, finished: boolean): Promise<PerformScanResult> {
+/**
+ * `forceRefresh` (from `?freshOdds=true`) makes every The Odds API call in the
+ * scan skip its cache read, so legs are priced from a response fetched now
+ * instead of up to 24h-old cached prices. Successful responses are still
+ * written to the cache; failures are still never cached.
+ */
+export async function performScan(
+  mode: VaScanMode,
+  finished: boolean,
+  forceRefresh = false,
+): Promise<PerformScanResult> {
   // Check va_scan_lock. If a lock row exists younger than 5 minutes, return already in progress
   try {
     const existingLocks = await db.select().from(vaScanLock).orderBy(desc(vaScanLock.lockedAt)).limit(1);
@@ -70,7 +80,7 @@ export async function performScan(mode: VaScanMode, finished: boolean): Promise<
 
   try {
     if (finished) {
-      const finishedScan = await scanFinishedLegs(scanId, mode);
+      const finishedScan = await scanFinishedLegs(scanId, mode, forceRefresh);
 
       // Delete lock
       try {
@@ -100,7 +110,7 @@ export async function performScan(mode: VaScanMode, finished: boolean): Promise<
       };
     }
 
-    scanResult = await scanValueLegs(scanId, 7, mode);
+    scanResult = await scanValueLegs(scanId, 7, mode, forceRefresh);
     const built = buildTickets(scanResult.legs, mode);
 
     // Ticket-level real odds count: the per-leg oddsSource lives inside the
