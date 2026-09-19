@@ -424,23 +424,6 @@ function toEventDate(value: unknown): Date | null {
 }
 
 /**
- * The team's next scheduled kickoff —
- * GET /events/?team_id={id}&status=notstarted&limit=1 — or null when Bzzoiro
- * has nothing scheduled or cannot be reached. This is the cache's invalidation
- * key: the stored average stays usable until this date passes.
- */
-async function fetchNextMatchAt(teamId: number): Promise<Date | null> {
-  const data = await bzGet<BzPage<BzTeamEventRow> | BzTeamEventRow[]>(
-    `/events/?team_id=${encodeURIComponent(String(teamId))}&status=notstarted&limit=1`,
-  );
-  for (const row of teamEventRows(data)) {
-    const at = toEventDate(row.event_date);
-    if (at) return at;
-  }
-  return null;
-}
-
-/**
  * The most recent finished-match date inside the same window the rolling
  * average walks — GET /events/?team_id={id}&status=finished&limit={Xg_LAST_N}
  * — or null when the provider returns nothing usable. Recorded as the cache
@@ -609,6 +592,43 @@ async function writeTeamXgCache(entry: {
 }
 
 /**
+ * One-time cleanup: delete rows with invalid next_match_at values.
+ * Runs once per scan at the top, before the cache read loop.
+ * Invalid = NULL or > now() + 30 days (next-season fixtures).
+ */
+async function clearInvalidTeamXgCache(): Promise<void> {
+  try {
+    const { db, teamXgCache, sql } = await loadTeamXgCacheDb();
+    const maybeDelete = (db as unknown as { delete?: unknown }).delete;
+    if (typeof maybeDelete !== "function") {
+      console.info(`[First5] xG cache: cleared 0 rows with invalid next_match_at`);
+      return;
+    }
+    try {
+      const deleted = await db
+        .delete(teamXgCache)
+        .where(sql`next_match_at IS NULL OR next_match_at > now() + interval '30 days'`)
+        .returning();
+      const count = Array.isArray(deleted) ? deleted.length : 0;
+      console.info(`[First5] xG cache: cleared ${count} rows with invalid next_match_at`);
+    } catch {
+      try {
+        await db
+          .delete(teamXgCache)
+          .where(sql`next_match_at IS NULL OR next_match_at > now() + interval '30 days'`);
+        console.info(`[First5] xG cache: cleared 0 rows with invalid next_match_at`);
+      } catch (inner) {
+        throw inner;
+      }
+    }
+  } catch (error) {
+    console.warn(
+      `[First5] xG cache clear failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
+/**
  * The fixture-facing entry point: a team's rolling xG average, from the
  * persistent cache when it is still valid.
  *
@@ -617,8 +637,8 @@ async function writeTeamXgCache(entry: {
  *   2. Otherwise the live average is fetched (fetchTeamXgAverage, last
  *      Xg_LAST_N finished matches). A null average is returned as-is and
  *      NOT cached, so a provider hiccup is retried on the next scan.
- *   3. On a value, the team's next scheduled match and the newest finished
- *      match are resolved in parallel and the row is UPSERTed — next time
+ *   3. On a value, next_match_at is computed locally from the scan's own
+ *      fixture list (source of truth), and the row is UPSERTed — next time
  *      this team is asked for, it is a HIT until it plays again.
  *
  * Returns exactly the shape the goal baseline consumes; null means "no real
@@ -626,6 +646,8 @@ async function writeTeamXgCache(entry: {
  */
 export async function getTeamXgCached(
   teamId: number,
+  teamName: string = "",
+  allFixtures: FixtureLite[] = [],
 ): Promise<{ xgFor: number; xgAgainst: number; samples: number } | null> {
   if (!Number.isFinite(teamId) || teamId <= 0) return null;
 
@@ -651,11 +673,18 @@ export async function getTeamXgCached(
     return null;
   }
 
-  // Two cheap date lookups, only on a miss, in parallel. Both fail soft.
-  const [lastFinishedAt, nextScheduledAt] = await Promise.all([
-    fetchLastFinishedAt(teamId).catch(() => null),
-    fetchNextMatchAt(teamId).catch(() => null),
-  ]);
+  const lastFinishedAt = await fetchLastFinishedAt(teamId).catch(() => null);
+
+  const now = Date.now();
+  const upcoming = allFixtures
+    .filter((f) => {
+      const h = (f.home?.name || "").trim().toLowerCase();
+      const a = (f.away?.name || "").trim().toLowerCase();
+      const t = teamName.trim().toLowerCase();
+      return (h === t || a === t) && new Date(f.date).getTime() > now;
+    })
+    .sort((x, y) => new Date(x.date).getTime() - new Date(y.date).getTime());
+  const nextMatchAt = upcoming.length > 0 ? new Date(upcoming[0].date) : null;
 
   await writeTeamXgCache({
     teamId,
@@ -667,7 +696,7 @@ export async function getTeamXgCached(
     // conservative (never-earlier) stamp for this provenance column — the
     // invalidation itself is driven solely by next_match_at.
     basedOnThroughAt: lastFinishedAt ?? new Date(),
-    nextMatchAt: nextScheduledAt,
+    nextMatchAt,
   });
 
   return { xgFor: avg.xgFor, xgAgainst: avg.xgAgainst, samples: avg.samples };
@@ -824,7 +853,7 @@ function meshSamples(profile: MeshProfile | null): number | null {
  * absence of data, not a zero). Returns nulls when neither source delivers
  * both teams, and the goal market is then omitted.
  */
-async function fetchGoalBaseline(fx: FixtureLite): Promise<{
+async function fetchGoalBaseline(fx: FixtureLite, allFixtures: FixtureLite[]): Promise<{
   home: number | null;
   away: number | null;
   source: string | null;
@@ -839,8 +868,8 @@ async function fetchGoalBaseline(fx: FixtureLite): Promise<{
       const detail = await fetchEventDetail(bzEvent.eventId).catch(() => null);
       if (detail?.homeTeamId != null && detail?.awayTeamId != null) {
         const [h, a] = await Promise.all([
-          getTeamXgCached(detail.homeTeamId).catch(() => null),
-          getTeamXgCached(detail.awayTeamId).catch(() => null),
+          getTeamXgCached(detail.homeTeamId, fx.home.name, allFixtures).catch(() => null),
+          getTeamXgCached(detail.awayTeamId, fx.away.name, allFixtures).catch(() => null),
         ]);
         if (h?.xgFor != null && a?.xgFor != null) {
           return {
@@ -886,11 +915,11 @@ async function fetchGoalBaseline(fx: FixtureLite): Promise<{
   return empty;
 }
 
-async function fetchRealFixtureData(fx: FixtureLite): Promise<RealFixtureData> {
+async function fetchRealFixtureData(fx: FixtureLite, allFixtures: FixtureLite[]): Promise<RealFixtureData> {
   const [homeMesh, awayMesh, goals] = await Promise.all([
     getCachedMeshProfile(fx.home.name, fx.leagueSlug).catch(() => null),
     getCachedMeshProfile(fx.away.name, fx.leagueSlug).catch(() => null),
-    fetchGoalBaseline(fx),
+    fetchGoalBaseline(fx, allFixtures),
   ]);
 
   return {
@@ -1374,12 +1403,14 @@ export async function GET(req: Request): Promise<Response> {
   try {
     const fixtures = (await fetchUpcomingFixtures()).slice(0, MAX_FIXTURES);
 
+    await clearInvalidTeamXgCache();
+
     // Pass 1: real per-team data for every fixture (mesh + Bzzoiro + ESPN).
     // Team xG comes from the persistent cache whenever it is still valid;
     // the single aggregate hit/miss line is emitted once the pass is done.
     resetXgCacheScan();
     const rows = await mapWithConcurrency(fixtures, CONCURRENCY, async (fx) =>
-      withTimeout(fetchRealFixtureData(fx), REALDATA_TIMEOUT_MS, () =>
+      withTimeout(fetchRealFixtureData(fx, fixtures), REALDATA_TIMEOUT_MS, () =>
         console.warn(
           `[First5] ${formatMatch(fx)}: real-data fetch timed out after ` +
           `${REALDATA_TIMEOUT_MS}ms; fixture skipped (no markets published)`,
