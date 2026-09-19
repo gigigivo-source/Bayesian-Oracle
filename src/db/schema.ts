@@ -385,6 +385,23 @@ export const leagueOddsCache = pgTable("league_odds_cache", {
 export type LeagueOddsCacheRow = typeof leagueOddsCache.$inferSelect;
 export type NewLeagueOddsCache = typeof leagueOddsCache.$inferInsert;
 
+// ─── First 5 Minutes response cache ───────────────────────────────────────────
+// Persists the First 5 Minutes scan response so it survives dev-server
+// restarts. TTL = 24 hours: after the first scan of the day every subsequent
+// request is served from this single row ('default') in under 1s — even
+// across a Ctrl+C and restart. Written fail-soft only after a successful
+// scan (see src/app/api/first-5-minutes/route.ts).
+export const first5Cache = pgTable("first5_cache", {
+  id:           serial("id").primaryKey(),
+  cacheKey:     text("cache_key").notNull().unique(), // 'default'
+  responseJson: jsonb("response_json").notNull(),
+  generatedAt:  timestamp("generated_at").defaultNow().notNull(),
+  expiresAt:    timestamp("expires_at").notNull(),
+});
+
+export type First5CacheRow = typeof first5Cache.$inferSelect;
+export type NewFirst5Cache = typeof first5Cache.$inferInsert;
+
 // ─── Legacy aliases (kept for backward compat with older routes) ───────────────
 /** @deprecated use `bankroll` */
 export const bankrollEntries = bankroll;

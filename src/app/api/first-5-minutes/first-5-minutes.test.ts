@@ -36,6 +36,61 @@ vi.mock("@/lib/va/oddsFetcher", () => ({
   resolveBzzoiroEvent: vi.fn(),
 }));
 
+// ─── Database mock ────────────────────────────────────────────────────────────
+// The route's cache helpers read/write first5_cache through drizzle. Read
+// order is: DB row (24h) → in-memory (1h) → full scan. The mock is the same
+// "one row + a write log" shape used by the Value Accumulator tests: the
+// single 'default' row is set per test and every UPSERT lands in `writes`,
+// so cache HIT / WRITE / fail-soft behaviour can be asserted directly.
+const dbState = vi.hoisted(() => ({
+  cacheRows: new Map<string, Record<string, unknown>>(),
+  writes: [] as Array<Record<string, unknown>>,
+  readError: null as Error | null,
+  writeError: null as Error | null,
+}));
+
+vi.mock("@/db", () => ({
+  db: {
+    select: () => ({
+      from: () => ({
+        where: () => ({
+          limit: async () => {
+            if (dbState.readError) throw dbState.readError;
+            return Array.from(dbState.cacheRows.values());
+          },
+        }),
+      }),
+    }),
+    insert: () => ({
+      values: (row: Record<string, unknown>) => {
+        dbState.writes.push(row);
+        const result = Promise.resolve([]) as unknown as Promise<unknown[]> & {
+          onConflictDoUpdate: () => Promise<unknown[]>;
+        };
+        result.onConflictDoUpdate = () => {
+          if (dbState.writeError) return Promise.reject(dbState.writeError);
+          return Promise.resolve([]);
+        };
+        return result;
+      },
+    }),
+  },
+  keepDbAlive: async () => undefined,
+}));
+
+vi.mock("@/db/schema", () => ({
+  first5Cache: { cacheKey: "cache_key" },
+  // performanceLog is only used by the fail-soft pick-persistence step; the
+  // cache tests never persist a published market so a stub shape is enough.
+  performanceLog: {
+    id: "id",
+    eventId: "event_id",
+    feature: "feature",
+    market: "market",
+    selection: "selection",
+  },
+}));
+
 // ─── Mock builders (no network) ───────────────────────────────────────────────
 
 function makeMockTeam(id: string, name: string, homeAway: "home" | "away"): espn.TeamLite {
@@ -184,6 +239,10 @@ async function getFirst5(url = "http://localhost/api/first-5-minutes?refresh=tru
 
 beforeEach(() => {
   vi.clearAllMocks();
+  dbState.cacheRows.clear();
+  dbState.writes.length = 0;
+  dbState.readError = null;
+  dbState.writeError = null;
   // Default: no Bzzoiro, no ESPN form — each test opts into its data.
   vi.mocked(resolveBzzoiroEvent).mockResolvedValue({
     eventId: null,
@@ -197,6 +256,55 @@ beforeEach(() => {
   vi.mocked(getCachedMeshProfile).mockResolvedValue(null);
   vi.mocked(espn.fetchSummary).mockResolvedValue(null);
 });
+
+/**
+ * Seed the DB cache row that readDbCache() will observe. `expiresAt` is an
+ * ISO timestamp; use a future date for a valid row, a past date for an
+ * expired one.
+ */
+function seedDbCacheRow(expiresAt: Date, responseJson: unknown = { seeded: true }) {
+  dbState.cacheRows.set("default", {
+    id: 1,
+    cacheKey: "default",
+    responseJson,
+    generatedAt: new Date(Date.now() - 60 * 60 * 1000),
+    expiresAt,
+  });
+}
+
+/** Build the response body a full scan would have produced (one fixture, one goal market). */
+function buildScannedBody(): First5MinutesResponse {
+  return {
+    generatedAt: new Date().toISOString(),
+    windowMinutes: 5,
+    lookaheadDays: 7,
+    totalFixturesChecked: 1,
+    totalMatches: 1,
+    marketTypes: [{ key: "goal", label: "Goal in First 5 Minutes", icon: "⚽" }],
+    model: {
+      description: "test",
+      matchMinutes: 96,
+      openingIntensity: { goal: 0.45, corner: 0.78, card: 0.25 },
+    },
+    cache: { ttlMinutes: 60, hit: false },
+    matches: [
+      {
+        fixtureId: "fx-scan",
+        homeTeam: "Arsenal",
+        awayTeam: "Chelsea",
+        homeLogo: null,
+        awayLogo: null,
+        league: "English Premier League",
+        leagueSlug: "eng.1",
+        leagueTier: 1,
+        date: new Date(Date.now() + 36 * 60 * 60 * 1000).toISOString(),
+        venue: "Stadium",
+        statsSource: "Bzzoiro xG",
+        markets: [],
+      },
+    ],
+  };
+}
 
 // ─── Model helpers (unchanged math) ───────────────────────────────────────────
 
@@ -334,5 +442,109 @@ describe("First 5 Minutes API (real-data-only)", () => {
     // No markets anywhere means no values at all — synthetic or otherwise.
     const allMarkets = data.matches.flatMap((m) => m.markets);
     expect(allMarkets).toHaveLength(0);
+  });
+});
+
+// ─── DB-backed cache (24h TTL, survives restarts) ─────────────────────────────
+describe("First 5 Minutes DB-backed cache", () => {
+  // Each test uses a distinct extra query param so the route's module-level
+  // in-memory cache (1h TTL, keyed on the URL) from one test can never leak
+  // into the next. The DB cache key is always 'default', independent of URL.
+  const suite = Date.now().toString(36);
+  const urlFor = (name: string) =>
+    `http://localhost/api/first-5-minutes?cache-suite=${suite}-${name}`;
+
+  it("serves a valid DB cache row with ZERO fetcher calls", async () => {
+    seedDbCacheRow(
+      new Date(Date.now() + 60 * 60 * 1000),
+      buildScannedBody() satisfies First5MinutesResponse,
+    );
+
+    const data = await getFirst5(urlFor("hit"));
+
+    expect(data.cache.hit).toBe(true);
+    expect(data.totalFixturesChecked).toBe(1);
+    expect(data.matches[0].fixtureId).toBe("fx-scan");
+
+    // The scan never ran: no scoreboard, mesh, Bzzoiro or summary fetches.
+    expect(espn.fetchScoreboard).not.toHaveBeenCalled();
+    expect(getCachedMeshProfile).not.toHaveBeenCalled();
+    expect(resolveBzzoiroEvent).not.toHaveBeenCalled();
+    expect(fetchEventDetail).not.toHaveBeenCalled();
+    expect(fetchTeamXgAverage).not.toHaveBeenCalled();
+    expect(espn.fetchSummary).not.toHaveBeenCalled();
+
+    // A HIT served from the DB row never rewrites the cache.
+    expect(dbState.writes).toHaveLength(0);
+  });
+
+  it("runs a fresh scan when the DB row is expired and writes a 24h expiry", async () => {
+    seedDbCacheRow(new Date(Date.now() - 60 * 60 * 1000));
+    mockScoreboard([makeMockFixture("fx-stale", "Arsenal", "Chelsea")]);
+    vi.mocked(getCachedMeshProfile)
+      .mockResolvedValueOnce(null) // Arsenal
+      .mockResolvedValueOnce(null); // Chelsea
+
+    const before = Date.now();
+    const data = await getFirst5(urlFor("expired"));
+
+    expect(data.cache.hit).toBe(false);
+    // The scan ran over the single fixture: one mesh profile per team.
+    expect(getCachedMeshProfile).toHaveBeenCalledTimes(2);
+    expect(dbState.writes).toHaveLength(1);
+
+    const written = dbState.writes[0];
+    expect(written.cacheKey).toBe("default");
+    const writtenBody = written.responseJson as First5MinutesResponse;
+    expect(writtenBody.totalFixturesChecked).toBe(1);
+    const writtenExpiry = new Date(written.expiresAt as string).getTime();
+    expect(writtenExpiry).toBeGreaterThan(before + 23 * 60 * 60 * 1000);
+  });
+
+  it("?refresh=true bypasses a valid DB cache row and runs a fresh scan", async () => {
+    seedDbCacheRow(
+      new Date(Date.now() + 60 * 60 * 1000),
+      buildScannedBody() satisfies First5MinutesResponse,
+    );
+    mockScoreboard([makeMockFixture("fx-fresh", "Arsenal", "Chelsea")]);
+    vi.mocked(getCachedMeshProfile)
+      .mockResolvedValueOnce(null) // Arsenal
+      .mockResolvedValueOnce(null); // Chelsea
+
+    const data = await getFirst5(`${urlFor("refresh")}&refresh=true`);
+
+    expect(data.cache.hit).toBe(false);
+    expect(getCachedMeshProfile).toHaveBeenCalledTimes(2);
+    // The forced scan still refreshes both cache layers.
+    expect(dbState.writes).toHaveLength(1);
+    expect(dbState.writes[0].cacheKey).toBe("default");
+  });
+
+  it("falls through to a fresh scan when the DB read throws", async () => {
+    dbState.readError = new Error("connection refused");
+    mockScoreboard([makeMockFixture("fx-readfail", "Arsenal", "Chelsea")]);
+    vi.mocked(getCachedMeshProfile)
+      .mockResolvedValueOnce(null) // Arsenal
+      .mockResolvedValueOnce(null); // Chelsea
+
+    const data = await getFirst5(urlFor("readfail"));
+
+    expect(data.cache.hit).toBe(false);
+    expect(getCachedMeshProfile).toHaveBeenCalledTimes(2);
+  });
+
+  it("still returns the response when the DB write throws", async () => {
+    dbState.writeError = new Error("disk full");
+    mockScoreboard([makeMockFixture("fx-writefail", "Arsenal", "Chelsea")]);
+    vi.mocked(getCachedMeshProfile)
+      .mockResolvedValueOnce(null) // Arsenal
+      .mockResolvedValueOnce(null); // Chelsea
+
+    const data = await getFirst5(urlFor("writefail"));
+
+    expect(data.cache.hit).toBe(false);
+    // The scan still completed and the response was returned.
+    expect(data.totalFixturesChecked).toBe(1);
+    expect(espn.fetchScoreboard).toHaveBeenCalled();
   });
 });
