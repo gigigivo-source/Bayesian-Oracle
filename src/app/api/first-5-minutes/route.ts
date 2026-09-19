@@ -629,6 +629,27 @@ async function clearInvalidTeamXgCache(): Promise<void> {
 }
 
 /**
+ * Normalise a club name for cross-provider fixture matching. ESPN calls a
+ * club "1. FC Union Berlin" while Bzzoiro calls it "Union Berlin"; compare on
+ * the normalised form (lowercase, accents stripped, common club prefixes like
+ * FC/SC/TSG removed, punctuation gone, whitespace collapsed) so the
+ * next_match_at lookup stops returning null for names that differ only by a
+ * prefix, case or accent. A null next_match_at row is wiped by the scan-start
+ * cleanup and refetched from Bzzoiro on every scan — the exact waste this
+ * fixes.
+ */
+function normaliseTeamName(name: string): string {
+  return name
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "") // strip accents
+    .replace(/\b(\d+\.\s*)?(fc|cf|sc|afc|ac|as|tsg|vfb|vfl|sv|bsc|fsv|sk|fk|bk|if)\b\.?/g, "")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
  * The fixture-facing entry point: a team's rolling xG average, from the
  * persistent cache when it is still valid.
  *
@@ -676,15 +697,32 @@ export async function getTeamXgCached(
   const lastFinishedAt = await fetchLastFinishedAt(teamId).catch(() => null);
 
   const now = Date.now();
+  const target = normaliseTeamName(teamName);
   const upcoming = allFixtures
     .filter((f) => {
-      const h = (f.home?.name || "").trim().toLowerCase();
-      const a = (f.away?.name || "").trim().toLowerCase();
-      const t = teamName.trim().toLowerCase();
-      return (h === t || a === t) && new Date(f.date).getTime() > now;
+      const h = normaliseTeamName(f.home?.name || "");
+      const a = normaliseTeamName(f.away?.name || "");
+      return (h === target || a === target) && new Date(f.date).getTime() > now;
     })
     .sort((x, y) => new Date(x.date).getTime() - new Date(y.date).getTime());
-  const nextMatchAt = upcoming.length > 0 ? new Date(upcoming[0].date) : null;
+  let nextMatchAt = upcoming.length > 0 ? new Date(upcoming[0].date) : null;
+
+  // Ambiguity fallback: for names whose normalised form matches nothing
+  // (e.g. "Milan" vs "AC Milan" / "Inter Milan"), the original exact
+  // case-insensitive comparison is the safe path — if the normalised compare
+  // produced zero matches but it finds a fixture, use it.
+  if (!nextMatchAt) {
+    const t = teamName.trim().toLowerCase();
+    const legacy = allFixtures
+      .filter(
+        (f) =>
+          ((f.home?.name || "").trim().toLowerCase() === t ||
+            (f.away?.name || "").trim().toLowerCase() === t) &&
+          new Date(f.date).getTime() > now,
+      )
+      .sort((x, y) => new Date(x.date).getTime() - new Date(y.date).getTime());
+    nextMatchAt = legacy.length > 0 ? new Date(legacy[0].date) : null;
+  }
 
   await writeTeamXgCache({
     teamId,
