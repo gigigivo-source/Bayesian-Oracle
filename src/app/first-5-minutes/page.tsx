@@ -85,8 +85,13 @@ export default function First5MinutesPage() {
     );
   }, [data]);
 
-  const realDataCount = useMemo(
-    () => data?.matches.filter((match) => match.dataOrigin !== "league").length ?? 0,
+  const publishedMarkets = useMemo(
+    () => data?.matches.reduce((sum, match) => sum + match.markets.length, 0) ?? 0,
+    [data],
+  );
+
+  const skippedFixtures = useMemo(
+    () => (data ? Math.max(0, data.totalFixturesChecked - data.totalMatches) : 0),
     [data],
   );
 
@@ -180,12 +185,12 @@ export default function First5MinutesPage() {
           </div>
           <div>
             <div className="font-mono uppercase tracking-wider text-violet-300">
-              Real stats first
+              Real data only
             </div>
             <p className="mt-1 text-slate-400">
-              xG, season corner and card averages come from the stats aggregator;
-              a missing baseline falls back to the league average and is labelled
-              Synthetic Baseline.
+              Goals come from Bzzoiro rolling xG or ESPN form averages; corners
+              and cards come from mesh team distributions. A market with no real
+              baseline is omitted — never synthesised.
             </p>
           </div>
           <div>
@@ -206,9 +211,10 @@ export default function First5MinutesPage() {
           <FilterChip
             active={marketFilter === "all"}
             onClick={() => setMarketFilter("all")}
-            label="All 4 markets"
+            label="All 3 markets"
           />
-          {MARKET_ORDER.map((key) => (
+          {/* No penalty market exists — the API publishes goal/corner/card only. */}
+          {MARKET_ORDER.filter((key) => key !== "penalty").map((key) => (
             <FilterChip
               key={key}
               active={marketFilter === key}
@@ -242,9 +248,9 @@ export default function First5MinutesPage() {
               <span>
                 {data.matches.length} upcoming match
                 {data.matches.length === 1 ? "" : "es"} ·{" "}
-                {data.matches.length * 4} markets · {highConfidenceCount} HIGH
-                confidence · {guaranteedCount} likely guaranteed · {realDataCount}{" "}
-                on real aggregator data
+                {publishedMarkets} markets published · {skippedFixtures} fixtures
+                skipped (no data) · {highConfidenceCount} HIGH confidence ·{" "}
+                {guaranteedCount} likely guaranteed
               </span>
               <span className="font-mono">
                 Updated {formatDateTime(data.generatedAt)}

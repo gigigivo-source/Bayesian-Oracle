@@ -1,34 +1,44 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   GET,
   atLeastOne,
   bookOddsFor,
   confidenceFor,
   fairOddsFor,
-  resolveStatsSource,
   round1xBetOdds,
-  SYNTHETIC_BASELINE,
   type First5MinutesResponse,
 } from "./route";
 import * as espn from "@/lib/espn";
-import { statsAggregator } from "@/lib/data/aggregator";
-import { emptyTeamStats } from "@/lib/data/types";
+import { getCachedMeshProfile } from "@/lib/engine/dataMesh";
+import type { MeshProfile } from "@/lib/engine/dataMesh";
+import { fetchEventDetail, fetchTeamXgAverage } from "@/lib/va/xgFetcher";
+import { resolveBzzoiroEvent } from "@/lib/va/oddsFetcher";
 
 vi.mock("@/lib/espn", async () => {
   const actual = await vi.importActual<typeof import("@/lib/espn")>("@/lib/espn");
   return {
     ...actual,
     fetchScoreboard: vi.fn(),
+    fetchSummary: vi.fn(),
   };
 });
 
-vi.mock("@/lib/data/aggregator", () => ({
-  statsAggregator: {
-    fetch: vi.fn(),
-  },
+vi.mock("@/lib/engine/dataMesh", () => ({
+  getCachedMeshProfile: vi.fn(),
 }));
 
-function makeMockTeam(id: string, name: string): espn.TeamLite {
+vi.mock("@/lib/va/xgFetcher", () => ({
+  fetchTeamXgAverage: vi.fn(),
+  fetchEventDetail: vi.fn(),
+}));
+
+vi.mock("@/lib/va/oddsFetcher", () => ({
+  resolveBzzoiroEvent: vi.fn(),
+}));
+
+// ─── Mock builders (no network) ───────────────────────────────────────────────
+
+function makeMockTeam(id: string, name: string, homeAway: "home" | "away"): espn.TeamLite {
   return {
     id,
     name,
@@ -37,7 +47,7 @@ function makeMockTeam(id: string, name: string): espn.TeamLite {
     logo: null,
     color: "000000",
     score: null,
-    homeAway: "home",
+    homeAway,
   };
 }
 
@@ -51,10 +61,144 @@ function makeMockFixture(id: string, homeName: string, awayName: string): espn.F
     neutralSite: false,
     leagueSlug: "eng.1",
     leagueName: "English Premier League",
-    home: makeMockTeam("1", homeName),
-    away: makeMockTeam("2", awayName),
+    home: makeMockTeam("1", homeName, "home"),
+    away: makeMockTeam("2", awayName, "away"),
   };
 }
+
+function dist(mean: number, n: number) {
+  return { mean, std: mean * 0.3, n };
+}
+
+function makeMeshProfile(opts: {
+  corners?: number;
+  cards?: number;
+  fouls?: number;
+  samples?: number;
+}): MeshProfile {
+  const n = opts.samples ?? 8;
+  const zero = dist(0, 0);
+  return {
+    teamId: "1",
+    samples: n,
+    shots: dist(13, n),
+    sot: dist(4.5, n),
+    corners: opts.corners == null ? zero : dist(opts.corners, n),
+    cards: opts.cards == null ? zero : dist(opts.cards, n),
+    fouls: opts.fouls == null ? zero : dist(opts.fouls, n),
+    offsides: dist(2, n),
+    saves: dist(3, n),
+    possession: dist(52, n),
+    passes: dist(480, n),
+    passAccuracy: dist(82, n),
+    crosses: dist(18, n),
+    longBalls: dist(55, n),
+    tackles: dist(16, n),
+    clearances: dist(20, n),
+    interceptions: dist(10, n),
+    blockedShots: dist(4, n),
+    providers: ["ESPN Boxscore"],
+    providerCount: 1,
+  };
+}
+
+function makeForm(gfAvg: number, games: number): espn.MatchSummary["homeForm"] {
+  return {
+    teamId: "1",
+    teamName: "Team",
+    games: Array.from({ length: games }, (_, i) => ({
+      date: `2026-09-${String(10 + i).padStart(2, "0")}`,
+      opponent: "Opponent",
+      opponentLogo: null,
+      result: "W",
+      scoreFor: 2,
+      scoreAgainst: 1,
+      atVs: "vs",
+      competition: "League",
+    })),
+    gfAvg,
+    gaAvg: 1,
+    points: games * 3,
+  };
+}
+
+function makeSummary(homeGf: number, awayGf: number, games = 5): espn.MatchSummary {
+  return {
+    odds: null,
+    homeForm: makeForm(homeGf, games),
+    awayForm: makeForm(awayGf, games),
+    h2h: [],
+    homeLineup: [],
+    awayLineup: [],
+    lineupAvailable: false,
+    homeFormation: null,
+    awayFormation: null,
+    venue: null,
+    boxscore: null,
+  };
+}
+
+function mockScoreboard(fixtures: espn.FixtureLite[]) {
+  vi.mocked(espn.fetchScoreboard).mockImplementation(async (slug) => {
+    if (slug === "eng.1") return fixtures;
+    return [];
+  });
+}
+
+function mockBzzoiroChain(homeXg: number | null, awayXg: number | null) {
+  vi.mocked(resolveBzzoiroEvent).mockResolvedValue({
+    eventId: "555",
+    status: "resolved",
+    eventsInRange: 1,
+    relatedInRange: 1,
+    toleranceDays: 2,
+  });
+  vi.mocked(fetchEventDetail).mockResolvedValue({ homeTeamId: 101, awayTeamId: 202 });
+  vi.mocked(fetchTeamXgAverage).mockImplementation(async (teamId: number) => {
+    if (teamId === 101) {
+      return homeXg == null
+        ? null
+        : { teamId, xgFor: homeXg, xgAgainst: 1.1, samples: 5 };
+    }
+    if (teamId === 202) {
+      return awayXg == null
+        ? null
+        : { teamId, xgFor: awayXg, xgAgainst: 1.2, samples: 5 };
+    }
+    return null;
+  });
+}
+
+function mockMesh(home: MeshProfile | null, away: MeshProfile | null) {
+  vi.mocked(getCachedMeshProfile).mockImplementation(async (teamName: string) => {
+    if (teamName === "Arsenal" || teamName === "Everton" || teamName === "Leeds") return home;
+    return away;
+  });
+}
+
+async function getFirst5(url = "http://localhost/api/first-5-minutes?refresh=true") {
+  const res = await GET(new Request(url));
+  expect(res.status).toBe(200);
+  return (await res.json()) as First5MinutesResponse;
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  // Default: no Bzzoiro, no ESPN form — each test opts into its data.
+  vi.mocked(resolveBzzoiroEvent).mockResolvedValue({
+    eventId: null,
+    status: "no-match",
+    eventsInRange: 0,
+    relatedInRange: 0,
+    toleranceDays: 5,
+  });
+  vi.mocked(fetchEventDetail).mockResolvedValue(null);
+  vi.mocked(fetchTeamXgAverage).mockResolvedValue(null);
+  vi.mocked(getCachedMeshProfile).mockResolvedValue(null);
+  vi.mocked(espn.fetchSummary).mockResolvedValue(null);
+});
+
+// ─── Model helpers (unchanged math) ───────────────────────────────────────────
 
 describe("First 5 Minutes model helpers", () => {
   it("maps confidence from probability thresholds", () => {
@@ -78,245 +222,117 @@ describe("First 5 Minutes model helpers", () => {
     expect(atLeastOne(Math.log(2))).toBeCloseTo(0.5, 5);
     expect(bookOddsFor(0.5)).toBe(2);
   });
-
-  it("labels a missing aggregator source as Synthetic Baseline", () => {
-    expect(resolveStatsSource(null)).toBe(SYNTHETIC_BASELINE);
-    expect(resolveStatsSource("")).toBe(SYNTHETIC_BASELINE);
-    expect(resolveStatsSource("SportScore")).toBe("SportScore");
-  });
 });
 
-describe("First 5 Minutes API", () => {
-  it("returns four dual-outcome markets with Yes and No metrics", async () => {
-    const fixture = makeMockFixture("fx-1", "Arsenal", "Chelsea");
-    vi.mocked(espn.fetchScoreboard).mockImplementation(async (slug) => {
-      if (slug === "eng.1") return [fixture];
-      return [];
-    });
+// ─── Real-data publishing ────────────────────────────────────────────────────
 
-    vi.mocked(statsAggregator.fetch).mockResolvedValue({
-      home: {
-        ...emptyTeamStats(),
-        xg: 1.8,
-        avgCornersPerGame: 6.2,
-        avgCardsPerGame: 1.9,
-        fouls: 11,
-      },
-      away: {
-        ...emptyTeamStats(),
-        xg: 1.4,
-        avgCornersPerGame: 4.8,
-        avgCardsPerGame: 2.1,
-        fouls: 12,
-      },
-      metadata: {
-        source: "SportScore",
-        fetchedAt: new Date().toISOString(),
-        matchDate: fixture.date.slice(0, 10),
-        leagueSlug: "eng.1",
-      },
-    });
+describe("First 5 Minutes API (real-data-only)", () => {
+  it("publishes goal, corner and card from real mesh + Bzzoiro xG — and no penalty", async () => {
+    mockScoreboard([makeMockFixture("fx-1", "Arsenal", "Chelsea")]);
+    mockBzzoiroChain(1.8, 1.4);
+    mockMesh(
+      makeMeshProfile({ corners: 6.2, cards: 1.9, fouls: 11 }),
+      makeMeshProfile({ corners: 4.8, cards: 2.1, fouls: 12 }),
+    );
 
-    const res = await GET(new Request("http://localhost/api/first-5-minutes?refresh=true"));
-    expect(res.status).toBe(200);
+    const data = await getFirst5();
+    expect(data.matches).toHaveLength(1);
+    const match = data.matches[0];
+    expect(match.markets.map((m) => m.key).sort()).toEqual(["card", "corner", "goal"]);
+    expect(match.markets.some((m) => m.key === ("penalty" as string))).toBe(false);
 
-    const data = (await res.json()) as First5MinutesResponse;
-    expect(data.matches.length).toBe(1);
-    expect(data.matches[0].statsSource).toBe("SportScore");
-    expect(data.matches[0].markets).toHaveLength(4);
+    const goal = match.markets.find((m) => m.key === "goal");
+    // Bzzoiro xG 1.8 + 1.4 = 3.2 combined expected goals.
+    expect(goal?.expectedPerMatch).toBeCloseTo(3.2, 2);
+    expect(goal?.statsSource).toBe("Bzzoiro xG");
+    expect(goal?.dataQuality).toBe("real");
 
-    for (const market of data.matches[0].markets) {
+    const corner = match.markets.find((m) => m.key === "corner");
+    expect(corner?.expectedPerMatch).toBeCloseTo(11.0, 2);
+    expect(corner?.statsSource).toBe("ESPN Mesh");
+
+    const card = match.markets.find((m) => m.key === "card");
+    expect(card?.expectedPerMatch).toBeCloseTo(4.0, 2);
+    expect(card?.statsSource).toBe("ESPN Mesh");
+
+    // Dual-outcome shape intact on every published market.
+    for (const market of match.markets) {
       expect(market.yes.label).toBe("Yes");
       expect(market.no.label).toBe("No");
       expect(market.yes.hitRate).toBeGreaterThan(0);
       expect(market.no.hitRate).toBeGreaterThan(0);
-      expect(market.yes.fairOdds).toBeGreaterThan(1);
-      expect(market.no.fairOdds).toBeGreaterThan(1);
       expect(market.yes.odds1xBet).toBeGreaterThan(1);
       expect(market.no.odds1xBet).toBeGreaterThan(1);
-      expect(["HIGH", "MEDIUM", "LOW"]).toContain(market.yes.confidence);
-      expect(["HIGH", "MEDIUM", "LOW"]).toContain(market.no.confidence);
       expect(typeof market.isGuaranteed).toBe("boolean");
-      expect(market.statsSource).toBeTruthy();
     }
-
-    const penalty = data.matches[0].markets.find((market) => market.key === "penalty");
-    expect(penalty?.isGuaranteed).toBe(true);
-    expect(penalty?.no.hitRate).toBeGreaterThanOrEqual(0.95);
   });
 
-  it("annotates every market with data quality, a confidence score and source detail", async () => {
-    const fixture = makeMockFixture("fx-quality", "Arsenal", "Chelsea");
-    vi.mocked(espn.fetchScoreboard).mockImplementation(async (slug) => {
-      if (slug === "eng.1") return [fixture];
-      return [];
-    });
+  it("omits corner/card when home mesh is null but still publishes goal from xG", async () => {
+    mockScoreboard([makeMockFixture("fx-2", "Arsenal", "Chelsea")]);
+    mockBzzoiroChain(1.8, 1.4);
+    mockMesh(null, makeMeshProfile({ corners: 4.8, cards: 2.1, fouls: 12 }));
 
-    // Single-source payload (only metadata.source, no multi-source list).
-    vi.mocked(statsAggregator.fetch).mockResolvedValue({
-      home: {
-        ...emptyTeamStats(),
-        xg: 1.8,
-        avgCornersPerGame: 6.2,
-        avgCardsPerGame: 1.9,
-        fouls: 11,
-      },
-      away: {
-        ...emptyTeamStats(),
-        xg: 1.4,
-        avgCornersPerGame: 4.8,
-        avgCardsPerGame: 2.1,
-        fouls: 12,
-      },
-      metadata: {
-        source: "SportScore",
-        fetchedAt: new Date().toISOString(),
-        matchDate: fixture.date.slice(0, 10),
-        leagueSlug: "eng.1",
-      },
-    });
+    const data = await getFirst5();
+    expect(data.matches).toHaveLength(1);
+    const keys = data.matches[0].markets.map((m) => m.key);
+    // Only one side has mesh data → corner and card omitted; xG covers goal.
+    expect(keys).toEqual(["goal"]);
+  });
 
-    const res = await GET(new Request("http://localhost/api/first-5-minutes?refresh=true"));
-    const data = (await res.json()) as First5MinutesResponse;
-    const markets = data.matches[0].markets;
+  it("publishes goal from ESPN form gfAvg when Bzzoiro xG is null", async () => {
+    mockScoreboard([makeMockFixture("fx-3", "Arsenal", "Chelsea")]);
+    // Bzzoiro chain resolves nothing (defaults from beforeEach).
+    mockMesh(
+      makeMeshProfile({ corners: 6.2, cards: 1.9, fouls: 11 }),
+      makeMeshProfile({ corners: 4.8, cards: 2.1, fouls: 12 }),
+    );
+    vi.mocked(espn.fetchSummary).mockResolvedValue(makeSummary(2.0, 1.2));
 
-    for (const market of markets) {
-      expect(["real", "mixed", "synthetic"]).toContain(market.dataQuality);
-      expect(market.confidenceScore).toBeGreaterThanOrEqual(0);
-      expect(market.confidenceScore).toBeLessThanOrEqual(100);
-      expect(market.confidenceScore).toBe(
-        market.confidenceBreakdown.dataQualityPoints +
-          market.confidenceBreakdown.sourceAgreementPoints +
-          market.confidenceBreakdown.completenessPoints,
-      );
-    }
-
-    const goal = markets.find((market) => market.key === "goal");
-    // real (40) + 1 source (15) + all stats present (30) = 85
+    const data = await getFirst5();
+    const goal = data.matches[0].markets.find((m) => m.key === "goal");
+    expect(goal).toBeDefined();
+    // ESPN form 2.0 + 1.2 = 3.2 combined.
+    expect(goal?.expectedPerMatch).toBeCloseTo(3.2, 2);
+    expect(goal?.statsSource).toBe("ESPN Form");
     expect(goal?.dataQuality).toBe("real");
-    expect(goal?.dataSourceDetail).toBe("SportScore (Real)");
-    expect(goal?.confidenceScore).toBe(85);
-
-    // The penalty baseline always falls back to the league anchor here, so the
-    // market must be flagged synthetic and score far below the real markets —
-    // even though its own hit rate is ≥95%.
-    const penalty = markets.find((market) => market.key === "penalty");
-    expect(penalty?.dataQuality).toBe("synthetic");
-    expect(penalty?.dataSourceDetail).toBe("Synthetic Baseline (League Avg)");
-    expect(penalty?.confidenceScore).toBeLessThan(40);
-    expect(penalty?.hitRate).toBeGreaterThanOrEqual(0.9);
   });
 
-  it("raises the score when multiple aggregator sources agree", async () => {
-    const fixture = makeMockFixture("fx-multi", "Arsenal", "Chelsea");
-    vi.mocked(espn.fetchScoreboard).mockImplementation(async (slug) => {
-      if (slug === "eng.1") return [fixture];
-      return [];
-    });
+  it("omits the goal market when both xG and ESPN form are null", async () => {
+    mockScoreboard([makeMockFixture("fx-4", "Arsenal", "Chelsea")]);
+    mockMesh(
+      makeMeshProfile({ corners: 6.2, cards: 1.9, fouls: 11 }),
+      makeMeshProfile({ corners: 4.8, cards: 2.1, fouls: 12 }),
+    );
+    // fetchSummary stays null (beforeEach default).
 
-    vi.mocked(statsAggregator.fetch).mockResolvedValue({
-      home: {
-        ...emptyTeamStats(),
-        xg: 1.8,
-        avgCornersPerGame: 6.2,
-        avgCardsPerGame: 1.9,
-        fouls: 11,
-      },
-      away: {
-        ...emptyTeamStats(),
-        xg: 1.4,
-        avgCornersPerGame: 4.8,
-        avgCardsPerGame: 2.1,
-        fouls: 12,
-      },
-      metadata: {
-        source: "SportScore",
-        sources: ["SportScore", "API-Football", "FBref"],
-        fetchedAt: new Date().toISOString(),
-        matchDate: fixture.date.slice(0, 10),
-        leagueSlug: "eng.1",
-      },
-    });
-
-    const res = await GET(new Request("http://localhost/api/first-5-minutes?refresh=true"));
-    const data = (await res.json()) as First5MinutesResponse;
-    const goal = data.matches[0].markets.find((market) => market.key === "goal");
-
-    // real (40) + 3 sources agree (30) + all stats present (30) = 100
-    expect(goal?.dataQuality).toBe("real");
-    expect(goal?.dataSourceDetail).toBe("SportScore + API-Football + FBref (Real)");
-    expect(goal?.confidenceScore).toBe(100);
-    expect(goal?.confidenceBreakdown.sourceCount).toBe(3);
+    const data = await getFirst5();
+    expect(data.matches).toHaveLength(1);
+    const keys = data.matches[0].markets.map((m) => m.key).sort();
+    expect(keys).toEqual(["card", "corner"]);
   });
 
-  it("labels one-sided stats as mixed with the + Synthetic detail suffix", async () => {
-    const fixture = makeMockFixture("fx-partial", "Arsenal", "Chelsea");
-    vi.mocked(espn.fetchScoreboard).mockImplementation(async (slug) => {
-      if (slug === "eng.1") return [fixture];
-      return [];
-    });
+  it("publishes zero markets for a fixture with no real data at all", async () => {
+    mockScoreboard([makeMockFixture("fx-5", "Everton", "Brentford")]);
+    // All providers null (beforeEach defaults).
 
-    // Away xG is missing: the goal baseline mirrors the home side only →
-    // "mixed" tier, while the corner/card markets stay "real".
-    vi.mocked(statsAggregator.fetch).mockResolvedValue({
-      home: {
-        ...emptyTeamStats(),
-        xg: 1.8,
-        avgCornersPerGame: 6.2,
-        avgCardsPerGame: 1.9,
-      },
-      away: {
-        ...emptyTeamStats(),
-        avgCornersPerGame: 4.8,
-        avgCardsPerGame: 2.1,
-      },
-      metadata: {
-        source: "SportScore",
-        sources: ["SportScore", "API-Football"],
-        fetchedAt: new Date().toISOString(),
-        matchDate: fixture.date.slice(0, 10),
-        leagueSlug: "eng.1",
-      },
-    });
-
-    const res = await GET(new Request("http://localhost/api/first-5-minutes?refresh=true"));
-    const data = (await res.json()) as First5MinutesResponse;
-    const goal = data.matches[0].markets.find((market) => market.key === "goal");
-    const corner = data.matches[0].markets.find((market) => market.key === "corner");
-
-    expect(goal?.dataQuality).toBe("mixed");
-    expect(goal?.dataSourceDetail).toBe("SportScore + API-Football (Real) + Synthetic");
-    expect(goal?.confidenceScore).toBeLessThan(100);
-    expect(corner?.dataQuality).toBe("real");
+    const data = await getFirst5();
+    expect(data.totalFixturesChecked).toBe(1);
+    expect(data.totalMatches).toBe(0);
+    expect(data.matches).toHaveLength(0);
   });
 
-  it("falls back to Synthetic Baseline when the aggregator returns null", async () => {
-    const fixture = makeMockFixture("fx-2", "Everton", "Brentford");
-    vi.mocked(espn.fetchScoreboard).mockImplementation(async (slug) => {
-      if (slug === "eng.1") return [fixture];
-      return [];
-    });
-    vi.mocked(statsAggregator.fetch).mockResolvedValue(null);
+  it("publishes nothing — not hash-jittered numbers — for two dataless fixtures", async () => {
+    mockScoreboard([
+      makeMockFixture("fx-6", "Everton", "Brentford"),
+      makeMockFixture("fx-7", "Leeds", "Sunderland"),
+    ]);
 
-    const res = await GET(new Request("http://localhost/api/first-5-minutes?refresh=true"));
-    const data = (await res.json()) as First5MinutesResponse;
-    expect(data.matches[0].statsSource).toBe(SYNTHETIC_BASELINE);
-    expect(data.matches[0].markets.every((market) => market.statsSource === SYNTHETIC_BASELINE)).toBe(true);
-    expect(data.matches[0].markets.every((market) => market.origin === "league")).toBe(true);
-
-    // Every synthetic market carries the grey-badge label and a low score.
-    for (const market of data.matches[0].markets) {
-      expect(market.dataQuality).toBe("synthetic");
-      expect(market.dataSourceDetail).toBe("Synthetic Baseline (League Avg)");
-      expect(market.confidenceScore).toBeLessThanOrEqual(40);
-    }
-    // A ≥90% hit rate on synthetic data is exactly the trap the badge flags:
-    // high hit rate, low confidence.
-    const highHit = data.matches[0].markets.filter((market) => market.hitRate >= 0.9);
-    expect(highHit.length).toBeGreaterThan(0);
-    for (const market of highHit) {
-      expect(market.dataQuality).toBe("synthetic");
-      expect(market.confidenceScore).toBeLessThan(50);
-    }
+    const data = await getFirst5();
+    expect(data.totalFixturesChecked).toBe(2);
+    expect(data.totalMatches).toBe(0);
+    expect(data.matches).toHaveLength(0);
+    // No markets anywhere means no values at all — synthetic or otherwise.
+    const allMarkets = data.matches.flatMap((m) => m.markets);
+    expect(allMarkets).toHaveLength(0);
   });
 });

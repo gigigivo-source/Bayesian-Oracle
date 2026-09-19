@@ -1,24 +1,28 @@
-// ĞIGI GIVØ — First 5 Minutes Markets.
+// ĞIGI GIVØ — First 5 Minutes Markets (real-data-only).
 //
-// Predicts whether a goal, corner, card or penalty happens inside the opening
-// five minutes of every upcoming fixture (next 7 days).
+// Predicts whether a goal, corner or card happens inside the opening five
+// minutes of upcoming fixtures (next 7 days). Three markets per fixture —
+// goal, corner, card. There is deliberately NO penalty market: no data source
+// in the app provides pre-match penalty rates (the mesh profile has no
+// penalties field, the Bzzoiro xG fetcher exposes only xG, the ESPN summary
+// has no penalty field, and referee_stats.penaltiesPerGame has zero writers
+// and zero readers). Do not re-add a penalty market without a real source.
 //
-// Integrity contract (identical to the rest of the app):
-//   1. REAL DATA FIRST — every market baseline is pulled from the multi-source
-//      stats aggregator (src/lib/data/aggregator.ts).
-//   2. HONEST FALLBACK — when no source can supply a team-level baseline the
-//      league anchor (observed long-run league average FOR THAT MATCH'S OWN
-//      LEAGUE) is used instead and the market is explicitly tagged
-//      `origin: "league"` (Synthetic Baseline). The anchor is modulated by a
-//      small deterministic per-match profile (hash of fixture identity), so
-//      two synthetic matches never render byte-identical numbers.
-//   3. FAIL-SOFT — a failing aggregator, source or fixture feed never breaks
-//      the response; that fixture simply falls back to the league baseline.
+// Integrity contract:
+//   1. REAL DATA ONLY — every published market is computed from real
+//      per-team data (Bzzoiro rolling xG, ESPN form averages, mesh corner /
+//      card / foul distributions). There is no league-anchor fallback, no
+//      hash jitter, no synthetic baseline anywhere in this file.
+//   2. OMISSION OVER FABRICATION — when a market has no real baseline for a
+//      fixture it is OMITTED from the response for that fixture (and logged).
+//      A fixture with no publishable market is skipped entirely.
+//   3. FAIL-SOFT — a failing provider never breaks the response; the affected
+//      market (or fixture) is simply not published.
 //
 // ── Model ────────────────────────────────────────────────────────────────────
 // Every market is modelled as a Poisson arrival process over match time:
 //
-//   λ_match  = expected events for the WHOLE match (real stats → league anchor)
+//   λ_match  = expected events for the WHOLE match (real per-team data only)
 //   λ_window = λ_match × (5 / 96) × openingIntensity × tempo
 //   P(Yes)   = 1 − exp(−λ_window)
 //   fairOdds = 1 / P(outcome)
@@ -27,21 +31,28 @@
 // `openingIntensity` corrects the naive uniform-minute assumption with the
 // observed shape of the opening five minutes (goals and especially cards are
 // rarer than a uniform split implies; corners are close to uniform).
+// Tempo/aggression adjustments are normalised against the scan's own real
+// data (mean of the fetched values across this scan), never a static table.
+//
+// ── Sources ──────────────────────────────────────────────────────────────────
+//   Goal baseline   — Bzzoiro rolling team xG (xgFor, last 5 finished),
+//                     else ESPN summary form averages (gfAvg). Both teams
+//                     required or the market is omitted.
+//   Corner baseline — mesh corner distributions (both teams, n > 0).
+//   Card baseline   — mesh card distributions (both teams, n > 0).
+//   Aggression      — mesh foul distributions (optional; defaults to 1.0).
 
-import { statsAggregator } from "@/lib/data/aggregator";
 import {
   assessMarketConfidence,
   toConfidenceBreakdown,
   type MarketConfidenceBreakdown,
   type MarketDataQuality,
 } from "@/lib/data/confidence";
-import type { CanonicalMatchStats, TeamStats } from "@/lib/data/types";
-import { fetchScoreboard, type FixtureLite, type TeamLite } from "@/lib/espn";
-import {
-  LEAGUE_ANCHORS,
-  getAnchors,
-  type LeagueAnchors,
-} from "@/lib/engine/statisticalAnchors";
+import type { MeshProfile } from "@/lib/engine/dataMesh";
+import { getCachedMeshProfile } from "@/lib/engine/dataMesh";
+import { fetchScoreboard, fetchSummary, type FixtureLite, type TeamLite } from "@/lib/espn";
+import { fetchEventDetail, fetchTeamXgAverage } from "@/lib/va/xgFetcher";
+import { resolveBzzoiroEvent } from "@/lib/va/oddsFetcher";
 import { LEAGUE_TIER, leagueTier } from "@/lib/leaguePriority";
 
 export const dynamic = "force-dynamic";
@@ -51,7 +62,7 @@ export const maxDuration = 300;
 
 /** Fixture window shown on the page. */
 const LOOKAHEAD_DAYS = 7;
-/** Part 5 — results are cached for one hour (same TTL as Sure Bet Corners). */
+/** Results are cached for one hour (same TTL as Sure Bet Corners). */
 const CACHE_TTL_MS = 60 * 60 * 1000;
 /** The prediction window, in minutes. */
 const WINDOW_MINUTES = 5;
@@ -62,118 +73,37 @@ const MAX_FIXTURES = 60;
 /** Fixtures scored in parallel. */
 const CONCURRENCY = 8;
 /**
- * Per-fixture ceiling for the aggregator walk. The aggregator already applies
- * its own per-source timeout; this only stops one pathological fixture from
- * holding the whole feed hostage — it then rides the league baseline.
+ * Per-fixture ceiling for the real-data fetch (mesh + Bzzoiro + ESPN
+ * summary). A cold mesh profile fans out across many ESPN calls, so one
+ * pathological fixture must never hold the whole feed hostage — on timeout
+ * the fixture is skipped (no markets published for it).
  */
-const STATS_TIMEOUT_MS = 15_000;
+const REALDATA_TIMEOUT_MS = 25_000;
 /** Competition tiers included in the feed. */
 const MAX_LEAGUE_TIER = 3;
-/** Label used whenever the aggregator cannot supply a real source. */
-export const SYNTHETIC_BASELINE = "Synthetic Baseline";
 /** Hit-rate threshold that flips the "Likely Guaranteed" flag. */
 export const GUARANTEED_HIT_RATE = 0.95;
+/** Finished matches behind each Bzzoiro rolling xG average. */
+const Xg_LAST_N = 5;
 
 /**
  * Share of the match's events that land in minutes 0–5, relative to a uniform
  * split. Derived from observed opening-phase distributions: teams start
  * cautiously (goals ~0.45× uniform), referees are lenient early (cards
- * ~0.25×), penalties track fouls in the box (~0.5×) and corners arrive almost
- * uniformly from the first attacks (~0.78×).
+ * ~0.25×) and corners arrive almost uniformly from the first attacks (~0.78×).
+ * There is no penalty entry — the penalty market does not exist (see header).
  */
 const OPENING_INTENSITY = {
   goal: 0.45,
   corner: 0.78,
   card: 0.25,
-  penalty: 0.5,
 } as const;
-
-/**
- * League-average penalties per match. The anchors table has no penalty column,
- * so the observed ~0.26 penalties/match baseline is scaled by how foul-heavy
- * the competition is relative to the reference league.
- */
-const BASE_PENALTIES_PER_MATCH = 0.26;
-const REFERENCE_FOULS_PER_MATCH = 21.0;
-
-/**
- * Half-width of the deterministic per-match spread applied to synthetic
- * (league-anchor) baselines. A league anchor is the same object for every
- * match in that league, so without this every synthetic match rendered
- * byte-identical hit rates, odds and selections. ±12% keeps the baseline
- * anchored to the league average while making each fixture's fallback its
- * own — real team season averages deviate from their league mean by far
- * more than this, so the spread stays well inside plausible territory.
- */
-const SYNTHETIC_MATCH_SPREAD = 0.12;
-
-/**
- * Second-level alias repair for the anchor table. `getAnchors()` resolves
- * its alias map only ONE level deep, so any slug that aliases to another
- * alias-only key (aut.1 → ger.2, sui.1 → fra.2, gre.1 → ita.2, den/nor/swe/
- * pol.1 → ger.2) silently falls through to the eng.1 default — i.e. those
- * leagues' matches were priced off the Premier League "global" average.
- * Map those slugs to their intended anchor league so a synthetic baseline
- * reflects the competition the match is actually played in.
- * (statisticalAnchors.ts is shared with other features, so the repair is
- * kept local to this route.)
- */
-const ANCHOR_CHAIN_REPAIR: Record<string, string> = {
-  "aut.1": "ger.1",
-  "den.1": "ger.1",
-  "nor.1": "ger.1",
-  "swe.1": "ger.1",
-  "pol.1": "ger.1",
-  "gre.1": "ita.1",
-  "sui.1": "fra.1",
-};
-
-/**
- * League anchors for THIS match's league. Resolution order:
- *   1. direct anchor-table hit,
- *   2. repaired second-level alias (see ANCHOR_CHAIN_REPAIR),
- *   3. shared getAnchors() (one-level aliases → eng.1 default last resort).
- * `via` names the anchor league actually used (for the per-match log line).
- */
-export function leagueAnchorsFor(leagueSlug: string): { anchors: LeagueAnchors; via: string } {
-  const direct = LEAGUE_ANCHORS[leagueSlug];
-  if (direct) return { anchors: direct, via: leagueSlug };
-  const repaired = ANCHOR_CHAIN_REPAIR[leagueSlug];
-  if (repaired && LEAGUE_ANCHORS[repaired]) {
-    return { anchors: LEAGUE_ANCHORS[repaired], via: repaired };
-  }
-  return { anchors: getAnchors(leagueSlug), via: leagueSlug };
-}
-
-/** FNV-1a 32-bit — tiny deterministic hash for the per-match spread. */
-function fnv1a32(input: string): number {
-  let hash = 0x811c9dc5;
-  for (let i = 0; i < input.length; i++) {
-    hash ^= input.charCodeAt(i);
-    hash = Math.imul(hash, 0x01000193);
-  }
-  return hash >>> 0;
-}
-
-/**
- * Deterministic per-match multiplier, keyed by fixture identity + market.
- * Same fixture ⇒ same factor (reproducible, cache-friendly, testable);
- * different fixtures ⇒ different factors, so no two synthetic baselines in
- * the same league are identical. Range: 1 ± SYNTHETIC_MATCH_SPREAD.
- */
-export function matchProfileFactor(fx: FixtureLite, key: First5MarketKey): number {
-  const seed = `${fx.leagueSlug}|${fx.id}|${fx.home.name}|${fx.away.name}|${key}`;
-  const unit = fnv1a32(seed) / 0xffffffff; // 0..1
-  return 1 + (unit * 2 - 1) * SYNTHETIC_MATCH_SPREAD;
-}
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
-export type First5MarketKey = "goal" | "corner" | "card" | "penalty";
+export type First5MarketKey = "goal" | "corner" | "card";
 export type First5Outcome = "Yes" | "No";
 export type Confidence = "HIGH" | "MEDIUM" | "LOW";
-/** Where the per-match baseline came from: real stats, mixed, or league avg. */
-export type BaselineOrigin = "real" | "partial" | "league";
 
 /** One side of a dual-outcome market (Yes or No) with every displayed metric. */
 export interface First5OutcomeSide {
@@ -217,26 +147,23 @@ export interface First5Market {
   expectedInWindow: number;
   /** λ for the full match (the baseline the window is derived from). */
   expectedPerMatch: number;
-  origin: BaselineOrigin;
   /**
-   * Aggregator metadata.source (e.g. SportScore, API-Football) or
-   * "Synthetic Baseline" when the aggregator returned null / the market
-   * rode the league average.
+   * Real provider names that supplied this market's baseline
+   * (e.g. "Bzzoiro xG", "ESPN Mesh", "ESPN Form").
    */
   statsSource: string;
   /** Human-readable data provenance. */
   source: string;
   reason: string;
   /**
-   * Where this market's baseline came from: "real" (both teams' stats are
-   * team-specific aggregator data), "mixed" (one side real, the other
-   * mirrored / league-substituted) or "synthetic" (league average baseline).
-   * Presentation-only — never used to gate a market.
+   * Always "real": synthetic markets are never published, so the tier is
+   * invariant. Retained (rather than removed) because downstream consumers
+   * (profit-maximizer) and the shared confidence annotation read this field.
    */
   dataQuality: MarketDataQuality;
   /** 0–100 model-confidence score (data quality 40% / source agreement 30% / stat completeness 30%). */
   confidenceScore: number;
-  /** e.g. "SportScore (Real)", "Synthetic Baseline (League Avg)", "SportScore (Real) + Synthetic". */
+  /** e.g. "Bzzoiro xG (Real)", "ESPN Mesh (Real)". */
   dataSourceDetail: string;
   /** Per-factor breakdown backing the score (drives the UI hover tooltip). */
   confidenceBreakdown: MarketConfidenceBreakdown;
@@ -253,12 +180,9 @@ export interface First5Match {
   leagueTier: number;
   date: string;
   venue: string | null;
-  /** Aggregator source that contributed the most fields (or Synthetic Baseline). */
+  /** Real provider names behind this fixture's markets. */
   statsSource: string;
-  /** Worst-case origin across the four markets. */
-  dataOrigin: BaselineOrigin;
-  /** How many of the four markets are grounded in real team data. */
-  realMarketCount: number;
+  /** Only publishable (real-data) markets — never padded with fallbacks. */
   markets: First5Market[];
 }
 
@@ -280,7 +204,7 @@ export interface First5MinutesResponse {
   error?: string;
 }
 
-// ─── Cache (Part 5) ───────────────────────────────────────────────────────────
+// ─── Cache ────────────────────────────────────────────────────────────────────
 
 interface CacheEntry {
   data: First5MinutesResponse;
@@ -305,10 +229,9 @@ const MARKET_META: Record<First5MarketKey, { label: string; shortLabel: string; 
   goal: { label: "Goal in First 5 Minutes", shortLabel: "Goal", icon: "⚽" },
   corner: { label: "Corner in First 5 Minutes", shortLabel: "Corner", icon: "🏁" },
   card: { label: "Card in First 5 Minutes", shortLabel: "Card", icon: "🟨" },
-  penalty: { label: "Penalty in First 5 Minutes", shortLabel: "Penalty", icon: "⚠️" },
 };
 
-const MARKET_ORDER: First5MarketKey[] = ["goal", "corner", "card", "penalty"];
+const MARKET_ORDER: First5MarketKey[] = ["goal", "corner", "card"];
 
 /** Competitions included in the feed (tier 1–3 of the shared priority table). */
 const FIRST_5_LEAGUES = Object.entries(LEAGUE_TIER)
@@ -322,14 +245,6 @@ function round(value: number, decimals = 4): number {
 
 function clamp(value: number, minimum: number, maximum: number): number {
   return Math.max(minimum, Math.min(maximum, value));
-}
-
-function positiveNumber(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
-}
-
-function nonNegativeNumber(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
 }
 
 function formatMatch(fx: FixtureLite): string {
@@ -388,239 +303,190 @@ export function bookOddsFor(probability: number): number {
   return round1xBetOdds(fairOddsFor(probability));
 }
 
-export function resolveStatsSource(source: string | null | undefined): string {
-  const trimmed = source?.trim();
-  return trimmed ? trimmed : SYNTHETIC_BASELINE;
+// ─── Real per-team data (one fetch per fixture) ───────────────────────────────
+
+/**
+ * Everything real this fixture yielded. Any `null` pair means the
+ * corresponding market is NOT published for this fixture — there is no
+ * fallback, mirroring, or league-average substitution.
+ */
+interface RealFixtureData {
+  fx: FixtureLite;
+  /** Per-team goal expectation: Bzzoiro xgFor, else ESPN form gfAvg. */
+  homeGoals: number | null;
+  awayGoals: number | null;
+  /** Which real source supplied the goal baseline (for the reason string). */
+  goalSource: string | null;
+  /** Sample counts behind the goal baseline (xG matches / form games). */
+  homeGoalSamples: number | null;
+  awayGoalSamples: number | null;
+  /** Mesh corner means (null unless the distribution has n > 0). */
+  homeCorners: number | null;
+  awayCorners: number | null;
+  /** Mesh card means (null unless the distribution has n > 0). */
+  homeCards: number | null;
+  awayCards: number | null;
+  /** Mesh foul means for the aggression adjustment (optional). */
+  homeFouls: number | null;
+  awayFouls: number | null;
+  /** Mesh sample counts (finished matches averaged) for the reason strings. */
+  homeMeshSamples: number | null;
+  awayMeshSamples: number | null;
 }
 
-// ─── Baselines from the aggregator (Part 2) ───────────────────────────────────
-
-interface Baseline {
-  /** Expected events for the whole match (both teams combined). */
-  perMatch: number;
-  origin: BaselineOrigin;
-  /** Which inputs produced the value, for the market's reason string. */
-  detail: string;
+/**
+ * A mesh distribution mean is real data only when it was averaged over at
+ * least one finished match (n > 0). A { mean: 0, n: 0 } distribution (e.g.
+ * corners on a season-aggregates-only profile) is absence of data, not a
+ * zero average — publishing λ = 0 from it would be fabrication.
+ */
+function meshMean(
+  profile: MeshProfile | null,
+  field: "corners" | "cards" | "fouls",
+): number | null {
+  const dist = profile?.[field];
+  if (!dist || dist.n <= 0) return null;
+  return typeof dist.mean === "number" && Number.isFinite(dist.mean) ? dist.mean : null;
 }
 
-/** Sum a per-team field when at least one side has it; null when neither does. */
-function pairSum(
-  home: TeamStats | null,
-  away: TeamStats | null,
-  read: (team: TeamStats) => number | null,
-): { value: number | null; sides: number } {
-  const homeValue = home ? read(home) : null;
-  const awayValue = away ? read(away) : null;
-  if (homeValue === null && awayValue === null) return { value: null, sides: 0 };
-  if (homeValue !== null && awayValue !== null) {
-    return { value: homeValue + awayValue, sides: 2 };
+function meshSamples(profile: MeshProfile | null): number | null {
+  return profile && profile.samples > 0 ? profile.samples : null;
+}
+
+/**
+ * Goal baseline, real sources only. Bzzoiro rolling xG first (xgFor per
+ * team); when either side is missing, ESPN summary form averages (gfAvg per
+ * team, gated on at least one form game — a 0.00 average over zero games is
+ * absence of data, not a zero). Returns nulls when neither source delivers
+ * both teams, and the goal market is then omitted.
+ */
+async function fetchGoalBaseline(fx: FixtureLite): Promise<{
+  home: number | null;
+  away: number | null;
+  source: string | null;
+  homeSamples: number | null;
+  awaySamples: number | null;
+}> {
+  const empty = { home: null, away: null, source: null, homeSamples: null, awaySamples: null };
+
+  try {
+    const bzEvent = await resolveBzzoiroEvent(fx).catch(() => null);
+    if (bzEvent?.eventId) {
+      const detail = await fetchEventDetail(bzEvent.eventId).catch(() => null);
+      if (detail?.homeTeamId != null && detail?.awayTeamId != null) {
+        const [h, a] = await Promise.all([
+          fetchTeamXgAverage(detail.homeTeamId, Xg_LAST_N).catch(() => null),
+          fetchTeamXgAverage(detail.awayTeamId, Xg_LAST_N).catch(() => null),
+        ]);
+        if (h?.xgFor != null && a?.xgFor != null) {
+          return {
+            home: h.xgFor,
+            away: a.xgFor,
+            source: "Bzzoiro xG",
+            homeSamples: h.samples,
+            awaySamples: a.samples,
+          };
+        }
+      }
+    }
+  } catch {
+    // fail-soft → ESPN form fallback below
   }
-  // Only one side reported: mirror it so the match total stays on the same
-  // scale instead of silently halving the expectation.
-  const single = (homeValue ?? awayValue) as number;
-  return { value: single * 2, sides: 1 };
-}
 
-function originForSides(sides: number): BaselineOrigin {
-  if (sides === 2) return "real";
-  if (sides === 1) return "partial";
-  return "league";
-}
-
-/** Expected match goals: real xG when available, else the league goal anchor. */
-function goalsBaseline(
-  stats: CanonicalMatchStats | null,
-  anchors: LeagueAnchors,
-  profile: number,
-): Baseline {
-  const xg = pairSum(stats?.home ?? null, stats?.away ?? null, (team) => positiveNumber(team.xg));
-  if (xg.value !== null) {
-    return {
-      perMatch: clamp(xg.value, 0.6, 6),
-      origin: originForSides(xg.sides),
-      detail: `combined xG ${xg.value.toFixed(2)}`,
-    };
+  try {
+    const sum = await fetchSummary(fx.leagueSlug, fx.id).catch(() => null);
+    const homeGames = sum?.homeForm?.games?.length ?? 0;
+    const awayGames = sum?.awayForm?.games?.length ?? 0;
+    const homeAvg = sum?.homeForm?.gfAvg;
+    const awayAvg = sum?.awayForm?.gfAvg;
+    if (
+      homeGames > 0 &&
+      awayGames > 0 &&
+      typeof homeAvg === "number" &&
+      Number.isFinite(homeAvg) &&
+      typeof awayAvg === "number" &&
+      Number.isFinite(awayAvg)
+    ) {
+      return {
+        home: homeAvg,
+        away: awayAvg,
+        source: "ESPN Form",
+        homeSamples: homeGames,
+        awaySamples: awayGames,
+      };
+    }
+  } catch {
+    // fail-soft → goal market omitted for this fixture
   }
-  const perMatch = clamp(anchors.avgGoals * profile, 0.6, 6);
+
+  return empty;
+}
+
+async function fetchRealFixtureData(fx: FixtureLite): Promise<RealFixtureData> {
+  const [homeMesh, awayMesh, goals] = await Promise.all([
+    getCachedMeshProfile(fx.home.name, fx.leagueSlug).catch(() => null),
+    getCachedMeshProfile(fx.away.name, fx.leagueSlug).catch(() => null),
+    fetchGoalBaseline(fx),
+  ]);
+
   return {
-    perMatch,
-    origin: "league",
-    detail: `league average ${anchors.avgGoals.toFixed(2)} goals/match × ${profile.toFixed(2)} match profile`,
+    fx,
+    homeGoals: goals.home,
+    awayGoals: goals.away,
+    goalSource: goals.source,
+    homeGoalSamples: goals.homeSamples,
+    awayGoalSamples: goals.awaySamples,
+    homeCorners: meshMean(homeMesh, "corners"),
+    awayCorners: meshMean(awayMesh, "corners"),
+    homeCards: meshMean(homeMesh, "cards"),
+    awayCards: meshMean(awayMesh, "cards"),
+    homeFouls: meshMean(homeMesh, "fouls"),
+    awayFouls: meshMean(awayMesh, "fouls"),
+    homeMeshSamples: meshSamples(homeMesh),
+    awayMeshSamples: meshSamples(awayMesh),
   };
 }
 
-/** Expected match corners: season corner averages, else the league anchor. */
-function cornersBaseline(
-  stats: CanonicalMatchStats | null,
-  anchors: LeagueAnchors,
-  profile: number,
-): Baseline {
-  const seasonAvg = pairSum(
-    stats?.home ?? null,
-    stats?.away ?? null,
-    (team) => positiveNumber(team.avgCornersPerGame),
-  );
-  if (seasonAvg.value !== null) {
-    return {
-      perMatch: clamp(seasonAvg.value, 3, 18),
-      origin: originForSides(seasonAvg.sides),
-      detail: `season corner averages ${seasonAvg.value.toFixed(1)}/match`,
-    };
-  }
-  const perMatchCorners = pairSum(
-    stats?.home ?? null,
-    stats?.away ?? null,
-    (team) => positiveNumber(team.corners),
-  );
-  if (perMatchCorners.value !== null) {
-    return {
-      perMatch: clamp(perMatchCorners.value, 3, 18),
-      origin: originForSides(perMatchCorners.sides),
-      detail: `aggregated corner counts ${perMatchCorners.value.toFixed(1)}/match`,
-    };
-  }
-  const perMatch = clamp(anchors.avgCorners * profile, 3, 18);
-  return {
-    perMatch,
-    origin: "league",
-    detail: `league average ${anchors.avgCorners.toFixed(1)} corners/match × ${profile.toFixed(2)} match profile`,
-  };
+// ─── Scan-level normalisation (real data only) ────────────────────────────────
+
+/**
+ * League-average analogues for the tempo/aggression adjustments, computed
+ * from the real values fetched in THIS scan — never from a static anchor
+ * table. Null when the scan yielded no usable totals (adjustment → 1.0).
+ */
+interface ScanAverages {
+  goalTotalAvg: number | null;
+  foulTotalAvg: number | null;
 }
 
-/** Expected match cards: season card averages, else yellow+red, else anchor. */
-function cardsBaseline(
-  stats: CanonicalMatchStats | null,
-  anchors: LeagueAnchors,
-  profile: number,
-): Baseline {
-  const seasonAvg = pairSum(
-    stats?.home ?? null,
-    stats?.away ?? null,
-    (team) => positiveNumber(team.avgCardsPerGame),
-  );
-  if (seasonAvg.value !== null) {
-    return {
-      perMatch: clamp(seasonAvg.value, 1, 10),
-      origin: originForSides(seasonAvg.sides),
-      detail: `season card averages ${seasonAvg.value.toFixed(1)}/match`,
-    };
-  }
-  const booked = pairSum(stats?.home ?? null, stats?.away ?? null, (team) => {
-    const yellow = nonNegativeNumber(team.yellowCards);
-    const red = nonNegativeNumber(team.redCards);
-    if (yellow === null && red === null) return null;
-    const total = (yellow ?? 0) + (red ?? 0);
-    return total > 0 ? total : null;
-  });
-  if (booked.value !== null) {
-    return {
-      perMatch: clamp(booked.value, 1, 10),
-      origin: originForSides(booked.sides),
-      detail: `aggregated bookings ${booked.value.toFixed(1)}/match`,
-    };
-  }
-  const perMatch = clamp(anchors.avgCards * profile, 1, 10);
-  return {
-    perMatch,
-    origin: "league",
-    detail: `league average ${anchors.avgCards.toFixed(1)} cards/match × ${profile.toFixed(2)} match profile`,
-  };
+function computeScanAverages(rows: RealFixtureData[]): ScanAverages {
+  const goalTotals = rows
+    .filter((r) => r.homeGoals != null && r.awayGoals != null)
+    .map((r) => (r.homeGoals as number) + (r.awayGoals as number));
+  const foulTotals = rows
+    .filter((r) => r.homeFouls != null && r.awayFouls != null)
+    .map((r) => (r.homeFouls as number) + (r.awayFouls as number));
+  const mean = (xs: number[]): number | null =>
+    xs.length > 0 ? xs.reduce((s, x) => s + x, 0) / xs.length : null;
+  return { goalTotalAvg: mean(goalTotals), foulTotalAvg: mean(foulTotals) };
 }
 
 /**
- * Expected match penalties. Sources rarely expose a penalty rate for an
- * upcoming fixture, so the observed league penalty baseline is scaled by how
- * foul-heavy the competition is (fouls are the mechanism penalties come from).
+ * Tempo multiplier: sides scoring above the scan's real goal average start
+ * faster. Bounded so one noisy input can never dominate the intensity.
  */
-function penaltiesBaseline(
-  stats: CanonicalMatchStats | null,
-  anchors: LeagueAnchors,
-  profile: number,
-): Baseline {
-  const awarded = pairSum(
-    stats?.home ?? null,
-    stats?.away ?? null,
-    (team) => positiveNumber(team.penalties),
-  );
-  if (awarded.value !== null && awarded.value <= 2) {
-    return {
-      perMatch: clamp(awarded.value, 0.05, 1),
-      origin: originForSides(awarded.sides),
-      detail: `aggregated penalty rate ${awarded.value.toFixed(2)}/match`,
-    };
-  }
-  const foulFactor = clamp(anchors.avgFouls / REFERENCE_FOULS_PER_MATCH, 0.75, 1.35);
-  const perMatch = clamp(BASE_PENALTIES_PER_MATCH * foulFactor * profile, 0.05, 1);
-  return {
-    perMatch,
-    origin: "league",
-    detail:
-      `league baseline ${(BASE_PENALTIES_PER_MATCH * foulFactor).toFixed(2)} penalties/match ` +
-      `(fouls ${anchors.avgFouls.toFixed(1)}) × ${profile.toFixed(2)} match profile`,
-  };
+function tempoFactor(goalTotal: number, scanAvg: number | null): number {
+  if (scanAvg == null || scanAvg <= 0) return 1;
+  return clamp(goalTotal / Math.max(0.5, scanAvg), 0.8, 1.25);
 }
 
-/**
- * Tempo multiplier for the opening phase. Sides that generate more xG than the
- * league norm start faster; foul-heavy fixtures raise the card/penalty rate.
- * Bounded so a single noisy stat can never dominate the Poisson intensity.
- */
-function tempoFactor(stats: CanonicalMatchStats | null, anchors: LeagueAnchors): number {
-  const xg = pairSum(stats?.home ?? null, stats?.away ?? null, (team) => positiveNumber(team.xg));
-  if (xg.value === null) return 1;
-  return clamp(xg.value / Math.max(0.5, anchors.avgGoals), 0.8, 1.25);
+/** Aggression multiplier from real mesh fouls vs the scan's foul average. */
+function aggressionFactor(foulTotal: number | null, scanAvg: number | null): number {
+  if (foulTotal == null || scanAvg == null || scanAvg <= 0) return 1;
+  return clamp(foulTotal / Math.max(1, scanAvg), 0.8, 1.25);
 }
 
-function aggressionFactor(stats: CanonicalMatchStats | null, anchors: LeagueAnchors): number {
-  const fouls = pairSum(stats?.home ?? null, stats?.away ?? null, (team) => positiveNumber(team.fouls));
-  if (fouls.value === null) return 1;
-  return clamp(fouls.value / Math.max(1, anchors.avgFouls), 0.8, 1.25);
-}
-
-// ─── Market construction (Part 1 + Part 2) ────────────────────────────────────
-
-/**
- * Data-quality tier per baseline origin. "partial" (only one team reported
- * the stat, the other side mirrored) is the "mixed" tier from the confidence
- * spec — one team real, the other effectively a synthetic substitute.
- */
-const ORIGIN_QUALITY: Record<BaselineOrigin, MarketDataQuality> = {
-  real: "real",
-  partial: "mixed",
-  league: "synthetic",
-};
-
-/**
- * Stat-completeness factor per baseline origin (percent of required
- * home/away inputs grounded in real team-specific data — a mirrored or
- * league-substituted side still supplies a value, so it earns half credit).
- */
-const ORIGIN_COMPLETENESS: Record<BaselineOrigin, number> = {
-  real: 100,
-  partial: 75,
-  league: 50,
-};
-
-/**
- * Real aggregator sources that contributed fields to the merged stats.
- * Falls back to the primary `metadata.source` for payloads without the
- * multi-source list; a fully synthetic payload contributes none.
- */
-function contributingSourcesOf(stats: CanonicalMatchStats | null): string[] {
-  if (!stats) return [];
-  const declared = stats.metadata.sources?.length
-    ? stats.metadata.sources
-    : stats.metadata.source?.trim()
-      ? [stats.metadata.source.trim()]
-      : [];
-  return [
-    ...new Set(
-      declared
-        .map((name) => name.trim())
-        .filter((name) => name && name !== SYNTHETIC_BASELINE && name !== "baseline (synthetic)"),
-    ),
-  ];
-}
+// ─── Market construction ─────────────────────────────────────────────────────
 
 function buildOutcome(label: First5Outcome, probability: number): First5OutcomeSide {
   const hitRate = round(probability);
@@ -637,39 +503,29 @@ function buildOutcome(label: First5Outcome, probability: number): First5OutcomeS
 function buildMarket(
   fx: FixtureLite,
   key: First5MarketKey,
-  baseline: Baseline,
+  perMatch: number,
   adjustment: number,
-  aggregatorSource: string,
-  contributingSources: string[],
+  sourceNames: string[],
+  detail: string,
 ): First5Market {
   const meta = MARKET_META[key];
   const uniformShare = WINDOW_MINUTES / MATCH_MINUTES;
-  const lambdaWindow =
-    baseline.perMatch * uniformShare * OPENING_INTENSITY[key] * adjustment;
+  const lambdaWindow = perMatch * uniformShare * OPENING_INTENSITY[key] * adjustment;
   const probability = clamp(atLeastOne(lambdaWindow), 0.0005, 0.9995);
   const yes = buildOutcome("Yes", probability);
   const no = buildOutcome("No", 1 - probability);
   const outcome: First5Outcome = probability >= 0.5 ? "Yes" : "No";
   const selected = outcome === "Yes" ? yes : no;
-  const origin = baseline.origin;
-  const statsSource = origin === "league" ? SYNTHETIC_BASELINE : aggregatorSource;
+  const statsSource = sourceNames.join(" + ");
 
-  // Data-quality / confidence annotation. Purely additive: a league-origin
-  // market scores no source-agreement credit even when other fields were
-  // real, because THIS market's baseline never consumed them.
+  // Every published market is real by construction: full data-quality credit,
+  // agreement over the contributing real sources, 100% real inputs.
   const assessment = assessMarketConfidence({
-    dataQuality: ORIGIN_QUALITY[origin],
-    sourceCount: origin === "league" ? 0 : contributingSources.length,
-    completenessPct: ORIGIN_COMPLETENESS[origin],
-    sourceNames: origin === "league" ? [] : contributingSources,
+    dataQuality: "real",
+    sourceCount: sourceNames.length,
+    completenessPct: 100,
+    sourceNames,
   });
-
-  const originLabel =
-    origin === "real"
-      ? "real pre-match stats"
-      : origin === "partial"
-        ? "partial real stats"
-        : "league average (Synthetic Baseline)";
 
   return {
     id: `${fx.id}-${key}`,
@@ -691,15 +547,14 @@ function buildMarket(
     isGuaranteed: yes.hitRate >= GUARANTEED_HIT_RATE || no.hitRate >= GUARANTEED_HIT_RATE,
     confidence: selected.confidence,
     expectedInWindow: round(lambdaWindow),
-    expectedPerMatch: round(baseline.perMatch, 2),
-    origin,
+    expectedPerMatch: round(perMatch, 2),
     statsSource,
     source: statsSource,
     reason:
-      `${baseline.detail} → ${round(lambdaWindow, 3)} expected ${meta.shortLabel.toLowerCase()} ` +
+      `${detail} → ${round(lambdaWindow, 3)} expected ${meta.shortLabel.toLowerCase()} ` +
       `events in minutes 0–${WINDOW_MINUTES} ` +
       `(opening intensity ${OPENING_INTENSITY[key]}× uniform, tempo ${adjustment.toFixed(2)}×). ` +
-      `Poisson P(at least one) = ${(probability * 100).toFixed(1)}% · ${originLabel}.`,
+      `Poisson P(at least one) = ${(probability * 100).toFixed(1)}% · real per-team data.`,
     dataQuality: assessment.dataQuality,
     confidenceScore: assessment.confidenceScore,
     dataSourceDetail: assessment.dataSourceDetail,
@@ -707,89 +562,90 @@ function buildMarket(
   };
 }
 
-function buildMarkets(
-  fx: FixtureLite,
-  stats: CanonicalMatchStats | null,
-  aggregatorSource: string,
-): First5Market[] {
-  // League anchors come from THIS match's own competition (chain-repaired),
-  // never a single global default.
-  const { anchors } = leagueAnchorsFor(fx.leagueSlug);
-  const attacking = tempoFactor(stats, anchors);
-  const aggressive = aggressionFactor(stats, anchors);
-  const contributingSources = contributingSourcesOf(stats);
-  // Synthetic (league-origin) baselines are spread per match so every fixture
-  // scores its own numbers; real baselines are already match-specific.
-  const profiles: Record<First5MarketKey, number> = {
-    goal: matchProfileFactor(fx, "goal"),
-    corner: matchProfileFactor(fx, "corner"),
-    card: matchProfileFactor(fx, "card"),
-    penalty: matchProfileFactor(fx, "penalty"),
-  };
-
-  return [
-    buildMarket(fx, "goal", goalsBaseline(stats, anchors, profiles.goal), attacking, aggregatorSource, contributingSources),
-    buildMarket(fx, "corner", cornersBaseline(stats, anchors, profiles.corner), attacking, aggregatorSource, contributingSources),
-    buildMarket(fx, "card", cardsBaseline(stats, anchors, profiles.card), aggressive, aggregatorSource, contributingSources),
-    buildMarket(fx, "penalty", penaltiesBaseline(stats, anchors, profiles.penalty), aggressive, aggregatorSource, contributingSources),
-  ];
-}
-
-/** Format one per-team stat input as "label: home H, away A" (– when missing). */
-function formatStatPair(
-  stats: CanonicalMatchStats,
-  label: string,
-  read: (team: TeamStats) => number | null,
-): string | null {
-  const home = read(stats.home);
-  const away = read(stats.away);
-  if (home === null && away === null) return null;
-  const fmt = (value: number | null) => (value === null ? "–" : String(round(value, 2)));
-  return `${label}: home ${fmt(home)}, away ${fmt(away)}`;
-}
-
 /**
- * Per-match observability line — this is what verifies the fix in the logs.
- * Real data:  [First5] Arsenal vs Coventry: stats from SportScore
- *               (xg: home 1.8, away 0.9; corners/match: home 6.2, away 4.8; …)
- * Fallback:   [First5] Salzburg vs Sturm Graz: no aggregator stats — synthetic
- *               baseline from ger.1 anchors (goals 3.02, corners 10.8, cards
- *               3.5, fouls 20.0) × per-match profiles (goal 1.07, corner 0.95,
- *               card 1.11, penalty 0.92)
+ * Publishable markets for one fixture — real data only. Each market needs
+ * BOTH teams' inputs; anything missing is omitted (and logged), never
+ * mirrored, never substituted. Returns null when nothing is publishable.
  */
-function logPerMatchBasis(fx: FixtureLite, stats: CanonicalMatchStats | null): void {
-  if (stats) {
-    const parts = [
-      formatStatPair(stats, "xg", (team) => positiveNumber(team.xg)),
-      formatStatPair(stats, "corners/match", (team) =>
-        positiveNumber(team.avgCornersPerGame) ?? positiveNumber(team.corners)),
-      formatStatPair(stats, "cards/match", (team) =>
-        positiveNumber(team.avgCardsPerGame) ??
-        (nonNegativeNumber(team.yellowCards) !== null || nonNegativeNumber(team.redCards) !== null
-          ? (nonNegativeNumber(team.yellowCards) ?? 0) + (nonNegativeNumber(team.redCards) ?? 0)
-          : null)),
-      formatStatPair(stats, "fouls", (team) => positiveNumber(team.fouls)),
-    ].filter((part): part is string => part !== null);
-    console.info(
-      `[First5] ${formatMatch(fx)}: stats from ${resolveStatsSource(stats.metadata.source)} ` +
-      `(${parts.length ? parts.join("; ") : "no recognised per-team stat fields"})`,
+function buildMarkets(
+  row: RealFixtureData,
+  scan: ScanAverages,
+): First5Market[] | null {
+  const { fx } = row;
+  const markets: First5Market[] = [];
+  const omission = (key: string) =>
+    console.info(`[First5] ${formatMatch(fx)}: ${key} market omitted (no real baseline)`);
+
+  const goalTotal =
+    row.homeGoals != null && row.awayGoals != null ? row.homeGoals + row.awayGoals : null;
+  const foulTotal =
+    row.homeFouls != null && row.awayFouls != null ? row.homeFouls + row.awayFouls : null;
+  const tempo = goalTotal != null ? tempoFactor(goalTotal, scan.goalTotalAvg) : 1;
+  const aggression = aggressionFactor(foulTotal, scan.foulTotalAvg);
+
+  // Goal — Bzzoiro xG or ESPN form (both teams required).
+  if (goalTotal != null && row.goalSource) {
+    const perMatch = clamp(goalTotal, 0.6, 6);
+    const sampleNote =
+      row.homeGoalSamples != null && row.awayGoalSamples != null
+        ? ` over ${row.homeGoalSamples}/${row.awayGoalSamples} matches`
+        : "";
+    markets.push(
+      buildMarket(
+        fx,
+        "goal",
+        perMatch,
+        tempo,
+        [row.goalSource],
+        `${row.goalSource} ${goalTotal.toFixed(2)} combined (home ${row.homeGoals?.toFixed(2)}, away ${row.awayGoals?.toFixed(2)}${sampleNote})`,
+      ),
     );
-    return;
+  } else {
+    omission("goal");
   }
 
-  const { anchors, via } = leagueAnchorsFor(fx.leagueSlug);
-  const profiles = MARKET_ORDER
-    .map((key) => `${key} ${matchProfileFactor(fx, key).toFixed(2)}`)
-    .join(", ");
-  console.info(
-    `[First5] ${formatMatch(fx)}: no aggregator stats — synthetic baseline from ${via} anchors ` +
-    `(league ${fx.leagueSlug}; goals ${anchors.avgGoals.toFixed(2)}, corners ${anchors.avgCorners.toFixed(1)}, ` +
-    `cards ${anchors.avgCards.toFixed(1)}, fouls ${anchors.avgFouls.toFixed(1)}) ` +
-    `× per-match profiles (${profiles})`,
-  );
+  // Corner / card — mesh distributions (both teams, n > 0, required).
+  const cornerTotal =
+    row.homeCorners != null && row.awayCorners != null ? row.homeCorners + row.awayCorners : null;
+  if (cornerTotal != null) {
+    markets.push(
+      buildMarket(
+        fx,
+        "corner",
+        clamp(cornerTotal, 3, 18),
+        tempo,
+        ["ESPN Mesh"],
+        `mesh corner averages ${cornerTotal.toFixed(1)}/match (home ${row.homeCorners?.toFixed(1)}, away ${row.awayCorners?.toFixed(1)} over ${row.homeMeshSamples ?? "?"}/${row.awayMeshSamples ?? "?"} matches)`,
+      ),
+    );
+  } else {
+    omission("corner");
+  }
+
+  const cardTotal =
+    row.homeCards != null && row.awayCards != null ? row.homeCards + row.awayCards : null;
+  if (cardTotal != null) {
+    markets.push(
+      buildMarket(
+        fx,
+        "card",
+        clamp(cardTotal, 1, 10),
+        aggression,
+        ["ESPN Mesh"],
+        `mesh card averages ${cardTotal.toFixed(1)}/match (home ${row.homeCards?.toFixed(1)}, away ${row.awayCards?.toFixed(1)} over ${row.homeMeshSamples ?? "?"}/${row.awayMeshSamples ?? "?"} matches)`,
+      ),
+    );
+  } else {
+    omission("card");
+  }
+
+  // No penalty market: no source in the app provides pre-match penalty rates
+  // (see the header comment). It is omitted by design, not by accident.
+
+  return markets.length > 0 ? markets : null;
 }
 
-// ─── Fixture + stats plumbing ─────────────────────────────────────────────────
+// ─── Fixture + data plumbing ──────────────────────────────────────────────────
 
 function teamLogo(team: TeamLite): string | null {
   return team.logo ?? null;
@@ -798,63 +654,21 @@ function teamLogo(team: TeamLite): string | null {
 async function withTimeout<T>(
   promise: Promise<T>,
   ms: number,
-  fallback: T,
   onTimeout?: () => void,
-): Promise<T> {
+): Promise<T | null> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
       promise,
-      new Promise<T>((resolve) => {
+      new Promise<T | null>((resolve) => {
         timer = setTimeout(() => {
           onTimeout?.();
-          resolve(fallback);
+          resolve(null);
         }, ms);
       }),
     ]);
   } finally {
     if (timer) clearTimeout(timer);
-  }
-}
-
-/**
- * Pull merged canonical stats for a fixture. Returns null when no source
- * contributed a single field — the caller then rides the league anchors, which
- * is the documented synthetic baseline for this feature.
- */
-async function fetchPrematchStats(
-  fx: FixtureLite,
-  force: boolean,
-): Promise<CanonicalMatchStats | null> {
-  // Per-match query: league + event id + both team names + kickoff date.
-  // The aggregator's own [stats] log shows the walk for exactly this key.
-  // state="pre" tells keyed sources to use historical team stats — upcoming
-  // fixtures have no per-match statistics yet.
-  const query = {
-    leagueSlug: fx.leagueSlug,
-    eventId: fx.id,
-    homeTeam: fx.home.name,
-    awayTeam: fx.away.name,
-    date: fx.date,
-    state: fx.state,
-  };
-  try {
-    return await withTimeout(
-      statsAggregator.fetch(query, { force }),
-      STATS_TIMEOUT_MS,
-      null,
-      () =>
-        console.warn(
-          `[First5] ${formatMatch(fx)}: aggregator did not answer within ` +
-          `${STATS_TIMEOUT_MS}ms for stats:${query.leagueSlug}:${query.eventId}; using league baseline`,
-        ),
-    );
-  } catch (error) {
-    console.warn(
-      `[First5] ${formatMatch(fx)}: stats aggregator failed ` +
-      `(${error instanceof Error ? error.message : String(error)}); using league baseline`,
-    );
-    return null;
   }
 }
 
@@ -915,17 +729,8 @@ async function fetchUpcomingFixtures(): Promise<FixtureLite[]> {
     });
 }
 
-function buildMatch(fx: FixtureLite, stats: CanonicalMatchStats | null): First5Match {
-  const aggregatorSource = resolveStatsSource(stats?.metadata.source);
-  const markets = buildMarkets(fx, stats, aggregatorSource);
-  const realMarketCount = markets.filter((market) => market.origin !== "league").length;
-  const dataOrigin: BaselineOrigin =
-    realMarketCount === markets.length
-      ? "real"
-      : realMarketCount > 0
-        ? "partial"
-        : "league";
-
+function buildMatch(fx: FixtureLite, markets: First5Market[]): First5Match {
+  const sources = [...new Set(markets.flatMap((m) => m.statsSource.split(" + ")))];
   return {
     fixtureId: fx.id,
     homeTeam: fx.home.name,
@@ -937,9 +742,7 @@ function buildMatch(fx: FixtureLite, stats: CanonicalMatchStats | null): First5M
     leagueTier: leagueTier(fx),
     date: fx.date,
     venue: fx.venue,
-    statsSource: dataOrigin === "league" ? SYNTHETIC_BASELINE : aggregatorSource,
-    dataOrigin,
-    realMarketCount,
+    statsSource: sources.join(" + "),
     markets,
   };
 }
@@ -959,9 +762,10 @@ function emptyResponse(overrides: Partial<First5MinutesResponse> = {}): First5Mi
     model: {
       description:
         "Poisson arrival model: λ_window = λ_match × (5 / 96) × opening intensity × tempo. " +
-        "λ_match comes from the multi-source stats aggregator, falling back to the observed " +
-        "average of the match's own league, modulated by a small deterministic per-match " +
-        "profile so no two synthetic baselines are identical.",
+        "λ_match comes from real per-team data only (Bzzoiro rolling xG or ESPN form " +
+        "averages for goals; mesh corner/card distributions). Markets without a real " +
+        "baseline are omitted — never synthesised. No penalty market: no source " +
+        "provides pre-match penalty rates.",
       matchMinutes: MATCH_MINUTES,
       openingIntensity: { ...OPENING_INTENSITY },
     },
@@ -1043,7 +847,7 @@ async function persistFirst5Picks(matches: First5Match[]): Promise<void> {
             selection,
             hitRate: market.hitRate,
             outcome: "PENDING",
-            family: market.shortLabel,   // Goal | Corner | Card | Penalty
+            family: market.shortLabel,   // Goal | Corner | Card
             odds: market.odds.selected,  // 1xBet-ladder price at pick time
           }],
           lowConfidence: false,
@@ -1091,18 +895,38 @@ export async function GET(req: Request): Promise<Response> {
   try {
     const fixtures = (await fetchUpcomingFixtures()).slice(0, MAX_FIXTURES);
 
-    const matches = await mapWithConcurrency(fixtures, CONCURRENCY, async (fx) => {
-      const stats = await fetchPrematchStats(fx, isRefresh);
-      // One line per fixture naming exactly which stats (or which league
-      // anchors + per-match profile) the four markets are priced from.
-      logPerMatchBasis(fx, stats);
-      return buildMatch(fx, stats);
-    });
+    // Pass 1: real per-team data for every fixture (mesh + Bzzoiro + ESPN).
+    const rows = await mapWithConcurrency(fixtures, CONCURRENCY, async (fx) =>
+      withTimeout(fetchRealFixtureData(fx), REALDATA_TIMEOUT_MS, () =>
+        console.warn(
+          `[First5] ${formatMatch(fx)}: real-data fetch timed out after ` +
+          `${REALDATA_TIMEOUT_MS}ms; fixture skipped (no markets published)`,
+        ),
+      ),
+    );
+    const usable = rows.filter((row): row is RealFixtureData => row !== null);
 
-    const realCount = matches.filter((match) => match.dataOrigin !== "league").length;
+    // Pass 2: scan averages from the fetched real data (tempo normalisation).
+    const scan = computeScanAverages(usable);
+
+    // Pass 3: publishable markets only — fixtures with no real baseline for
+    // any market are skipped entirely (never padded with fallbacks).
+    const matches: First5Match[] = [];
+    for (const row of usable) {
+      const markets = buildMarkets(row, scan);
+      if (!markets) {
+        console.info(
+          `[First5] ${formatMatch(row.fx)}: fixture skipped (no real baseline for any market)`,
+        );
+        continue;
+      }
+      matches.push(buildMatch(row.fx, markets));
+    }
+
+    const marketCount = matches.reduce((sum, m) => sum + m.markets.length, 0);
     console.info(
-      `[First5] ${matches.length} upcoming fixture(s) scored over a ${LOOKAHEAD_DAYS}-day window ` +
-      `(${realCount} with real aggregator data, ${matches.length - realCount} on league baselines).`,
+      `[First5] ${matches.length}/${fixtures.length} fixture(s) published with real per-team data ` +
+      `(${marketCount} markets, ${fixtures.length - matches.length} skipped for lack of data).`,
     );
 
     // Record every generated pick so the settlement cron's feature pass
