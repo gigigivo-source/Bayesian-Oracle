@@ -1,47 +1,94 @@
 // @vitest-environment happy-dom
 
-// First 5 Minutes board — upcoming-fixtures grouping (page) plus the settled
-// history behind the Recent Results section (API).
+// First 5 Minutes board — upcoming-fixtures grouping (page), the settled
+// history behind the Recent Results section (API) and the analytics aggregates
+// behind the 📊 Analytics sheet (API + sheet).
 //
 // The page is a client component: it reads /api/first-5-minutes for the
 // upcoming board and /api/first-5-minutes/results for the settled matches below
 // it. Both fetches are stubbed here; nothing in this file touches the network.
 //
-// The results endpoint reads performance_log through drizzle; the database
-// module is mocked with a small chainable query builder (the same "rows + read
-// error" shape the other route tests use) so the grouping, window, ordering and
-// fail-soft behaviour can be asserted without a database.
+// Both endpoints read performance_log through drizzle; the database module is
+// mocked with a small chainable query builder (the same "rows + read error"
+// shape the other route tests use) so the grouping, window, ordering and
+// fail-soft behaviour can be asserted without a database. The analytics route
+// issues one GROUP BY query per dimension; the mock keys each query's canned
+// rows off the first selected field (the dimension name), and pure helpers
+// exported by the route (action verdicts, bucket assignment, trend windows)
+// are pinned directly.
 
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  GET as getAnalytics,
+  actionFor,
+  bucketFor,
+  clearAnalyticsCache,
+  trendPeriodFor,
+  trendWindows,
+  type First5AnalyticsResponse,
+} from "@/app/api/first-5-minutes/analytics/route";
 import { GET as getSettledResults } from "@/app/api/first-5-minutes/results/route";
 import First5MinutesPage from "./page";
+import { AnalyticsSheet } from "./components/AnalyticsSheet";
 import { formatDateTime } from "./components/format";
 import type { First5Match, First5MinutesData } from "./components/types";
 
 // ─── Database mock ────────────────────────────────────────────────────────────
-// db.select(...).from(...).where(...).orderBy(...).limit(...) — every link is
-// chainable and only limit() answers, mirroring how the route consumes the
-// builder. `lastLimit` records the row budget the route asked for (matches × 4).
+// db.select(...).from(...).where(...).orderBy(...).groupBy(...).limit(...) —
+// every link is chainable and awaiting the builder (or limit()) resolves the
+// query. `lastLimit` records the row budget the results route asked for
+// (matches × 4).
+//
+// Resolution keys off the first selected field: the results route selects
+// `eventId` first and is served the flat `rows` feed; the analytics route
+// selects its dimension name first (settled | market | selection | band |
+// leagueSlug | bucket | period) and, while `analytics` is set, is served the
+// matching canned GROUP BY result. A read error rejects exactly once.
 
 const dbState = vi.hoisted(() => ({
   rows: [] as Array<Record<string, unknown>>,
   readError: null as Error | null,
   lastLimit: null as number | null,
+  // Analytics mode — null restores the flat rows feed for the results route.
+  analytics: null as Record<string, unknown[]> | null,
 }));
 
 vi.mock("@/db", () => {
-  const query = {
-    where: () => query,
-    orderBy: () => query,
-    limit: (count: number) => {
-      dbState.lastLimit = count;
-      if (dbState.readError) return Promise.reject(dbState.readError);
-      return Promise.resolve(dbState.rows);
+  const query = (dimension: string) => {
+    const builder = {
+      where: () => builder,
+      orderBy: () => builder,
+      groupBy: () => builder,
+      limit: (count: number) => {
+        dbState.lastLimit = count;
+        return builder;
+      },
+      // Drizzle builders are thenables — awaiting resolves the query.
+      then: (
+        resolve: (rows: unknown[]) => unknown,
+        reject: (reason: unknown) => unknown,
+      ): Promise<unknown> => {
+        const source = dbState.readError
+          ? Promise.reject<never>(dbState.readError)
+          : Promise.resolve(
+              dbState.analytics
+                ? (dbState.analytics[dimension] ?? [])
+                : dbState.rows,
+            );
+        return source.then(resolve, reject);
+      },
+    };
+    return builder;
+  };
+  return {
+    db: {
+      select: (fields?: Record<string, unknown>) => ({
+        from: () => query(Object.keys(fields ?? {})[0] ?? ""),
+      }),
     },
   };
-  return { db: { select: () => ({ from: () => query }) } };
 });
 
 let root: Root | null = null;
@@ -57,6 +104,7 @@ beforeEach(() => {
   dbState.rows = [];
   dbState.readError = null;
   dbState.lastLimit = null;
+  dbState.analytics = null;
 });
 
 /** ISO day string N days before today — the same convention the route uses. */
@@ -455,5 +503,290 @@ describe("GET /api/first-5-minutes/results", () => {
     const { response, body } = await getResults();
     expect(response.status).toBe(200);
     expect(body).toEqual({ ok: true, matches: [] });
+  });
+});
+
+// ─── GET /api/first-5-minutes/analytics ───────────────────────────────────────
+
+async function getAnalyticsBody(query = "") {
+  const response = await getAnalytics(
+    new Request(`http://localhost/api/first-5-minutes/analytics${query}`),
+  );
+  const body = (await response.json()) as First5AnalyticsResponse;
+  return { response, body };
+}
+
+describe("GET /api/first-5-minutes/analytics", () => {
+  beforeEach(() => {
+    dbState.analytics = {};
+    clearAnalyticsCache();
+  });
+
+  it("returns all-zero totals and empty aggregates when performance_log has no first5 rows", async () => {
+    const { response, body } = await getAnalyticsBody();
+    const zeros = { n: 0, won: 0, lost: 0, realised: 0, claimed: 0, edge: 0 };
+
+    expect(response.status).toBe(200);
+    expect(body.ok).toBe(true);
+    expect(body.totals).toEqual({
+      settled: 0, won: 0, lost: 0, push: 0, void: 0,
+      realisedRate: 0, claimedAverage: 0, edge: 0,
+    });
+    expect(body.byMarket).toEqual([]);
+    expect(body.bySelection).toEqual([]);
+    expect(body.byConfidence).toEqual([]);
+    expect(body.byLeague).toEqual([]);
+    expect(body.byBucket).toEqual([]);
+    expect(body.trend).toEqual({ last7d: zeros, previous: zeros });
+    expect(body.trust).toEqual({ best: [], worst: [] });
+  });
+
+  it("aggregates three settled rows (2 WIN, 1 LOSS) in the same market", async () => {
+    dbState.analytics = {
+      settled: [{ settled: 3, won: 2, lost: 1, push: 0, void: 0, claimed: 0.75 }],
+      market: [{ market: "Goal in first 5", n: 3, won: 2, lost: 1, claimed: 0.75 }],
+    };
+
+    const { body } = await getAnalyticsBody();
+    expect(body.totals.settled).toBe(3);
+    expect(body.totals.won).toBe(2);
+    expect(body.totals.lost).toBe(1);
+    expect(body.totals.realisedRate).toBe(0.667);
+    expect(body.byMarket).toHaveLength(1);
+    expect(body.byMarket[0]).toMatchObject({
+      market: "Goal in first 5",
+      n: 3,
+      won: 2,
+      lost: 1,
+      realised: 0.667,
+      claimed: 0.75,
+      edge: -0.083,
+      action: "insufficient",
+    });
+  });
+
+  it("marks a market with n < 20 as insufficient", async () => {
+    dbState.analytics = {
+      market: [{ market: "Card in first 5", n: 19, won: 10, lost: 9, claimed: 0.5 }],
+    };
+
+    const { body } = await getAnalyticsBody();
+    expect(body.byMarket[0].action).toBe("insufficient");
+    // The pure rule agrees at the boundary: 20 is the gate.
+    expect(actionFor(19, 0.9)).toBe("insufficient");
+    expect(actionFor(0, -0.9)).toBe("insufficient");
+  });
+
+  it("marks a well-sampled market with a sub-5-point edge as trusted", async () => {
+    // 12/25 realised = 0.48, claimed 0.46 → edge +0.02 (2 points).
+    dbState.analytics = {
+      market: [{ market: "Goal in first 5", n: 25, won: 12, lost: 13, claimed: 0.46 }],
+    };
+
+    const { body } = await getAnalyticsBody();
+    expect(body.byMarket[0].action).toBe("trusted");
+    expect(actionFor(20, 0.04)).toBe("trusted");
+    // |edge| == 0.05 is NOT trusted — the band is strict.
+    expect(actionFor(25, 0.05)).toBe("watch");
+  });
+
+  it("marks a well-sampled market beyond a −15-point edge as avoid", async () => {
+    // 10/25 realised = 0.4, claimed 0.6 → edge −0.2 (−20 points).
+    dbState.analytics = {
+      market: [{ market: "Corner in first 5", n: 25, won: 10, lost: 15, claimed: 0.6 }],
+    };
+
+    const { body } = await getAnalyticsBody();
+    expect(body.byMarket[0].action).toBe("avoid");
+    expect(actionFor(25, -0.2)).toBe("avoid");
+    // The boundary is strict: −0.15 itself is not beyond it.
+    expect(actionFor(25, -0.15)).toBe("avoid");
+    expect(actionFor(25, -0.149)).toBe("watch");
+  });
+
+  it("assigns hitRate 0.72 to the 0.70-0.80 calibration bucket", async () => {
+    expect(bucketFor(0.72)).toBe("0.70-0.80");
+    expect(bucketFor(0.5)).toBe("0.50-0.60");
+    expect(bucketFor(0.6)).toBe("0.60-0.70");
+    expect(bucketFor(0.9)).toBe("0.90-1.00");
+    expect(bucketFor(1)).toBe("0.90-1.00");
+    expect(bucketFor(0.49)).toBeNull();
+    expect(bucketFor(1.01)).toBeNull();
+
+    // Route level: the bucket row surfaces with its calibration diff.
+    dbState.analytics = {
+      bucket: [{ bucket: "0.70-0.80", n: 30, won: 22, lost: 8, claimed: 0.74 }],
+    };
+    const { body } = await getAnalyticsBody();
+    expect(body.byBucket).toEqual([
+      { bucket: "0.70-0.80", n: 30, realised: 0.733, claimed: 0.74, diff: -0.007 },
+    ]);
+  });
+
+  it("splits the trend correctly: a row at now-3d is last7d, now-10d is previous", async () => {
+    const windows = trendWindows(new Date());
+    expect(windows.last7Start).toBe(dayOffset(7));
+    expect(windows.previousStart).toBe(dayOffset(14));
+
+    expect(trendPeriodFor(dayOffset(3), windows)).toBe("last7d");
+    expect(trendPeriodFor(dayOffset(7), windows)).toBe("last7d");
+    expect(trendPeriodFor(dayOffset(10), windows)).toBe("previous");
+    expect(trendPeriodFor(dayOffset(14), windows)).toBe("previous");
+    expect(trendPeriodFor(dayOffset(20), windows)).toBeNull();
+
+    // Route level: the two SQL period rows land in their own slices.
+    dbState.analytics = {
+      period: [
+        { period: "last7d", n: 4, won: 3, lost: 1, claimed: 0.5 },
+        { period: "previous", n: 2, won: 0, lost: 2, claimed: 0.6 },
+      ],
+    };
+    const { body } = await getAnalyticsBody();
+    expect(body.trend.last7d).toEqual({
+      n: 4, won: 3, lost: 1, realised: 0.75, claimed: 0.5, edge: 0.25,
+    });
+    expect(body.trend.previous).toEqual({
+      n: 2, won: 0, lost: 2, realised: 0, claimed: 0.6, edge: -0.6,
+    });
+  });
+
+  it("never 500s: a database error answers ok:true with a zeroed payload", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      dbState.readError = new Error("connection refused");
+      const { response, body } = await getAnalyticsBody();
+
+      expect(response.status).toBe(200);
+      expect(body.ok).toBe(true);
+      expect(body.totals).toEqual({
+        settled: 0, won: 0, lost: 0, push: 0, void: 0,
+        realisedRate: 0, claimedAverage: 0, edge: 0,
+      });
+      expect(body.byMarket).toEqual([]);
+      expect(body.bySelection).toEqual([]);
+      expect(body.byConfidence).toEqual([]);
+      expect(body.byLeague).toEqual([]);
+      expect(body.byBucket).toEqual([]);
+      expect(body.trust.best).toEqual([]);
+      expect(body.trust.worst).toEqual([]);
+      // The contract's log line.
+      expect(warn).toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("caches the payload per windowDays for five minutes", async () => {
+    dbState.analytics = {
+      market: [{ market: "Goal in first 5", n: 40, won: 20, lost: 20, claimed: 0.5 }],
+    };
+    const first = await getAnalyticsBody("?days=30");
+    expect(first.body.byMarket).toHaveLength(1);
+
+    // The table "empties", but the cached 30-day payload is still served.
+    dbState.analytics = {};
+    const second = await getAnalyticsBody();
+    expect(second.body.byMarket).toHaveLength(1);
+
+    // A different window key misses the cache and reads fresh.
+    const third = await getAnalyticsBody("?days=7");
+    expect(third.body.windowDays).toBe(7);
+    expect(third.body.byMarket).toEqual([]);
+  });
+});
+
+// ─── AnalyticsSheet ───────────────────────────────────────────────────────────
+
+const ZERO_SPLIT = { n: 0, won: 0, lost: 0, realised: 0, claimed: 0, edge: 0 };
+
+/** A full, well-formed analytics payload with everything testable zeroed out. */
+function analyticsPayload(
+  overrides: Partial<First5AnalyticsResponse> = {},
+): First5AnalyticsResponse {
+  return {
+    ok: true,
+    generatedAt: "2026-09-19T10:00:00Z",
+    windowDays: 30,
+    totals: {
+      settled: 0, won: 0, lost: 0, push: 0, void: 0,
+      realisedRate: 0, claimedAverage: 0, edge: 0,
+    },
+    byMarket: [],
+    bySelection: [],
+    byConfidence: [],
+    byLeague: [],
+    byBucket: [],
+    trend: { last7d: { ...ZERO_SPLIT }, previous: { ...ZERO_SPLIT } },
+    trust: { best: [], worst: [] },
+    ...overrides,
+  };
+}
+
+describe("AnalyticsSheet", () => {
+  function sheetFetchMock(payload: unknown) {
+    return vi.fn(async () => ({ ok: true, status: 200, json: async () => payload }));
+  }
+
+  async function renderSheet(
+    fetchMock: ReturnType<typeof sheetFetchMock>,
+  ): Promise<HTMLDivElement> {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    vi.stubGlobal("fetch", fetchMock);
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root!.render(createElement(AnalyticsSheet, { open: true, onClose: () => {} }));
+    });
+    // Flush the fetch effect and the state update it triggers.
+    await act(async () => {});
+    return container;
+  }
+
+  it("fetches on open and shows the returned realised and claimed in the summary line", async () => {
+    const fetchMock = sheetFetchMock(analyticsPayload({
+      totals: {
+        settled: 20, won: 12, lost: 6, push: 1, void: 1,
+        realisedRate: 0.6, claimedAverage: 0.58, edge: 0.02,
+      },
+    }));
+    const container = await renderSheet(fetchMock);
+
+    expect(fetchMock).toHaveBeenCalledWith("/api/first-5-minutes/analytics", {
+      cache: "no-store",
+    });
+    expect(container.textContent).toContain("20 settled");
+    expect(container.textContent).toContain("12W / 6L / 1P / 1V");
+    expect(container.textContent).toContain("Realised 60.0%");
+    expect(container.textContent).toContain("Claimed 58.0%");
+    expect(container.textContent).toContain("Edge +2.0 pts");
+  });
+
+  it("appends (low sample) to rows with n < 20 and leaves well-sampled rows alone", async () => {
+    const fetchMock = sheetFetchMock(analyticsPayload({
+      totals: {
+        settled: 28, won: 17, lost: 11, push: 0, void: 0,
+        realisedRate: 0.607, claimedAverage: 0.6, edge: 0.007,
+      },
+      byMarket: [
+        {
+          market: "Corner in first 5", n: 3, won: 2, lost: 1,
+          realised: 0.667, claimed: 0.7, edge: -0.033, action: "insufficient",
+        },
+        {
+          market: "Goal in first 5", n: 25, won: 15, lost: 10,
+          realised: 0.6, claimed: 0.58, edge: 0.02, action: "trusted",
+        },
+      ],
+    }));
+    const container = await renderSheet(fetchMock);
+
+    const rows = [...container.querySelectorAll("tbody tr")];
+    const cornerRow = rows.find((row) => row.textContent?.includes("Corner in first 5"));
+    const goalRow = rows.find((row) => row.textContent?.includes("Goal in first 5"));
+    expect(cornerRow).toBeDefined();
+    expect(cornerRow!.textContent).toContain("(low sample)");
+    expect(goalRow).toBeDefined();
+    expect(goalRow!.textContent).not.toContain("(low sample)");
   });
 });
