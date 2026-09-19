@@ -7,11 +7,21 @@
 // /api/first-5-minutes (1-hour cache, force-refresh via the Refresh button).
 
 import Link from "next/link";
+import { LEAGUE_MAP } from "@/lib/leagues";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { EmptyState } from "./components/EmptyState";
-import { MARKET_LABEL, MARKET_ORDER, formatDateGroup, formatDateTime } from "./components/format";
+import { MARKET_LABEL, MARKET_ORDER, formatDateTime } from "./components/format";
 import { MatchCard } from "./components/MatchCard";
 import type { First5MarketKey, First5MinutesData } from "./components/types";
+
+const LEAGUE_ORDER = [
+  "eng.1", "esp.1", "ita.1", "ger.1", "fra.1",
+  "uefa.champions", "uefa.europa", "uefa.europa.conf",
+  "eng.fa", "eng.league_cup", "esp.copa_del_rey",
+  "ita.coppa_italia", "ger.dfb_pokal", "fra.coupe_de_france",
+];
+
+const LEAGUE_PRIORITY = new Map(LEAGUE_ORDER.map((slug, index) => [slug, index]));
 
 export default function First5MinutesPage() {
   const [data, setData] = useState<First5MinutesData | null>(null);
@@ -58,14 +68,25 @@ export default function First5MinutesPage() {
     if (!data?.matches?.length) return [];
     const groups = new Map<string, First5MinutesData["matches"]>();
     for (const match of data.matches) {
-      const dateKey = new Date(match.date).toISOString().slice(0, 10);
-      const bucket = groups.get(dateKey) ?? [];
+      const bucket = groups.get(match.leagueSlug) ?? [];
       bucket.push(match);
-      groups.set(dateKey, bucket);
+      groups.set(match.leagueSlug, bucket);
     }
     return Array.from(groups.entries())
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([dateKey, matches]) => ({ dateKey, matches }));
+      .map(([leagueSlug, matches]) => ({
+        leagueSlug,
+        // Keep the requested spacing for La Liga; all other names use the catalogue.
+        leagueName: leagueSlug === "esp.1"
+          ? "La Liga"
+          : LEAGUE_MAP[leagueSlug]?.name ?? matches[0].league,
+        matches: matches.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime()),
+      }))
+      .sort((a, b) =>
+        (LEAGUE_PRIORITY.get(a.leagueSlug) ?? LEAGUE_ORDER.length) -
+          (LEAGUE_PRIORITY.get(b.leagueSlug) ?? LEAGUE_ORDER.length) ||
+        a.leagueName.localeCompare(b.leagueName) ||
+        a.leagueSlug.localeCompare(b.leagueSlug),
+      );
   }, [data]);
 
   const highConfidenceCount = useMemo(() => {
@@ -267,12 +288,12 @@ export default function First5MinutesPage() {
 
             <div className="space-y-8">
               {groupedMatches.map((group) => (
-                <div key={group.dateKey} className="space-y-3">
+                <div key={group.leagueSlug} className="space-y-3">
                   <div className="flex items-center gap-2">
                     <div className="h-px flex-1 bg-cyan-400/15" />
-                    <span className="rounded-full border border-violet-400/20 bg-violet-500/10 px-3 py-1 font-mono text-[11px] uppercase tracking-wider text-violet-200">
-                      {formatDateGroup(group.matches[0].date)}
-                    </span>
+                    <h2 className="rounded-full border border-violet-400/20 bg-violet-500/10 px-3 py-1 font-mono text-[11px] uppercase tracking-wider text-violet-200">
+                      {group.leagueName}
+                    </h2>
                     <div className="h-px flex-1 bg-cyan-400/15" />
                   </div>
 
