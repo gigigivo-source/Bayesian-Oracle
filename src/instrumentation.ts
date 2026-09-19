@@ -1,30 +1,25 @@
 export async function register() {
-  // Only run in the Node.js runtime, not Edge
+  // Only run in the Node.js runtime, not Edge.
   if (process.env.NEXT_RUNTIME !== "nodejs") return;
 
-  // Wait 30 seconds after boot so the server is fully ready
-  // before we start hitting the DB.
+  const port = process.env.PORT ?? "3000";
+  const base = `http://localhost:${port}`;
+  const secret = (process.env.CRON_SECRET ?? "").trim();
+
   const FIRST_DELAY_MS = 30_000;
-  // Run settle every 60 minutes.
   const INTERVAL_MS = 60 * 60 * 1000;
 
-  console.log(
-    "[instrumentation] settle scheduler started — first run in 30s, then every 60m",
-  );
-
-  // Import lazily to avoid pulling DB code during Edge runtime
-  // warmup if the runtime check above ever misses.
   const runOnce = async () => {
     try {
-      const { settleFeaturePicks } = await import(
-        "@/app/api/cron/settle/route"
-      );
-      const { runSettlementEngine } = await import("@/lib/settlement/engine");
-      const engine = await runSettlementEngine();
-      const featurePicks = await settleFeaturePicks(false);
+      const res = await fetch(`${base}/api/cron/settle`, {
+        method: "POST",
+        headers: secret
+          ? { Authorization: `Bearer ${secret}` }
+          : undefined,
+      });
+      const body = await res.text();
       console.log(
-        `[instrumentation] settle: engine=${JSON.stringify(engine)} ` +
-          `features=${JSON.stringify(featurePicks)}`,
+        `[instrumentation] settle → HTTP ${res.status} ${body.slice(0, 200)}`
       );
     } catch (err) {
       console.error("[instrumentation] settle failed:", err);
@@ -35,4 +30,8 @@ export async function register() {
     void runOnce();
     setInterval(() => void runOnce(), INTERVAL_MS);
   }, FIRST_DELAY_MS);
+
+  console.log(
+    "[instrumentation] settle scheduler started — first run in 30s, then every 60m"
+  );
 }
