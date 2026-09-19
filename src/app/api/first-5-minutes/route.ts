@@ -62,8 +62,12 @@ export const maxDuration = 300;
 
 /** Fixture window shown on the page. */
 const LOOKAHEAD_DAYS = 7;
-/** Results are cached for one hour (same TTL as Sure Bet Corners). */
+/** In-process results are cached for one hour. */
 const CACHE_TTL_MS = 60 * 60 * 1000;
+/** DB-backed cache row key — one 'default' response per scan window. */
+const FIRST5_CACHE_KEY = "default";
+/** DB-backed cache TTL: the persisted scan response is valid for 24 hours. */
+const FIRST5_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 /** The prediction window, in minutes. */
 const WINDOW_MINUTES = 5;
 /** Effective match length including stoppage time. */
@@ -221,6 +225,97 @@ function getCacheKey(url: URL): string {
     .map((key) => `${key}=${params.get(key)}`)
     .join("&");
   return `first-5-minutes:${LOOKAHEAD_DAYS}d:${paramString}`;
+}
+
+// ─── DB-backed cache (24h TTL, survives restarts) ─────────────────────────────
+// The DB row is an optimisation on top of the in-memory cache: the first scan
+// of the day is persisted so every later request — even in a brand-new process
+// after a dev-server restart — is served in under a second. Both the read and
+// the write fail soft: a database problem must never break the feed.
+
+function formatAge(ms: number): string {
+  const totalMinutes = Math.max(0, Math.floor(ms / 60_000));
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return `${hours}h ${minutes}m`;
+}
+
+function toTimestamp(value: unknown): number {
+  if (value instanceof Date) {
+    const ms = value.getTime();
+    return Number.isFinite(ms) ? ms : NaN;
+  }
+  if (typeof value === "string" || typeof value === "number") {
+    const ms = new Date(value).getTime();
+    return Number.isFinite(ms) ? ms : NaN;
+  }
+  return NaN;
+}
+
+/**
+ * Read the persisted scan response (cache_key = 'default'). Returns the body
+ * when the row exists and is still inside its 24h TTL; null on a miss, an
+ * expired or unparseable row, or a database error (logged once, then the
+ * caller falls through to the in-memory cache / a fresh scan).
+ */
+async function readDbCache(): Promise<First5MinutesResponse | null> {
+  try {
+    const { db } = await import("@/db");
+    const { first5Cache } = await import("@/db/schema");
+    const { eq } = await import("drizzle-orm");
+
+    const rows = await db
+      .select()
+      .from(first5Cache)
+      .where(eq(first5Cache.cacheKey, FIRST5_CACHE_KEY))
+      .limit(1);
+    const row = Array.isArray(rows) ? rows[0] : undefined;
+    if (!row) return null;
+
+    const expiresAt = toTimestamp(row.expiresAt);
+    if (!Number.isFinite(expiresAt) || Date.now() >= expiresAt) return null;
+
+    const parsed = row.responseJson as First5MinutesResponse;
+    if (parsed == null || typeof parsed !== "object") return null;
+
+    console.info(`[First5] DB cache HIT (age: ${formatAge(Date.now() - toTimestamp(row.generatedAt))})`);
+    return parsed;
+  } catch (error) {
+    console.warn(`[First5] DB cache READ failed: ${error instanceof Error ? error.message : String(error)}`);
+    return null;
+  }
+}
+
+/**
+ * UPSERT the scan response under cache_key = 'default' with a fresh 24h
+ * expiry. Called only after a successful scan. Fail-soft: a write failure is
+ * logged and swallowed — the caller still returns the fresh response.
+ */
+async function writeDbCache(body: First5MinutesResponse): Promise<void> {
+  try {
+    const { db } = await import("@/db");
+    const { first5Cache } = await import("@/db/schema");
+    const { sql } = await import("drizzle-orm");
+
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + FIRST5_CACHE_TTL_MS);
+
+    await db
+      .insert(first5Cache)
+      .values({ cacheKey: FIRST5_CACHE_KEY, responseJson: body, generatedAt: now, expiresAt })
+      .onConflictDoUpdate({
+        target: first5Cache.cacheKey,
+        set: {
+          responseJson: body,
+          generatedAt: now,
+          expiresAt: sql`now() + interval '24 hours'`,
+        },
+      });
+
+    console.info(`[First5] DB cache WRITE — expires at ${expiresAt.toISOString()}`);
+  } catch (error) {
+    console.warn(`[First5] DB cache WRITE failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 // ─── Small helpers ────────────────────────────────────────────────────────────
@@ -880,8 +975,19 @@ export async function GET(req: Request): Promise<Response> {
   const cacheKey = getCacheKey(url);
 
   if (isRefresh) {
+    // Forced refresh bypasses both caches; the in-memory entry is dropped.
     cache.delete(cacheKey);
   } else {
+    // Read order: DB row (24h, survives restarts) → in-memory (1h, process
+    // lifetime) → full scan. Each layer falls through to the next.
+    const dbCached = await readDbCache();
+    if (dbCached) {
+      return Response.json(
+        { ...dbCached, cache: { ...dbCached.cache, hit: true } },
+        { headers: { "Cache-Control": "no-store", "X-Cache": "HIT" } },
+      );
+    }
+
     const cached = cache.get(cacheKey);
     if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
       return Response.json(
@@ -941,7 +1047,10 @@ export async function GET(req: Request): Promise<Response> {
       matches,
     });
 
+    // Write order: in-memory first (existing behaviour), then the DB-backed
+    // 24h row so later requests — even after a restart — skip the scan.
     cache.set(cacheKey, { data: body, timestamp: Date.now() });
+    await writeDbCache(body);
 
     return Response.json(body, {
       headers: {
