@@ -1,10 +1,11 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   GET,
   atLeastOne,
   bookOddsFor,
   confidenceFor,
   fairOddsFor,
+  getTeamXgCached,
   round1xBetOdds,
   type First5MinutesResponse,
 } from "./route";
@@ -37,36 +38,83 @@ vi.mock("@/lib/va/oddsFetcher", () => ({
 }));
 
 // ─── Database mock ────────────────────────────────────────────────────────────
-// The route's cache helpers read/write first5_cache through drizzle. Read
-// order is: DB row (24h) → in-memory (1h) → full scan. The mock is the same
-// "one row + a write log" shape used by the Value Accumulator tests: the
-// single 'default' row is set per test and every UPSERT lands in `writes`,
-// so cache HIT / WRITE / fail-soft behaviour can be asserted directly.
-const dbState = vi.hoisted(() => ({
-  cacheRows: new Map<string, Record<string, unknown>>(),
-  writes: [] as Array<Record<string, unknown>>,
-  readError: null as Error | null,
-  writeError: null as Error | null,
-}));
+// The route's cache helpers read/write first5_cache AND team_xg_cache through
+// drizzle. Read order for the scan response is: DB row (24h) → in-memory (1h)
+// → full scan. The mock is the same "rows + a write log" shape used by the
+// Value Accumulator tests: the single 'default' cache row is set per test and
+// every UPSERT lands in `writes`, so cache HIT / WRITE / fail-soft behaviour
+// can be asserted directly. team_xg_cache gets its own row map and write log
+// (keyed / filtered by team id, like the table's primary key) so the two
+// caches can never be confused for one another.
+const dbState = vi.hoisted(() => {
+  /**
+   * Pull the team id out of a drizzle `eq(team_id, <id>)` expression so the
+   * team_xg_cache mock filters like a real WHERE clause instead of returning
+   * every row. With a real column drizzle binds the value as a `Param` chunk
+   * (the only chunk carrying both `brand` and `value`); with this file's
+   * stubbed column it inlines the literal instead, so a raw number chunk is
+   * accepted too.
+   */
+  function teamIdFromWhere(expr: unknown): number {
+    const chunks = (expr as { queryChunks?: unknown[] } | null)?.queryChunks;
+    if (!Array.isArray(chunks)) return NaN;
+    for (const chunk of chunks) {
+      if (typeof chunk === "number") return chunk;
+      const candidate = chunk as { brand?: unknown; value?: unknown } | null;
+      if (typeof candidate === "object" && candidate !== null && "brand" in candidate && "value" in candidate) {
+        return Number(candidate.value);
+      }
+    }
+    return NaN;
+  }
+
+  return {
+    cacheRows: new Map<string, Record<string, unknown>>(),
+    writes: [] as Array<Record<string, unknown>>,
+    readError: null as Error | null,
+    writeError: null as Error | null,
+    /** team_xg_cache rows, keyed by team id. */
+    teamXgRows: new Map<number, Record<string, unknown>>(),
+    xgWrites: [] as Array<Record<string, unknown>>,
+    xgReadError: null as Error | null,
+    xgWriteError: null as Error | null,
+    teamIdFromWhere,
+  };
+});
 
 vi.mock("@/db", () => ({
   db: {
     select: () => ({
-      from: () => ({
-        where: () => ({
+      from: (table?: { __table?: string }) => ({
+        where: (expr?: unknown) => ({
           limit: async () => {
+            if (table?.__table === "team_xg_cache") {
+              if (dbState.xgReadError) throw dbState.xgReadError;
+              const row = dbState.teamXgRows.get(dbState.teamIdFromWhere(expr));
+              return row ? [row] : [];
+            }
             if (dbState.readError) throw dbState.readError;
             return Array.from(dbState.cacheRows.values());
           },
         }),
       }),
     }),
-    insert: () => ({
+    insert: (table?: { __table?: string }) => ({
       values: (row: Record<string, unknown>) => {
-        dbState.writes.push(row);
         const result = Promise.resolve([]) as unknown as Promise<unknown[]> & {
           onConflictDoUpdate: () => Promise<unknown[]>;
         };
+        if (table?.__table === "team_xg_cache") {
+          dbState.xgWrites.push(row);
+          result.onConflictDoUpdate = () => {
+            if (dbState.xgWriteError) return Promise.reject(dbState.xgWriteError);
+            // Emulate the UPSERT so a later read in the same test sees the row.
+            dbState.teamXgRows.set(Number(row.teamId), row);
+            return Promise.resolve([]);
+          };
+          return result;
+        }
+        dbState.writes.push(row);
         result.onConflictDoUpdate = () => {
           if (dbState.writeError) return Promise.reject(dbState.writeError);
           return Promise.resolve([]);
@@ -79,10 +127,12 @@ vi.mock("@/db", () => ({
 }));
 
 vi.mock("@/db/schema", () => ({
-  first5Cache: { cacheKey: "cache_key" },
+  first5Cache: { __table: "first5_cache", cacheKey: "cache_key" },
+  teamXgCache: { __table: "team_xg_cache", teamId: "team_id" },
   // performanceLog is only used by the fail-soft pick-persistence step; the
   // cache tests never persist a published market so a stub shape is enough.
   performanceLog: {
+    __table: "performance_log",
     id: "id",
     eventId: "event_id",
     feature: "feature",
@@ -248,6 +298,21 @@ beforeEach(() => {
   dbState.writes.length = 0;
   dbState.readError = null;
   dbState.writeError = null;
+  dbState.teamXgRows.clear();
+  dbState.xgWrites.length = 0;
+  dbState.xgReadError = null;
+  dbState.xgWriteError = null;
+  // No test in this file may reach the network. Every provider is mocked, but
+  // the route's Bzzoiro date lookups (team xG cache) go through global fetch,
+  // so it is stubbed to an empty page: a stray call is inert and provably
+  // never a real request.
+  process.env.BZOOIRO_KEY = "test-key";
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () =>
+      new Response(JSON.stringify({ count: 0, next: null, results: [] }), { status: 200 }),
+    ),
+  );
   // Default: no Bzzoiro, no ESPN form — each test opts into its data.
   vi.mocked(resolveBzzoiroEvent).mockResolvedValue({
     eventId: null,
@@ -260,6 +325,11 @@ beforeEach(() => {
   vi.mocked(fetchTeamXgAverage).mockResolvedValue(null);
   vi.mocked(getCachedMeshProfile).mockResolvedValue(null);
   vi.mocked(espn.fetchSummary).mockResolvedValue(null);
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  delete process.env.BZOOIRO_KEY;
 });
 
 /**
@@ -618,5 +688,311 @@ describe("First 5 Minutes league whitelist", () => {
     const match = data.matches.find((m) => m.fixtureId === "fx-ucl");
     expect(match?.leagueSlug).toBe("uefa.champions");
     expect(match?.markets.length).toBeGreaterThan(0);
+  });
+});
+
+// ─── Persistent team xG cache (invalidated when the team plays again) ─────────
+// The rolling Bzzoiro average is the expensive part of a scan (~6 HTTP calls
+// per team), so it is persisted in team_xg_cache and reused until the team's
+// next scheduled match kicks off — never invalidated on a timer. Every
+// provider is mocked here: the xG fetcher itself is a mock (and is asserted
+// on) and the cache's two Bzzoiro date lookups go through the stubbed global
+// fetch. Nothing in this block touches the network.
+describe("First 5 Minutes team xG cache", () => {
+  const HOME_TEAM = 101;
+  const AWAY_TEAM = 202;
+  const HOUR_MS = 60 * 60 * 1000;
+  const DAY_MS = 24 * HOUR_MS;
+
+  /**
+   * Seed a team_xg_cache row exactly as the pg driver would deliver it:
+   * numeric columns as strings, timestamps as Dates.
+   */
+  function seedTeamXgRow(
+    teamId: number,
+    opts: {
+      xgFor?: number;
+      xgAgainst?: number;
+      samples?: number;
+      nextMatchAt?: Date | null;
+      basedOnThroughAt?: Date;
+    } = {},
+  ) {
+    dbState.teamXgRows.set(teamId, {
+      teamId,
+      xgFor: String(opts.xgFor ?? 1.8),
+      xgAgainst: String(opts.xgAgainst ?? 1.1),
+      samples: opts.samples ?? 5,
+      basedOnThroughAt: opts.basedOnThroughAt ?? new Date(Date.now() - 7 * DAY_MS),
+      nextMatchAt: opts.nextMatchAt ?? null,
+      updatedAt: new Date(Date.now() - DAY_MS),
+    });
+  }
+
+  /** Stub the two Bzzoiro team-event lookups the cache performs on a miss. */
+  function stubTeamEventDates(dates: { next?: string; lastFinished?: string }) {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      const rows = url.includes("status=notstarted")
+        ? dates.next
+          ? [{ id: 9001, event_date: dates.next }]
+          : []
+        : dates.lastFinished
+          ? [{ id: 9002, event_date: dates.lastFinished }]
+          : [];
+      return new Response(JSON.stringify({ count: rows.length, next: null, results: rows }), {
+        status: 200,
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  // ── 1. HIT ──────────────────────────────────────────────────────────────────
+  it("treats a row whose next match is in the future as a HIT and never calls the xG fetcher", async () => {
+    seedTeamXgRow(HOME_TEAM, {
+      xgFor: 1.75,
+      xgAgainst: 0.9,
+      samples: 5,
+      nextMatchAt: new Date(Date.now() + 6 * HOUR_MS),
+    });
+    const fetchMock = stubTeamEventDates({});
+
+    const value = await getTeamXgCached(HOME_TEAM);
+
+    expect(value).toEqual({ xgFor: 1.75, xgAgainst: 0.9, samples: 5 });
+    expect(fetchTeamXgAverage).not.toHaveBeenCalled();
+    // Zero Bzzoiro traffic: not even the date lookups run on a hit.
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(dbState.xgWrites).toHaveLength(0);
+  });
+
+  // ── 2. MISS (no row / expired row) ──────────────────────────────────────────
+  it("treats a missing row as a MISS and calls the xG fetcher", async () => {
+    const fetchMock = stubTeamEventDates({});
+    vi.mocked(fetchTeamXgAverage).mockResolvedValue({
+      teamId: HOME_TEAM,
+      xgFor: 1.6,
+      xgAgainst: 1.2,
+      samples: 5,
+    });
+
+    const value = await getTeamXgCached(HOME_TEAM);
+
+    expect(fetchTeamXgAverage).toHaveBeenCalledWith(HOME_TEAM, 5);
+    expect(value).toEqual({ xgFor: 1.6, xgAgainst: 1.2, samples: 5 });
+    // Both Bzzoiro date lookups ran (next match + newest finished match).
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining(`team_id=${HOME_TEAM}&status=notstarted&limit=1`),
+      expect.anything(),
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining(`team_id=${HOME_TEAM}&status=finished&limit=5`),
+      expect.anything(),
+    );
+  });
+
+  it("treats a row whose next match is already in the past as a MISS", async () => {
+    seedTeamXgRow(HOME_TEAM, { nextMatchAt: new Date(Date.now() - 2 * HOUR_MS) });
+    stubTeamEventDates({});
+    vi.mocked(fetchTeamXgAverage).mockResolvedValue({
+      teamId: HOME_TEAM,
+      xgFor: 2.2,
+      xgAgainst: 0.8,
+      samples: 5,
+    });
+
+    const value = await getTeamXgCached(HOME_TEAM);
+
+    expect(fetchTeamXgAverage).toHaveBeenCalledWith(HOME_TEAM, 5);
+    expect(value).toEqual({ xgFor: 2.2, xgAgainst: 0.8, samples: 5 });
+  });
+
+  it("treats a row with no next match date as a MISS (never a timed cache)", async () => {
+    seedTeamXgRow(HOME_TEAM, { nextMatchAt: null });
+    stubTeamEventDates({});
+    vi.mocked(fetchTeamXgAverage).mockResolvedValue({
+      teamId: HOME_TEAM,
+      xgFor: 1.3,
+      xgAgainst: 1.4,
+      samples: 4,
+    });
+
+    await getTeamXgCached(HOME_TEAM);
+
+    expect(fetchTeamXgAverage).toHaveBeenCalledTimes(1);
+  });
+
+  // ── 3. UPSERT after a miss ──────────────────────────────────────────────────
+  it("UPSERTs the average with the resolved next_match_at after a miss", async () => {
+    const nextKickoff = new Date(Date.now() + 3 * DAY_MS);
+    const lastFinished = new Date(Date.now() - 5 * DAY_MS);
+    stubTeamEventDates({
+      next: nextKickoff.toISOString(),
+      lastFinished: lastFinished.toISOString(),
+    });
+    vi.mocked(fetchTeamXgAverage).mockResolvedValue({
+      teamId: HOME_TEAM,
+      xgFor: 1.9,
+      xgAgainst: 1.05,
+      samples: 5,
+    });
+
+    const value = await getTeamXgCached(HOME_TEAM);
+
+    expect(value).toEqual({ xgFor: 1.9, xgAgainst: 1.05, samples: 5 });
+    expect(dbState.xgWrites).toHaveLength(1);
+    const written = dbState.xgWrites[0];
+    expect(written.teamId).toBe(HOME_TEAM);
+    expect(Number(written.xgFor)).toBeCloseTo(1.9, 5);
+    expect(Number(written.xgAgainst)).toBeCloseTo(1.05, 5);
+    expect(written.samples).toBe(5);
+    expect(written.nextMatchAt).toEqual(nextKickoff);
+    expect(written.basedOnThroughAt).toEqual(lastFinished);
+
+    // The very next lookup of that team is a HIT: no further fetches.
+    vi.mocked(fetchTeamXgAverage).mockClear();
+    const second = await getTeamXgCached(HOME_TEAM);
+    expect(second).toEqual({ xgFor: 1.9, xgAgainst: 1.05, samples: 5 });
+    expect(fetchTeamXgAverage).not.toHaveBeenCalled();
+  });
+
+  it("writes next_match_at as null when the provider has nothing scheduled", async () => {
+    stubTeamEventDates({ lastFinished: new Date(Date.now() - 4 * DAY_MS).toISOString() });
+    vi.mocked(fetchTeamXgAverage).mockResolvedValue({
+      teamId: AWAY_TEAM,
+      xgFor: 1.1,
+      xgAgainst: 1.5,
+      samples: 5,
+    });
+
+    await getTeamXgCached(AWAY_TEAM);
+
+    expect(dbState.xgWrites).toHaveLength(1);
+    expect(dbState.xgWrites[0].nextMatchAt).toBeNull();
+  });
+
+  // ── 4. No average → no row ──────────────────────────────────────────────────
+  it("writes no row when the xG fetcher returns null", async () => {
+    stubTeamEventDates({ next: new Date(Date.now() + 2 * DAY_MS).toISOString() });
+    vi.mocked(fetchTeamXgAverage).mockResolvedValue(null);
+
+    const value = await getTeamXgCached(HOME_TEAM);
+
+    expect(value).toBeNull();
+    expect(dbState.xgWrites).toHaveLength(0);
+    expect(dbState.teamXgRows.size).toBe(0);
+  });
+
+  // ── 5. Fail-soft read ───────────────────────────────────────────────────────
+  it("falls through to the live fetch — without throwing — when the DB read fails", async () => {
+    dbState.xgReadError = new Error("connection refused");
+    stubTeamEventDates({ next: new Date(Date.now() + 2 * DAY_MS).toISOString() });
+    vi.mocked(fetchTeamXgAverage).mockResolvedValue({
+      teamId: HOME_TEAM,
+      xgFor: 1.4,
+      xgAgainst: 1.3,
+      samples: 4,
+    });
+
+    const value = await getTeamXgCached(HOME_TEAM);
+
+    expect(fetchTeamXgAverage).toHaveBeenCalledWith(HOME_TEAM, 5);
+    expect(value).toEqual({ xgFor: 1.4, xgAgainst: 1.3, samples: 4 });
+  });
+
+  // ── 6. Fail-soft write ──────────────────────────────────────────────────────
+  it("still returns the fetched average when the DB write fails", async () => {
+    dbState.xgWriteError = new Error("disk full");
+    stubTeamEventDates({ next: new Date(Date.now() + 2 * DAY_MS).toISOString() });
+    vi.mocked(fetchTeamXgAverage).mockResolvedValue({
+      teamId: HOME_TEAM,
+      xgFor: 2.1,
+      xgAgainst: 1.0,
+      samples: 5,
+    });
+
+    const value = await getTeamXgCached(HOME_TEAM);
+
+    expect(value).toEqual({ xgFor: 2.1, xgAgainst: 1.0, samples: 5 });
+    // The write was attempted — it just did not stick.
+    expect(dbState.xgWrites).toHaveLength(1);
+    expect(dbState.teamXgRows.size).toBe(0);
+  });
+
+  // ── Wiring: the per-fixture fetch reads the cache, not the fetcher ──────────
+  it("serves a whole scan from cached xG — the fetcher is never called", async () => {
+    seedTeamXgRow(HOME_TEAM, { xgFor: 1.75, nextMatchAt: new Date(Date.now() + 36 * HOUR_MS) });
+    seedTeamXgRow(AWAY_TEAM, {
+      xgFor: 1.4,
+      xgAgainst: 1.2,
+      nextMatchAt: new Date(Date.now() + 36 * HOUR_MS),
+    });
+    mockScoreboard([makeMockFixture("fx-xgc", "Arsenal", "Chelsea")]);
+    vi.mocked(resolveBzzoiroEvent).mockResolvedValue({
+      eventId: "555",
+      status: "resolved",
+      eventsInRange: 1,
+      relatedInRange: 1,
+      toleranceDays: 2,
+    });
+    vi.mocked(fetchEventDetail).mockResolvedValue({
+      homeTeamId: HOME_TEAM,
+      awayTeamId: AWAY_TEAM,
+    });
+
+    const data = await getFirst5();
+
+    const goal = data.matches[0].markets.find((m) => m.key === "goal");
+    expect(goal?.statsSource).toBe("Bzzoiro xG");
+    // 1.75 + 1.40 from the cache rows — no Bzzoiro xG walk at all.
+    expect(goal?.expectedPerMatch).toBeCloseTo(3.15, 2);
+    expect(fetchTeamXgAverage).not.toHaveBeenCalled();
+  });
+
+  // ── Logging: one aggregate line per scan, one line per cache write ──────────
+  it("logs one aggregate hit/miss line per scan, not one per fixture", async () => {
+    // One fixture, one cached team (hit) and one uncached team (miss).
+    seedTeamXgRow(HOME_TEAM, { nextMatchAt: new Date(Date.now() + 36 * HOUR_MS) });
+    mockScoreboard([makeMockFixture("fx-log", "Arsenal", "Chelsea")]);
+    vi.mocked(resolveBzzoiroEvent).mockResolvedValue({
+      eventId: "555",
+      status: "resolved",
+      eventsInRange: 1,
+      relatedInRange: 1,
+      toleranceDays: 2,
+    });
+    vi.mocked(fetchEventDetail).mockResolvedValue({
+      homeTeamId: HOME_TEAM,
+      awayTeamId: AWAY_TEAM,
+    });
+    const nextKickoff = new Date(Date.now() + 36 * HOUR_MS).toISOString();
+    stubTeamEventDates({ next: nextKickoff });
+    vi.mocked(fetchTeamXgAverage).mockResolvedValue({
+      teamId: AWAY_TEAM,
+      xgFor: 1.2,
+      xgAgainst: 1.3,
+      samples: 5,
+    });
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+
+    try {
+      await getFirst5();
+
+      const cacheLines = info.mock.calls
+        .map(([message]) => String(message))
+        .filter((message) => message.startsWith("[First5] xG cache:"));
+      // Exactly one aggregate line for the whole scan (2 teams), never one per team.
+      expect(cacheLines).toEqual(["[First5] xG cache: 1 hits, 1 misses"]);
+
+      const writeLines = info.mock.calls
+        .map(([message]) => String(message))
+        .filter((message) => message.startsWith("[First5] xG cache write:"));
+      expect(writeLines).toEqual([
+        `[First5] xG cache write: team ${AWAY_TEAM} — next match at ${nextKickoff}`,
+      ]);
+    } finally {
+      info.mockRestore();
+    }
   });
 });

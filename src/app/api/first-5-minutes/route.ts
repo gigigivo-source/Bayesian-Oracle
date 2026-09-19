@@ -36,8 +36,11 @@
 //
 // ── Sources ──────────────────────────────────────────────────────────────────
 //   Goal baseline   — Bzzoiro rolling team xG (xgFor, last 5 finished),
-//                     else ESPN summary form averages (gfAvg). Both teams
-//                     required or the market is omitted.
+//                     served from the persistent team_xg_cache while the
+//                     team's next scheduled match is still in the future
+//                     (see the cache section below), else ESPN summary form
+//                     averages (gfAvg). Both teams required or the market is
+//                     omitted.
 //   Corner baseline — mesh corner distributions (both teams, n > 0).
 //   Card baseline   — mesh card distributions (both teams, n > 0).
 //   Aggression      — mesh foul distributions (optional; defaults to 1.0).
@@ -81,8 +84,14 @@ const CONCURRENCY = 8;
  * summary). A cold mesh profile fans out across many ESPN calls, so one
  * pathological fixture must never hold the whole feed hostage — on timeout
  * the fixture is skipped (no markets published for it).
+ *
+ * 60s covers the first scan of the day, when the persistent team xG cache
+ * (team_xg_cache) is still cold and each team's rolling average really does
+ * walk five finished matches over Bzzoiro one call at a time. Every later
+ * scan reads the cache and finishes a fixture in under two seconds, so the
+ * ceiling is only ever approached once per cold start.
  */
-const REALDATA_TIMEOUT_MS = 25_000;
+const REALDATA_TIMEOUT_MS = 60_000;
 /** Hit-rate threshold that flips the "Likely Guaranteed" flag. */
 export const GUARANTEED_HIT_RATE = 0.95;
 /** Finished matches behind each Bzzoiro rolling xG average. */
@@ -316,6 +325,354 @@ async function writeDbCache(body: First5MinutesResponse): Promise<void> {
   }
 }
 
+// ─── Persistent team xG cache (invalidated when the team plays again) ─────────
+// A rolling team xG average costs ~6 Bzzoiro calls (the last five finished
+// matches, one request each, plus the list request); a fixture needs two of
+// them. With 8 fixtures in flight that queues at Bzzoiro and fixtures blow
+// through the per-fixture ceiling, so the average is persisted per team and
+// reused across scans.
+//
+// Invalidation is event-based, never time-based: the row carries the date of
+// the team's next scheduled match and is a HIT only while now() < next_match_at
+// — i.e. until the team actually plays again, at which point the average is
+// recomputed from the newer finished matches. A row whose next_match_at is
+// NULL (no scheduled match known, provider unavailable) is never a hit, so the
+// cache can only ever be as stale as the provider's own fixture list.
+//
+// Everything here is fail-soft, mirroring the DB response cache above: a read
+// error falls through to the live fetch, a write error still returns the
+// freshly fetched value, and the public feed never fails because of a cache
+// problem.
+
+/** Bzzoiro base URL — same env override the VA fetchers use. */
+const BZOOIRO_BASE = (() => {
+  const raw = (process.env.BZOOIRO_BASE ?? "https://sports.bzzoiro.com/api/v2").trim();
+  return raw.replace(/\/+$/, "");
+})();
+/** Same 8s ceiling the VA fetchers put on every Bzzoiro request. */
+const BZOOIRO_TIMEOUT_MS = 8_000;
+
+/** The subset of a Bzzoiro event row this cache needs. */
+interface BzTeamEventRow {
+  id?: unknown;
+  event_date?: unknown;
+}
+
+interface BzPage<T> {
+  results?: T[];
+}
+
+let warnedNoBzKey = false;
+
+function getBzzoiroKey(): string {
+  return (process.env.BZOOIRO_KEY ?? "").trim();
+}
+
+/**
+ * Bzzoiro GET, mirroring xgFetcher's private bzGet exactly: same base URL,
+ * same `Authorization: Token ${key}` header, same 8s abort timeout, same
+ * fail-soft `null` on a missing key or any failure. It is duplicated here
+ * (rather than imported) because the fetcher's helper is module-private.
+ */
+async function bzGet<T>(path: string): Promise<T | null> {
+  const key = getBzzoiroKey();
+  if (!key) {
+    if (!warnedNoBzKey) {
+      console.info("[First5][Bzzoiro] BZOOIRO_KEY not set — skipping Bzzoiro calls");
+      warnedNoBzKey = true;
+    }
+    return null;
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), BZOOIRO_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${BZOOIRO_BASE}${path}`, {
+      headers: { Authorization: `Token ${key}` },
+      signal: controller.signal,
+      cache: "no-store",
+    });
+    if (!res.ok) {
+      console.warn(`[First5][Bzzoiro] GET ${path} → HTTP ${res.status}`);
+      return null;
+    }
+    return (await res.json()) as T;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Page rows from either a `{results}` envelope or a bare array. */
+function teamEventRows(data: BzPage<BzTeamEventRow> | BzTeamEventRow[] | null): BzTeamEventRow[] {
+  if (Array.isArray(data)) return data;
+  const results = data?.results;
+  return Array.isArray(results) ? results : [];
+}
+
+/** Parse a Bzzoiro `event_date` (ISO string or Date) into a Date, else null. */
+function toEventDate(value: unknown): Date | null {
+  if (value instanceof Date) {
+    return Number.isFinite(value.getTime()) ? value : null;
+  }
+  if (typeof value === "string" && value.trim() !== "") {
+    const trimmed = value.trim();
+    const ms = Date.parse(trimmed.length === 10 ? `${trimmed}T00:00:00Z` : trimmed);
+    return Number.isFinite(ms) ? new Date(ms) : null;
+  }
+  return null;
+}
+
+/**
+ * The team's next scheduled kickoff —
+ * GET /events/?team_id={id}&status=notstarted&limit=1 — or null when Bzzoiro
+ * has nothing scheduled or cannot be reached. This is the cache's invalidation
+ * key: the stored average stays usable until this date passes.
+ */
+async function fetchNextMatchAt(teamId: number): Promise<Date | null> {
+  const data = await bzGet<BzPage<BzTeamEventRow> | BzTeamEventRow[]>(
+    `/events/?team_id=${encodeURIComponent(String(teamId))}&status=notstarted&limit=1`,
+  );
+  for (const row of teamEventRows(data)) {
+    const at = toEventDate(row.event_date);
+    if (at) return at;
+  }
+  return null;
+}
+
+/**
+ * The most recent finished-match date inside the same window the rolling
+ * average walks — GET /events/?team_id={id}&status=finished&limit={Xg_LAST_N}
+ * — or null when the provider returns nothing usable. Recorded as the cache
+ * row's `based_on_through_at` (provenance; nothing is published from it).
+ */
+async function fetchLastFinishedAt(teamId: number): Promise<Date | null> {
+  const data = await bzGet<BzPage<BzTeamEventRow> | BzTeamEventRow[]>(
+    `/events/?team_id=${encodeURIComponent(String(teamId))}&status=finished&limit=${Xg_LAST_N}`,
+  );
+  let latest: Date | null = null;
+  for (const row of teamEventRows(data)) {
+    const at = toEventDate(row.event_date);
+    if (at && (!latest || at.getTime() > latest.getTime())) latest = at;
+  }
+  return latest;
+}
+
+/**
+ * Per-scan tally behind the single aggregate "[First5] xG cache: N hits,
+ * M misses" line. One scan = one GET(); the counters are reset when the
+ * real-data pass starts and reported once when it ends — never per fixture.
+ */
+const xgCacheScan = { hits: 0, misses: 0 };
+
+function resetXgCacheScan(): void {
+  xgCacheScan.hits = 0;
+  xgCacheScan.misses = 0;
+}
+
+function logXgCacheScan(): void {
+  console.info(`[First5] xG cache: ${xgCacheScan.hits} hits, ${xgCacheScan.misses} misses`);
+}
+
+let warnedXgCacheRead = false;
+let warnedXgCacheWrite = false;
+
+/**
+ * Lazy handle on the plumbing the team xG cache needs. One shared promise, so
+ * that a scan with eight fixtures in flight loads the database module exactly
+ * once instead of racing eight dynamic imports — the same fail-soft,
+ * dynamically-imported pattern the response cache above uses. A failed load
+ * clears the promise so the next scan can try again.
+ */
+type TeamXgCacheDb = {
+  db: typeof import("@/db")["db"];
+  teamXgCache: typeof import("@/db/schema")["teamXgCache"];
+  eq: typeof import("drizzle-orm")["eq"];
+  sql: typeof import("drizzle-orm")["sql"];
+};
+
+let teamXgCacheDbPromise: Promise<TeamXgCacheDb> | null = null;
+
+function loadTeamXgCacheDb(): Promise<TeamXgCacheDb> {
+  if (!teamXgCacheDbPromise) {
+    teamXgCacheDbPromise = (async () => {
+      const { db } = await import("@/db");
+      const { teamXgCache } = await import("@/db/schema");
+      const { eq, sql } = await import("drizzle-orm");
+      return { db, teamXgCache, eq, sql };
+    })().catch((error: unknown) => {
+      teamXgCacheDbPromise = null;
+      throw error;
+    });
+  }
+  return teamXgCacheDbPromise;
+}
+
+/** A cache row as the route consumes it (numeric columns arrive as strings). */
+interface CachedTeamXg {
+  xgFor: number;
+  xgAgainst: number;
+  samples: number;
+  nextMatchAt: Date | null;
+}
+
+/**
+ * Read the team's cache row. Fail-soft: a database error is logged once and
+ * reported as a miss, so the caller falls through to a live xG fetch instead
+ * of failing the fixture.
+ */
+async function readTeamXgCache(teamId: number): Promise<CachedTeamXg | null> {
+  try {
+    const { db, teamXgCache, eq } = await loadTeamXgCacheDb();
+
+    const rows = await db
+      .select()
+      .from(teamXgCache)
+      .where(eq(teamXgCache.teamId, teamId))
+      .limit(1);
+    const row = Array.isArray(rows) ? rows[0] : undefined;
+    if (!row) return null;
+
+    // numeric columns come back as strings from the pg driver.
+    const xgFor = Number(row.xgFor);
+    const xgAgainst = Number(row.xgAgainst);
+    const samples = Number(row.samples);
+    if (!Number.isFinite(xgFor) || !Number.isFinite(xgAgainst) || !Number.isFinite(samples)) {
+      return null;
+    }
+    return { xgFor, xgAgainst, samples, nextMatchAt: toEventDate(row.nextMatchAt) };
+  } catch (error) {
+    if (!warnedXgCacheRead) {
+      warnedXgCacheRead = true;
+      console.warn(
+        `[First5] xG cache READ failed (using live Bzzoiro fetches instead): ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    return null;
+  }
+}
+
+/**
+ * UPSERT the team's rolling average. Fail-soft: a write error is logged once
+ * and swallowed — the freshly fetched value is still returned to the caller,
+ * only the next scan has to pay for it again.
+ */
+async function writeTeamXgCache(entry: {
+  teamId: number;
+  xgFor: number;
+  xgAgainst: number;
+  samples: number;
+  basedOnThroughAt: Date;
+  nextMatchAt: Date | null;
+}): Promise<void> {
+  try {
+    const { db, teamXgCache, sql } = await loadTeamXgCacheDb();
+
+    const values = {
+      teamId: entry.teamId,
+      xgFor: String(entry.xgFor),
+      xgAgainst: String(entry.xgAgainst),
+      samples: entry.samples,
+      basedOnThroughAt: entry.basedOnThroughAt,
+      nextMatchAt: entry.nextMatchAt,
+    };
+
+    await db
+      .insert(teamXgCache)
+      .values(values)
+      .onConflictDoUpdate({
+        target: teamXgCache.teamId,
+        set: {
+          xgFor: values.xgFor,
+          xgAgainst: values.xgAgainst,
+          samples: values.samples,
+          basedOnThroughAt: values.basedOnThroughAt,
+          nextMatchAt: values.nextMatchAt,
+          updatedAt: sql`now()`,
+        },
+      });
+
+    console.info(
+      `[First5] xG cache write: team ${entry.teamId} — next match at ` +
+      `${entry.nextMatchAt ? entry.nextMatchAt.toISOString() : "none"}`,
+    );
+  } catch (error) {
+    if (!warnedXgCacheWrite) {
+      warnedXgCacheWrite = true;
+      console.warn(
+        `[First5] xG cache WRITE failed (value still used for this scan): ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+}
+
+/**
+ * The fixture-facing entry point: a team's rolling xG average, from the
+ * persistent cache when it is still valid.
+ *
+ *   1. A row whose next_match_at lies in the future is a HIT — zero Bzzoiro
+ *      calls. So is every other fixture in the scan that needs the same team.
+ *   2. Otherwise the live average is fetched (fetchTeamXgAverage, last
+ *      Xg_LAST_N finished matches). A null average is returned as-is and
+ *      NOT cached, so a provider hiccup is retried on the next scan.
+ *   3. On a value, the team's next scheduled match and the newest finished
+ *      match are resolved in parallel and the row is UPSERTed — next time
+ *      this team is asked for, it is a HIT until it plays again.
+ *
+ * Returns exactly the shape the goal baseline consumes; null means "no real
+ * average", which omits the goal market for the fixture, as before.
+ */
+export async function getTeamXgCached(
+  teamId: number,
+): Promise<{ xgFor: number; xgAgainst: number; samples: number } | null> {
+  if (!Number.isFinite(teamId) || teamId <= 0) return null;
+
+  const cachedRow = await readTeamXgCache(teamId);
+  if (cachedRow?.nextMatchAt && Date.now() < cachedRow.nextMatchAt.getTime()) {
+    xgCacheScan.hits++;
+    return {
+      xgFor: cachedRow.xgFor,
+      xgAgainst: cachedRow.xgAgainst,
+      samples: cachedRow.samples,
+    };
+  }
+  xgCacheScan.misses++;
+
+  const avg = await fetchTeamXgAverage(teamId, Xg_LAST_N).catch(() => null);
+  if (
+    !avg ||
+    avg.xgFor == null ||
+    avg.xgAgainst == null ||
+    !Number.isFinite(avg.xgFor) ||
+    !Number.isFinite(avg.xgAgainst)
+  ) {
+    return null;
+  }
+
+  // Two cheap date lookups, only on a miss, in parallel. Both fail soft.
+  const [lastFinishedAt, nextScheduledAt] = await Promise.all([
+    fetchLastFinishedAt(teamId).catch(() => null),
+    fetchNextMatchAt(teamId).catch(() => null),
+  ]);
+
+  await writeTeamXgCache({
+    teamId,
+    xgFor: avg.xgFor,
+    xgAgainst: avg.xgAgainst,
+    samples: avg.samples,
+    // The average covers everything up to the newest finished match it walked.
+    // If the provider gave no usable date, the observation time is the
+    // conservative (never-earlier) stamp for this provenance column — the
+    // invalidation itself is driven solely by next_match_at.
+    basedOnThroughAt: lastFinishedAt ?? new Date(),
+    nextMatchAt: nextScheduledAt,
+  });
+
+  return { xgFor: avg.xgFor, xgAgainst: avg.xgAgainst, samples: avg.samples };
+}
+
 // ─── Small helpers ────────────────────────────────────────────────────────────
 
 const MARKET_META: Record<First5MarketKey, { label: string; shortLabel: string; icon: string }> = {
@@ -482,8 +839,8 @@ async function fetchGoalBaseline(fx: FixtureLite): Promise<{
       const detail = await fetchEventDetail(bzEvent.eventId).catch(() => null);
       if (detail?.homeTeamId != null && detail?.awayTeamId != null) {
         const [h, a] = await Promise.all([
-          fetchTeamXgAverage(detail.homeTeamId, Xg_LAST_N).catch(() => null),
-          fetchTeamXgAverage(detail.awayTeamId, Xg_LAST_N).catch(() => null),
+          getTeamXgCached(detail.homeTeamId).catch(() => null),
+          getTeamXgCached(detail.awayTeamId).catch(() => null),
         ]);
         if (h?.xgFor != null && a?.xgFor != null) {
           return {
@@ -1018,6 +1375,9 @@ export async function GET(req: Request): Promise<Response> {
     const fixtures = (await fetchUpcomingFixtures()).slice(0, MAX_FIXTURES);
 
     // Pass 1: real per-team data for every fixture (mesh + Bzzoiro + ESPN).
+    // Team xG comes from the persistent cache whenever it is still valid;
+    // the single aggregate hit/miss line is emitted once the pass is done.
+    resetXgCacheScan();
     const rows = await mapWithConcurrency(fixtures, CONCURRENCY, async (fx) =>
       withTimeout(fetchRealFixtureData(fx), REALDATA_TIMEOUT_MS, () =>
         console.warn(
@@ -1026,6 +1386,7 @@ export async function GET(req: Request): Promise<Response> {
         ),
       ),
     );
+    logXgCacheScan();
     const usable = rows.filter((row): row is RealFixtureData => row !== null);
 
     // Pass 2: scan averages from the fetched real data (tempo normalisation).
