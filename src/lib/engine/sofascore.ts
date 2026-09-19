@@ -237,10 +237,21 @@ export async function buildTeamStatProfile(
     .slice(-lastN);
   if (finished.length === 0) return null;
 
+  // Walk the finished matches with bounded concurrency (8 in flight) instead
+  // of a strictly sequential loop — each ESPN boxscore can take up to ~12s,
+  // so 20 sequential calls can stall a single team profile for minutes.
+  // Same rows collected: per-call failures still degrade to a skipped row,
+  // and the usable-stat filter below is unchanged.
+  const CONCURRENCY = 8;
   const rows: OneMatch[] = [];
-  for (const e of finished) {
-    const st = await matchStatsForTeam(slug, e.id!, id);
-    if (st && (st.shots > 0 || st.corners > 0 || st.fouls > 0)) rows.push(st);
+  for (let i = 0; i < finished.length; i += CONCURRENCY) {
+    const batch = finished.slice(i, i + CONCURRENCY);
+    const results = await Promise.all(
+      batch.map((e) => matchStatsForTeam(slug, e.id!, id).catch(() => null)),
+    );
+    for (const st of results) {
+      if (st && (st.shots > 0 || st.corners > 0 || st.fouls > 0)) rows.push(st);
+    }
   }
   // A single match's corner/card counts are a weak signal but real data —
   // callers already see the sample count via `samples` and can down-weight it.

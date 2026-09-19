@@ -10,7 +10,11 @@
 //      signal beats no signal; callers see the count via `samples`;
 //   2. zero matches with any usable stat still returns null;
 //   3. the default look-back window now spans up to 20 recent finished
-//      matches (was 10), keeping the most recent ones.
+//      matches (was 10), keeping the most recent ones;
+//   4. the bounded-parallel (8-wide) boxscore walk still visits all 20
+//      finished matches and yields samples = 20;
+//   5. rejected boxscore calls degrade to skipped rows instead of failing
+//      the build (3 of 20 wiped out → samples = 17).
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -66,19 +70,32 @@ function boxscoreResponse(
 
 /**
  * Wire the resilientJson stub: team list + season schedule + one summary
- * boxscore per event id (a null entry = no boxscore for that match).
+ * boxscore per event id (a null entry = no boxscore for that match, and the
+ * REJECT sentinel = the summary call itself rejects, e.g. an ESPN timeout).
  */
+const REJECT = { reject: true } as const;
+
 function stubEspn(boxscores: Record<string, unknown>): void {
   espnJson.mockImplementation(async (url?: string) => {
     const u = url ?? "";
     if (u.includes("/schedule")) return scheduleResponse(Object.keys(boxscores));
     if (u.includes("/summary")) {
       const id = new URL(u).searchParams.get("event");
-      return boxscores[id ?? ""] ?? null;
+      const res = boxscores[id ?? ""] ?? null;
+      if (res === REJECT) throw new Error("ESPN boxscore timeout");
+      return res;
     }
     if (u.endsWith("/teams")) return teamsResponse();
     return null;
   });
+}
+
+/** Event ids (in call order) of every summary/boxscore call the stub saw. */
+function summaryCalls(): string[] {
+  return espnJson.mock.calls
+    .map((call) => String(call[0]))
+    .filter((u) => u.includes("/summary"))
+    .map((u) => new URL(u).searchParams.get("event") ?? "");
 }
 
 beforeEach(() => {
@@ -155,5 +172,53 @@ describe("buildTeamStatProfile — minimum-sample & look-back policy", () => {
     expect(all!.samples).toBe(12);
     expect(all!.corners.n).toBe(12);
     expect(all!.corners.mean).toBeCloseTo(6.5, 10); // mean of 1..12
+  });
+});
+
+describe("buildTeamStatProfile — bounded-parallel boxscore walk", () => {
+  it("fetches all 20 finished boxscores and builds a profile with samples = 20", async () => {
+    const twenty: Record<string, unknown> = {};
+    for (let i = 1; i <= 20; i++) {
+      twenty[`ev-${i}`] = boxscoreResponse([
+        { name: "totalShots", displayValue: String(i) },
+        { name: "wonCorners", displayValue: String(i) },
+      ]);
+    }
+    stubEspn(twenty);
+
+    const profile = await buildTeamStatProfile("Arsenal", "eng.1");
+
+    // Every one of the 20 finished events got its own summary call — the
+    // bounded-parallel walk visits the full window, not just the first batch.
+    const calls = summaryCalls();
+    expect(calls).toHaveLength(20);
+    expect(new Set(calls).size).toBe(20);
+    for (let i = 1; i <= 20; i++) expect(calls).toContain(`ev-${i}`);
+
+    expect(profile).not.toBeNull();
+    expect(profile!.samples).toBe(20);
+    expect(profile!.corners.n).toBe(20);
+    expect(profile!.corners.mean).toBeCloseTo(10.5, 10); // mean of 1..20
+  });
+
+  it("swallows 3 rejected boxscore calls and still returns samples = 17", async () => {
+    const twenty: Record<string, unknown> = {};
+    for (let i = 1; i <= 20; i++) {
+      twenty[`ev-${i}`] =
+        i <= 3
+          ? REJECT // three ESPN calls blow up entirely (e.g. timeout/reject)
+          : boxscoreResponse([{ name: "wonCorners", displayValue: String(i) }]);
+    }
+    stubEspn(twenty);
+
+    const profile = await buildTeamStatProfile("Arsenal", "eng.1");
+
+    // All 20 were attempted, but the 3 failures degrade to skipped rows
+    // instead of failing the whole profile build.
+    expect(summaryCalls()).toHaveLength(20);
+    expect(profile).not.toBeNull();
+    expect(profile!.samples).toBe(17);
+    expect(profile!.corners.n).toBe(17);
+    expect(profile!.corners.mean).toBeCloseTo(12, 10); // mean of 4..20
   });
 });
