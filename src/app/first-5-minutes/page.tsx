@@ -23,12 +23,37 @@ const LEAGUE_ORDER = [
 
 const LEAGUE_PRIORITY = new Map(LEAGUE_ORDER.map((slug, index) => [slug, index]));
 
+type RecentResultOutcome = "WIN" | "LOSS" | "PUSH" | "VOID";
+
+type RecentResultMarket = {
+  market: string;
+  selection: string;
+  hitRate: number;
+  confidence: "HIGH" | "MEDIUM" | "LOW";
+  outcome: RecentResultOutcome;
+};
+
+type RecentResultMatch = {
+  eventId: string;
+  matchLabel: string;
+  league: string;
+  leagueSlug: string;
+  matchDate: string;
+  homeScore: number | null;
+  awayScore: number | null;
+  markets: RecentResultMarket[];
+};
+
 export default function First5MinutesPage() {
   const [data, setData] = useState<First5MinutesData | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [marketFilter, setMarketFilter] = useState<First5MarketKey | "all">("all");
+  const [recentResults, setRecentResults] = useState<RecentResultMatch[]>([]);
+  const [recentResultsLoading, setRecentResultsLoading] = useState(true);
+  const [recentResultsError, setRecentResultsError] = useState<string | null>(null);
+  const [showAllRecentResults, setShowAllRecentResults] = useState(false);
 
   const dataRef = useRef<First5MinutesData | null>(null);
   const initialFetchDone = useRef(false);
@@ -58,11 +83,40 @@ export default function First5MinutesPage() {
     }
   }, []);
 
+  const loadRecentResults = useCallback(async () => {
+    setRecentResultsLoading(true);
+    setRecentResultsError(null);
+    try {
+      const response = await fetch("/api/first-5-minutes/results", { cache: "no-store" });
+      const payload = (await response.json()) as {
+        ok?: boolean;
+        matches?: RecentResultMatch[];
+      };
+      if (!response.ok || payload.ok === false) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      const matches = Array.isArray(payload.matches) ? payload.matches : [];
+      setRecentResults(
+        [...matches].sort((a, b) => b.matchDate.localeCompare(a.matchDate)),
+      );
+    } catch (reason) {
+      setRecentResults([]);
+      setRecentResultsError(
+        reason instanceof Error
+          ? reason.message
+          : "Unable to load settled First 5 Minutes results.",
+      );
+    } finally {
+      setRecentResultsLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     if (initialFetchDone.current) return;
     initialFetchDone.current = true;
     void load(false);
-  }, [load]);
+    void loadRecentResults();
+  }, [load, loadRecentResults]);
 
   const groupedMatches = useMemo(() => {
     if (!data?.matches?.length) return [];
@@ -315,6 +369,14 @@ export default function First5MinutesPage() {
           <EmptyState onRetry={() => void load(true)} />
         ) : null}
 
+        <RecentResultsSection
+          matches={recentResults}
+          loading={recentResultsLoading}
+          error={recentResultsError}
+          showAll={showAllRecentResults}
+          onToggle={() => setShowAllRecentResults((visible) => !visible)}
+        />
+
         <p className="border-t border-cyan-400/10 pt-4 text-center text-[11px] leading-relaxed text-slate-500">
           Opening-phase markets are inherently volatile. Odds shown are model
           prices (fair odds plus a 1xBet-style tick round), not a bookmaker quote,
@@ -323,6 +385,142 @@ export default function First5MinutesPage() {
       </div>
     </main>
   );
+}
+
+function RecentResultsSection({
+  matches,
+  loading,
+  error,
+  showAll,
+  onToggle,
+}: {
+  matches: RecentResultMatch[];
+  loading: boolean;
+  error: string | null;
+  showAll: boolean;
+  onToggle: () => void;
+}) {
+  const markets = matches.flatMap((match) => match.markets);
+  const won = markets.filter((market) => market.outcome === "WIN").length;
+  const lost = markets.filter((market) => market.outcome === "LOSS").length;
+  const decided = won + lost;
+  const realisedRate = decided > 0 ? (won / decided) * 100 : 0;
+  const sortedMatches = [...matches].sort((a, b) => b.matchDate.localeCompare(a.matchDate));
+  const visibleMatches = showAll ? sortedMatches : sortedMatches.slice(0, 10);
+
+  return (
+    <section
+      id="recent-results"
+      aria-labelledby="recent-results-heading"
+      className="space-y-4 rounded-2xl border border-cyan-500/15 bg-cyan-500/5 p-4 sm:p-5"
+    >
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h2
+            id="recent-results-heading"
+            className="font-mono text-xs font-bold uppercase tracking-[0.18em] text-cyan-200"
+          >
+            📊 RECENT RESULTS — LAST 14 DAYS
+          </h2>
+          {!loading && matches.length > 0 && (
+            <p className="mt-2 text-xs text-slate-400">
+              {matches.length} finished match{matches.length === 1 ? "" : "es"} · {won} won · {lost} lost · {formatRecentPercent(realisedRate)} hit rate
+            </p>
+          )}
+        </div>
+        {!loading && matches.length > 10 && (
+          <button
+            type="button"
+            onClick={onToggle}
+            className="rounded-full border border-cyan-400/25 bg-cyan-400/10 px-3 py-1.5 text-[11px] font-semibold text-cyan-200 transition hover:bg-cyan-400/20"
+          >
+            {showAll ? "Show fewer" : `Show all ${matches.length}`}
+          </button>
+        )}
+      </div>
+
+      {loading ? (
+        <div className="flex items-center gap-2 text-xs text-slate-500" aria-busy="true">
+          <span className="h-3 w-3 animate-spin rounded-full border-2 border-slate-700 border-t-cyan-400" />
+          Loading settled predictions…
+        </div>
+      ) : matches.length === 0 ? (
+        <p className="rounded-xl border border-slate-700/50 bg-slate-900/30 px-3 py-4 text-sm text-slate-500">
+          {error
+            ? "Settled results are temporarily unavailable."
+            : "No settled predictions in the last 14 days yet."}
+        </p>
+      ) : (
+        <div className="divide-y divide-cyan-400/10 rounded-xl border border-cyan-400/10 bg-black/10">
+          {visibleMatches.map((match) => {
+            const score = match.homeScore === null || match.awayScore === null
+              ? "—"
+              : `${match.homeScore}-${match.awayScore}`;
+            const leagueName = LEAGUE_MAP[match.leagueSlug]?.name ?? match.league;
+            return (
+              <article key={match.eventId} className="p-4 first:rounded-t-xl last:rounded-b-xl">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-semibold text-slate-100">
+                      {match.matchLabel}
+                    </div>
+                    <div className="mt-1 text-xs text-slate-500">
+                      {leagueName} · {match.matchDate}
+                    </div>
+                  </div>
+                  <div className="shrink-0 font-mono text-sm font-bold text-cyan-100">
+                    {score}
+                  </div>
+                </div>
+
+                <div className="mt-3 space-y-2 border-l border-cyan-400/20 pl-3">
+                  {match.markets.map((market, marketIndex) => (
+                    <div key={`${market.market}-${market.selection}-${marketIndex}`} className="text-xs">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="font-medium text-slate-300">
+                          {market.market} · {market.selection}
+                        </span>
+                        <span className={`rounded-full border px-2 py-0.5 text-[10px] font-bold tracking-wide ${recentOutcomeClasses(market.outcome)}`}>
+                          {market.outcome}
+                        </span>
+                      </div>
+                      <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-slate-500">
+                        <span>Model: {formatRecentPercent(market.hitRate)} ({market.confidence})</span>
+                        <span>
+                          Result: <span className={recentOutcomeTextClass(market.outcome)}>{market.outcome}</span>
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </article>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function formatRecentPercent(value: number): string {
+  if (!Number.isFinite(value)) return "0%";
+  const percentage = value <= 1 ? value * 100 : value;
+  const rounded = Math.round(percentage * 10) / 10;
+  return `${Number.isInteger(rounded) ? rounded.toFixed(0) : rounded.toFixed(1)}%`;
+}
+
+function recentOutcomeClasses(outcome: RecentResultOutcome): string {
+  if (outcome === "WIN") return "border-emerald-400/30 bg-emerald-400/10 text-emerald-300";
+  if (outcome === "LOSS") return "border-rose-400/30 bg-rose-400/10 text-rose-300";
+  if (outcome === "PUSH") return "border-amber-300/30 bg-amber-300/10 text-amber-200";
+  return "border-slate-600 bg-slate-700/40 text-slate-400";
+}
+
+function recentOutcomeTextClass(outcome: RecentResultOutcome): string {
+  if (outcome === "WIN") return "font-semibold text-emerald-300";
+  if (outcome === "LOSS") return "font-semibold text-rose-300";
+  if (outcome === "PUSH") return "font-semibold text-amber-200";
+  return "font-semibold text-slate-400";
 }
 
 function FilterChip({
