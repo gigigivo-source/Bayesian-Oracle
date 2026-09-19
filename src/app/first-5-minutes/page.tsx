@@ -10,6 +10,7 @@ import Link from "next/link";
 import { LEAGUE_MAP } from "@/lib/leagues";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { EmptyState } from "./components/EmptyState";
+import { AnalyticsSheet } from "./components/AnalyticsSheet";
 import { MARKET_LABEL, MARKET_ORDER, formatDateTime } from "./components/format";
 import { MatchCard } from "./components/MatchCard";
 import type { First5MarketKey, First5MinutesData } from "./components/types";
@@ -129,6 +130,8 @@ export default function First5MinutesPage() {
   // placeholder is the honest state either way).
   const [settledMatches, setSettledMatches] = useState<SettledMatch[] | null>(null);
   const [settledLoading, setSettledLoading] = useState(true);
+  // Analytics bottom sheet (📊 Analytics chip) — fetched only while open.
+  const [analyticsOpen, setAnalyticsOpen] = useState(false);
 
   const dataRef = useRef<First5MinutesData | null>(null);
   const initialFetchDone = useRef(false);
@@ -298,6 +301,16 @@ export default function First5MinutesPage() {
             </Link>
             <button
               type="button"
+              onClick={() => setAnalyticsOpen(true)}
+              title="Realised vs claimed performance for settled First 5 Minutes picks"
+              aria-label="Open First 5 Minutes analytics"
+              aria-haspopup="dialog"
+              className="inline-flex items-center gap-1.5 rounded-full bg-gradient-to-r from-cyan-400 to-teal-400 px-4 py-2 text-xs font-bold text-white shadow-lg shadow-cyan-500/30 transition-all duration-300 hover:scale-105 hover:shadow-cyan-400/50 active:scale-95"
+            >
+              📊 Analytics
+            </button>
+            <button
+              type="button"
               onClick={() => void load(true)}
               disabled={loading || refreshing}
               className="inline-flex items-center gap-1.5 rounded-full bg-gradient-to-r from-cyan-400 to-teal-400 px-4 py-2 text-xs font-bold text-white shadow-lg shadow-cyan-500/30 transition-all duration-300 hover:scale-105 hover:shadow-cyan-400/50 active:scale-95 disabled:opacity-60"
@@ -444,6 +457,8 @@ export default function First5MinutesPage() {
           and no model can guarantee a sports result.
         </p>
       </div>
+
+      <AnalyticsSheet open={analyticsOpen} onClose={() => setAnalyticsOpen(false)} />
     </main>
   );
 }
