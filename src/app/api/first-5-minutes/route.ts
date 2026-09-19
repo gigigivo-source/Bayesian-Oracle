@@ -53,7 +53,7 @@ import { getCachedMeshProfile } from "@/lib/engine/dataMesh";
 import { fetchScoreboard, fetchSummary, type FixtureLite, type TeamLite } from "@/lib/espn";
 import { fetchEventDetail, fetchTeamXgAverage } from "@/lib/va/xgFetcher";
 import { resolveBzzoiroEvent } from "@/lib/va/oddsFetcher";
-import { LEAGUE_TIER, leagueTier } from "@/lib/leaguePriority";
+import { leagueTier } from "@/lib/leaguePriority";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -83,8 +83,6 @@ const CONCURRENCY = 8;
  * the fixture is skipped (no markets published for it).
  */
 const REALDATA_TIMEOUT_MS = 25_000;
-/** Competition tiers included in the feed. */
-const MAX_LEAGUE_TIER = 3;
 /** Hit-rate threshold that flips the "Likely Guaranteed" flag. */
 export const GUARANTEED_HIT_RATE = 0.95;
 /** Finished matches behind each Bzzoiro rolling xG average. */
@@ -328,10 +326,24 @@ const MARKET_META: Record<First5MarketKey, { label: string; shortLabel: string; 
 
 const MARKET_ORDER: First5MarketKey[] = ["goal", "corner", "card"];
 
-/** Competitions included in the feed (tier 1–3 of the shared priority table). */
-const FIRST_5_LEAGUES = Object.entries(LEAGUE_TIER)
-  .filter(([, tier]) => tier <= MAX_LEAGUE_TIER)
-  .map(([slug]) => slug);
+/**
+ * Competitions included in the feed — an explicit whitelist (every slug
+ * verified against the league catalogue, LEAGUE_MAP in src/lib/leagues.ts):
+ *   - Top-5 European domestic leagues
+ *   - Their domestic cups (FA Cup, EFL Cup, Copa del Rey, DFB-Pokal,
+ *     Coppa Italia, Coupe de France)
+ *   - UEFA club competitions (Champions, Europa, Conference)
+ *
+ * Selection is whitelist-only, NOT tier-based: anything outside this set
+ * (Championship, Belgian Pro League, Greek Super League, …) is never fetched.
+ */
+const ALLOWED_LEAGUES = new Set([
+  "eng.1", "esp.1", "ita.1", "ger.1", "fra.1",
+  "eng.fa", "eng.league_cup",
+  "esp.copa_del_rey", "ita.coppa_italia",
+  "ger.dfb_pokal", "fra.coupe_de_france",
+  "uefa.champions", "uefa.europa", "uefa.europa.conf",
+]);
 
 function round(value: number, decimals = 4): number {
   const factor = 10 ** decimals;
@@ -789,9 +801,13 @@ async function mapWithConcurrency<T, R>(
 
 /** Fetch every upcoming fixture in the next 7 days from the dynamic feed. */
 async function fetchUpcomingFixtures(): Promise<FixtureLite[]> {
+  console.info(
+    "[First5] scanning leagues: eng.1, esp.1, ita.1, ger.1, fra.1, " +
+    "uefa.champions, uefa.europa, uefa.europa.conf (+ 6 cups)",
+  );
   const range = dateRange(LOOKAHEAD_DAYS);
   const boards = await Promise.all(
-    FIRST_5_LEAGUES.map(async (slug) => {
+    Array.from(ALLOWED_LEAGUES, async (slug) => {
       try {
         return await fetchScoreboard(slug, range);
       } catch (error) {
