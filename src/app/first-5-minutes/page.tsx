@@ -12,6 +12,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { EmptyState } from "./components/EmptyState";
 import { MARKET_LABEL, MARKET_ORDER, formatDateTime } from "./components/format";
 import { MatchCard } from "./components/MatchCard";
+import { AnalyticsSheet } from "./components/AnalyticsSheet";
 import type { First5MarketKey, First5MinutesData } from "./components/types";
 
 const LEAGUE_ORDER = [
@@ -129,6 +130,8 @@ export default function First5MinutesPage() {
   // placeholder is the honest state either way).
   const [settledMatches, setSettledMatches] = useState<SettledMatch[] | null>(null);
   const [settledLoading, setSettledLoading] = useState(true);
+  // Analytics bottom sheet (per-market, confidence, league and calibration views).
+  const [analyticsOpen, setAnalyticsOpen] = useState(false);
 
   const dataRef = useRef<First5MinutesData | null>(null);
   const initialFetchDone = useRef(false);
@@ -312,6 +315,15 @@ export default function First5MinutesPage() {
                 <>🔄 Refresh</>
               )}
             </button>
+            <button
+              type="button"
+              onClick={() => setAnalyticsOpen(true)}
+              aria-haspopup="dialog"
+              aria-label="Open First 5 Minutes analytics"
+              className="inline-flex items-center gap-1.5 rounded-full bg-gradient-to-r from-cyan-400 to-teal-400 px-4 py-2 text-xs font-bold text-white shadow-lg shadow-cyan-500/30 transition-all duration-300 hover:scale-105 hover:shadow-cyan-400/50 active:scale-95"
+            >
+              📊 Analytics
+            </button>
           </div>
         </div>
 
@@ -444,6 +456,8 @@ export default function First5MinutesPage() {
           and no model can guarantee a sports result.
         </p>
       </div>
+
+      <AnalyticsSheet open={analyticsOpen} onClose={() => setAnalyticsOpen(false)} />
     </main>
   );
 }

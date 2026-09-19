@@ -15,33 +15,78 @@
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  GET as getAnalyticsHandler,
+  actionFor,
+  bucketFor,
+  clearAnalyticsCache,
+  trendWindowFor,
+} from "@/app/api/first-5-minutes/analytics/route";
 import { GET as getSettledResults } from "@/app/api/first-5-minutes/results/route";
 import First5MinutesPage from "./page";
+import { AnalyticsSheet } from "./components/AnalyticsSheet";
 import { formatDateTime } from "./components/format";
 import type { First5Match, First5MinutesData } from "./components/types";
 
 // ─── Database mock ────────────────────────────────────────────────────────────
-// db.select(...).from(...).where(...).orderBy(...).limit(...) — every link is
-// chainable and only limit() answers, mirroring how the route consumes the
-// builder. `lastLimit` records the row budget the route asked for (matches × 4).
+// The settled-results route consumes db.select(...).from(...).where(...)
+// .orderBy(...).limit(...) — every link is chainable and only limit() answers,
+// resolving `dbState.rows` (`lastLimit` records the row budget the route asked
+// for: matches × 4).
+//
+// The analytics route instead runs one aggregate query per dimension and
+// awaits the builder directly (no limit). Those queries are dispatched by the
+// LEAD FIELD of the select (each dimension selects a distinctive first key:
+// "settled" for totals, "market", "selection", "band", "leagueSlug", "bucket",
+// "window"), answering from `dbState.analytics`; `dbState.analyticsError`
+// simulates a database failure.
 
 const dbState = vi.hoisted(() => ({
   rows: [] as Array<Record<string, unknown>>,
   readError: null as Error | null,
   lastLimit: null as number | null,
+  analytics: {
+    totals: { settled: 0, won: 0, lost: 0, push: 0, void: 0, claimed: 0 },
+    market: [],
+    selection: [],
+    band: [],
+    leagueSlug: [],
+    bucket: [],
+    window: [],
+  } as Record<string, unknown>,
+  analyticsError: null as Error | null,
 }));
 
 vi.mock("@/db", () => {
-  const query = {
-    where: () => query,
-    orderBy: () => query,
-    limit: (count: number) => {
-      dbState.lastLimit = count;
-      if (dbState.readError) return Promise.reject(dbState.readError);
-      return Promise.resolve(dbState.rows);
-    },
-  };
-  return { db: { select: () => ({ from: () => query }) } };
+  function makeQuery(fields?: Record<string, unknown>) {
+    const dimension =
+      fields && typeof fields === "object" ? (Object.keys(fields)[0] ?? "") : "";
+    const query = {
+      where: () => query,
+      orderBy: () => query,
+      groupBy: () => query,
+      having: () => query,
+      limit: (count: number) => {
+        dbState.lastLimit = count;
+        if (dbState.readError) return Promise.reject(dbState.readError);
+        return Promise.resolve(dbState.rows);
+      },
+      then: (
+        resolve: (rows: unknown) => void,
+        reject: (reason: unknown) => void,
+      ) => {
+        if (dbState.analyticsError) {
+          reject(dbState.analyticsError);
+          return;
+        }
+        // Totals is a single-row aggregate; every other dimension is a list.
+        if (dimension === "settled") resolve([dbState.analytics.totals]);
+        else resolve(dbState.analytics[dimension] ?? []);
+      },
+    };
+    return query;
+  }
+  return { db: { select: (fields?: Record<string, unknown>) => ({ from: () => makeQuery(fields) }) } };
 });
 
 let root: Root | null = null;
@@ -51,12 +96,24 @@ afterEach(() => {
   root = null;
   document.body.innerHTML = "";
   vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 
 beforeEach(() => {
   dbState.rows = [];
   dbState.readError = null;
   dbState.lastLimit = null;
+  dbState.analytics = {
+    totals: { settled: 0, won: 0, lost: 0, push: 0, void: 0, claimed: 0 },
+    market: [],
+    selection: [],
+    band: [],
+    leagueSlug: [],
+    bucket: [],
+    window: [],
+  };
+  dbState.analyticsError = null;
+  clearAnalyticsCache();
 });
 
 /** ISO day string N days before today — the same convention the route uses. */
@@ -455,5 +512,384 @@ describe("GET /api/first-5-minutes/results", () => {
     const { response, body } = await getResults();
     expect(response.status).toBe(200);
     expect(body).toEqual({ ok: true, matches: [] });
+  });
+});
+
+// ─── GET /api/first-5-minutes/analytics (fixtures) ────────────────────────────
+
+/** One aggregated group row as the analytics SQL would deliver it. */
+interface AnalyticsAggregateRow {
+  n: number;
+  won: number;
+  lost: number;
+  claimed: number;
+}
+
+interface AnalyticsFixture {
+  totals: {
+    settled: number;
+    won: number;
+    lost: number;
+    push: number;
+    void: number;
+    claimed: number;
+  };
+  market: Array<AnalyticsAggregateRow & { market: string }>;
+  selection: Array<AnalyticsAggregateRow & { selection: string }>;
+  band: Array<AnalyticsAggregateRow & { band: string }>;
+  leagueSlug: Array<AnalyticsAggregateRow & { leagueSlug: string; leagueName: string | null }>;
+  bucket: Array<AnalyticsAggregateRow & { bucket: string }>;
+  window: Array<AnalyticsAggregateRow & { window: string }>;
+}
+
+function analyticsFixture(overrides: Partial<AnalyticsFixture> = {}): AnalyticsFixture {
+  return {
+    totals: { settled: 0, won: 0, lost: 0, push: 0, void: 0, claimed: 0 },
+    market: [],
+    selection: [],
+    band: [],
+    leagueSlug: [],
+    bucket: [],
+    window: [],
+    ...overrides,
+  };
+}
+
+interface AnalyticsResponseShape {
+  ok: boolean;
+  generatedAt: string;
+  windowDays: number;
+  totals: Record<string, number>;
+  byMarket: Array<Record<string, unknown>>;
+  bySelection: Array<Record<string, unknown>>;
+  byConfidence: Array<Record<string, unknown>>;
+  byLeague: Array<Record<string, unknown>>;
+  byBucket: Array<Record<string, unknown>>;
+  trend: Record<string, Record<string, number>>;
+  trust: { best: Array<Record<string, unknown>>; worst: Array<Record<string, unknown>> };
+}
+
+async function getAnalytics(query = "") {
+  const response = await getAnalyticsHandler(
+    new Request(`http://localhost/api/first-5-minutes/analytics${query}`),
+  );
+  const body = (await response.json()) as AnalyticsResponseShape;
+  return { response, body };
+}
+
+/** Seed the per-dimension aggregates the mocked database will answer with. */
+function seedAnalytics(fixture: AnalyticsFixture): void {
+  dbState.analytics = fixture as unknown as Record<string, unknown>;
+}
+
+const ZERO_TREND = { n: 0, won: 0, lost: 0, realised: 0, claimed: 0, edge: 0 };
+const ZERO_TOTALS = {
+  settled: 0, won: 0, lost: 0, push: 0, void: 0, realisedRate: 0, claimedAverage: 0, edge: 0,
+};
+
+// ─── Classification helpers (the rules the endpoint publishes) ────────────────
+
+describe("first5 analytics classification helpers", () => {
+  it("labels a row with n<20 as insufficient regardless of edge", () => {
+    expect(actionFor(19, 0.4)).toBe("insufficient");
+    expect(actionFor(0, 0)).toBe("insufficient");
+    expect(actionFor(Number.NaN, 0.1)).toBe("insufficient");
+  });
+
+  it("labels a settled row with |edge| < 0.05 as trusted", () => {
+    expect(actionFor(20, 0.049)).toBe("trusted");
+    expect(actionFor(50, -0.04)).toBe("trusted");
+    expect(actionFor(100, 0)).toBe("trusted");
+  });
+
+  it("labels a row with edge < -0.15 as avoid and everything between as watch", () => {
+    expect(actionFor(50, -0.2)).toBe("avoid");
+    expect(actionFor(50, -0.15)).toBe("avoid");
+    expect(actionFor(50, -0.14)).toBe("watch");
+    expect(actionFor(50, 0.3)).toBe("watch");
+  });
+
+  it("assigns hitRate 0.72 to the 0.70-0.80 bucket", () => {
+    expect(bucketFor(0.72)).toBe("0.70-0.80");
+    expect(bucketFor(0.5)).toBe("0.50-0.60");
+    expect(bucketFor(0.6)).toBe("0.60-0.70");
+    expect(bucketFor(0.79)).toBe("0.70-0.80");
+    expect(bucketFor(1)).toBe("0.90-1.00");
+    // Rows outside [0.50, 1.00] are excluded from the aggregate entirely.
+    expect(bucketFor(0.49)).toBeNull();
+    expect(bucketFor(1.01)).toBeNull();
+    expect(bucketFor(Number.NaN)).toBeNull();
+  });
+
+  it("splits the trend: now-3d lands in last7d, now-10d in previous", () => {
+    expect(trendWindowFor(dayOffset(3))).toBe("last7d");
+    expect(trendWindowFor(dayOffset(7))).toBe("last7d");
+    expect(trendWindowFor(dayOffset(8))).toBe("previous");
+    expect(trendWindowFor(dayOffset(10))).toBe("previous");
+    expect(trendWindowFor(dayOffset(14))).toBe("previous");
+    // Older than the fortnight, or not a date at all → no window.
+    expect(trendWindowFor(dayOffset(15))).toBeNull();
+    expect(trendWindowFor("not-a-date")).toBeNull();
+  });
+});
+
+// ─── GET /api/first-5-minutes/analytics ───────────────────────────────────────
+
+describe("GET /api/first-5-minutes/analytics", () => {
+  it("returns all-zero totals and empty arrays when performance_log is empty", async () => {
+    const { response, body } = await getAnalytics();
+    expect(response.status).toBe(200);
+    expect(body.ok).toBe(true);
+    expect(body.generatedAt).toEqual(expect.any(String));
+    expect(body.windowDays).toBe(30);
+    expect(body.totals).toEqual(ZERO_TOTALS);
+    expect(body.byMarket).toEqual([]);
+    expect(body.bySelection).toEqual([]);
+    expect(body.byConfidence).toEqual([]);
+    expect(body.byLeague).toEqual([]);
+    expect(body.byBucket).toEqual([]);
+    expect(body.trend).toEqual({ last7d: ZERO_TREND, previous: ZERO_TREND });
+    expect(body.trust).toEqual({ best: [], worst: [] });
+  });
+
+  it("aggregates 3 settled rows (2 WIN, 1 LOSS) into one byMarket row with realised 0.667", async () => {
+    seedAnalytics(analyticsFixture({
+      totals: { settled: 3, won: 2, lost: 1, push: 0, void: 0, claimed: 0.55 },
+      market: [
+        { market: "Goal in First 5 Minutes", n: 3, won: 2, lost: 1, claimed: 0.55 },
+      ],
+    }));
+
+    const { body } = await getAnalytics();
+    expect(body.byMarket).toHaveLength(1);
+    expect(body.byMarket[0]).toMatchObject({
+      market: "Goal in First 5 Minutes",
+      n: 3,
+      won: 2,
+      lost: 1,
+      realised: 0.667,
+      claimed: 0.55,
+      edge: 0.117,
+      // 3 settled rows is below the 20-pick threshold, whatever the edge.
+      action: "insufficient",
+    });
+    expect(body.totals).toEqual({
+      settled: 3,
+      won: 2,
+      lost: 1,
+      push: 0,
+      void: 0,
+      realisedRate: 0.667,
+      claimedAverage: 0.55,
+      edge: 0.117,
+    });
+  });
+
+  it("builds every dimension from its own aggregate and ranks the trust lists", async () => {
+    seedAnalytics(analyticsFixture({
+      totals: { settled: 45, won: 25, lost: 15, push: 3, void: 2, claimed: 0.6 },
+      market: [
+        { market: "Goal in First 5 Minutes", n: 30, won: 20, lost: 8, claimed: 0.7 },
+        { market: "Corner in First 5 Minutes", n: 25, won: 5, lost: 18, claimed: 0.6 },
+        { market: "Card in First 5 Minutes", n: 10, won: 4, lost: 4, claimed: 0.55 },
+      ],
+      selection: [
+        { selection: "Yes", n: 40, won: 24, lost: 14, claimed: 0.62 },
+        { selection: "No", n: 5, won: 1, lost: 1, claimed: 0.5 },
+      ],
+      band: [
+        { band: "HIGH", n: 20, won: 14, lost: 4, claimed: 0.8 },
+        { band: "LOW", n: 12, won: 3, lost: 8, claimed: 0.45 },
+      ],
+      leagueSlug: [
+        { leagueSlug: "eng.1", leagueName: "English Premier League", n: 22, won: 12, lost: 6, claimed: 0.64 },
+        { leagueSlug: "ger.1", leagueName: "German Bundesliga", n: 8, won: 3, lost: 4, claimed: 0.5 },
+      ],
+      bucket: [
+        { bucket: "0.70-0.80", n: 15, won: 11, lost: 2, claimed: 0.75 },
+        { bucket: "0.50-0.60", n: 8, won: 3, lost: 4, claimed: 0.55 },
+      ],
+      window: [
+        { window: "last7d", n: 12, won: 8, lost: 2, claimed: 0.7 },
+        { window: "previous", n: 9, won: 4, lost: 4, claimed: 0.5 },
+      ],
+    }));
+
+    const { body } = await getAnalytics();
+
+    // Totals: 25/(25+15) = 0.625 realised against a 0.6 average claim.
+    expect(body.totals).toEqual({
+      settled: 45, won: 25, lost: 15, push: 3, void: 2,
+      realisedRate: 0.625, claimedAverage: 0.6, edge: 0.025,
+    });
+
+    // Per market: trusted (|edge| < 0.05), avoid (edge < -0.15), and a thin
+    // n=10 row that stays insufficient even though its edge reads -0.05.
+    expect(body.byMarket.map((row) => row.market)).toEqual([
+      "Goal in First 5 Minutes", "Corner in First 5 Minutes", "Card in First 5 Minutes",
+    ]);
+    expect(body.byMarket[0]).toMatchObject({ n: 30, realised: 0.714, edge: 0.014, action: "trusted" });
+    expect(body.byMarket[1]).toMatchObject({ n: 25, realised: 0.217, edge: -0.383, action: "avoid" });
+    expect(body.byMarket[2]).toMatchObject({ n: 10, action: "insufficient" });
+
+    // Trust lists only consider n>=20 and rank by edge, best first / worst first.
+    expect(body.trust.best).toEqual([
+      { marketKey: "Goal in First 5 Minutes", n: 30, edge: 0.014, action: "trusted" },
+      { marketKey: "Corner in First 5 Minutes", n: 25, edge: -0.383, action: "avoid" },
+    ]);
+    expect(body.trust.worst).toEqual([
+      { marketKey: "Corner in First 5 Minutes", n: 25, edge: -0.383, action: "avoid" },
+      { marketKey: "Goal in First 5 Minutes", n: 30, edge: 0.014, action: "trusted" },
+    ]);
+
+    expect(body.bySelection).toEqual([
+      expect.objectContaining({ selection: "Yes", n: 40, realised: 0.632, edge: 0.012 }),
+      expect.objectContaining({ selection: "No", n: 5, realised: 0.5, edge: 0 }),
+    ]);
+    expect(body.byConfidence[0]).toMatchObject({ band: "HIGH", n: 20, realised: 0.778, edge: -0.022 });
+    expect(body.byLeague[0]).toMatchObject({
+      leagueSlug: "eng.1", leagueName: "English Premier League", n: 22, realised: 0.667, edge: 0.027,
+    });
+
+    // Buckets keep realised/claimed/diff (and sort by bucket label).
+    expect(body.byBucket).toEqual([
+      expect.objectContaining({ bucket: "0.50-0.60", n: 8, realised: 0.429, claimed: 0.55, diff: -0.121 }),
+      expect.objectContaining({ bucket: "0.70-0.80", n: 15, realised: 0.846, claimed: 0.75, diff: 0.096 }),
+    ]);
+
+    // Trend windows land where trendWindowFor() says they should.
+    expect(body.trend.last7d).toMatchObject({ n: 12, won: 8, realised: 0.8, claimed: 0.7, edge: 0.1 });
+    expect(body.trend.previous).toMatchObject({ n: 9, won: 4, realised: 0.5, claimed: 0.5, edge: 0 });
+  });
+
+  it("never 500s: a database error answers with the empty payload and no throw", async () => {
+    dbState.analyticsError = new Error("connection refused");
+
+    const { response, body } = await getAnalytics();
+    expect(response.status).toBe(200);
+    expect(body.ok).toBe(true);
+    expect(body.totals).toEqual(ZERO_TOTALS);
+    expect(body.byMarket).toEqual([]);
+    expect(body.bySelection).toEqual([]);
+    expect(body.byConfidence).toEqual([]);
+    expect(body.byLeague).toEqual([]);
+    expect(body.byBucket).toEqual([]);
+    expect(body.trend).toEqual({ last7d: ZERO_TREND, previous: ZERO_TREND });
+    expect(body.trust).toEqual({ best: [], worst: [] });
+  });
+
+  it("caches the payload for 5 minutes keyed by windowDays", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-19T12:00:00Z"));
+    const first = await getAnalytics();
+    expect(first.body.generatedAt).toBe("2026-09-19T12:00:00.000Z");
+
+    // Within the TTL the cached payload is served even though the data moved.
+    seedAnalytics(analyticsFixture({
+      totals: { settled: 9, won: 5, lost: 2, push: 1, void: 1, claimed: 0.6 },
+    }));
+    vi.setSystemTime(new Date("2026-09-19T12:04:59Z"));
+    const second = await getAnalytics();
+    expect(second.body.generatedAt).toBe(first.body.generatedAt);
+    expect(second.body.totals.settled).toBe(0);
+
+    // After 5 minutes the aggregates are recomputed.
+    vi.setSystemTime(new Date("2026-09-19T12:05:00Z"));
+    const third = await getAnalytics();
+    expect(third.body.totals.settled).toBe(9);
+    expect(third.body.generatedAt).toBe("2026-09-19T12:05:00.000Z");
+
+    // A different window is an independent cache entry.
+    vi.setSystemTime(new Date("2026-09-19T12:06:00Z"));
+    const other = await getAnalytics("?days=7");
+    expect(other.body.windowDays).toBe(7);
+    expect(other.body.generatedAt).toBe("2026-09-19T12:06:00.000Z");
+    const again = await getAnalytics("?days=7");
+    expect(again.body.generatedAt).toBe(other.body.generatedAt);
+  });
+});
+
+// ─── AnalyticsSheet ───────────────────────────────────────────────────────────
+
+/** Full response body for the sheet tests, mirroring the endpoint's shape. */
+function analyticsPayload() {
+  return {
+    ok: true,
+    generatedAt: "2026-09-19T12:00:00Z",
+    windowDays: 30,
+    totals: {
+      settled: 24, won: 15, lost: 6, push: 2, void: 1,
+      realisedRate: 0.714, claimedAverage: 0.68, edge: 0.034,
+    },
+    byMarket: [
+      { market: "Goal in First 5 Minutes", n: 24, won: 15, lost: 6, realised: 0.714, claimed: 0.68, edge: 0.034, action: "trusted" },
+      { market: "Corner in First 5 Minutes", n: 6, won: 2, lost: 4, realised: 0.333, claimed: 0.55, edge: -0.217, action: "insufficient" },
+    ],
+    bySelection: [
+      { selection: "Yes", n: 18, won: 12, lost: 4, realised: 0.75, claimed: 0.7, edge: 0.05 },
+    ],
+    byConfidence: [
+      { band: "HIGH", n: 10, won: 7, lost: 2, realised: 0.778, claimed: 0.8, edge: -0.022 },
+    ],
+    byLeague: [
+      { leagueSlug: "eng.1", leagueName: "Premier League", n: 24, won: 15, lost: 6, realised: 0.714, claimed: 0.68, edge: 0.034 },
+    ],
+    byBucket: [
+      { bucket: "0.70-0.80", n: 12, realised: 0.833, claimed: 0.75, diff: 0.083 },
+    ],
+    trend: {
+      last7d: { n: 9, won: 6, lost: 2, realised: 0.75, claimed: 0.7, edge: 0.05 },
+      previous: { n: 10, won: 6, lost: 3, realised: 0.667, claimed: 0.68, edge: -0.013 },
+    },
+    trust: {
+      best: [{ marketKey: "Goal in First 5 Minutes", n: 24, edge: 0.034, action: "trusted" }],
+      worst: [],
+    },
+  };
+}
+
+async function renderSheet(payload: unknown, open = true) {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  const fetchMock = vi.fn(async () => ({ ok: true, status: 200, json: async () => payload }));
+  vi.stubGlobal("fetch", fetchMock);
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  root = createRoot(container);
+  await act(async () => {
+    root!.render(createElement(AnalyticsSheet, { open, onClose: () => {} }));
+  });
+  return { container, fetchMock };
+}
+
+describe("AnalyticsSheet", () => {
+  it("shows the returned realised and claimed values in the summary line", async () => {
+    const { container, fetchMock } = await renderSheet(analyticsPayload());
+
+    const summary = container.querySelector('[data-testid="f5a-summary"]');
+    expect(summary).not.toBeNull();
+    expect(summary!.textContent).toContain("24 settled · 15W / 6L / 2P / 1V");
+    expect(summary!.textContent).toContain("Realised 71.4%");
+    expect(summary!.textContent).toContain("Claimed 68.0%");
+    expect(summary!.textContent).toContain("Edge +3.4 pts");
+    expect(fetchMock).toHaveBeenCalledWith("/api/first-5-minutes/analytics", { cache: "no-store" });
+  });
+
+  it("appends (low sample) to rows with fewer than 20 settled picks", async () => {
+    const { container } = await renderSheet(analyticsPayload());
+
+    const rows = [...container.querySelectorAll("tbody tr")];
+    const goal = rows.find((row) => row.textContent?.includes("Goal in First 5 Minutes"));
+    const corner = rows.find((row) => row.textContent?.includes("Corner in First 5 Minutes"));
+    expect(goal).toBeDefined();
+    expect(corner).toBeDefined();
+    // n=24 reads clean; n=6 is muted and flagged next to its N value.
+    expect(goal!.textContent).not.toContain("(low sample)");
+    expect(corner!.textContent).toContain("6 (low sample)");
+  });
+
+  it("renders nothing and fetches nothing while closed", async () => {
+    const { container, fetchMock } = await renderSheet(analyticsPayload(), false);
+    expect(container.textContent).toBe("");
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
