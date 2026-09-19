@@ -215,7 +215,7 @@ async function matchStatsForTeam(
 export async function buildTeamStatProfile(
   teamName:    string,
   preferSlug?: string,
-  lastN        = 10,
+  lastN        = 20,
 ): Promise<TeamStatProfile | null> {
   const resolved = await findTeamId(teamName, preferSlug);
   if (!resolved) return null;
@@ -242,7 +242,9 @@ export async function buildTeamStatProfile(
     const st = await matchStatsForTeam(slug, e.id!, id);
     if (st && (st.shots > 0 || st.corners > 0 || st.fouls > 0)) rows.push(st);
   }
-  if (rows.length < 2) return null;
+  // A single match's corner/card counts are a weak signal but real data —
+  // callers already see the sample count via `samples` and can down-weight it.
+  if (rows.length < 1) return null;
 
   return {
     teamId:        id,
