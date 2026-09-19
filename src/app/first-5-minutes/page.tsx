@@ -23,12 +23,112 @@ const LEAGUE_ORDER = [
 
 const LEAGUE_PRIORITY = new Map(LEAGUE_ORDER.map((slug, index) => [slug, index]));
 
+// ─── Settled results (Recent Results section) ─────────────────────────────────
+// Payload of /api/first-5-minutes/results, normalised once at load time so the
+// render path never has to defend against a partial body. The window is a
+// constant here because the heading ("LAST 14 DAYS") and the query param must
+// never drift apart.
+
+const RECENT_RESULTS_DAYS = 14;
+/** Matches shown before the "Show all" toggle appears. */
+const RECENT_RESULTS_VISIBLE = 10;
+const SETTLED_OUTCOMES = ["WIN", "LOSS", "PUSH", "VOID"] as const;
+
+type SettledOutcome = (typeof SETTLED_OUTCOMES)[number];
+
+interface SettledMarket {
+  market: string;
+  selection: string;
+  /** The model's claimed probability at pick time (0–1). */
+  hitRate: number;
+  confidence: string;
+  outcome: SettledOutcome;
+}
+
+interface SettledMatch {
+  eventId: string;
+  matchLabel: string;
+  league: string;
+  leagueSlug: string;
+  matchDate: string;
+  homeScore: number | null;
+  awayScore: number | null;
+  markets: SettledMarket[];
+}
+
+function asText(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+function asSettledOutcome(value: unknown): SettledOutcome | null {
+  const outcome = asText(value).toUpperCase();
+  return (SETTLED_OUTCOMES as readonly string[]).includes(outcome)
+    ? (outcome as SettledOutcome)
+    : null;
+}
+
+function asScore(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * Read the endpoint's `matches` array defensively: anything malformed (or a
+ * market whose outcome is not settled) is dropped rather than rendered. The
+ * section then falls back to its placeholder instead of breaking the board.
+ */
+function normaliseSettledMatches(payload: unknown): SettledMatch[] {
+  const raw = (payload as { matches?: unknown } | null)?.matches;
+  if (!Array.isArray(raw)) return [];
+
+  const matches: SettledMatch[] = [];
+  for (const entry of raw) {
+    if (entry === null || typeof entry !== "object") continue;
+    const match = entry as Record<string, unknown>;
+    const eventId = asText(match.eventId);
+    if (!eventId) continue;
+
+    const markets: SettledMarket[] = [];
+    for (const rawMarket of Array.isArray(match.markets) ? match.markets : []) {
+      if (rawMarket === null || typeof rawMarket !== "object") continue;
+      const market = rawMarket as Record<string, unknown>;
+      const outcome = asSettledOutcome(market.outcome);
+      if (!outcome) continue;
+      markets.push({
+        market: asText(market.market),
+        selection: asText(market.selection),
+        hitRate: typeof market.hitRate === "number" && Number.isFinite(market.hitRate)
+          ? market.hitRate
+          : 0,
+        confidence: asText(market.confidence) || "LOW",
+        outcome,
+      });
+    }
+
+    matches.push({
+      eventId,
+      matchLabel: asText(match.matchLabel) || "Finished match",
+      league: asText(match.league),
+      leagueSlug: asText(match.leagueSlug),
+      matchDate: asText(match.matchDate).slice(0, 10),
+      homeScore: asScore(match.homeScore),
+      awayScore: asScore(match.awayScore),
+      markets,
+    });
+  }
+  return matches;
+}
+
 export default function First5MinutesPage() {
   const [data, setData] = useState<First5MinutesData | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [marketFilter, setMarketFilter] = useState<First5MarketKey | "all">("all");
+  // Settled history: null while the first read is in flight, [] when the
+  // window holds nothing (or the read failed — the endpoint fails soft, so the
+  // placeholder is the honest state either way).
+  const [settledMatches, setSettledMatches] = useState<SettledMatch[] | null>(null);
+  const [settledLoading, setSettledLoading] = useState(true);
 
   const dataRef = useRef<First5MinutesData | null>(null);
   const initialFetchDone = useRef(false);
@@ -58,11 +158,32 @@ export default function First5MinutesPage() {
     }
   }, []);
 
+  // Settled history for the same feature — a second, independent read that
+  // mirrors load()'s shape. It fails soft: a failed read leaves the section on
+  // its placeholder and never touches the upcoming-fixtures board.
+  const loadRecentResults = useCallback(async () => {
+    setSettledLoading(true);
+    try {
+      const response = await fetch(
+        `/api/first-5-minutes/results?days=${RECENT_RESULTS_DAYS}`,
+        { cache: "no-store" },
+      );
+      const payload: unknown = await response.json();
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      setSettledMatches(normaliseSettledMatches(payload));
+    } catch {
+      setSettledMatches([]);
+    } finally {
+      setSettledLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     if (initialFetchDone.current) return;
     initialFetchDone.current = true;
     void load(false);
-  }, [load]);
+    void loadRecentResults();
+  }, [load, loadRecentResults]);
 
   const groupedMatches = useMemo(() => {
     if (!data?.matches?.length) return [];
@@ -315,6 +436,8 @@ export default function First5MinutesPage() {
           <EmptyState onRetry={() => void load(true)} />
         ) : null}
 
+        <RecentResults matches={settledMatches} loading={settledLoading} />
+
         <p className="border-t border-cyan-400/10 pt-4 text-center text-[11px] leading-relaxed text-slate-500">
           Opening-phase markets are inherently volatile. Odds shown are model
           prices (fair odds plus a 1xBet-style tick round), not a bookmaker quote,
@@ -322,6 +445,193 @@ export default function First5MinutesPage() {
         </p>
       </div>
     </main>
+  );
+}
+
+// ─── Recent Results (settled history) ─────────────────────────────────────────
+// Below the upcoming board: what the model actually got right, newest first.
+// Outcome palette follows the track-record dashboards — green WIN, red LOSS,
+// amber PUSH, grey VOID.
+
+const OUTCOME_STYLES: Record<SettledOutcome, { chip: string; dot: string; note: string }> = {
+  WIN: {
+    chip: "border-emerald-500/40 bg-emerald-500/15 text-emerald-300",
+    dot: "bg-emerald-400",
+    note: "HIT — the pick won",
+  },
+  LOSS: {
+    chip: "border-rose-500/40 bg-rose-500/15 text-rose-300",
+    dot: "bg-rose-400",
+    note: "MISS — the pick lost",
+  },
+  PUSH: {
+    chip: "border-amber-500/40 bg-amber-500/15 text-amber-300",
+    dot: "bg-amber-400",
+    note: "PUSH — stake returned",
+  },
+  VOID: {
+    chip: "border-slate-500/40 bg-slate-500/15 text-slate-300",
+    dot: "bg-slate-400",
+    note: "VOID — market void, stake returned",
+  },
+};
+
+/** Claimed probability as a percentage: 0.87 → "87", 0.875 → "87.5". */
+function formatHitRate(hitRate: number): string {
+  const percent = hitRate * 100;
+  if (!Number.isFinite(percent)) return "0";
+  return String(Math.round(percent * 10) / 10);
+}
+
+function settledLeagueName(match: SettledMatch): string {
+  // Same spacing rule the upcoming board applies to La Liga.
+  if (match.leagueSlug === "esp.1") return "La Liga";
+  return LEAGUE_MAP[match.leagueSlug]?.name ?? match.league ?? "Unknown competition";
+}
+
+function OutcomeBadge({ outcome }: { outcome: SettledOutcome }) {
+  const style = OUTCOME_STYLES[outcome];
+  return (
+    <span
+      title={style.note}
+      aria-label={`${outcome} — ${style.note}`}
+      className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 font-mono text-[10px] font-bold tracking-wide ${style.chip}`}
+    >
+      <span className={`h-1.5 w-1.5 rounded-full ${style.dot}`} />
+      {outcome}
+    </span>
+  );
+}
+
+function RecentResultRow({ match }: { match: SettledMatch }) {
+  const score =
+    match.homeScore === null || match.awayScore === null
+      ? "—"
+      : `${match.homeScore}-${match.awayScore}`;
+
+  return (
+    <article className="rounded-2xl border border-emerald-500/15 bg-emerald-500/[0.04] p-3">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <h3 className="text-sm font-semibold text-slate-100">{match.matchLabel}</h3>
+        <span className="font-mono text-sm font-bold text-cyan-200" title="Final score">
+          {score}
+        </span>
+      </div>
+      <div className="mt-0.5 font-mono text-[10px] uppercase tracking-wider text-slate-500">
+        {settledLeagueName(match)} · {match.matchDate}
+      </div>
+
+      <div className="mt-2 space-y-1.5">
+        {match.markets.map((entry, index) => (
+          <div
+            key={`${entry.market}-${entry.selection}-${index}`}
+            className="rounded-xl border border-white/5 bg-black/25 px-2.5 py-2"
+          >
+            <div className="text-[11px] font-semibold text-slate-300">
+              {entry.market || "First 5 market"} · {entry.selection || "—"}
+            </div>
+            <div className="mt-0.5 font-mono text-[10px] text-slate-400">
+              Model: {formatHitRate(entry.hitRate)}% ({entry.confidence})
+            </div>
+            <div className="mt-1 flex items-center gap-2">
+              <span className="font-mono text-[10px] uppercase tracking-wider text-slate-500">
+                Result:
+              </span>
+              <OutcomeBadge outcome={entry.outcome} />
+            </div>
+          </div>
+        ))}
+      </div>
+    </article>
+  );
+}
+
+function RecentResults({
+  matches,
+  loading,
+}: {
+  matches: SettledMatch[] | null;
+  loading: boolean;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  // Newest first. The endpoint already orders the window this way; sorting here
+  // keeps that guarantee at the point of rendering.
+  const all = useMemo(
+    () => [...(matches ?? [])].sort((left, right) => right.matchDate.localeCompare(left.matchDate)),
+    [matches],
+  );
+  const visible = expanded ? all : all.slice(0, RECENT_RESULTS_VISIBLE);
+
+  // Tallies are per settled MARKET (a match usually carries several), exactly
+  // how the performance tracker counts picks: won = WIN rows, lost = LOSS rows,
+  // and pushes/voids are neither.
+  const won = all.reduce(
+    (sum, match) => sum + match.markets.filter((market) => market.outcome === "WIN").length,
+    0,
+  );
+  const lost = all.reduce(
+    (sum, match) => sum + match.markets.filter((market) => market.outcome === "LOSS").length,
+    0,
+  );
+  const decided = won + lost;
+  const realisedRate = decided > 0 ? `${((won / decided) * 100).toFixed(1)}%` : null;
+
+  return (
+    <section
+      id="recent-results"
+      aria-labelledby="recent-results-heading"
+      className="space-y-4"
+    >
+      <div className="flex items-center gap-2">
+        <div className="h-px flex-1 bg-emerald-400/15" />
+        <h2
+          id="recent-results-heading"
+          className="rounded-full border border-emerald-400/20 bg-emerald-500/10 px-3 py-1 font-mono text-[11px] uppercase tracking-wider text-emerald-200"
+        >
+          📊 RECENT RESULTS — LAST {RECENT_RESULTS_DAYS} DAYS
+        </h2>
+        <div className="h-px flex-1 bg-emerald-400/15" />
+      </div>
+
+      {loading && matches === null ? (
+        <div className="flex items-center gap-2 text-xs text-slate-500" aria-busy="true">
+          <span className="h-3 w-3 animate-spin rounded-full border-2 border-slate-700 border-t-emerald-400" />
+          <span className="font-mono">Loading settled results…</span>
+        </div>
+      ) : all.length === 0 ? (
+        <p className="rounded-2xl border border-slate-700/40 bg-slate-800/20 px-4 py-3 text-xs text-slate-500">
+          No settled predictions in the last {RECENT_RESULTS_DAYS} days yet.
+        </p>
+      ) : (
+        <>
+          <p className="text-xs text-slate-400">
+            <span className="font-semibold text-slate-200">{all.length}</span> finished matches ·{" "}
+            <span className="font-semibold text-emerald-300">{won} won</span> ·{" "}
+            <span className="font-semibold text-rose-300">{lost} lost</span> ·{" "}
+            <span className="font-semibold text-cyan-200">{realisedRate ?? "—"}</span> hit rate
+          </p>
+
+          <div className="space-y-2">
+            {visible.map((match) => (
+              <RecentResultRow key={match.eventId} match={match} />
+            ))}
+          </div>
+
+          {all.length > RECENT_RESULTS_VISIBLE && (
+            <div className="flex justify-center">
+              <button
+                type="button"
+                onClick={() => setExpanded((value) => !value)}
+                aria-expanded={expanded}
+                className="rounded-full border border-slate-700 bg-slate-800 px-4 py-1.5 text-[11px] font-semibold text-slate-300 transition hover:bg-slate-700 hover:text-white"
+              >
+                {expanded ? "Show fewer" : `Show all ${all.length}`}
+              </button>
+            </div>
+          )}
+        </>
+      )}
+    </section>
   );
 }
 
