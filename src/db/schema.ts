@@ -402,6 +402,35 @@ export const first5Cache = pgTable("first5_cache", {
 export type First5CacheRow = typeof first5Cache.$inferSelect;
 export type NewFirst5Cache = typeof first5Cache.$inferInsert;
 
+// ─── Team xG cache (persistent rolling averages) ───────────────────────────────
+// Bzzoiro rolling team xG is expensive: one average walks the team's last five
+// finished matches with a separate HTTP call each (~6 calls per team, ~12 per
+// fixture). The First 5 Minutes scan needs both teams of every fixture, so a
+// cold scan queues at Bzzoiro and fixtures blow their per-fixture ceiling.
+//
+// This table keeps the computed average per team and the date of that team's
+// next scheduled match. The row stays valid until that match kicks off — i.e.
+// while now() < next_match_at — so the average is recomputed exactly when the
+// team has played again, never on a timer. next_match_at NULL (nothing
+// scheduled / provider unavailable) is never treated as a hit.
+//
+// based_on_through_at records the most recent finished match the average
+// covered (provenance only — nothing is published from it); updated_at is the
+// row's own refresh stamp. Read/write are fail-soft in the route: a database
+// problem falls back to the live Bzzoiro path and never breaks the feed.
+export const teamXgCache = pgTable("team_xg_cache", {
+  teamId:           integer("team_id").primaryKey(),
+  xgFor:            numeric("xg_for").notNull(),
+  xgAgainst:        numeric("xg_against").notNull(),
+  samples:          integer("samples").notNull(),
+  basedOnThroughAt: timestamp("based_on_through_at").notNull(),
+  nextMatchAt:      timestamp("next_match_at"),
+  updatedAt:        timestamp("updated_at").defaultNow().notNull(),
+});
+
+export type TeamXgCacheRow = typeof teamXgCache.$inferSelect;
+export type NewTeamXgCache = typeof teamXgCache.$inferInsert;
+
 // ─── Legacy aliases (kept for backward compat with older routes) ───────────────
 /** @deprecated use `bankroll` */
 export const bankrollEntries = bankroll;
