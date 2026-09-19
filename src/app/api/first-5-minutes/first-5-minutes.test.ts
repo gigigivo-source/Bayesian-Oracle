@@ -729,7 +729,7 @@ describe("First 5 Minutes team xG cache", () => {
     });
   }
 
-  /** Stub the two Bzzoiro team-event lookups the cache performs on a miss. */
+  /** Stub the Bzzoiro finished-match date lookup the cache performs on a miss. */
   function stubTeamEventDates(dates: { next?: string; lastFinished?: string }) {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
@@ -767,31 +767,6 @@ describe("First 5 Minutes team xG cache", () => {
     expect(dbState.xgWrites).toHaveLength(0);
   });
 
-  // ── 2. MISS (no row / expired row) ──────────────────────────────────────────
-  it("treats a missing row as a MISS and calls the xG fetcher", async () => {
-    const fetchMock = stubTeamEventDates({});
-    vi.mocked(fetchTeamXgAverage).mockResolvedValue({
-      teamId: HOME_TEAM,
-      xgFor: 1.6,
-      xgAgainst: 1.2,
-      samples: 5,
-    });
-
-    const value = await getTeamXgCached(HOME_TEAM);
-
-    expect(fetchTeamXgAverage).toHaveBeenCalledWith(HOME_TEAM, 5);
-    expect(value).toEqual({ xgFor: 1.6, xgAgainst: 1.2, samples: 5 });
-    // Both Bzzoiro date lookups ran (next match + newest finished match).
-    expect(fetchMock).toHaveBeenCalledWith(
-      expect.stringContaining(`team_id=${HOME_TEAM}&status=notstarted&limit=1`),
-      expect.anything(),
-    );
-    expect(fetchMock).toHaveBeenCalledWith(
-      expect.stringContaining(`team_id=${HOME_TEAM}&status=finished&limit=5`),
-      expect.anything(),
-    );
-  });
-
   it("treats a row whose next match is already in the past as a MISS", async () => {
     seedTeamXgRow(HOME_TEAM, { nextMatchAt: new Date(Date.now() - 2 * HOUR_MS) });
     stubTeamEventDates({});
@@ -824,39 +799,6 @@ describe("First 5 Minutes team xG cache", () => {
   });
 
   // ── 3. UPSERT after a miss ──────────────────────────────────────────────────
-  it("UPSERTs the average with the resolved next_match_at after a miss", async () => {
-    const nextKickoff = new Date(Date.now() + 3 * DAY_MS);
-    const lastFinished = new Date(Date.now() - 5 * DAY_MS);
-    stubTeamEventDates({
-      next: nextKickoff.toISOString(),
-      lastFinished: lastFinished.toISOString(),
-    });
-    vi.mocked(fetchTeamXgAverage).mockResolvedValue({
-      teamId: HOME_TEAM,
-      xgFor: 1.9,
-      xgAgainst: 1.05,
-      samples: 5,
-    });
-
-    const value = await getTeamXgCached(HOME_TEAM);
-
-    expect(value).toEqual({ xgFor: 1.9, xgAgainst: 1.05, samples: 5 });
-    expect(dbState.xgWrites).toHaveLength(1);
-    const written = dbState.xgWrites[0];
-    expect(written.teamId).toBe(HOME_TEAM);
-    expect(Number(written.xgFor)).toBeCloseTo(1.9, 5);
-    expect(Number(written.xgAgainst)).toBeCloseTo(1.05, 5);
-    expect(written.samples).toBe(5);
-    expect(written.nextMatchAt).toEqual(nextKickoff);
-    expect(written.basedOnThroughAt).toEqual(lastFinished);
-
-    // The very next lookup of that team is a HIT: no further fetches.
-    vi.mocked(fetchTeamXgAverage).mockClear();
-    const second = await getTeamXgCached(HOME_TEAM);
-    expect(second).toEqual({ xgFor: 1.9, xgAgainst: 1.05, samples: 5 });
-    expect(fetchTeamXgAverage).not.toHaveBeenCalled();
-  });
-
   it("writes next_match_at as null when the provider has nothing scheduled", async () => {
     stubTeamEventDates({ lastFinished: new Date(Date.now() - 4 * DAY_MS).toISOString() });
     vi.mocked(fetchTeamXgAverage).mockResolvedValue({
@@ -950,49 +892,127 @@ describe("First 5 Minutes team xG cache", () => {
     expect(fetchTeamXgAverage).not.toHaveBeenCalled();
   });
 
-  // ── Logging: one aggregate line per scan, one line per cache write ──────────
-  it("logs one aggregate hit/miss line per scan, not one per fixture", async () => {
-    // One fixture, one cached team (hit) and one uncached team (miss).
-    seedTeamXgRow(HOME_TEAM, { nextMatchAt: new Date(Date.now() + 36 * HOUR_MS) });
-    mockScoreboard([makeMockFixture("fx-log", "Arsenal", "Chelsea")]);
-    vi.mocked(resolveBzzoiroEvent).mockResolvedValue({
-      eventId: "555",
-      status: "resolved",
-      eventsInRange: 1,
-      relatedInRange: 1,
-      toleranceDays: 2,
+  // ── Post-#164/#165 behaviour (replaces the pre-#164 Bzzoiro-date tests) ─────
+  // Since #164, next_match_at is computed locally from the scan's own fixture
+  // list — the Bzzoiro `status=notstarted` lookup is gone — and since #165 the
+  // fixture/team comparison runs on normalised club names. The tests below pin
+  // that behaviour. Everything is mocked (DB, xG fetcher, global fetch);
+  // nothing here touches the network.
+
+  it("Cache HIT: a row with next_match_at in the future never calls the xG fetcher", async () => {
+    seedTeamXgRow(HOME_TEAM, {
+      xgFor: 1.8,
+      xgAgainst: 1.1,
+      samples: 5,
+      nextMatchAt: new Date(Date.now() + 6 * HOUR_MS),
     });
-    vi.mocked(fetchEventDetail).mockResolvedValue({
-      homeTeamId: HOME_TEAM,
-      awayTeamId: AWAY_TEAM,
-    });
-    const nextKickoff = new Date(Date.now() + 36 * HOUR_MS).toISOString();
-    stubTeamEventDates({ next: nextKickoff });
+    const fetchMock = stubTeamEventDates({});
+
+    const value = await getTeamXgCached(HOME_TEAM, "Arsenal", []);
+
+    expect(value).toEqual({ xgFor: 1.8, xgAgainst: 1.1, samples: 5 });
+    expect(fetchTeamXgAverage).not.toHaveBeenCalled();
+    // Zero traffic on a hit — not even the finished-match date lookup.
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(dbState.xgWrites).toHaveLength(0);
+  });
+
+  it("Cache MISS (row exists, next_match_at in the past): the xG fetcher IS called", async () => {
+    seedTeamXgRow(HOME_TEAM, { nextMatchAt: new Date(Date.now() - 2 * HOUR_MS) });
+    stubTeamEventDates({});
     vi.mocked(fetchTeamXgAverage).mockResolvedValue({
-      teamId: AWAY_TEAM,
+      teamId: HOME_TEAM,
+      xgFor: 2.2,
+      xgAgainst: 0.8,
+      samples: 5,
+    });
+
+    const value = await getTeamXgCached(HOME_TEAM, "Arsenal", []);
+
+    expect(fetchTeamXgAverage).toHaveBeenCalledTimes(1);
+    expect(fetchTeamXgAverage).toHaveBeenCalledWith(HOME_TEAM, 5);
+    expect(value).toEqual({ xgFor: 2.2, xgAgainst: 0.8, samples: 5 });
+  });
+
+  it("Cache MISS (no row): fetches, then UPSERTs next_match_at from the earliest upcoming scan fixture", async () => {
+    const earliest = makeMockFixture("fx-early", "Chelsea", "Arsenal"); // Arsenal away, +36h
+    const later = makeMockFixture("fx-late", "Arsenal", "Leeds"); // Arsenal home, +5d
+    later.date = new Date(Date.now() + 5 * DAY_MS).toISOString();
+    const unrelated = makeMockFixture("fx-other", "Everton", "Brentford");
+    // No Bzzoiro dates at all: next_match_at can only come from the scan.
+    stubTeamEventDates({});
+    vi.mocked(fetchTeamXgAverage).mockResolvedValue({
+      teamId: HOME_TEAM,
+      xgFor: 1.9,
+      xgAgainst: 1.05,
+      samples: 5,
+    });
+
+    const value = await getTeamXgCached(HOME_TEAM, "Arsenal", [later, unrelated, earliest]);
+
+    expect(fetchTeamXgAverage).toHaveBeenCalledTimes(1);
+    expect(fetchTeamXgAverage).toHaveBeenCalledWith(HOME_TEAM, 5);
+    expect(value).toEqual({ xgFor: 1.9, xgAgainst: 1.05, samples: 5 });
+
+    expect(dbState.xgWrites).toHaveLength(1);
+    const written = dbState.xgWrites[0];
+    expect(written.teamId).toBe(HOME_TEAM);
+    expect(Number(written.xgFor)).toBeCloseTo(1.9, 5);
+    expect(Number(written.xgAgainst)).toBeCloseTo(1.05, 5);
+    expect(written.samples).toBe(5);
+    // The earliest upcoming Arsenal fixture in the scan's fixture list —
+    // not a date resolved from Bzzoiro.
+    expect(written.nextMatchAt).toEqual(new Date(earliest.date));
+
+    // The UPSERT landed in the row map: the very next lookup is a HIT.
+    vi.mocked(fetchTeamXgAverage).mockClear();
+    const second = await getTeamXgCached(HOME_TEAM, "Arsenal", [later, unrelated, earliest]);
+    expect(second).toEqual({ xgFor: 1.9, xgAgainst: 1.05, samples: 5 });
+    expect(fetchTeamXgAverage).not.toHaveBeenCalled();
+    expect(dbState.xgWrites).toHaveLength(1);
+  });
+
+  it("normalises team names: fixture home.name 'Union Berlin' matches a lookup for '1. FC Union Berlin'", async () => {
+    // ESPN calls the club "Union Berlin"; the lookup name carries the "1. FC"
+    // prefix. Only the #165 normalised comparison can join the two.
+    const union = makeMockFixture("fx-union", "Union Berlin", "Bayern Munich", {
+      slug: "ger.1",
+      name: "Bundesliga",
+    });
+    stubTeamEventDates({});
+    vi.mocked(fetchTeamXgAverage).mockResolvedValue({
+      teamId: HOME_TEAM,
+      xgFor: 1.5,
+      xgAgainst: 1.0,
+      samples: 5,
+    });
+
+    await getTeamXgCached(HOME_TEAM, "1. FC Union Berlin", [union]);
+
+    expect(fetchTeamXgAverage).toHaveBeenCalledTimes(1);
+    expect(dbState.xgWrites).toHaveLength(1);
+    // The normalised match resolved the team's next match to the fixture date.
+    expect(dbState.xgWrites[0].nextMatchAt).toEqual(new Date(union.date));
+  });
+
+  it("writes next_match_at as null when the team has no upcoming fixture in the scan", async () => {
+    const scan = [
+      makeMockFixture("fx-a", "Everton", "Brentford"),
+      makeMockFixture("fx-b", "Leeds", "Sunderland"),
+    ];
+    // Nothing scheduled anywhere — neither in the scan nor on Bzzoiro.
+    stubTeamEventDates({});
+    vi.mocked(fetchTeamXgAverage).mockResolvedValue({
+      teamId: HOME_TEAM,
       xgFor: 1.2,
       xgAgainst: 1.3,
       samples: 5,
     });
-    const info = vi.spyOn(console, "info").mockImplementation(() => {});
 
-    try {
-      await getFirst5();
+    await getTeamXgCached(HOME_TEAM, "Arsenal", scan);
 
-      const cacheLines = info.mock.calls
-        .map(([message]) => String(message))
-        .filter((message) => message.startsWith("[First5] xG cache:"));
-      // Exactly one aggregate line for the whole scan (2 teams), never one per team.
-      expect(cacheLines).toEqual(["[First5] xG cache: 1 hits, 1 misses"]);
-
-      const writeLines = info.mock.calls
-        .map(([message]) => String(message))
-        .filter((message) => message.startsWith("[First5] xG cache write:"));
-      expect(writeLines).toEqual([
-        `[First5] xG cache write: team ${AWAY_TEAM} — next match at ${nextKickoff}`,
-      ]);
-    } finally {
-      info.mockRestore();
-    }
+    expect(fetchTeamXgAverage).toHaveBeenCalledTimes(1);
+    expect(dbState.xgWrites).toHaveLength(1);
+    expect(dbState.xgWrites[0].nextMatchAt).toBeNull();
   });
 });
