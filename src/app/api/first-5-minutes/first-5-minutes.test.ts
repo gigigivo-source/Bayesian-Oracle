@@ -106,7 +106,12 @@ function makeMockTeam(id: string, name: string, homeAway: "home" | "away"): espn
   };
 }
 
-function makeMockFixture(id: string, homeName: string, awayName: string): espn.FixtureLite {
+function makeMockFixture(
+  id: string,
+  homeName: string,
+  awayName: string,
+  league?: { slug: string; name: string },
+): espn.FixtureLite {
   return {
     id,
     date: new Date(Date.now() + 36 * 60 * 60 * 1000).toISOString(),
@@ -114,8 +119,8 @@ function makeMockFixture(id: string, homeName: string, awayName: string): espn.F
     statusDetail: "Scheduled",
     venue: "Stadium",
     neutralSite: false,
-    leagueSlug: "eng.1",
-    leagueName: "English Premier League",
+    leagueSlug: league?.slug ?? "eng.1",
+    leagueName: league?.name ?? "English Premier League",
     home: makeMockTeam("1", homeName, "home"),
     away: makeMockTeam("2", awayName, "away"),
   };
@@ -546,5 +551,72 @@ describe("First 5 Minutes DB-backed cache", () => {
     // The scan still completed and the response was returned.
     expect(data.totalFixturesChecked).toBe(1);
     expect(espn.fetchScoreboard).toHaveBeenCalled();
+  });
+});
+
+// ─── League whitelist (top-5 + domestic cups + UEFA) ─────────────────────────
+// getFirst5() defaults to ?refresh=true, so every scan below bypasses both
+// cache layers and hits the (mocked) scoreboards directly — no network.
+
+describe("First 5 Minutes league whitelist", () => {
+  it("excludes a fixture from a non-whitelisted league (eng.2 is never fetched)", async () => {
+    const championshipFixture = makeMockFixture("fx-eng2", "Leeds", "Sunderland", {
+      slug: "eng.2",
+      name: "English Championship",
+    });
+    // The mocked ESPN response contains a Championship fixture — but only
+    // behind the eng.2 scoreboard, which the whitelist must never request.
+    vi.mocked(espn.fetchScoreboard).mockImplementation(async (slug) => {
+      if (slug === "eng.2") return [championshipFixture];
+      return [];
+    });
+
+    const data = await getFirst5();
+
+    expect(data.matches.map((m) => m.fixtureId)).not.toContain("fx-eng2");
+    // Whitelist proof: the unwanted league's scoreboard is never requested.
+    expect(espn.fetchScoreboard).not.toHaveBeenCalledWith("eng.2", expect.anything());
+    // ...while the whitelisted leagues still are.
+    expect(espn.fetchScoreboard).toHaveBeenCalledWith("eng.1", expect.anything());
+    expect(espn.fetchScoreboard).toHaveBeenCalledWith("uefa.champions", expect.anything());
+  });
+
+  it("includes a fixture from a whitelisted top-5 league (eng.1)", async () => {
+    mockScoreboard([makeMockFixture("fx-eng1", "Arsenal", "Chelsea")]);
+    mockBzzoiroChain(1.8, 1.4);
+    mockMesh(
+      makeMeshProfile({ corners: 6.2, cards: 1.9, fouls: 11 }),
+      makeMeshProfile({ corners: 4.8, cards: 2.1, fouls: 12 }),
+    );
+
+    const data = await getFirst5();
+
+    expect(data.matches.map((m) => m.fixtureId)).toContain("fx-eng1");
+    const match = data.matches.find((m) => m.fixtureId === "fx-eng1");
+    expect(match?.leagueSlug).toBe("eng.1");
+    expect(match?.markets.length).toBeGreaterThan(0);
+  });
+
+  it("includes a UEFA Champions League fixture (uefa.champions)", async () => {
+    const uclFixture = makeMockFixture("fx-ucl", "Real Madrid", "Bayern Munich", {
+      slug: "uefa.champions",
+      name: "UEFA Champions League",
+    });
+    vi.mocked(espn.fetchScoreboard).mockImplementation(async (slug) => {
+      if (slug === "uefa.champions") return [uclFixture];
+      return [];
+    });
+    mockBzzoiroChain(2.0, 1.7);
+    mockMesh(
+      makeMeshProfile({ corners: 5.5, cards: 1.6, fouls: 10 }),
+      makeMeshProfile({ corners: 5.1, cards: 1.8, fouls: 11 }),
+    );
+
+    const data = await getFirst5();
+
+    expect(data.matches.map((m) => m.fixtureId)).toContain("fx-ucl");
+    const match = data.matches.find((m) => m.fixtureId === "fx-ucl");
+    expect(match?.leagueSlug).toBe("uefa.champions");
+    expect(match?.markets.length).toBeGreaterThan(0);
   });
 });
