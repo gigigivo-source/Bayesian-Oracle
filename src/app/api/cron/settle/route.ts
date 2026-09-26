@@ -884,12 +884,30 @@ async function fetchEspnEventTimeline(
   eventId: string,
 ): Promise<EspnTimelineEvent[] | null> {
   if (!leagueSlug || leagueSlug.includes(":") || !eventId || eventId.includes(":")) return null;
-  const data = await resilientJson<{ details?: EspnTimelineEvent[] }>(
+
+  const data = await resilientJson<{
+    details?: EspnTimelineEvent[];
+    header?: {
+      competitions?: Array<{ details?: EspnTimelineEvent[] }>;
+    };
+  }>(
     `https://site.api.espn.com/apis/site/v2/sports/soccer/${leagueSlug}/summary?event=${eventId}`,
     { revalidate: 600 },
   ).catch(() => null);
-  const details = data?.details;
-  return Array.isArray(details) && details.length > 0 ? details : null;
+
+  if (!data) return null;
+
+  // ESPN puts the event timeline at header.competitions[0].details.
+  // Some responses also expose a top-level details array — check both.
+  const nested = data.header?.competitions?.[0]?.details;
+  const topLevel = data.details;
+  const details = Array.isArray(nested) && nested.length > 0
+    ? nested
+    : Array.isArray(topLevel) && topLevel.length > 0
+      ? topLevel
+      : null;
+
+  return details;
 }
 
 interface FeatureSettlePass {
@@ -1012,9 +1030,11 @@ export async function settleFeaturePicks(force = false): Promise<FeatureSettlePa
       if (picks.some((pick) => pick.feature === "first5")) {
         const timelineKey = `${result.leagueSlug}|${result.eventId}`;
         if (!timelineCache.has(timelineKey)) {
-          timelineCache.set(
-            timelineKey,
-            await fetchEspnEventTimeline(result.leagueSlug, result.eventId),
+          const timeline = await fetchEspnEventTimeline(result.leagueSlug, result.eventId);
+          timelineCache.set(timelineKey, timeline);
+          console.log(
+            `[Settle] timeline for ${result.leagueSlug}:${result.eventId} — ` +
+            `${timeline ? timeline.length + " events" : "null"}`
           );
         }
       }
