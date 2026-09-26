@@ -1407,6 +1407,38 @@ async function persistFirst5Picks(matches: First5Match[]): Promise<void> {
   }
 }
 
+// ─── Background settlement ────────────────────────────────────────────────────
+// First 5 Minutes picks are written pre-match with `outcome = 'pending'` (see
+// persistFirst5Picks above) and are only ever resolved by the dedicated
+// feature pass in /api/cron/settle — /api/first-5-minutes/results reads that
+// `outcome` column, and the settlement cron only runs every two hours. A match
+// that finishes between two cron ticks therefore stays unresolved until the
+// next tick even though the page that surfaces it was already open, so every
+// GET fires that pass in the background.
+//
+// Fire-and-forget by design: the promise is deliberately NOT awaited — the
+// public feed must never pay for a settlement sweep, and the response body is
+// already built when the pass starts (the same post-response settle shape
+// /api/match uses for its own features). Fail-soft: a missing database, a
+// provider outage or a slow sweep can only ever produce a log line here, never
+// a broken response. The pass is idempotent (each pick's `outcome` is stamped
+// once, under a guarded update), so overlapping page loads are harmless.
+//
+// settleFeaturePicks is the real exported name of the feature-settle pass in
+// the cron route (it resolves `corners` AND `first5` rows); it is imported
+// lazily so the cron route's Node-only dependency graph (pg, the aggregator,
+// the settlement engine) is only pulled in when a request actually lands.
+function triggerFeatureSettlePass(): void {
+  void (async () => {
+    try {
+      const { settleFeaturePicks } = await import("@/app/api/cron/settle/route");
+      await settleFeaturePicks(false);
+    } catch (err) {
+      console.error("[First5] settle pass failed:", err);
+    }
+  })();
+}
+
 // ─── Route ────────────────────────────────────────────────────────────────────
 
 export async function GET(req: Request): Promise<Response> {
@@ -1422,6 +1454,8 @@ export async function GET(req: Request): Promise<Response> {
     // lifetime) → full scan. Each layer falls through to the next.
     const dbCached = await readDbCache();
     if (dbCached) {
+      // A cached response is still a page load — settle in the background.
+      triggerFeatureSettlePass();
       return Response.json(
         { ...dbCached, cache: { ...dbCached.cache, hit: true } },
         { headers: { "Cache-Control": "no-store", "X-Cache": "HIT" } },
@@ -1430,6 +1464,8 @@ export async function GET(req: Request): Promise<Response> {
 
     const cached = cache.get(cacheKey);
     if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
+      // Same here: the 1h in-memory hit must settle too.
+      triggerFeatureSettlePass();
       return Response.json(
         { ...cached.data, cache: { ...cached.data.cache, hit: true } },
         { headers: { "Cache-Control": "no-store", "X-Cache": "HIT" } },
@@ -1498,6 +1534,11 @@ export async function GET(req: Request): Promise<Response> {
     cache.set(cacheKey, { data: body, timestamp: Date.now() });
     await writeDbCache(body);
 
+    // Fire and forget — do not await. Same pattern as /api/match's
+    // post-response settle for its own features: the settle pass runs after
+    // the response body is ready, so a slow sweep can never delay the feed.
+    triggerFeatureSettlePass();
+
     return Response.json(body, {
       headers: {
         "Cache-Control": "no-store",
@@ -1507,6 +1548,9 @@ export async function GET(req: Request): Promise<Response> {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error(`[First5] Route failed: ${message}`);
+    // Even a failed scan is a page load: pending picks are already in
+    // performance_log and must not wait for the next cron tick to settle.
+    triggerFeatureSettlePass();
     return Response.json(
       emptyResponse({ error: "First 5 Minutes Markets are temporarily unavailable." }),
       { status: 503, headers: { "Cache-Control": "no-store" } },
