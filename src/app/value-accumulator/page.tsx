@@ -209,8 +209,8 @@ const spinnerStyle = {
   width: 12,
   height: 12,
   borderRadius: "50%",
-  border: "2px solid #a7f3d0",
-  borderTopColor: "#0a7d4f",
+  border: "2px solid #334155",
+  borderTopColor: "#F59E0B",
   display: "inline-block",
   animation: "va-spin 0.8s linear infinite",
 } as const;
@@ -405,7 +405,7 @@ export default function ValueAccumulatorPage() {
   );
 
   return (
-    <div style={{ background: "#f7f8fa", minHeight: "100vh", padding: "0 16px 48px" }}>
+    <div style={{ background: "#0F1117", minHeight: "100vh", padding: "0 16px 48px" }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
         * { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; }
@@ -416,14 +416,14 @@ export default function ValueAccumulatorPage() {
       <div style={{ maxWidth: 720, margin: "0 auto", paddingTop: 32 }}>
         {/* Header */}
         <div style={{ marginBottom: 32 }}>
-          <h1 style={{ fontSize: 32, fontWeight: 700, color: "#111827", margin: 0, letterSpacing: "-0.02em" }}>
+          <h1 style={{ fontSize: 32, fontWeight: 700, color: "#fcd34d", margin: 0, letterSpacing: "-0.02em" }}>
             Value Accumulator
           </h1>
-          <p style={{ fontSize: 16, color: "#6b7280", margin: "8px 0 0", fontWeight: 400 }}>
+          <p style={{ fontSize: 16, color: "#94a3b8", margin: "8px 0 0", fontWeight: 400 }}>
             Ranked tickets this week, best first
           </p>
           <div style={{ marginTop: 16, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
-            <span style={{ fontSize: 13, color: "#6b7280", fontWeight: 500 }}>
+            <span style={{ fontSize: 13, color: "#94a3b8", fontWeight: 500 }}>
               Scan is run from the server. Refresh to see latest tickets.
             </span>
             <button
@@ -431,9 +431,9 @@ export default function ValueAccumulatorPage() {
               onClick={runBacktest}
               disabled={backtestStatus === "running"}
               style={{
-                background: "#ecfdf5",
-                color: "#0a7d4f",
-                border: "1px solid #a7f3d0",
+                background: "linear-gradient(to right, #F59E0B, #FF8C00)",
+                color: "white",
+                border: "1px solid #F59E0B",
                 borderRadius: 999,
                 padding: "4px 12px",
                 fontSize: 13,
@@ -458,9 +458,9 @@ export default function ValueAccumulatorPage() {
               onClick={startLiveScan}
               disabled={liveScanStatus === "running"}
               style={{
-                background: "#ecfdf5",
-                color: "#0a7d4f",
-                border: "1px solid #a7f3d0",
+                background: "linear-gradient(to right, #F59E0B, #FF8C00)",
+                color: "white",
+                border: "1px solid #F59E0B",
                 borderRadius: 999,
                 padding: "4px 12px",
                 fontSize: 13,
@@ -485,9 +485,9 @@ export default function ValueAccumulatorPage() {
               onClick={runTicketBacktest}
               disabled={ticketBacktestStatus === "running"}
               style={{
-                background: "#ecfdf5",
-                color: "#0a7d4f",
-                border: "1px solid #a7f3d0",
+                background: "linear-gradient(to right, #F59E0B, #FF8C00)",
+                color: "white",
+                border: "1px solid #F59E0B",
                 borderRadius: 999,
                 padding: "4px 12px",
                 fontSize: 13,
@@ -508,7 +508,7 @@ export default function ValueAccumulatorPage() {
               )}
             </button>
             {scanId && (
-              <span style={{ fontSize: 12, color: "#9ca3af", fontFamily: "monospace" }}>
+              <span style={{ fontSize: 12, color: "#64748b", fontFamily: "monospace" }}>
                 Scan: {scanId.slice(0, 20)}…
               </span>
             )}
@@ -520,8 +520,8 @@ export default function ValueAccumulatorPage() {
           <div
             role="status"
             style={{
-              background: "#fffbeb",
-              border: "1px solid #fde68a",
+              background: "#292524",
+              border: "1px solid #fcd34d",
               borderRadius: 12,
               padding: "14px 20px",
               marginBottom: 24,
@@ -531,10 +531,10 @@ export default function ValueAccumulatorPage() {
             }}
           >
             <span
-              style={{ ...spinnerStyle, border: "2px solid #fde68a", borderTopColor: "#d97706" }}
+              style={{ ...spinnerStyle, border: "2px solid #334155", borderTopColor: "#F59E0B" }}
               aria-hidden="true"
             />
-            <div style={{ fontSize: 13, color: "#92400e", fontWeight: 500 }}>
+            <div style={{ fontSize: 13, color: "#fcd34d", fontWeight: 500 }}>
               Scan running — this takes 4-6 minutes. Matches are being analysed. Do not close this tab.
             </div>
           </div>
@@ -544,12 +544,12 @@ export default function ValueAccumulatorPage() {
         {hasTickets && (
           <div
             style={{
-              background: "white",
-              border: "1px solid #e5e7eb",
+              background: "#0f172a",
+              border: "1px solid #334155",
               borderRadius: 12,
               padding: "16px 20px",
               marginBottom: 24,
-              boxShadow: "0 1px 3px rgba(0,0,0,0.05)",
+              boxShadow: "0 1px 3px rgba(0,0,0,0.4)",
               display: "flex",
               alignItems: "center",
               gap: 12,
@@ -560,11 +560,11 @@ export default function ValueAccumulatorPage() {
                 width: 36,
                 height: 36,
                 borderRadius: 8,
-                background: "#ecfdf5",
+                background: "#1e293b",
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "center",
-                color: "#0a7d4f",
+                color: "#F59E0B",
                 fontWeight: 700,
                 fontSize: 16,
               }}
@@ -572,10 +572,10 @@ export default function ValueAccumulatorPage() {
               %
             </div>
             <div>
-              <div style={{ fontSize: 14, fontWeight: 600, color: "#111827" }}>
+              <div style={{ fontSize: 14, fontWeight: 600, color: "#f1f5f9" }}>
                 Placing the recommended tickets uses {totalExposure.toFixed(2)}% of bankroll.
               </div>
-              <div style={{ fontSize: 12, color: "#6b7280", marginTop: 2 }}>
+              <div style={{ fontSize: 12, color: "#94a3b8", marginTop: 2 }}>
                 {tickets.filter((t) => !t.isReferenceOnly).length} active ticket
                 {tickets.filter((t) => !t.isReferenceOnly).length !== 1 ? "s" : ""} within 6% cap
                 {tickets.filter((t) => t.isReferenceOnly).length > 0
@@ -590,12 +590,12 @@ export default function ValueAccumulatorPage() {
         {loading && (
           <div
             style={{
-              background: "white",
-              border: "1px solid #e5e7eb",
+              background: "#0f172a",
+              border: "1px solid #334155",
               borderRadius: 12,
               padding: 32,
               textAlign: "center",
-              color: "#6b7280",
+              color: "#94a3b8",
             }}
           >
             Loading tickets…
@@ -606,11 +606,11 @@ export default function ValueAccumulatorPage() {
         {error && !loading && (
           <div
             style={{
-              background: "#fef2f2",
-              border: "1px solid #fecaca",
+              background: "#450a0a",
+              border: "1px solid #7f1d1d",
               borderRadius: 12,
               padding: 16,
-              color: "#991b1b",
+              color: "#fca5a5",
               fontSize: 14,
               marginBottom: 16,
             }}
@@ -623,18 +623,18 @@ export default function ValueAccumulatorPage() {
         {!loading && !hasTickets && !error && (
           <div
             style={{
-              background: "white",
-              border: "1px solid #e5e7eb",
+              background: "#0f172a",
+              border: "1px solid #334155",
               borderRadius: 12,
               padding: 32,
               textAlign: "center",
-              boxShadow: "0 1px 3px rgba(0,0,0,0.05)",
+              boxShadow: "0 1px 3px rgba(0,0,0,0.4)",
             }}
           >
-            <div style={{ fontSize: 18, fontWeight: 600, color: "#111827", marginBottom: 8 }}>
+            <div style={{ fontSize: 18, fontWeight: 600, color: "#f1f5f9", marginBottom: 8 }}>
               No value legs found this week. Try again tomorrow.
             </div>
-            <div style={{ fontSize: 14, color: "#6b7280" }}>
+            <div style={{ fontSize: 14, color: "#94a3b8" }}>
               The scanner looks for legs where model probability beats bookmaker price with EV &gt; 3% and
               hitRate ≥ 55% within 1.30–2.00 odds.
             </div>
@@ -643,7 +643,7 @@ export default function ValueAccumulatorPage() {
 
         {/* Tickets */}
         {!loading && hasLearningActive && activeLearning && (
-          <div style={{ fontSize: 13, color: "#4b5563", marginBottom: 16 }}>
+          <div style={{ fontSize: 13, color: "#cbd5e1", marginBottom: 16 }}>
             Learning active: {activeLearning.lineCorrections} line corrections ·{" "}
             {activeLearning.familyCorrections} family corrections ·{" "}
             {activeLearning.filtered.length} filtered
@@ -655,13 +655,13 @@ export default function ValueAccumulatorPage() {
               <div
                 key={ticket.id}
                 style={{
-                  background: "white",
-                  border: `1px solid ${ticket.isRecommended ? "#0a7d4f" : "#e5e7eb"}`,
+                  background: "#0f172a",
+                  border: `1px solid ${ticket.isRecommended ? "#F59E0B" : "#334155"}`,
                   borderRadius: 12,
                   padding: 20,
                   boxShadow: ticket.isRecommended
-                    ? "0 4px 12px rgba(10,125,79,0.12)"
-                    : "0 1px 3px rgba(0,0,0,0.05)",
+                    ? "0 4px 12px rgba(245,158,11,0.12)"
+                    : "0 1px 3px rgba(0,0,0,0.4)",
                   position: "relative",
                 }}
               >
@@ -669,8 +669,8 @@ export default function ValueAccumulatorPage() {
                 <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
                   <div
                     style={{
-                      background: ticket.isRecommended ? "#0a7d4f" : "#f3f4f6",
-                      color: ticket.isRecommended ? "white" : "#374151",
+                      background: ticket.isRecommended ? "#F59E0B" : "#1e293b",
+                      color: ticket.isRecommended ? "white" : "#e2e8f0",
                       borderRadius: 6,
                       padding: "4px 10px",
                       fontSize: 13,
@@ -682,9 +682,9 @@ export default function ValueAccumulatorPage() {
                   {ticket.isRecommended && (
                     <div
                       style={{
-                        background: "#ecfdf5",
-                        color: "#0a7d4f",
-                        border: "1px solid #a7f3d0",
+                        background: "#1e293b",
+                        color: "#F59E0B",
+                        border: "1px solid #334155",
                         borderRadius: 6,
                         padding: "4px 10px",
                         fontSize: 12,
@@ -698,9 +698,9 @@ export default function ValueAccumulatorPage() {
                   {ticket.isReferenceOnly && (
                     <div
                       style={{
-                        background: "#f9fafb",
-                        color: "#6b7280",
-                        border: "1px solid #e5e7eb",
+                        background: "#1e293b",
+                        color: "#94a3b8",
+                        border: "1px solid #334155",
                         borderRadius: 6,
                         padding: "4px 10px",
                         fontSize: 12,
@@ -714,7 +714,7 @@ export default function ValueAccumulatorPage() {
                     style={{
                       marginLeft: "auto",
                       fontSize: 12,
-                      color: "#6b7280",
+                      color: "#94a3b8",
                       display: "flex",
                       gap: 12,
                       alignItems: "center",
@@ -724,20 +724,20 @@ export default function ValueAccumulatorPage() {
                       style={{
                         background:
                           ticket.status === "win"
-                            ? "#ecfdf5"
+                            ? "#1e293b"
                             : ticket.status === "loss"
-                            ? "#fef2f2"
+                            ? "#450a0a"
                             : ticket.status === "partial"
-                            ? "#fffbeb"
-                            : "#f3f4f6",
+                            ? "#292524"
+                            : "#1e293b",
                         color:
                           ticket.status === "win"
-                            ? "#0a7d4f"
+                            ? "#F59E0B"
                             : ticket.status === "loss"
-                            ? "#dc2626"
+                            ? "#f87171"
                             : ticket.status === "partial"
-                            ? "#d97706"
-                            : "#6b7280",
+                            ? "#fbbf24"
+                            : "#94a3b8",
                         padding: "2px 8px",
                         borderRadius: 4,
                         fontWeight: 600,
@@ -752,7 +752,7 @@ export default function ValueAccumulatorPage() {
                 </div>
 
                 {/* Real-odds coverage line */}
-                <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 8 }}>
+                <div style={{ fontSize: 12, color: "#94a3b8", marginBottom: 8 }}>
                   {realOddsCountOf(ticket)} of {ticket.legs.length} legs at real bookmaker odds
                 </div>
 
@@ -760,48 +760,48 @@ export default function ValueAccumulatorPage() {
                 <div style={{ overflowX: "auto", marginBottom: 16 }}>
                   <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
                     <thead>
-                      <tr style={{ textAlign: "left", borderBottom: "1px solid #e5e7eb" }}>
-                        <th style={{ padding: "8px 6px", color: "#6b7280", fontWeight: 600, fontSize: 11, textTransform: "uppercase" }}>
+                      <tr style={{ textAlign: "left", borderBottom: "1px solid #334155" }}>
+                        <th style={{ padding: "8px 6px", color: "#94a3b8", fontWeight: 600, fontSize: 11, textTransform: "uppercase" }}>
                           Match
                         </th>
-                        <th style={{ padding: "8px 6px", color: "#6b7280", fontWeight: 600, fontSize: 11, textTransform: "uppercase" }}>
+                        <th style={{ padding: "8px 6px", color: "#94a3b8", fontWeight: 600, fontSize: 11, textTransform: "uppercase" }}>
                           Market
                         </th>
-                        <th style={{ padding: "8px 6px", color: "#6b7280", fontWeight: 600, fontSize: 11, textTransform: "uppercase" }}>
+                        <th style={{ padding: "8px 6px", color: "#94a3b8", fontWeight: 600, fontSize: 11, textTransform: "uppercase" }}>
                           Selection
                         </th>
-                        <th style={{ padding: "8px 6px", color: "#6b7280", fontWeight: 600, fontSize: 11, textTransform: "uppercase" }}>
+                        <th style={{ padding: "8px 6px", color: "#94a3b8", fontWeight: 600, fontSize: 11, textTransform: "uppercase" }}>
                           Odds
                         </th>
-                        <th style={{ padding: "8px 6px", color: "#6b7280", fontWeight: 600, fontSize: 11, textTransform: "uppercase" }}>
+                        <th style={{ padding: "8px 6px", color: "#94a3b8", fontWeight: 600, fontSize: 11, textTransform: "uppercase" }}>
                           EV
                         </th>
-                        <th style={{ padding: "8px 6px", color: "#6b7280", fontWeight: 600, fontSize: 11, textTransform: "uppercase" }}>
+                        <th style={{ padding: "8px 6px", color: "#94a3b8", fontWeight: 600, fontSize: 11, textTransform: "uppercase" }}>
                           Kickoff
                         </th>
-                        <th style={{ padding: "8px 6px", color: "#6b7280", fontWeight: 600, fontSize: 11, textTransform: "uppercase" }}>
+                        <th style={{ padding: "8px 6px", color: "#94a3b8", fontWeight: 600, fontSize: 11, textTransform: "uppercase" }}>
                           Bookmaker
                         </th>
                       </tr>
                     </thead>
                     <tbody>
                       {ticket.legs.map((leg, i) => (
-                        <tr key={i} style={{ borderBottom: "1px solid #f3f4f6" }}>
-                          <td style={{ padding: "10px 6px", color: "#111827", fontWeight: 500 }}>
+                        <tr key={i} style={{ borderBottom: "1px solid #1e293b" }}>
+                          <td style={{ padding: "10px 6px", color: "#f1f5f9", fontWeight: 500 }}>
                             <div>{leg.match}</div>
-                            <div style={{ fontSize: 11, color: "#9ca3af" }}>{leg.statFamily}</div>
+                            <div style={{ fontSize: 11, color: "#64748b" }}>{leg.statFamily}</div>
                           </td>
-                          <td style={{ padding: "10px 6px", color: "#374151" }}>{leg.market}</td>
-                          <td style={{ padding: "10px 6px", color: "#111827", fontWeight: 600 }}>{leg.selection}</td>
-                          <td style={{ padding: "10px 6px", color: "#111827" }}>
+                          <td style={{ padding: "10px 6px", color: "#e2e8f0" }}>{leg.market}</td>
+                          <td style={{ padding: "10px 6px", color: "#f1f5f9", fontWeight: 600 }}>{leg.selection}</td>
+                          <td style={{ padding: "10px 6px", color: "#f1f5f9" }}>
                             {leg.odds.toFixed(2)}
                             {leg.oddsSource === "real" ? (
                               <span
                                 style={{
                                   marginLeft: 6,
-                                  background: "#ecfdf5",
-                                  color: "#0a7d4f",
-                                  border: "1px solid #a7f3d0",
+                                  background: "#1e293b",
+                                  color: "#F59E0B",
+                                  border: "1px solid #334155",
                                   borderRadius: 4,
                                   padding: "1px 5px",
                                   fontSize: 10,
@@ -815,9 +815,9 @@ export default function ValueAccumulatorPage() {
                               <span
                                 style={{
                                   marginLeft: 6,
-                                  background: "#f3f4f6",
-                                  color: "#6b7280",
-                                  border: "1px solid #e5e7eb",
+                                  background: "#1e293b",
+                                  color: "#94a3b8",
+                                  border: "1px solid #334155",
                                   borderRadius: 4,
                                   padding: "1px 5px",
                                   fontSize: 10,
@@ -829,10 +829,10 @@ export default function ValueAccumulatorPage() {
                               </span>
                             )}
                           </td>
-                          <td style={{ padding: "10px 6px", color: leg.ev > 0 ? "#0a7d4f" : "#dc2626", fontWeight: 600 }}>
+                          <td style={{ padding: "10px 6px", color: leg.ev > 0 ? "#F59E0B" : "#f87171", fontWeight: 600 }}>
                             {(leg.ev * 100).toFixed(1)}%
                           </td>
-                          <td style={{ padding: "10px 6px", color: "#6b7280", fontSize: 12 }}>
+                          <td style={{ padding: "10px 6px", color: "#94a3b8", fontSize: 12 }}>
                             {new Date(leg.kickoff).toLocaleString(undefined, {
                               month: "short",
                               day: "numeric",
@@ -840,7 +840,7 @@ export default function ValueAccumulatorPage() {
                               minute: "2-digit",
                             })}
                           </td>
-                          <td style={{ padding: "10px 6px", color: "#6b7280", fontSize: 12 }}>{leg.bookmaker}</td>
+                          <td style={{ padding: "10px 6px", color: "#94a3b8", fontSize: 12 }}>{leg.bookmaker}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -853,48 +853,48 @@ export default function ValueAccumulatorPage() {
                     display: "grid",
                     gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))",
                     gap: 12,
-                    background: "#f9fafb",
+                    background: "#1e293b",
                     borderRadius: 8,
                     padding: "12px 16px",
                     fontSize: 13,
                   }}
                 >
                   <div>
-                    <div style={{ color: "#6b7280", fontSize: 11, textTransform: "uppercase", fontWeight: 600 }}>Combined odds</div>
-                    <div style={{ color: "#111827", fontWeight: 700, fontSize: 14 }}>{ticket.combinedOdds.toFixed(2)}</div>
+                    <div style={{ color: "#94a3b8", fontSize: 11, textTransform: "uppercase", fontWeight: 600 }}>Combined odds</div>
+                    <div style={{ color: "#f1f5f9", fontWeight: 700, fontSize: 14 }}>{ticket.combinedOdds.toFixed(2)}</div>
                   </div>
                   <div>
-                    <div style={{ color: "#6b7280", fontSize: 11, textTransform: "uppercase", fontWeight: 600 }}>Combined prob (adjusted)</div>
-                    <div style={{ color: "#111827", fontWeight: 600 }}>{(ticket.combinedProbability * 100).toFixed(1)}%</div>
+                    <div style={{ color: "#94a3b8", fontSize: 11, textTransform: "uppercase", fontWeight: 600 }}>Combined prob (adjusted)</div>
+                    <div style={{ color: "#f1f5f9", fontWeight: 600 }}>{(ticket.combinedProbability * 100).toFixed(1)}%</div>
                     {ticket.legs.length >= 2 && ticket.independentProbability != null && (() => {
                       const ind = typeof ticket.independentProbability === "number"
                         ? ticket.independentProbability
                         : Number(ticket.independentProbability);
                       return (
-                        <div style={{ color: "#9ca3af", fontSize: 10, fontWeight: 400, marginTop: 2 }}>
+                        <div style={{ color: "#64748b", fontSize: 10, fontWeight: 400, marginTop: 2 }}>
                           Independent: {(ind * 100).toFixed(1)}% · {ticket.legs.length}-leg discount ×{Math.pow(0.92, ticket.legs.length).toFixed(3)}
                         </div>
                       );
                     })()}
                   </div>
                   <div>
-                    <div style={{ color: "#6b7280", fontSize: 11, textTransform: "uppercase", fontWeight: 600 }}>Combined EV</div>
-                    <div style={{ color: ticket.combinedEv > 0 ? "#0a7d4f" : "#dc2626", fontWeight: 700 }}>
+                    <div style={{ color: "#94a3b8", fontSize: 11, textTransform: "uppercase", fontWeight: 600 }}>Combined EV</div>
+                    <div style={{ color: ticket.combinedEv > 0 ? "#F59E0B" : "#f87171", fontWeight: 700 }}>
                       {(ticket.combinedEv * 100).toFixed(1)}%
                     </div>
                   </div>
                   <div>
-                    <div style={{ color: "#6b7280", fontSize: 11, textTransform: "uppercase", fontWeight: 600 }}>Stake</div>
-                    <div style={{ color: "#111827", fontWeight: 600 }}>{ticket.stakePercent.toFixed(2)}% bankroll</div>
+                    <div style={{ color: "#94a3b8", fontSize: 11, textTransform: "uppercase", fontWeight: 600 }}>Stake</div>
+                    <div style={{ color: "#f1f5f9", fontWeight: 600 }}>{ticket.stakePercent.toFixed(2)}% bankroll</div>
                   </div>
                   <div>
-                    <div style={{ color: "#6b7280", fontSize: 11, textTransform: "uppercase", fontWeight: 600 }}>Kelly</div>
-                    <div style={{ color: "#374151", fontWeight: 600 }}>{ticket.kellyScore.toFixed(4)}</div>
+                    <div style={{ color: "#94a3b8", fontSize: 11, textTransform: "uppercase", fontWeight: 600 }}>Kelly</div>
+                    <div style={{ color: "#e2e8f0", fontWeight: 600 }}>{ticket.kellyScore.toFixed(4)}</div>
                   </div>
                 </div>
 
                 {/* Real-odds EV — EV of the real-priced legs alone */}
-                <div style={{ marginTop: 8, fontSize: 12, color: "#6b7280" }}>
+                <div style={{ marginTop: 8, fontSize: 12, color: "#94a3b8" }}>
                   Real-odds EV: {realOddsEvOf(ticket)}
                 </div>
               </div>
@@ -909,8 +909,8 @@ export default function ValueAccumulatorPage() {
             type="button"
             onClick={() => setBtHistoryOpen((o) => !o)}
             style={{
-              background: "white",
-              border: "1px solid #e5e7eb",
+              background: "#0f172a",
+              border: "1px solid #334155",
               borderRadius: 12,
               padding: "14px 20px",
               width: "100%",
@@ -921,14 +921,14 @@ export default function ValueAccumulatorPage() {
               alignItems: "center",
             }}
           >
-            <span style={{ fontSize: 15, fontWeight: 700, color: "#111827" }}>Backtest History</span>
-            <span style={{ fontSize: 12, color: "#6b7280" }}>{btHistoryOpen ? "Hide" : "Show"}</span>
+            <span style={{ fontSize: 15, fontWeight: 700, color: "#f1f5f9" }}>Backtest History</span>
+            <span style={{ fontSize: 12, color: "#94a3b8" }}>{btHistoryOpen ? "Hide" : "Show"}</span>
           </button>
           {btHistoryOpen && (
             <div
               style={{
-                background: "white",
-                border: "1px solid #e5e7eb",
+                background: "#0f172a",
+                border: "1px solid #334155",
                 borderTop: "none",
                 borderRadius: "0 0 12px 12px",
                 padding: 20,
@@ -953,10 +953,10 @@ export default function ValueAccumulatorPage() {
                   const o = (outcome ?? "unknown").toLowerCase();
                   const palette =
                     o === "won"
-                      ? { bg: "#ecfdf5", fg: "#0a7d4f", label: "WON" }
+                      ? { bg: "#1e293b", fg: "#F59E0B", label: "WON" }
                       : o === "lost"
-                      ? { bg: "#fef2f2", fg: "#dc2626", label: "LOST" }
-                      : { bg: "#f3f4f6", fg: "#6b7280", label: "UNKNOWN" };
+                      ? { bg: "#450a0a", fg: "#f87171", label: "LOST" }
+                      : { bg: "#1e293b", fg: "#94a3b8", label: "UNKNOWN" };
                   return (
                     <span
                       style={{
@@ -974,20 +974,20 @@ export default function ValueAccumulatorPage() {
                 };
                 return (
                   <>
-                    <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 16 }}>
+                    <div style={{ fontSize: 13, color: "#94a3b8", marginBottom: 16 }}>
                       {btRuns.length} runs · {totalTickets} tickets · {wonN}W / {lostN}L ({rate}%)
                     </div>
                     <button
                       type="button"
                       onClick={() => setBtViewAllRuns((v) => !v)}
                       style={{
-                        background: "#f3f4f6",
-                        border: "1px solid #e5e7eb",
+                        background: "#1e293b",
+                        border: "1px solid #334155",
                         borderRadius: 8,
                         padding: "6px 12px",
                         fontSize: 12,
                         fontWeight: 600,
-                        color: "#374151",
+                        color: "#e2e8f0",
                         cursor: "pointer",
                         marginBottom: 16,
                       }}
@@ -1001,10 +1001,10 @@ export default function ValueAccumulatorPage() {
                             key={r.runId}
                             style={{
                               fontSize: 12,
-                              color: "#374151",
+                              color: "#e2e8f0",
                               fontFamily: "monospace",
                               padding: "8px 10px",
-                              background: "#f9fafb",
+                              background: "#1e293b",
                               borderRadius: 8,
                             }}
                           >
@@ -1021,7 +1021,7 @@ export default function ValueAccumulatorPage() {
                           <div
                             key={ticket.id}
                             style={{
-                              border: "1px solid #e5e7eb",
+                              border: "1px solid #334155",
                               borderRadius: 10,
                               padding: 14,
                             }}
@@ -1029,7 +1029,7 @@ export default function ValueAccumulatorPage() {
                             <div
                               style={{
                                 fontSize: 11,
-                                color: "#6b7280",
+                                color: "#94a3b8",
                                 fontWeight: 700,
                                 letterSpacing: "0.04em",
                                 marginBottom: 6,
@@ -1037,7 +1037,7 @@ export default function ValueAccumulatorPage() {
                             >
                               SIMULATED DAY: {ticket.simulatedDay}
                             </div>
-                            <div style={{ fontSize: 13, fontWeight: 600, color: "#111827", marginBottom: 10 }}>
+                            <div style={{ fontSize: 13, fontWeight: 600, color: "#f1f5f9", marginBottom: 10 }}>
                               ODDS {Number.isFinite(odds) ? odds.toFixed(2) : "—"} · CLAIMED{" "}
                               {Number.isFinite(claimed) ? `${(claimed * 100).toFixed(1)}%` : "—"} · STATUS:{" "}
                               {ticket.status.toUpperCase()}
@@ -1045,13 +1045,13 @@ export default function ValueAccumulatorPage() {
                             <div style={{ overflowX: "auto" }}>
                               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
                                 <thead>
-                                  <tr style={{ textAlign: "left", borderBottom: "1px solid #e5e7eb" }}>
+                                  <tr style={{ textAlign: "left", borderBottom: "1px solid #334155" }}>
                                     {["MATCH", "MARKET", "SELECTION", "ODDS", "PROB", "OUTCOME"].map((h) => (
                                       <th
                                         key={h}
                                         style={{
                                           padding: "6px 4px",
-                                          color: "#6b7280",
+                                          color: "#94a3b8",
                                           fontWeight: 600,
                                           fontSize: 10,
                                         }}
@@ -1063,7 +1063,7 @@ export default function ValueAccumulatorPage() {
                                 </thead>
                                 <tbody>
                                   {(ticket.legs ?? []).map((leg, i) => (
-                                    <tr key={i} style={{ borderBottom: "1px solid #f3f4f6" }}>
+                                    <tr key={i} style={{ borderBottom: "1px solid #1e293b" }}>
                                       <td style={{ padding: "8px 4px" }}>{leg.match ?? leg.matchLabel ?? "—"}</td>
                                       <td style={{ padding: "8px 4px" }}>{leg.market}</td>
                                       <td style={{ padding: "8px 4px" }}>{leg.selection}</td>
@@ -1094,12 +1094,12 @@ export default function ValueAccumulatorPage() {
 
         {/* Edge case: 1-2 legs */}
         {!loading && tickets.length === 0 && scanId && (
-          <div style={{ marginTop: 16, fontSize: 13, color: "#6b7280", textAlign: "center" }}>
+          <div style={{ marginTop: 16, fontSize: 13, color: "#94a3b8", textAlign: "center" }}>
             Only {tickets.length} value legs found. Need at least 3 across different stat families.
           </div>
         )}
 
-        <div style={{ marginTop: 32, textAlign: "center", fontSize: 11, color: "#9ca3af" }}>
+        <div style={{ marginTop: 32, textAlign: "center", fontSize: 11, color: "#64748b" }}>
           Value Accumulator scans upcoming matches for EV &gt; 3% where model beats bookmaker. Tickets are immutable once
           built. Settlement runs automatically after matches finish.
         </div>
@@ -1122,7 +1122,7 @@ export default function ValueAccumulatorPage() {
           <div
             onClick={(e) => e.stopPropagation()}
             style={{
-              background: "white",
+              background: "#0f172a",
               width: "100%",
               maxWidth: 720,
               maxHeight: "70vh",
@@ -1140,23 +1140,23 @@ export default function ValueAccumulatorPage() {
                 alignItems: "center",
                 justifyContent: "space-between",
                 padding: "16px 20px",
-                borderBottom: "1px solid #e5e7eb",
+                borderBottom: "1px solid #334155",
               }}
             >
-              <div style={{ fontSize: 16, fontWeight: 700, color: "#111827" }}>Calibration Backtest</div>
+              <div style={{ fontSize: 16, fontWeight: 700, color: "#f1f5f9" }}>Calibration Backtest</div>
               <button
                 type="button"
                 onClick={closeBacktest}
                 aria-label="Close"
                 style={{
-                  background: "#f3f4f6",
+                  background: "#1e293b",
                   border: "none",
                   borderRadius: 8,
                   width: 28,
                   height: 28,
                   fontSize: 14,
                   lineHeight: 1,
-                  color: "#6b7280",
+                  color: "#94a3b8",
                   cursor: "pointer",
                 }}
               >
@@ -1171,7 +1171,7 @@ export default function ValueAccumulatorPage() {
                     display: "flex",
                     alignItems: "center",
                     gap: 10,
-                    color: "#6b7280",
+                    color: "#94a3b8",
                     fontSize: 14,
                     padding: "24px 0",
                   }}
@@ -1182,25 +1182,25 @@ export default function ValueAccumulatorPage() {
               )}
 
               {backtestStatus === "error" && (
-                <div style={{ color: "#dc2626", fontSize: 14, padding: "8px 0" }}>{backtestError}</div>
+                <div style={{ color: "#f87171", fontSize: 14, padding: "8px 0" }}>{backtestError}</div>
               )}
 
               {backtestStatus === "done" && backtestResult && (
                 <>
-                  <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 12 }}>
+                  <div style={{ fontSize: 13, color: "#94a3b8", marginBottom: 12 }}>
                     {backtestResult.matchesProcessed} matches · {backtestResult.totalPredictions} predictions ·{" "}
                     {backtestResult.elapsedMs}ms
                   </div>
                   {backtestResult.buckets.length > 0 ? (
                     <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
                       <thead>
-                        <tr style={{ textAlign: "left", borderBottom: "1px solid #e5e7eb" }}>
+                        <tr style={{ textAlign: "left", borderBottom: "1px solid #334155" }}>
                           {["Claimed", "N", "Hits", "Actual", "Diff"].map((h) => (
                             <th
                               key={h}
                               style={{
                                 padding: "8px 6px",
-                                color: "#6b7280",
+                                color: "#94a3b8",
                                 fontWeight: 600,
                                 fontSize: 11,
                                 textTransform: "uppercase",
@@ -1213,20 +1213,20 @@ export default function ValueAccumulatorPage() {
                       </thead>
                       <tbody>
                         {backtestResult.buckets.map((b) => (
-                          <tr key={b.claimed} style={{ borderBottom: "1px solid #f3f4f6" }}>
-                            <td style={{ padding: "10px 6px", color: "#111827", fontWeight: 600 }}>
+                          <tr key={b.claimed} style={{ borderBottom: "1px solid #1e293b" }}>
+                            <td style={{ padding: "10px 6px", color: "#f1f5f9", fontWeight: 600 }}>
                               {(b.claimed * 100).toFixed(0)}%
                             </td>
-                            <td style={{ padding: "10px 6px", color: "#374151" }}>{b.n}</td>
-                            <td style={{ padding: "10px 6px", color: "#374151" }}>{b.hits}</td>
-                            <td style={{ padding: "10px 6px", color: "#111827", fontWeight: 600 }}>
+                            <td style={{ padding: "10px 6px", color: "#e2e8f0" }}>{b.n}</td>
+                            <td style={{ padding: "10px 6px", color: "#e2e8f0" }}>{b.hits}</td>
+                            <td style={{ padding: "10px 6px", color: "#f1f5f9", fontWeight: 600 }}>
                               {(b.actual * 100).toFixed(1)}%
                             </td>
                             <td
                               style={{
                                 padding: "10px 6px",
                                 fontWeight: 600,
-                                color: b.diff > -0.05 ? "#0a7d4f" : b.diff >= -0.1 ? "#d97706" : "#dc2626",
+                                color: b.diff > -0.05 ? "#F59E0B" : b.diff >= -0.1 ? "#fbbf24" : "#f87171",
                               }}
                             >
                               {b.diff >= 0 ? "+" : ""}
@@ -1237,7 +1237,7 @@ export default function ValueAccumulatorPage() {
                       </tbody>
                     </table>
                   ) : (
-                    <div style={{ fontSize: 13, color: "#6b7280", padding: "8px 0" }}>
+                    <div style={{ fontSize: 13, color: "#94a3b8", padding: "8px 0" }}>
                       No bucket reached 5 predictions yet — scan more days first.
                     </div>
                   )}
@@ -1257,7 +1257,7 @@ export default function ValueAccumulatorPage() {
             left: "50%",
             bottom: 24,
             transform: "translateX(-50%)",
-            background: "#111827",
+            background: "#1e293b",
             color: "white",
             borderRadius: 999,
             padding: "10px 18px",
@@ -1290,7 +1290,7 @@ export default function ValueAccumulatorPage() {
           <div
             onClick={(e) => e.stopPropagation()}
             style={{
-              background: "white",
+              background: "#0f172a",
               width: "100%",
               maxWidth: 720,
               maxHeight: "70vh",
@@ -1308,23 +1308,23 @@ export default function ValueAccumulatorPage() {
                 alignItems: "center",
                 justifyContent: "space-between",
                 padding: "16px 20px",
-                borderBottom: "1px solid #e5e7eb",
+                borderBottom: "1px solid #334155",
               }}
             >
-              <div style={{ fontSize: 16, fontWeight: 700, color: "#111827" }}>Live Scan</div>
+              <div style={{ fontSize: 16, fontWeight: 700, color: "#f1f5f9" }}>Live Scan</div>
               <button
                 type="button"
                 onClick={closeLiveScanError}
                 aria-label="Close"
                 style={{
-                  background: "#f3f4f6",
+                  background: "#1e293b",
                   border: "none",
                   borderRadius: 8,
                   width: 28,
                   height: 28,
                   fontSize: 14,
                   lineHeight: 1,
-                  color: "#6b7280",
+                  color: "#94a3b8",
                   cursor: "pointer",
                 }}
               >
@@ -1332,7 +1332,7 @@ export default function ValueAccumulatorPage() {
               </button>
             </div>
             <div style={{ overflowY: "auto", padding: "16px 20px 24px" }}>
-              <div style={{ color: "#dc2626", fontSize: 14, padding: "8px 0" }}>{liveScanError}</div>
+              <div style={{ color: "#f87171", fontSize: 14, padding: "8px 0" }}>{liveScanError}</div>
             </div>
           </div>
         </div>
@@ -1355,7 +1355,7 @@ export default function ValueAccumulatorPage() {
           <div
             onClick={(e) => e.stopPropagation()}
             style={{
-              background: "white",
+              background: "#0f172a",
               width: "100%",
               maxWidth: 720,
               maxHeight: "70vh",
@@ -1373,13 +1373,13 @@ export default function ValueAccumulatorPage() {
                 alignItems: "center",
                 justifyContent: "space-between",
                 padding: "16px 20px",
-                borderBottom: "1px solid #e5e7eb",
+                borderBottom: "1px solid #334155",
               }}
             >
               <div>
-                <div style={{ fontSize: 16, fontWeight: 700, color: "#111827" }}>Ticket Backtest</div>
+                <div style={{ fontSize: 16, fontWeight: 700, color: "#f1f5f9" }}>Ticket Backtest</div>
                 {ticketBacktestStatus === "done" && ticketBacktestResult?.ticketBacktest && (
-                  <div style={{ fontSize: 13, color: "#6b7280", marginTop: 4 }}>
+                  <div style={{ fontSize: 13, color: "#94a3b8", marginTop: 4 }}>
                     {ticketBacktestResult.ticketBacktest.daysSimulated} days ·{" "}
                     {ticketBacktestResult.ticketBacktest.ticketsBuilt} tickets ·{" "}
                     {ticketBacktestResult.ticketBacktest.won} won ·{" "}
@@ -1393,14 +1393,14 @@ export default function ValueAccumulatorPage() {
                 onClick={closeTicketBacktest}
                 aria-label="Close"
                 style={{
-                  background: "#f3f4f6",
+                  background: "#1e293b",
                   border: "none",
                   borderRadius: 8,
                   width: 28,
                   height: 28,
                   fontSize: 14,
                   lineHeight: 1,
-                  color: "#6b7280",
+                  color: "#94a3b8",
                   cursor: "pointer",
                 }}
               >
@@ -1415,7 +1415,7 @@ export default function ValueAccumulatorPage() {
                     display: "flex",
                     alignItems: "center",
                     gap: 10,
-                    color: "#6b7280",
+                    color: "#94a3b8",
                     fontSize: 14,
                     padding: "24px 0",
                   }}
@@ -1426,7 +1426,7 @@ export default function ValueAccumulatorPage() {
               )}
 
               {ticketBacktestStatus === "error" && (
-                <div style={{ color: "#dc2626", fontSize: 14, padding: "8px 0" }}>{ticketBacktestError}</div>
+                <div style={{ color: "#f87171", fontSize: 14, padding: "8px 0" }}>{ticketBacktestError}</div>
               )}
 
               {ticketBacktestStatus === "done" && ticketBacktestResult?.ticketBacktest && (
@@ -1435,19 +1435,19 @@ export default function ValueAccumulatorPage() {
                     style={{
                       padding: "16px 0 20px",
                       textAlign: "center",
-                      borderBottom: "1px solid #f3f4f6",
+                      borderBottom: "1px solid #1e293b",
                       marginBottom: 16,
                     }}
                   >
-                    <div style={{ fontSize: 11, color: "#6b7280", textTransform: "uppercase", fontWeight: 600 }}>
+                    <div style={{ fontSize: 11, color: "#94a3b8", textTransform: "uppercase", fontWeight: 600 }}>
                       Realised hit rate
                     </div>
-                    <div style={{ fontSize: 40, fontWeight: 700, color: "#111827", letterSpacing: "-0.02em", marginTop: 4 }}>
+                    <div style={{ fontSize: 40, fontWeight: 700, color: "#f1f5f9", letterSpacing: "-0.02em", marginTop: 4 }}>
                       {ticketBacktestResult.ticketBacktest.realisedRate == null
                         ? "—"
                         : `${(ticketBacktestResult.ticketBacktest.realisedRate * 100).toFixed(1)}%`}
                     </div>
-                    <div style={{ fontSize: 13, color: "#6b7280", marginTop: 4 }}>
+                    <div style={{ fontSize: 13, color: "#94a3b8", marginTop: 4 }}>
                       Claimed avg{" "}
                       {ticketBacktestResult.ticketBacktest.claimedAverage != null
                         ? `${(ticketBacktestResult.ticketBacktest.claimedAverage * 100).toFixed(1)}%`
@@ -1465,13 +1465,13 @@ export default function ValueAccumulatorPage() {
                     <div style={{ overflowX: "auto" }}>
                       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
                         <thead>
-                          <tr style={{ textAlign: "left", borderBottom: "1px solid #e5e7eb" }}>
+                          <tr style={{ textAlign: "left", borderBottom: "1px solid #334155" }}>
                             {["Legs", "Combined Odds", "Model Claimed Prob", "Status"].map((h) => (
                               <th
                                 key={h}
                                 style={{
                                   padding: "8px 6px",
-                                  color: "#6b7280",
+                                  color: "#94a3b8",
                                   fontWeight: 600,
                                   fontSize: 11,
                                   textTransform: "uppercase",
@@ -1490,19 +1490,19 @@ export default function ValueAccumulatorPage() {
                                 : "pending";
                             const palette =
                               status === "won"
-                                ? { bg: "#ecfdf5", fg: "#0a7d4f" }
+                                ? { bg: "#1e293b", fg: "#F59E0B" }
                                 : status === "lost"
-                                ? { bg: "#fef2f2", fg: "#dc2626" }
-                                : { bg: "#f3f4f6", fg: "#6b7280" };
+                                ? { bg: "#450a0a", fg: "#f87171" }
+                                : { bg: "#1e293b", fg: "#94a3b8" };
                             return (
-                              <tr key={`${t.weekLabel}-${idx}`} style={{ borderBottom: "1px solid #f3f4f6" }}>
-                                <td style={{ padding: "10px 6px", color: "#111827", fontWeight: 600 }}>
+                              <tr key={`${t.weekLabel}-${idx}`} style={{ borderBottom: "1px solid #1e293b" }}>
+                                <td style={{ padding: "10px 6px", color: "#f1f5f9", fontWeight: 600 }}>
                                   {t.legsCount}
                                 </td>
-                                <td style={{ padding: "10px 6px", color: "#111827", fontWeight: 600 }}>
+                                <td style={{ padding: "10px 6px", color: "#f1f5f9", fontWeight: 600 }}>
                                   {t.combinedOdds.toFixed(2)}
                                 </td>
-                                <td style={{ padding: "10px 6px", color: "#374151" }}>
+                                <td style={{ padding: "10px 6px", color: "#e2e8f0" }}>
                                   {(t.claimedProbability * 100).toFixed(1)}%
                                 </td>
                                 <td style={{ padding: "10px 6px" }}>
@@ -1527,7 +1527,7 @@ export default function ValueAccumulatorPage() {
                       </table>
                     </div>
                   ) : (
-                    <div style={{ fontSize: 13, color: "#6b7280", padding: "8px 0" }}>
+                    <div style={{ fontSize: 13, color: "#94a3b8", padding: "8px 0" }}>
                       No tickets were built for this scan.
                     </div>
                   )}
@@ -1537,7 +1537,7 @@ export default function ValueAccumulatorPage() {
                       <div
                         style={{
                           fontSize: 11,
-                          color: "#6b7280",
+                          color: "#94a3b8",
                           textTransform: "uppercase",
                           fontWeight: 600,
                           letterSpacing: "0.02em",
@@ -1550,13 +1550,13 @@ export default function ValueAccumulatorPage() {
                         <div style={{ overflowX: "auto" }}>
                           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
                             <thead>
-                              <tr style={{ textAlign: "left", borderBottom: "1px solid #e5e7eb" }}>
+                              <tr style={{ textAlign: "left", borderBottom: "1px solid #334155" }}>
                                 {["Claimed", "N", "Won", "Lost", "Realised", "Diff"].map((h) => (
                                   <th
                                     key={h}
                                     style={{
                                       padding: "8px 6px",
-                                      color: "#6b7280",
+                                      color: "#94a3b8",
                                       fontWeight: 600,
                                       fontSize: 11,
                                       textTransform: "uppercase",
@@ -1569,14 +1569,14 @@ export default function ValueAccumulatorPage() {
                             </thead>
                             <tbody>
                               {ticketBacktestResult.ticketBacktest.ticketBuckets.map((b) => (
-                                <tr key={b.claimed} style={{ borderBottom: "1px solid #f3f4f6" }}>
-                                  <td style={{ padding: "10px 6px", color: "#111827", fontWeight: 600 }}>
+                                <tr key={b.claimed} style={{ borderBottom: "1px solid #1e293b" }}>
+                                  <td style={{ padding: "10px 6px", color: "#f1f5f9", fontWeight: 600 }}>
                                     {(b.claimed * 100).toFixed(0)}%
                                   </td>
-                                  <td style={{ padding: "10px 6px", color: "#374151" }}>{b.n}</td>
-                                  <td style={{ padding: "10px 6px", color: "#374151" }}>{b.won}</td>
-                                  <td style={{ padding: "10px 6px", color: "#374151" }}>{b.lost}</td>
-                                  <td style={{ padding: "10px 6px", color: "#111827", fontWeight: 600 }}>
+                                  <td style={{ padding: "10px 6px", color: "#e2e8f0" }}>{b.n}</td>
+                                  <td style={{ padding: "10px 6px", color: "#e2e8f0" }}>{b.won}</td>
+                                  <td style={{ padding: "10px 6px", color: "#e2e8f0" }}>{b.lost}</td>
+                                  <td style={{ padding: "10px 6px", color: "#f1f5f9", fontWeight: 600 }}>
                                     {(b.realised * 100).toFixed(1)}%
                                   </td>
                                   <td
@@ -1585,10 +1585,10 @@ export default function ValueAccumulatorPage() {
                                       fontWeight: 600,
                                       color:
                                         Math.abs(b.diff) <= 0.05
-                                          ? "#0a7d4f"
+                                          ? "#F59E0B"
                                           : Math.abs(b.diff) <= 0.1
-                                          ? "#d97706"
-                                          : "#dc2626",
+                                          ? "#fbbf24"
+                                          : "#f87171",
                                     }}
                                   >
                                     {b.diff >= 0 ? "+" : ""}
@@ -1600,7 +1600,7 @@ export default function ValueAccumulatorPage() {
                           </table>
                         </div>
                       ) : (
-                        <div style={{ fontSize: 13, color: "#6b7280", padding: "8px 0" }}>
+                        <div style={{ fontSize: 13, color: "#94a3b8", padding: "8px 0" }}>
                           No bucket reached 3 settled tickets yet — run more scans first.
                         </div>
                       )}
@@ -1612,7 +1612,7 @@ export default function ValueAccumulatorPage() {
                       <div
                         style={{
                           fontSize: 11,
-                          color: "#6b7280",
+                          color: "#94a3b8",
                           textTransform: "uppercase",
                           fontWeight: 600,
                           letterSpacing: "0.02em",
@@ -1626,13 +1626,13 @@ export default function ValueAccumulatorPage() {
                         <div style={{ overflowX: "auto" }}>
                           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
                             <thead>
-                              <tr style={{ textAlign: "left", borderBottom: "1px solid #e5e7eb" }}>
+                              <tr style={{ textAlign: "left", borderBottom: "1px solid #334155" }}>
                                 {["Market Key", "N", "Claimed", "Realised", "Edge", "Corr", "Action"].map((h) => (
                                   <th
                                     key={h}
                                     style={{
                                       padding: "8px 6px",
-                                      color: "#6b7280",
+                                      color: "#94a3b8",
                                       fontWeight: 600,
                                       fontSize: 11,
                                       textTransform: "uppercase",
@@ -1662,19 +1662,19 @@ export default function ValueAccumulatorPage() {
 
                                   const palette =
                                     action === "trusted"
-                                      ? { bg: "#ecfdf5", fg: "#0a7d4f" }
+                                      ? { bg: "#1e293b", fg: "#F59E0B" }
                                       : action === "downweighted"
-                                      ? { bg: "#fef3c7", fg: "#d97706" }
+                                      ? { bg: "#292524", fg: "#fbbf24" }
                                       : action === "filtered"
-                                      ? { bg: "#fef2f2", fg: "#dc2626" }
-                                      : { bg: "#f3f4f6", fg: "#6b7280" };
+                                      ? { bg: "#450a0a", fg: "#f87171" }
+                                      : { bg: "#1e293b", fg: "#94a3b8" };
 
                                   return (
-                                    <tr key={item.marketKey} style={{ borderBottom: "1px solid #f3f4f6" }}>
+                                    <tr key={item.marketKey} style={{ borderBottom: "1px solid #1e293b" }}>
                                       <td
                                         style={{
                                           padding: "10px 6px",
-                                          color: "#111827",
+                                          color: "#f1f5f9",
                                           fontWeight: 600,
                                           fontFamily: "monospace",
                                           fontSize: 12,
@@ -1682,11 +1682,11 @@ export default function ValueAccumulatorPage() {
                                       >
                                         {item.marketKey}
                                       </td>
-                                      <td style={{ padding: "10px 6px", color: "#374151" }}>{item.n}</td>
-                                      <td style={{ padding: "10px 6px", color: "#374151" }}>
+                                      <td style={{ padding: "10px 6px", color: "#e2e8f0" }}>{item.n}</td>
+                                      <td style={{ padding: "10px 6px", color: "#e2e8f0" }}>
                                         {(item.claimed * 100).toFixed(1)}%
                                       </td>
-                                      <td style={{ padding: "10px 6px", color: "#111827", fontWeight: 600 }}>
+                                      <td style={{ padding: "10px 6px", color: "#f1f5f9", fontWeight: 600 }}>
                                         {(item.realised * 100).toFixed(1)}%
                                       </td>
                                       <td
@@ -1695,16 +1695,16 @@ export default function ValueAccumulatorPage() {
                                           fontWeight: 600,
                                           color:
                                             item.edge >= 0
-                                              ? "#0a7d4f"
+                                              ? "#F59E0B"
                                               : item.edge >= -0.05
-                                              ? "#d97706"
-                                              : "#dc2626",
+                                              ? "#fbbf24"
+                                              : "#f87171",
                                         }}
                                       >
                                         {item.edge >= 0 ? "+" : ""}
                                         {(item.edge * 100).toFixed(1)}%
                                       </td>
-                                      <td style={{ padding: "10px 6px", color: "#374151", fontFamily: "monospace" }}>
+                                      <td style={{ padding: "10px 6px", color: "#e2e8f0", fontFamily: "monospace" }}>
                                         {item.corr.toFixed(3)}
                                       </td>
                                       <td style={{ padding: "10px 6px" }}>
@@ -1729,7 +1729,7 @@ export default function ValueAccumulatorPage() {
                           </table>
                         </div>
                       ) : (
-                        <div style={{ fontSize: 13, color: "#6b7280", padding: "8px 0" }}>
+                        <div style={{ fontSize: 13, color: "#94a3b8", padding: "8px 0" }}>
                           No market reliability data available yet.
                         </div>
                       )}
