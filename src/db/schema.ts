@@ -438,3 +438,14 @@ export const bankrollEntries = bankroll;
 export const authSettings = userSettings;
 /** @deprecated use `performanceLog` */
 export const performanceRecords = performanceLog;
+
+export const v4Predictions = pgTable("v4_predictions", {
+  id:          serial("id").primaryKey(),
+  matchweek:   text("matchweek").notNull(),
+  fixtures:    jsonb("fixtures").notNull(),
+  predictions: jsonb("predictions").notNull(),
+  actuals:     jsonb("actuals"),
+  totalScore:  integer("total_score"),
+  createdAt:   timestamp("created_at").defaultNow().notNull(),
+});
+export type V4PredictionRow = typeof v4Predictions.$inferSelect;
