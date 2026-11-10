@@ -685,6 +685,20 @@ function Header({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
               </div>
               <div className="text-[11px] mt-0.5 leading-snug text-slate-500">Ranked tickets this week, best first</div>
             </button>
+            <button
+              type="button"
+              role="menuitem"
+              title="V4 Predictor — Rule-based EPL score predictor"
+              aria-label="V4 Predictor — Rule-based EPL score predictor"
+              onClick={() => {
+                router.push("/v4-predictor");
+                setMenuOpen(false);
+              }}
+              className={`${MENU_ITEM} w-full px-4 py-3 text-left rounded-xl`}
+            >
+              <div className="text-sm font-semibold">🔮 V4 Predictor</div>
+              <div className="text-xs text-slate-400 mt-0.5">Rule-based EPL score predictor</div>
+            </button>
             {menuTabs.map((t) => (
               <button
                 key={t.id}
