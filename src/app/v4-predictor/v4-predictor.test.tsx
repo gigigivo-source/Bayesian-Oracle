@@ -4,7 +4,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FixtureLite } from "@/lib/espn";
-import { TEAM_NAME_MAP, translateTeamName } from "@/lib/v4-predictor";
+import { TEAM_NAME_MAP, isScoreline, translateTeamName } from "@/lib/v4-predictor";
 
 const fetchScoreboardMock = vi.fn();
 const getCurrentMatchweekMock = vi.fn();
@@ -98,7 +98,14 @@ beforeEach(() => {
   fetchSummaryMock.mockReset();
   fetchSummaryMock.mockResolvedValue(null);
   runEngineMock.mockReset();
-  runEngineMock.mockResolvedValue({ markets: [] });
+  // The feed has no V2 fallback: the engine must supply a Correct Score market
+  // for every fixture, so the default fixture is a valid engine response.
+  runEngineMock.mockImplementation(async () => ({
+    markets: [
+      { name: "Correct Score 1-0", family: "Goals", selection: "Score 1-0", hitRate: 0.12 },
+      { name: "Correct Score 2-1", family: "Goals", selection: "Score 2-1", hitRate: 0.18 },
+    ],
+  }));
 });
 
 afterEach(() => {
@@ -144,9 +151,9 @@ describe("GET /api/v4-predictor/auto", () => {
     expect(body).toEqual({
       week: 10,
       fixtures: [
-        { home: { name: "Man City", logo: "https://example.com/mancity.png" }, away: { name: "Hull", logo: "https://example.com/hull.png" }, state: "post", actual: [2, 0], enginePrediction: null },
-        { home: { name: "Spurs", logo: "https://example.com/spurs.png" }, away: { name: "Brighton", logo: "https://example.com/brighton.png" }, state: "post", actual: [0, 0], enginePrediction: null },
-        { home: { name: "Bournemouth", logo: null }, away: { name: "Newcastle", logo: null }, state: "pre", actual: null, enginePrediction: null },
+        { home: { name: "Man City", logo: "https://example.com/mancity.png" }, away: { name: "Hull", logo: "https://example.com/hull.png" }, state: "post", actual: [2, 0], enginePrediction: "2-1" },
+        { home: { name: "Spurs", logo: "https://example.com/spurs.png" }, away: { name: "Brighton", logo: "https://example.com/brighton.png" }, state: "post", actual: [0, 0], enginePrediction: "2-1" },
+        { home: { name: "Bournemouth", logo: null }, away: { name: "Newcastle", logo: null }, state: "pre", actual: null, enginePrediction: "2-1" },
       ],
     });
   });
@@ -167,7 +174,7 @@ describe("GET /api/v4-predictor/auto", () => {
     expect(body).toEqual({
       week: 12,
       fixtures: [
-        { home: { name: "Arsenal", logo: "https://example.com/arsenal.png" }, away: { name: "Man City", logo: "https://example.com/mancity.png" }, state: "pre", actual: null, enginePrediction: null },
+        { home: { name: "Arsenal", logo: "https://example.com/arsenal.png" }, away: { name: "Man City", logo: "https://example.com/mancity.png" }, state: "pre", actual: null, enginePrediction: "2-1" },
       ],
     });
   });
@@ -193,20 +200,93 @@ describe("GET /api/v4-predictor/auto", () => {
     expect(body.fixtures.map((f: { enginePrediction: string | null }) => f.enginePrediction)).toEqual(["3-1", "2-2"]);
   });
 
-  it("returns enginePrediction null for a fixture when the engine or summary fails, without failing the request", async () => {
+  it("surfaces the engine's real error as a 500 instead of falling back to the V2 rules", async () => {
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     fetchScoreboardMock.mockResolvedValue([
       makeFixture("m1", "2026-11-07T15:00:00Z", "Arsenal FC", "Chelsea FC", "pre", null, null, 8),
     ]);
-    runEngineMock.mockRejectedValue(new Error("engine down"));
+    runEngineMock.mockRejectedValue(new Error("DATABASE_URL is required"));
+
+    const { GET } = await import("@/app/api/v4-predictor/auto/route");
+    const response = await GET(new Request("http://localhost:3000/api/v4-predictor/auto?week=8"));
+    expect(response.status).toBe(500);
+    const body = await response.json();
+    expect(body.error).toBe("Prediction Engine failed");
+    expect(body.phase).toBe("engine");
+    expect(body.detail).toBe("DATABASE_URL is required");
+
+    errSpy.mockRestore();
+  });
+
+  it("fails with a 500 when the engine returns no Correct Score market", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    fetchScoreboardMock.mockResolvedValue([
+      makeFixture("m1", "2026-11-07T15:00:00Z", "Arsenal FC", "Chelsea FC", "pre", null, null, 8),
+    ]);
+    runEngineMock.mockResolvedValue({ markets: [] });
+
+    const { GET } = await import("@/app/api/v4-predictor/auto/route");
+    const response = await GET(new Request("http://localhost:3000/api/v4-predictor/auto?week=8"));
+    expect(response.status).toBe(500);
+    const body = await response.json();
+    expect(body.error).toBe("Prediction Engine failed");
+    expect(body.detail).toContain("no markets");
+
+    errSpy.mockRestore();
+  });
+
+  it("still returns a scoreline when the summary feed fails (engine runs with null)", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    fetchSummaryMock.mockRejectedValue(new Error("summary down"));
+    fetchScoreboardMock.mockResolvedValue([
+      makeFixture("m1", "2026-11-07T15:00:00Z", "Arsenal FC", "Chelsea FC", "pre", null, null, 8),
+    ]);
+    runEngineMock.mockResolvedValue(engineResultWithTopScore("Correct Score 3-0"));
 
     const { GET } = await import("@/app/api/v4-predictor/auto/route");
     const response = await GET(new Request("http://localhost:3000/api/v4-predictor/auto?week=8"));
     expect(response.status).toBe(200);
     const body = await response.json();
-    expect(body.fixtures[0].enginePrediction).toBeNull();
+    expect(runEngineMock).toHaveBeenCalledWith(expect.objectContaining({ id: "m1" }), null);
+    expect(body.fixtures[0].enginePrediction).toBe("3-0");
 
-    errSpy.mockRestore();
+    warnSpy.mockRestore();
+  });
+
+  it("reads the scoreline from the market name (family is Goals, not Correct Score)", async () => {
+    fetchScoreboardMock.mockResolvedValue([
+      makeFixture("m1", "2026-11-07T15:00:00Z", "Arsenal FC", "Chelsea FC", "pre", null, null, 8),
+    ]);
+    runEngineMock.mockResolvedValue({
+      markets: [
+        { name: "Correct Score 0-0", family: "Goals", selection: "Score 0-0", hitRate: 0.07, rejected: false },
+        { name: "Correct Score 2-1", family: "Goals", selection: "Score 2-1", hitRate: 0.19, rejected: true },
+        { name: "Match Result", family: "Goals", selection: "Home Win", hitRate: 0.61, rejected: false },
+      ],
+    });
+
+    const { GET } = await import("@/app/api/v4-predictor/auto/route");
+    const response = await GET(new Request("http://localhost:3000/api/v4-predictor/auto?week=8"));
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.fixtures[0].enginePrediction).toBe("2-1");
+  });
+
+  it("runs the engine for every fixture so no Lock can use a V2 scoreline", async () => {
+    fetchScoreboardMock.mockResolvedValue([
+      makeFixture("m1", "2026-11-07T15:00:00Z", "Arsenal FC", "Chelsea FC", "pre", null, null, 8),
+      makeFixture("m2", "2026-11-08T15:00:00Z", "Everton FC", "Leeds United FC", "pre", null, null, 8),
+      makeFixture("m3", "2026-11-09T15:00:00Z", "Hull City AFC", "Burnley FC", "in", null, null, 8),
+    ]);
+
+    const { GET } = await import("@/app/api/v4-predictor/auto/route");
+    const response = await GET(new Request("http://localhost:3000/api/v4-predictor/auto?week=8"));
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(runEngineMock).toHaveBeenCalledTimes(3);
+    for (const fixture of body.fixtures) {
+      expect(isScoreline(fixture.enginePrediction)).toBe(true);
+    }
   });
 
   it("returns 400 when week parameter is invalid", async () => {
@@ -224,7 +304,11 @@ describe("GET /api/v4-predictor/auto", () => {
     const { GET } = await import("@/app/api/v4-predictor/auto/route");
     const response = await GET(new Request("http://localhost:3000/api/v4-predictor/auto"));
     expect(response.status).toBe(500);
-    expect(await response.json()).toEqual({ error: "Failed to fetch" });
+    expect(await response.json()).toEqual({
+      error: "Failed to fetch",
+      phase: "fixtures",
+      detail: "ESPN down",
+    });
 
     errSpy.mockRestore();
   });
