@@ -1,3 +1,21 @@
+export const TEAM_NAME_MAP: Record<string, string> = {
+  "Manchester City": "Man City",
+  "Manchester United": "Man Utd",
+  "Tottenham Hotspur": "Spurs",
+  "Brighton & Hove Albion": "Brighton",
+  "Newcastle United": "Newcastle",
+  "Nottingham Forest": "Nott'm Forest",
+  "Leeds United": "Leeds",
+  "Coventry City": "Coventry",
+  "Hull City": "Hull",
+  "Ipswich Town": "Ipswich",
+  // Teams that don't need translation fall through to themselves
+};
+
+export function translateTeamName(espnName: string): string {
+  return TEAM_NAME_MAP[espnName] || espnName;
+}
+
 export const TOP_4 = ["Arsenal", "Liverpool", "Man City", "Brighton"];
 export const MID_TABLE = ["Fulham", "Brentford", "Everton", "Leeds", "Crystal Palace", "Newcastle", "Aston Villa"];
 export const BOTTOM_5 = ["Coventry", "Ipswich", "Hull", "Sunderland", "Burnley"];
