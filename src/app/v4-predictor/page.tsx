@@ -6,6 +6,7 @@ import { TeamBadge } from "@/app/_components/ui";
 import {
   calculateScore,
   generatePredictions,
+  isScoreline,
   type Actual,
   type Fixture,
   type Prediction,
@@ -17,6 +18,7 @@ type AutoFixtureRow = {
   away: { name: string; logo: string | null };
   state: "pre" | "in" | "post";
   actual: Actual | null;
+  enginePrediction: string | null;
 };
 
 const MATCHWEEKS = Array.from({ length: 38 }, (_, i) => i + 1);
@@ -46,6 +48,7 @@ function normalizeRow(raw: unknown): AutoFixtureRow | null {
     away?: unknown;
     state?: unknown;
     actual?: unknown;
+    enginePrediction?: unknown;
   };
   const home = normalizeTeam(row.home);
   const away = normalizeTeam(row.away);
@@ -54,6 +57,10 @@ function normalizeRow(raw: unknown): AutoFixtureRow | null {
     row.state === "post" || row.state === "in" || row.state === "pre"
       ? row.state
       : "pre";
+  const enginePrediction =
+    typeof row.enginePrediction === "string" && isScoreline(row.enginePrediction)
+      ? row.enginePrediction
+      : null;
   const actual: Actual | null =
     Array.isArray(row.actual) &&
     row.actual.length === 2 &&
@@ -61,7 +68,7 @@ function normalizeRow(raw: unknown): AutoFixtureRow | null {
     Number.isFinite(Number(row.actual[1]))
       ? [Number(row.actual[0]), Number(row.actual[1])]
       : null;
-  return { home, away, state, actual };
+  return { home, away, state, actual, enginePrediction };
 }
 
 function StatusBadge({ state }: { state: AutoFixtureRow["state"] }) {
@@ -155,10 +162,11 @@ export default function V4PredictorPage() {
       const rows = rawRows
         .map(normalizeRow)
         .filter((row): row is AutoFixtureRow => row !== null);
-      const v4Fixtures: Fixture[] = rows.map((row) => [
-        row.home.name,
-        row.away.name,
-      ]);
+      const v4Fixtures: Fixture[] = rows.map((row) => ({
+        home: row.home.name,
+        away: row.away.name,
+        enginePrediction: row.enginePrediction,
+      }));
       const newPredictions = generatePredictions(v4Fixtures);
       const finished = rows
         .map((row, index) =>

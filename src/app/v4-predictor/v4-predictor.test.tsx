@@ -8,11 +8,31 @@ import { TEAM_NAME_MAP, translateTeamName } from "@/lib/v4-predictor";
 
 const fetchScoreboardMock = vi.fn();
 const getCurrentMatchweekMock = vi.fn();
+const fetchSummaryMock = vi.fn();
+const runEngineMock = vi.fn();
 
 vi.mock("@/lib/espn", () => ({
   fetchScoreboard: (...args: unknown[]) => fetchScoreboardMock(...args),
   getCurrentMatchweek: (...args: unknown[]) => getCurrentMatchweekMock(...args),
+  fetchSummary: (...args: unknown[]) => fetchSummaryMock(...args),
 }));
+
+// The real engine needs a database; the route only needs its markets.
+vi.mock("@/lib/engine", () => ({
+  runEngineFromRealWithProfiles: (...args: unknown[]) => runEngineMock(...args),
+}));
+
+/** Engine result whose Correct Score markets peak at `score`. */
+function engineResultWithTopScore(score: string) {
+  return {
+    markets: [
+      { name: "Correct Score 0-0", hitRate: 0.08 },
+      { name: "Correct Score 1-1", hitRate: 0.11 },
+      { name: score, hitRate: 0.19 },
+      { name: "Match Result", hitRate: 0.6 },
+    ],
+  };
+}
 
 vi.mock("next/link", () => ({
   default: ({ href, children, ...rest }: { href: string; children: React.ReactNode }) => (
@@ -75,6 +95,10 @@ beforeEach(() => {
   fetchScoreboardMock.mockReset();
   getCurrentMatchweekMock.mockReset();
   getCurrentMatchweekMock.mockResolvedValue(11);
+  fetchSummaryMock.mockReset();
+  fetchSummaryMock.mockResolvedValue(null);
+  runEngineMock.mockReset();
+  runEngineMock.mockResolvedValue({ markets: [] });
 });
 
 afterEach(() => {
@@ -120,9 +144,9 @@ describe("GET /api/v4-predictor/auto", () => {
     expect(body).toEqual({
       week: 10,
       fixtures: [
-        { home: { name: "Man City", logo: "https://example.com/mancity.png" }, away: { name: "Hull", logo: "https://example.com/hull.png" }, state: "post", actual: [2, 0] },
-        { home: { name: "Spurs", logo: "https://example.com/spurs.png" }, away: { name: "Brighton", logo: "https://example.com/brighton.png" }, state: "post", actual: [0, 0] },
-        { home: { name: "Bournemouth", logo: null }, away: { name: "Newcastle", logo: null }, state: "pre", actual: null },
+        { home: { name: "Man City", logo: "https://example.com/mancity.png" }, away: { name: "Hull", logo: "https://example.com/hull.png" }, state: "post", actual: [2, 0], enginePrediction: null },
+        { home: { name: "Spurs", logo: "https://example.com/spurs.png" }, away: { name: "Brighton", logo: "https://example.com/brighton.png" }, state: "post", actual: [0, 0], enginePrediction: null },
+        { home: { name: "Bournemouth", logo: null }, away: { name: "Newcastle", logo: null }, state: "pre", actual: null, enginePrediction: null },
       ],
     });
   });
@@ -143,9 +167,46 @@ describe("GET /api/v4-predictor/auto", () => {
     expect(body).toEqual({
       week: 12,
       fixtures: [
-        { home: { name: "Arsenal", logo: "https://example.com/arsenal.png" }, away: { name: "Man City", logo: "https://example.com/mancity.png" }, state: "pre", actual: null },
+        { home: { name: "Arsenal", logo: "https://example.com/arsenal.png" }, away: { name: "Man City", logo: "https://example.com/mancity.png" }, state: "pre", actual: null, enginePrediction: null },
       ],
     });
+  });
+
+  it("includes the engine's top predicted scoreline for each fixture and runs the engine with the fixture and summary", async () => {
+    const summary = { venue: "Emirates" };
+    fetchSummaryMock.mockResolvedValue(summary);
+    fetchScoreboardMock.mockResolvedValue([
+      makeFixture("m1", "2026-11-07T15:00:00Z", "Arsenal FC", "Chelsea FC", "pre", null, null, 8),
+      makeFixture("m2", "2026-11-08T15:00:00Z", "Everton FC", "Leeds United FC", "pre", null, null, 8),
+    ]);
+    runEngineMock
+      .mockResolvedValueOnce(engineResultWithTopScore("Correct Score 3-1"))
+      .mockResolvedValueOnce(engineResultWithTopScore("Correct Score 2-2"));
+
+    const { GET } = await import("@/app/api/v4-predictor/auto/route");
+    const response = await GET(new Request("http://localhost:3000/api/v4-predictor/auto?week=8"));
+    expect(response.status).toBe(200);
+    const body = await response.json();
+
+    expect(fetchSummaryMock).toHaveBeenCalledWith("eng.1", "m1");
+    expect(runEngineMock).toHaveBeenCalledWith(expect.objectContaining({ id: "m1" }), summary);
+    expect(body.fixtures.map((f: { enginePrediction: string | null }) => f.enginePrediction)).toEqual(["3-1", "2-2"]);
+  });
+
+  it("returns enginePrediction null for a fixture when the engine or summary fails, without failing the request", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    fetchScoreboardMock.mockResolvedValue([
+      makeFixture("m1", "2026-11-07T15:00:00Z", "Arsenal FC", "Chelsea FC", "pre", null, null, 8),
+    ]);
+    runEngineMock.mockRejectedValue(new Error("engine down"));
+
+    const { GET } = await import("@/app/api/v4-predictor/auto/route");
+    const response = await GET(new Request("http://localhost:3000/api/v4-predictor/auto?week=8"));
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.fixtures[0].enginePrediction).toBeNull();
+
+    errSpy.mockRestore();
   });
 
   it("returns 400 when week parameter is invalid", async () => {

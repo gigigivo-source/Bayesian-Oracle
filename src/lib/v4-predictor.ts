@@ -21,17 +21,24 @@ export const MID_TABLE = ["Fulham", "Brentford", "Everton", "Leeds", "Crystal Pa
 export const BOTTOM_5 = ["Coventry", "Ipswich", "Hull", "Sunderland", "Burnley"];
 export const CHAOS_TEAMS = ["Chelsea", "Man Utd", "Spurs"];
 
-export type Fixture = [string, string];
+/** A fixture to predict. `enginePrediction` is the Prediction Engine's top
+ *  predicted scoreline (e.g. "2-1"); null/undefined when the engine failed. */
+export type Fixture = { home: string; away: string; enginePrediction?: string | null };
 export type Actual = [number, number];
 export type MatchType = "Chaos" | "Home_Fortress" | "Mid_Table_Deadlock" | "Elite_Away" | "Standard";
 export type Prediction = { Match: string; Category: string; Prediction: string; Target_Pts: number };
 export type ScoredPrediction = { Match: string; Prediction: string; Actual: string; Points: number; Status: string };
 
 export const MW11_FIXTURES: Fixture[] = [
-  ["Man City", "Fulham"], ["Bournemouth", "Nott'm Forest"], ["Coventry", "Crystal Palace"],
-  ["Spurs", "Ipswich"], ["Chelsea", "Leeds"], ["Aston Villa", "Sunderland"],
-  ["Newcastle", "Arsenal"], ["Hull", "Brighton"], ["Liverpool", "Man Utd"], ["Brentford", "Everton"],
+  { home: "Man City", away: "Fulham" }, { home: "Bournemouth", away: "Nott'm Forest" }, { home: "Coventry", away: "Crystal Palace" },
+  { home: "Spurs", away: "Ipswich" }, { home: "Chelsea", away: "Leeds" }, { home: "Aston Villa", away: "Sunderland" },
+  { home: "Newcastle", away: "Arsenal" }, { home: "Hull", away: "Brighton" }, { home: "Liverpool", away: "Man Utd" }, { home: "Brentford", away: "Everton" },
 ];
+
+/** Accepts only well-formed scorelines like "2-1"; anything else is ignored. */
+export function isScoreline(value: unknown): value is string {
+  return typeof value === "string" && /^\d{1,2}-\d{1,2}$/.test(value);
+}
 
 export function determineMatchType(home: string, away: string): MatchType {
   if (CHAOS_TEAMS.includes(home) || CHAOS_TEAMS.includes(away)) return "Chaos";
@@ -46,7 +53,7 @@ export function generatePredictions(fixtures: Fixture[]): Prediction[] {
   let deadlocksUsed = 0;
   let totalSnipesUsed = 0;
 
-  return fixtures.map(([home, away]) => {
+  return fixtures.map(({ home, away, enginePrediction }) => {
     let prediction: string;
     let category: string;
     let targetPts: number;
@@ -96,7 +103,13 @@ export function generatePredictions(fixtures: Fixture[]): Prediction[] {
     // 2. Locks (10-Point Targets)
     targetPts = 10;
 
-    if (homeIsChaos || awayIsChaos) {
+    // Engine-driven Locks: the Prediction Engine's top scoreline replaces the
+    // hardcoded 1-0 / 0-1 / 2-1 hierarchy. Without a valid engine score, the
+    // original hierarchy below is used unchanged.
+    if (isScoreline(enginePrediction)) {
+      category = "LOCK: Engine Top Pick";
+      prediction = enginePrediction;
+    } else if (homeIsChaos || awayIsChaos) {
       category = "LOCK: Chaos Rule";
       if (homeIsTop4) prediction = "2-1";
       else if (awayIsTop4) prediction = "1-2";
