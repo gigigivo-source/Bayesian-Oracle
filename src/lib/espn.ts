@@ -1,13 +1,26 @@
 // ĞIGI GIVØ — Real football data layer (ESPN public API, no key required).
 import { LEAGUE_MAP } from "./leagues";
 import { resilientJson } from "./httpClient";
+import {
+  OPENFOOTBALL_CODES,
+  fullTimeScore,
+  seasonCodes,
+  teamsMatch,
+} from "./data/historical";
 
 const BASE = "https://site.api.espn.com/apis/site/v2/sports/soccer";
+const OPENFOOTBALL_REPO = "openfootball/football.json";
+const OPENFOOTBALL_TTL_MS = 30 * 60_000;
 
-async function espnFetch<T>(url: string, cacheTtlMs = 60_000): Promise<T | null> {
+async function espnFetch<T>(
+  url: string,
+  cacheTtlMs = 60_000,
+  opts?: { retries?: number; timeoutMs?: number; totalTimeoutMs?: number },
+): Promise<T | null> {
   return resilientJson<T>(url, {
     revalidate: Math.max(1, Math.ceil(cacheTtlMs / 1000)),
     cacheTtlMs,
+    ...opts,
   });
 }
 
@@ -51,12 +64,14 @@ export interface FixtureLite {
   away:         TeamLite;
   neutralSite:  boolean;
   odds?:        OddsInfo | null;
+  matchweek?:   number;
 }
 
 // ─── ESPN raw shapes ──────────────────────────────────────────────────────────
 
 interface EspnScoreboard {
-  leagues?: Array<{ name?: string; slug?: string }>;
+  leagues?: Array<{ name?: string; slug?: string; calendar?: string[] }>;
+  week?:    { number?: number };
   events?:  EspnEvent[];
 }
 
@@ -65,6 +80,8 @@ interface EspnEvent {
   date:         string;
   name:         string;
   season?:      { slug?: string };
+  week?:        { number?: number } | number;
+  matchweek?:   number;
   status?:      EspnStatus;
   competitions?: EspnCompetition[];
 }
@@ -150,6 +167,17 @@ function seasonCompetitionName(seasonSlug: string | undefined): string {
     .join(" ") || "Other Competition";
 }
 
+function extractEventWeek(ev: EspnEvent): number | undefined {
+  const raw = typeof ev.matchweek === "number"
+    ? ev.matchweek
+    : typeof ev.week === "number"
+      ? ev.week
+      : typeof ev.week?.number === "number"
+        ? ev.week.number
+        : undefined;
+  return typeof raw === "number" && Number.isInteger(raw) && raw > 0 ? raw : undefined;
+}
+
 function normalizeEvent(ev: EspnEvent, slug: string, leagueName: string): FixtureLite | null {
   const comp = ev.competitions?.[0];
   if (!comp?.competitors || comp.competitors.length < 2) return null;
@@ -172,6 +200,7 @@ function normalizeEvent(ev: EspnEvent, slug: string, leagueName: string): Fixtur
   // competition. Prefer the event status, but use that competition status as
   // a fallback so in-play scores are never normalised as pre-match.
   const status = ev.status ?? comp.status;
+  const matchweek = extractEventWeek(ev);
 
   return {
     id:          ev.id,
@@ -186,6 +215,7 @@ function normalizeEvent(ev: EspnEvent, slug: string, leagueName: string): Fixtur
     home:        normalizeTeam(home),
     away:        normalizeTeam(away),
     odds:        o ? normalizeOdds(o) : null,
+    ...(matchweek !== undefined ? { matchweek } : {}),
   };
 }
 
@@ -258,20 +288,346 @@ function enumerateDays(from: string, to: string): string[] {
   return days;
 }
 
+// ─── Matchweek helpers ────────────────────────────────────────────────────────
+
+interface OpenfootballScheduleRow {
+  round?:  string;
+  date?:   string;
+  time?:   string;
+  team1?:  string;
+  team2?:  string;
+  score?:  { ht?: number[]; ft?: number[] } | number[] | null;
+  status?: string;
+}
+
+function parseRoundNumber(round: string | undefined): number | null {
+  if (!round) return null;
+  const match = round.match(
+    /(?:matchday|matchweek|round|md|mday|jornada|journ[ée]e|spieltag)\s*(\d+)/i,
+  );
+  if (!match) return null;
+  const n = Number(match[1]);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+async function fetchOpenfootballSeasonRows(
+  slug: string,
+  now = new Date(),
+): Promise<OpenfootballScheduleRow[] | null> {
+  const code = OPENFOOTBALL_CODES[slug];
+  if (!code) return null;
+  const repo = (process.env.HISTORICAL_OPENFOOTBALL_REPO ?? OPENFOOTBALL_REPO).replace(
+    /^\/+|\/+$/g,
+    "",
+  );
+  const season = seasonCodes(now, 1)[0];
+  const url = `https://api.github.com/repos/${repo}/contents/${season}/${code}.json`;
+  const data = await resilientJson<
+    { matches?: OpenfootballScheduleRow[] } | OpenfootballScheduleRow[]
+  >(url, {
+    headers: { Accept: "application/vnd.github.raw+json" },
+    revalidate: 1800,
+    cacheTtlMs: OPENFOOTBALL_TTL_MS,
+  });
+  if (!data) return null;
+  return Array.isArray(data) ? data : (data.matches ?? []);
+}
+
+function openfootballRowToFixture(
+  row: OpenfootballScheduleRow,
+  slug: string,
+  leagueName: string,
+  week: number,
+): FixtureLite | null {
+  const home = row.team1?.trim();
+  const away = row.team2?.trim();
+  const date = row.date?.trim();
+  if (!home || !away || !date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
+
+  const rawTime = row.time?.trim() ?? "";
+  const time = /^\d{1,2}:\d{2}/.test(rawTime) ? rawTime : "15:00";
+  const [hours, minutes] = time.split(":");
+  const isoDate = `${date}T${hours.padStart(2, "0")}:${minutes}:00Z`;
+  const ft = fullTimeScore(row.score);
+  const statusText = row.status?.trim();
+
+  return {
+    id:           `openfootball:${slug}:mw${week}:${date}:${home}-${away}`,
+    leagueSlug:   slug,
+    leagueName,
+    date:         isoDate,
+    state:        ft ? "post" : "pre",
+    statusDetail: ft ? statusText || "Full Time" : statusText || row.round?.trim() || `Matchweek ${week}`,
+    venue:        null,
+    neutralSite:  false,
+    home: {
+      id:        "",
+      name:      home,
+      shortName: home,
+      abbrev:    home.slice(0, 3).toUpperCase(),
+      logo:      null,
+      color:     null,
+      score:     ft ? String(ft[0]) : null,
+      homeAway:  "home",
+    },
+    away: {
+      id:        "",
+      name:      away,
+      shortName: away,
+      abbrev:    away.slice(0, 3).toUpperCase(),
+      logo:      null,
+      color:     null,
+      score:     ft ? String(ft[1]) : null,
+      homeAway:  "away",
+    },
+    odds:      null,
+    matchweek: week,
+  };
+}
+
+function addUtcDays(dayKey: string, deltaDays: number): string {
+  const d = parseDayKey(dayKey);
+  if (!d) return dayKey;
+  d.setUTCDate(d.getUTCDate() + deltaDays);
+  return d.toISOString().slice(0, 10).replace(/-/g, "");
+}
+
+function buildMatchweekWindowDays(fixtures: FixtureLite[]): string[] {
+  const uniqueDays = [...new Set(fixtures.map((f) => f.date.slice(0, 10).replace(/-/g, "")))]
+    .filter((d) => parseDayKey(d) !== null)
+    .sort();
+  if (uniqueDays.length === 0) return [];
+
+  // Cluster dates within 5 days so postponed outlier fixtures don't expand into
+  // a multi-month loop, then pad each cluster [-2d, +3d] to catch Fri/Mon TV shifts.
+  const clusters: string[][] = [];
+  for (const day of uniqueDays) {
+    const last = clusters[clusters.length - 1];
+    if (!last) {
+      clusters.push([day]);
+      continue;
+    }
+    const prevMs = parseDayKey(last[last.length - 1])!.getTime();
+    const curMs = parseDayKey(day)!.getTime();
+    if (curMs - prevMs <= 5 * 86_400_000) {
+      last.push(day);
+    } else {
+      clusters.push([day]);
+    }
+  }
+
+  const out = new Set<string>();
+  for (const cluster of clusters) {
+    const start = addUtcDays(cluster[0], -2);
+    const end = addUtcDays(cluster[cluster.length - 1], 3);
+    for (const d of enumerateDays(start, end)) {
+      out.add(d);
+      if (out.size >= 14) break;
+    }
+    if (out.size >= 14) break;
+  }
+  return [...out].sort();
+}
+
+function clusterCalendarDays(calendar: string[], week: number): string[] {
+  const dayKeys = [
+    ...new Set(
+      calendar
+        .map((iso) => {
+          const parsed = new Date(iso);
+          return Number.isNaN(parsed.getTime())
+            ? null
+            : parsed.toISOString().slice(0, 10).replace(/-/g, "");
+        })
+        .filter((d): d is string => d !== null && parseDayKey(d) !== null),
+    ),
+  ].sort();
+
+  const clusters: string[][] = [];
+  for (const day of dayKeys) {
+    const last = clusters[clusters.length - 1];
+    if (!last) {
+      clusters.push([day]);
+      continue;
+    }
+    const prevMs = parseDayKey(last[last.length - 1])!.getTime();
+    const curMs = parseDayKey(day)!.getTime();
+    if (curMs - prevMs >= 3 * 86_400_000) {
+      clusters.push([day]);
+    } else {
+      last.push(day);
+    }
+  }
+  return clusters[week - 1] ?? [];
+}
+
+async function fetchMatchweekFixtures(
+  slug: string,
+  leagueName: string,
+  week: number,
+  probeData: EspnScoreboard | null,
+): Promise<FixtureLite[]> {
+  const rows = await fetchOpenfootballSeasonRows(slug);
+  const weekRows = (rows ?? []).filter((r) => parseRoundNumber(r.round) === week);
+  const ofFixtures = weekRows
+    .map((r) => openfootballRowToFixture(r, slug, leagueName, week))
+    .filter((f): f is FixtureLite => f !== null);
+
+  let espnData = probeData;
+  if (!espnData) {
+    // ESPN soccer may answer HTTP 400 to ?week=X; verify base scoreboard once
+    // (negative-cached in httpClient) before concluding ESPN is unreachable.
+    espnData = await espnFetch<EspnScoreboard>(`${BASE}/${slug}/scoreboard?limit=1`, 60_000, {
+      retries: 0,
+      timeoutMs: 3000,
+      totalTimeoutMs: 3500,
+    });
+  }
+
+  if (ofFixtures.length > 0) {
+    if (espnData !== null) {
+      const days = buildMatchweekWindowDays(ofFixtures);
+      if (days.length > 0) {
+        const boards = await Promise.all(
+          days.map((day) =>
+            espnFetch<EspnScoreboard>(`${BASE}/${slug}/scoreboard?dates=${day}&limit=50`),
+          ),
+        );
+        const espnPool: FixtureLite[] = [];
+        const seen = new Set<string>();
+        for (const board of boards) {
+          if (!board?.events) continue;
+          for (const fx of normalizeScoreboard(board, slug, leagueName)) {
+            if (seen.has(fx.id)) continue;
+            seen.add(fx.id);
+            espnPool.push(fx);
+          }
+        }
+        if (espnPool.length > 0) {
+          return ofFixtures
+            .map((ofFx) => {
+              const match = espnPool.find(
+                (ef) =>
+                  teamsMatch(ofFx.home.name, ef.home.name) &&
+                  teamsMatch(ofFx.away.name, ef.away.name),
+              );
+              return match ? { ...match, matchweek: week } : ofFx;
+            })
+            .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+        }
+      }
+    }
+    return ofFixtures.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+  }
+
+  // Fallback for leagues without an openfootball schedule: cluster ESPN's
+  // season calendar dates into matchweeks when available.
+  const calendar = espnData?.leagues?.[0]?.calendar;
+  if (calendar?.length) {
+    const days = clusterCalendarDays(calendar, week);
+    if (days.length > 0) {
+      const boards = await Promise.all(
+        days.map((day) =>
+          espnFetch<EspnScoreboard>(`${BASE}/${slug}/scoreboard?dates=${day}&limit=50`),
+        ),
+      );
+      const seen = new Set<string>();
+      const out: FixtureLite[] = [];
+      for (const board of boards) {
+        if (!board?.events) continue;
+        for (const fx of normalizeScoreboard(board, slug, leagueName)) {
+          if (seen.has(fx.id)) continue;
+          seen.add(fx.id);
+          out.push({ ...fx, matchweek: week });
+        }
+      }
+      return out.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+    }
+  }
+
+  return [];
+}
+
+/**
+ * Determine the current (active or next upcoming) matchweek for a league slug,
+ * defaulting to 11 when the season schedule is unavailable.
+ */
+export async function getCurrentMatchweek(
+  slug: string,
+  now = new Date(),
+): Promise<number> {
+  const rows = await fetchOpenfootballSeasonRows(slug, now);
+  if (!rows || rows.length === 0) return 11;
+
+  const byWeek = new Map<number, { minDate: string; maxDate: string }>();
+  for (const row of rows) {
+    const w = parseRoundNumber(row.round);
+    const d = row.date?.trim();
+    if (!w || !d || !/^\d{4}-\d{2}-\d{2}$/.test(d)) continue;
+    const cur = byWeek.get(w);
+    if (!cur) {
+      byWeek.set(w, { minDate: d, maxDate: d });
+    } else {
+      if (d < cur.minDate) cur.minDate = d;
+      if (d > cur.maxDate) cur.maxDate = d;
+    }
+  }
+  if (byWeek.size === 0) return 11;
+
+  const weeks = [...byWeek.entries()].sort((a, b) => a[0] - b[0]);
+  const graceDate = new Date(now.getTime() - 2 * 86_400_000).toISOString().slice(0, 10);
+  for (const [w, span] of weeks) {
+    if (span.maxDate >= graceDate) return w;
+  }
+  return weeks[weeks.length - 1][0];
+}
+
 /**
  * Fetch fixtures for a league slug.
  * @param slug    ESPN league slug e.g. "eng.1"
  * @param dates   Optional date string "YYYYMMDD" or range "YYYYMMDD-YYYYMMDD".
  *                A range is fetched day-by-day (ESPN answers HTTP 400 to
  *                multi-day ranges) and merged, deduplicated by event id.
- *                When omitted, fetches a 3-day window (yesterday → tomorrow)
- *                to catch all live, upcoming and very recently finished matches.
+ *                When omitted (and no `week` provided), fetches a 3-day window
+ *                (yesterday → tomorrow) to catch all live, upcoming and very
+ *                recently finished matches.
+ * @param week    Optional matchweek number (1–38). Probes ESPN `?week=X` first;
+ *                if ESPN soccer omits week metadata (or is unreachable), resolves
+ *                the exact matchweek fixtures from the season schedule and merges
+ *                ESPN scores/states for those match dates.
  */
 export async function fetchScoreboard(
   slug:   string,
   dates?: string | null,
+  week?:  number,
 ): Promise<FixtureLite[]> {
   const leagueName = LEAGUE_MAP[slug]?.name ?? slug;
+
+  if (typeof week === "number" && Number.isInteger(week) && week > 0 && !dates) {
+    if (slug === "all") return [];
+
+    const probeUrl = `${BASE}/${slug}/scoreboard?week=${week}&limit=50`;
+    const probeData = await espnFetch<EspnScoreboard>(probeUrl, 60_000, {
+      retries: 1,
+      timeoutMs: 4000,
+      totalTimeoutMs: 6000,
+    });
+
+    const hasExplicitWeek =
+      probeData?.week?.number === week ||
+      (probeData?.events ?? []).some((ev) => extractEventWeek(ev) === week);
+
+    if (probeData && hasExplicitWeek) {
+      const normalized = normalizeScoreboard(probeData, slug, leagueName);
+      const hasEventWeeks = normalized.some((f) => f.matchweek !== undefined);
+      const matched = hasEventWeeks
+        ? normalized.filter((f) => f.matchweek === week)
+        : normalized.map((f) => ({ ...f, matchweek: week }));
+      if (matched.length > 0) return matched;
+    }
+
+    return fetchMatchweekFixtures(slug, leagueName, week, probeData);
+  }
 
   // When no date supplied, fetch a 3-day window: yesterday, today, tomorrow.
   // This guarantees today's matches always appear regardless of ESPN's default
@@ -301,6 +657,9 @@ export async function fetchScoreboard(
           merged.push(fixture);
         }
       }
+      if (typeof week === "number" && Number.isInteger(week) && week > 0) {
+        return merged.filter((f) => f.matchweek === week);
+      }
       return merged;
     }
   }
@@ -310,7 +669,11 @@ export async function fetchScoreboard(
   const url  = `${BASE}/${slug}/scoreboard?dates=${dates}&limit=50`;
   const data = await espnFetch<EspnScoreboard>(url);
   if (!data?.events) return [];
-  return normalizeScoreboard(data, slug, leagueName);
+  const normalized = normalizeScoreboard(data, slug, leagueName);
+  if (typeof week === "number" && Number.isInteger(week) && week > 0) {
+    return normalized.filter((f) => f.matchweek === week);
+  }
+  return normalized;
 }
 
 // ─── Match summary ────────────────────────────────────────────────────────────

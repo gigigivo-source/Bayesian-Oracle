@@ -11,7 +11,10 @@ const input = "rounded border border-slate-700 bg-slate-800 px-3 py-2 text-sm te
 const card = "rounded-2xl p-4 bg-white/[0.03] border border-white/[0.08]";
 const heading = "text-lg font-semibold text-white";
 
+const MATCHWEEKS = Array.from({ length: 38 }, (_, i) => i + 1);
+
 export default function V4PredictorPage() {
+  const [selectedWeek, setSelectedWeek] = useState(11);
   const [matchweek, setMatchweek] = useState("Matchweek 11");
   const [fixtures, setFixtures] = useState<Fixture[]>(() => MW11_FIXTURES.map(([h, a]) => [h, a]));
   const [snapshot, setSnapshot] = useState<Fixture[]>([]);
@@ -95,15 +98,20 @@ export default function V4PredictorPage() {
     setSaveMessage("");
   }, []);
 
-  const fetchRealFixtures = useCallback(async () => {
+  const fetchRealFixtures = useCallback(async (weekOverride?: number) => {
     const requestId = ++requestIdRef.current;
+    const targetWeek = weekOverride ?? selectedWeek;
     setLoadingFixtures(true);
     setAutoError("");
     try {
-      const response = await fetch("/api/v4-predictor/auto", { cache: "no-store" });
+      const response = await fetch(`/api/v4-predictor/auto?week=${targetWeek}`, { cache: "no-store" });
       if (!response.ok) throw new Error("Failed to fetch");
       const data = await response.json();
       if (!mountedRef.current || requestId !== requestIdRef.current) return;
+      if (typeof data?.week === "number" && Number.isInteger(data.week) && data.week >= 1 && data.week <= 38) {
+        setSelectedWeek(data.week);
+        setMatchweek(`Matchweek ${data.week}`);
+      }
       const rawRows = Array.isArray(data?.fixtures) ? (data.fixtures as AutoFixtureRow[]) : [];
       const rows = rawRows.filter(row => row && typeof row.home === "string" && typeof row.away === "string");
       applyAutoFixtures(rows);
@@ -115,7 +123,7 @@ export default function V4PredictorPage() {
         setLoadingFixtures(false);
       }
     }
-  }, [applyAutoFixtures]);
+  }, [applyAutoFixtures, selectedWeek]);
 
   useEffect(() => {
     const requestId = ++requestIdRef.current;
@@ -126,6 +134,10 @@ export default function V4PredictorPage() {
       })
       .then(data => {
         if (!mountedRef.current || requestId !== requestIdRef.current) return;
+        if (typeof data?.week === "number" && Number.isInteger(data.week) && data.week >= 1 && data.week <= 38) {
+          setSelectedWeek(data.week);
+          setMatchweek(`Matchweek ${data.week}`);
+        }
         const rawRows = Array.isArray(data?.fixtures) ? (data.fixtures as AutoFixtureRow[]) : [];
         const rows = rawRows.filter(row => row && typeof row.home === "string" && typeof row.away === "string");
         applyAutoFixtures(rows);
@@ -140,6 +152,13 @@ export default function V4PredictorPage() {
         }
       });
   }, [applyAutoFixtures]);
+
+  function handleWeekChange(nextWeek: number) {
+    if (!Number.isInteger(nextWeek) || nextWeek < 1 || nextWeek > 38) return;
+    setSelectedWeek(nextWeek);
+    setMatchweek(`Matchweek ${nextWeek}`);
+    void fetchRealFixtures(nextWeek);
+  }
 
   function generate() {
     if (fixtures.some(([h, a]) => !h.trim() || !a.trim() || h.trim().toLowerCase() === a.trim().toLowerCase())) {
@@ -179,6 +198,19 @@ export default function V4PredictorPage() {
       <div className="relative mx-auto max-w-6xl space-y-6">
         <div className="flex flex-wrap items-center gap-2">
           <Link href="/" className="inline-flex items-center rounded-full border border-slate-700 bg-slate-800 px-3 py-2 text-xs font-semibold text-slate-300 hover:bg-slate-700">← Oracle</Link>
+          <label className="inline-flex items-center gap-2 rounded-full border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-semibold text-slate-200">
+            <span>Matchweek</span>
+            <select
+              aria-label="Select Matchweek"
+              className="rounded bg-slate-900 px-2 py-1 text-xs font-semibold text-amber-300 outline-none focus:ring-1 focus:ring-amber-400"
+              value={selectedWeek}
+              onChange={e => handleWeekChange(Number(e.target.value))}
+            >
+              {MATCHWEEKS.map(w => (
+                <option key={w} value={w}>Matchweek {w}</option>
+              ))}
+            </select>
+          </label>
           <button type="button" className={`${ACTION_AMBER} inline-flex items-center rounded-full px-3 py-2 text-xs font-semibold`} disabled={loadingFixtures} onClick={() => void fetchRealFixtures()}>⚡ Fetch Real Fixtures</button>
         </div>
         {loadingFixtures && <p role="status" className="text-sm text-slate-300">Loading real fixtures...</p>}

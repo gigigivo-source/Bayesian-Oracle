@@ -11,9 +11,13 @@
 // responses from one case into the next.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { fetchScoreboard as FetchScoreboard } from "./espn";
+import type {
+  fetchScoreboard as FetchScoreboard,
+  getCurrentMatchweek as GetCurrentMatchweek,
+} from "./espn";
 
 let fetchScoreboard: typeof FetchScoreboard;
+let getCurrentMatchweek: typeof GetCurrentMatchweek;
 let fetchMock: ReturnType<typeof vi.fn>;
 
 // ─── ESPN payload helpers ─────────────────────────────────────────────────────
@@ -67,7 +71,7 @@ beforeEach(async () => {
   vi.resetModules();
   fetchMock = vi.fn();
   vi.stubGlobal("fetch", fetchMock);
-  ({ fetchScoreboard } = await import("./espn"));
+  ({ fetchScoreboard, getCurrentMatchweek } = await import("./espn"));
 });
 
 afterEach(() => {
@@ -162,5 +166,155 @@ describe("fetchScoreboard — dates handling", () => {
       "20260916",
       "20260917",
     ]);
+  });
+});
+
+describe("fetchScoreboard — matchweek handling", () => {
+  it("uses ESPN ?week=X directly when ESPN confirms the requested week", async () => {
+    const ev = {
+      ...espnEvent("mw11-1", "2026-11-21T15:00:00Z"),
+      week: { number: 11 },
+    };
+    fetchMock.mockImplementation(async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      json: async () => ({
+        leagues: [{ name: "English Premier League" }],
+        week: { number: 11 },
+        events: [ev],
+      }),
+    }) as unknown as Response);
+
+    const fixtures = await fetchScoreboard("eng.1", undefined, 11);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0][0])).toContain("/eng.1/scoreboard?week=11");
+    expect(fixtures).toHaveLength(1);
+    expect(fixtures[0].id).toBe("mw11-1");
+    expect(fixtures[0].matchweek).toBe(11);
+  });
+
+  it("falls back to openfootball schedule + ESPN date enrichment when ESPN ignores ?week=", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-11T12:00:00Z"));
+
+    const openfootballPayload = {
+      name: "English Premier League 2026/27",
+      matches: [
+        { round: "Matchday 10", date: "2026-11-07", time: "15:00", team1: "Arsenal FC", team2: "Hull City AFC" },
+        { round: "Matchday 11", date: "2026-11-21", time: "15:00", team1: "Chelsea FC", team2: "Leeds United FC" },
+      ],
+    };
+
+    const espnFinishedEvent = {
+      id: "espn-ars-hull",
+      date: "2026-11-07T15:00:00Z",
+      name: "Arsenal vs Hull City",
+      status: { type: { state: "post", shortDetail: "FT" } },
+      competitions: [{
+        competitors: [
+          { homeAway: "home", score: "3", team: { id: "ars", displayName: "Arsenal", abbreviation: "ARS" } },
+          { homeAway: "away", score: "1", team: { id: "hul", displayName: "Hull City", abbreviation: "HUL" } },
+        ],
+        status: { type: { state: "post", shortDetail: "FT" } },
+      }],
+    };
+
+    fetchMock.mockImplementation(async (rawUrl: string) => {
+      const url = String(rawUrl);
+      if (url.includes("api.github.com/repos/openfootball/football.json/contents/2026-27/en.1.json")) {
+        return {
+          ok: true,
+          status: 200,
+          headers: new Headers(),
+          json: async () => openfootballPayload,
+        } as unknown as Response;
+      }
+      if (url.includes("dates=20261107")) {
+        return scoreboard([espnFinishedEvent]);
+      }
+      // Probe (?week=10) and adjacent days return empty scoreboard without week metadata
+      return scoreboard([]);
+    });
+
+    const fixtures = await fetchScoreboard("eng.1", undefined, 10);
+
+    expect(fixtures).toHaveLength(1);
+    expect(fixtures[0].id).toBe("espn-ars-hull");
+    expect(fixtures[0].state).toBe("post");
+    expect(fixtures[0].home.score).toBe("3");
+    expect(fixtures[0].away.score).toBe("1");
+    expect(fixtures[0].matchweek).toBe(10);
+  });
+
+  it("returns openfootball schedule immediately when ESPN probe fails", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-11T12:00:00Z"));
+
+    const openfootballPayload = {
+      name: "English Premier League 2026/27",
+      matches: [
+        { round: "Matchday 1", date: "2026-08-21", time: "20:00", team1: "Arsenal FC", team2: "Coventry City FC", score: { ft: [3, 0] } },
+        { round: "Matchday 11", date: "2026-11-21", time: "15:00", team1: "Manchester City FC", team2: "Fulham FC" },
+      ],
+    };
+
+    fetchMock.mockImplementation(async (rawUrl: string) => {
+      const url = String(rawUrl);
+      if (url.includes("api.github.com/repos/openfootball/football.json/contents/2026-27/en.1.json")) {
+        return {
+          ok: true,
+          status: 200,
+          headers: new Headers(),
+          json: async () => openfootballPayload,
+        } as unknown as Response;
+      }
+      return serverError();
+    });
+
+    const mw1 = await fetchScoreboard("eng.1", undefined, 1);
+    expect(mw1).toHaveLength(1);
+    expect(mw1[0].state).toBe("post");
+    expect(mw1[0].home.score).toBe("3");
+    expect(mw1[0].away.score).toBe("0");
+    expect(mw1[0].matchweek).toBe(1);
+
+    // Ensure no per-day ESPN requests were made after ESPN probe failed
+    const espnDayCalls = fetchMock.mock.calls.filter(([u]) => String(u).includes("dates="));
+    expect(espnDayCalls).toHaveLength(0);
+  });
+
+  it("filters by matchweek when dates and week are both passed", async () => {
+    const ev1 = { ...espnEvent("101", "2026-09-16T18:30:00Z"), week: { number: 4 } };
+    const ev2 = { ...espnEvent("102", "2026-09-16T20:00:00Z"), week: { number: 5 } };
+    fetchMock.mockImplementation(async () => scoreboard([ev1, ev2]));
+
+    const fixtures = await fetchScoreboard("eng.1", "20260916", 5);
+    expect(fixtures.map((f) => f.id)).toEqual(["102"]);
+    expect(fixtures[0].matchweek).toBe(5);
+  });
+
+  it("getCurrentMatchweek picks active/upcoming round and falls back to 11", async () => {
+    fetchMock.mockImplementation(async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      json: async () => ({
+        matches: [
+          { round: "Matchday 10", date: "2026-11-07", team1: "A", team2: "B" },
+          { round: "Matchday 11", date: "2026-11-21", team1: "C", team2: "D" },
+        ],
+      }),
+    }) as unknown as Response);
+
+    expect(await getCurrentMatchweek("eng.1", new Date("2026-11-11T12:00:00Z"))).toBe(11);
+    expect(await getCurrentMatchweek("eng.1", new Date("2026-11-08T12:00:00Z"))).toBe(10);
+
+    vi.resetModules();
+    fetchMock = vi.fn().mockResolvedValue(serverError());
+    vi.stubGlobal("fetch", fetchMock);
+    ({ getCurrentMatchweek } = await import("./espn"));
+    expect(await getCurrentMatchweek("eng.1", new Date("2026-11-11T12:00:00Z"))).toBe(11);
   });
 });
