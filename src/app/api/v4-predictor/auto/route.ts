@@ -1,36 +1,63 @@
-import { fetchScoreboard } from "@/lib/espn";
+import * as espn from "@/lib/espn";
 import { translateTeamName } from "@/lib/v4-predictor";
 import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
 
-function fmt(d: Date): string {
-  return d.toISOString().slice(0, 10).replace(/-/g, "");
+const DEFAULT_WEEK = 11;
+
+const EXTRA_TEAM_MAP: Record<string, string> = {
+  "AFC Bournemouth": "Bournemouth",
+  "Wolverhampton Wanderers": "Wolves",
+  "West Ham United": "West Ham",
+  "Leicester City": "Leicester",
+};
+
+function toV4TeamName(name: string): string {
+  const trimmed = name.trim();
+  const stripped = trimmed.replace(/\s+(?:AFC|FC)$/i, "").trim();
+  const mapped = EXTRA_TEAM_MAP[trimmed] ?? EXTRA_TEAM_MAP[stripped] ?? stripped;
+  return translateTeamName(mapped);
 }
 
-function startOfDay(d: Date): number {
-  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+function parseWeekParam(raw: string | null): number | null {
+  if (raw === null || raw.trim() === "") return null;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 38) return NaN;
+  return parsed;
 }
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
-    const now = new Date();
-    const from = new Date(now);
-    from.setUTCDate(now.getUTCDate() - 4);
-    const to = new Date(now);
-    to.setUTCDate(now.getUTCDate() + 4);
-    const dateRange = `${fmt(from)}-${fmt(to)}`;
+    const rawWeek = new URL(request.url).searchParams.get("week");
+    const requestedWeek = parseWeekParam(rawWeek);
+    if (Number.isNaN(requestedWeek)) {
+      return NextResponse.json(
+        { error: "Invalid week parameter. Expected an integer between 1 and 38." },
+        { status: 400 },
+      );
+    }
 
-    const fixtures = await fetchScoreboard("eng.1", dateRange);
+    let week = requestedWeek;
+    if (week === null) {
+      try {
+        week =
+          typeof espn.getCurrentMatchweek === "function"
+            ? await espn.getCurrentMatchweek("eng.1")
+            : DEFAULT_WEEK;
+      } catch {
+        week = DEFAULT_WEEK;
+      }
+    }
 
-    const todayStart = startOfDay(now);
-    const inCurrentGameweek = fixtures.filter((f) => {
-      const fixtureDay = startOfDay(new Date(f.date));
-      const diffDays = Math.round((fixtureDay - todayStart) / 86_400_000);
-      return diffDays >= -4 && diffDays <= 4;
-    });
+    const fixtures = await espn.fetchScoreboard("eng.1", undefined, week);
 
-    const sorted = [...inCurrentGameweek].sort(
+    const hasMatchweeks = fixtures.some((f) => typeof f.matchweek === "number");
+    const forWeek = hasMatchweeks
+      ? fixtures.filter((f) => f.matchweek === week)
+      : fixtures;
+
+    const sorted = [...forWeek].sort(
       (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime(),
     );
 
@@ -40,18 +67,21 @@ export async function GET() {
       const hasScore =
         homeScore !== null && homeScore !== "" && awayScore !== null && awayScore !== "";
       const actual =
-        f.state === "post" && hasScore && Number.isFinite(Number(homeScore)) && Number.isFinite(Number(awayScore))
+        f.state === "post" &&
+        hasScore &&
+        Number.isFinite(Number(homeScore)) &&
+        Number.isFinite(Number(awayScore))
           ? [Number(homeScore), Number(awayScore)]
           : null;
       return {
-        home: translateTeamName(f.home.name),
-        away: translateTeamName(f.away.name),
+        home: toV4TeamName(f.home.name),
+        away: toV4TeamName(f.away.name),
         state: f.state,
         actual,
       };
     });
 
-    return NextResponse.json({ fixtures: result });
+    return NextResponse.json({ week, fixtures: result });
   } catch (error) {
     console.error("V4 auto-fetch error", error);
     return NextResponse.json({ error: "Failed to fetch" }, { status: 500 });
