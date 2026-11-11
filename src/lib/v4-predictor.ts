@@ -59,6 +59,9 @@ export function generatePredictions(fixtures: Fixture[]): Prediction[] {
     const awayIsBottom5 = BOTTOM_5.includes(away);
     const homeIsChaos = CHAOS_TEAMS.includes(home);
     const awayIsChaos = CHAOS_TEAMS.includes(away);
+    // "Standard" = not in any tier (not Top 4, Mid, Bottom 5, or Chaos)
+    const homeIsStandard = !homeIsTop4 && !homeIsMid && !homeIsBottom5 && !homeIsChaos;
+    const awayIsStandard = !awayIsTop4 && !awayIsMid && !awayIsBottom5 && !awayIsChaos;
 
     // 1. Snipes (20-Point Targets)
     // Crucial Rule: Chaos Teams are PERMANENTLY BANNED from being Snipes.
@@ -94,29 +97,40 @@ export function generatePredictions(fixtures: Fixture[]): Prediction[] {
     targetPts = 10;
 
     if (homeIsChaos || awayIsChaos) {
-      // Rule 1: Chaos Rule
       category = "LOCK: Chaos Rule";
-      if (homeIsTop4) prediction = "2-1"; // Top 4 home beats Chaos
-      else if (awayIsTop4) prediction = "1-2"; // Top 4 away beats Chaos
-      else prediction = "1-1"; // No Top 4 involved, predict draw
+      if (homeIsTop4) prediction = "2-1";
+      else if (awayIsTop4) prediction = "1-2";
+      else if (homeIsChaos && awayIsChaos) prediction = "1-1";
+      else if (homeIsChaos) prediction = "2-1"; // Chaos team at home beats Mid/Standard/Bottom
+      else prediction = "1-2"; // Chaos team away beats Mid/Standard/Bottom
     } else if (homeIsTop4) {
-      // Rule 2: Smart Top 4 Home
       category = "LOCK: Smart Top 4 Home";
       prediction = "2-0";
+    } else if (awayIsTop4) {
+      category = "LOCK: Elite Away (Exhausted)";
+      prediction = "0-1"; // Top 4 away always wins, even if Snipe is used
     } else if (homeIsMid && awayIsBottom5) {
-      // Rule 3: Mid vs Bottom
       category = "LOCK: Mid vs Bottom";
       prediction = "2-1";
+    } else if (homeIsBottom5 && awayIsMid) {
+      category = "LOCK: Bottom vs Mid";
+      prediction = "0-1"; // Mid always beats Bottom, even away
+    } else if (homeIsMid && awayIsStandard) {
+      category = "LOCK: Mid vs Standard";
+      prediction = "1-0";
+    } else if (homeIsStandard && awayIsMid) {
+      category = "LOCK: Standard vs Mid";
+      prediction = "0-1"; // Mid always beats Standard, even away
+    } else if (homeIsBottom5 && awayIsStandard) {
+      category = "LOCK: Bottom vs Standard";
+      prediction = "0-1";
+    } else if (homeIsStandard && awayIsBottom5) {
+      category = "LOCK: Standard vs Bottom";
+      prediction = "1-0";
     } else {
-      // Rule 4: Standard Default
-      // If Home is Bottom5 or Standard, and Away is stronger (Mid), predict 0-1
-      if (homeIsBottom5 && awayIsMid) {
-        category = "LOCK: Standard Away";
-        prediction = "0-1";
-      } else {
-        category = "LOCK: Standard Home";
-        prediction = "1-0";
-      }
+      // Both Standard, both Bottom5, or Mid vs Mid (if deadlock used up)
+      category = "LOCK: Standard Home";
+      prediction = "1-0";
     }
 
     return { Match: `${home} vs ${away}`, Category: category, Prediction: prediction, Target_Pts: targetPts };
