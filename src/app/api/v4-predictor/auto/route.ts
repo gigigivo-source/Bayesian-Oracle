@@ -1,8 +1,12 @@
 import * as espn from "@/lib/espn";
+import { runEngineFromRealWithProfiles } from "@/lib/engine";
+import type { Market } from "@/lib/engine/types";
 import { translateTeamName } from "@/lib/v4-predictor";
 import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
+// The engine runs once per fixture, so allow the same budget as daily-picks.
+export const maxDuration = 60;
 
 const DEFAULT_WEEK = 11;
 
@@ -25,6 +29,36 @@ function parseWeekParam(raw: string | null): number | null {
   const parsed = Number(raw);
   if (!Number.isInteger(parsed) || parsed < 1 || parsed > 38) return NaN;
   return parsed;
+}
+
+/**
+ * The engine's top predicted scoreline: the Correct Score market with the
+ * highest probability (e.g. "2-1"). Returns null if none is present.
+ */
+function topCorrectScore(markets: Market[]): string | null {
+  let best: { score: string; prob: number } | null = null;
+  for (const m of markets) {
+    const match = /^Correct Score (\d{1,2})-(\d{1,2})$/.exec(m.name);
+    if (!match) continue;
+    if (!best || m.hitRate > best.prob) {
+      best = { score: `${match[1]}-${match[2]}`, prob: m.hitRate };
+    }
+  }
+  return best ? best.score : null;
+}
+
+/** Runs the Prediction Engine for one fixture. Any failure yields null. */
+async function fetchEnginePrediction(
+  fixture: espn.FixtureLite,
+): Promise<string | null> {
+  try {
+    const summary = await espn.fetchSummary(fixture.leagueSlug, fixture.id).catch(() => null);
+    const result = await runEngineFromRealWithProfiles(fixture, summary);
+    return topCorrectScore(result.markets);
+  } catch (error) {
+    console.error("V4 engine prediction failed", fixture.id, error);
+    return null;
+  }
 }
 
 export async function GET(request: Request) {
@@ -61,7 +95,8 @@ export async function GET(request: Request) {
       (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime(),
     );
 
-    const result = sorted.map((f) => {
+    const result = await Promise.all(sorted.map(async (f) => {
+      const enginePrediction = await fetchEnginePrediction(f);
       const homeScore = f.home.score;
       const awayScore = f.away.score;
       const hasScore =
@@ -78,8 +113,9 @@ export async function GET(request: Request) {
         away: { name: toV4TeamName(f.away.name), logo: f.away.logo ?? null },
         state: f.state,
         actual,
+        enginePrediction,
       };
-    });
+    }));
 
     return NextResponse.json({ week, fixtures: result });
   } catch (error) {
