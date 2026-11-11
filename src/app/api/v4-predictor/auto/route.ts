@@ -74,8 +74,8 @@ export async function GET(request: Request) {
           ? [Number(homeScore), Number(awayScore)]
           : null;
       return {
-        home: toV4TeamName(f.home.name),
-        away: toV4TeamName(f.away.name),
+        home: { name: toV4TeamName(f.home.name), logo: f.home.logo ?? null },
+        away: { name: toV4TeamName(f.away.name), logo: f.away.logo ?? null },
         state: f.state,
         actual,
       };
