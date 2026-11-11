@@ -1,11 +1,12 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ACTION_AMBER } from "../_components/design";
 import { calculateScore, generatePredictions, MW11_FIXTURES, type Actual, type Fixture, type Prediction, type ScoredPrediction } from "@/lib/v4-predictor";
 
 type HistoryRow = { id: number; matchweek: string; predictions: Prediction[]; actuals: Actual[] | null; totalScore: number | null; createdAt: string };
+type AutoFixtureRow = { home: string; away: string; state: "pre" | "in" | "post"; actual: Actual | null };
 const input = "rounded border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white outline-none focus:border-amber-400 font-mono";
 const card = "rounded-2xl p-4 bg-white/[0.03] border border-white/[0.08]";
 const heading = "text-lg font-semibold text-white";
@@ -24,7 +25,18 @@ export default function V4PredictorPage() {
   const [saveMessage, setSaveMessage] = useState("");
   const [saving, setSaving] = useState(false);
   const [lastSaved, setLastSaved] = useState("");
+  const [loadingFixtures, setLoadingFixtures] = useState(true);
+  const [autoError, setAutoError] = useState("");
+  const requestIdRef = useRef(0);
+  const mountedRef = useRef(true);
   const changed = predictions.length > 0 && JSON.stringify(fixtures) !== JSON.stringify(snapshot);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   const loadHistory = useCallback(async () => {
     try {
@@ -42,6 +54,92 @@ export default function V4PredictorPage() {
       .catch(() => { if (active) setHistoryError("Unable to load history. Please try again."); });
     return () => { active = false; };
   }, []);
+
+  const applyAutoFixtures = useCallback((rows: AutoFixtureRow[]) => {
+    if (rows.length === 0) {
+      setAutoError("No real fixtures found right now. Manual input still available.");
+      return;
+    }
+    const newFixtures: Fixture[] = rows.map(row => [row.home, row.away]);
+    const newPredictions = generatePredictions(newFixtures);
+    const newActuals: [string, string][] = rows.map(row =>
+      Array.isArray(row.actual) && row.actual.length === 2
+        ? [String(row.actual[0]), String(row.actual[1])]
+        : ["0", "0"],
+    );
+    setFixtures(newFixtures);
+    setSnapshot(newFixtures.map(([h, a]) => [h, a] as Fixture));
+    setPredictions(newPredictions);
+    setActuals(newActuals);
+
+    const finished = rows
+      .map((row, index) =>
+        Array.isArray(row.actual) && row.actual.length === 2
+          ? { prediction: newPredictions[index], actual: row.actual }
+          : null,
+      )
+      .filter((entry): entry is { prediction: Prediction; actual: Actual } => entry !== null);
+
+    if (finished.length > 0) {
+      const [scored, points] = calculateScore(
+        finished.map(entry => entry.prediction),
+        finished.map(entry => entry.actual),
+      );
+      setScorecard(scored);
+      setTotal(points);
+    } else {
+      setScorecard([]);
+      setTotal(null);
+    }
+    setError("");
+    setSaveMessage("");
+  }, []);
+
+  const fetchRealFixtures = useCallback(async () => {
+    const requestId = ++requestIdRef.current;
+    setLoadingFixtures(true);
+    setAutoError("");
+    try {
+      const response = await fetch("/api/v4-predictor/auto", { cache: "no-store" });
+      if (!response.ok) throw new Error("Failed to fetch");
+      const data = await response.json();
+      if (!mountedRef.current || requestId !== requestIdRef.current) return;
+      const rawRows = Array.isArray(data?.fixtures) ? (data.fixtures as AutoFixtureRow[]) : [];
+      const rows = rawRows.filter(row => row && typeof row.home === "string" && typeof row.away === "string");
+      applyAutoFixtures(rows);
+    } catch {
+      if (!mountedRef.current || requestId !== requestIdRef.current) return;
+      setAutoError("Failed to fetch real fixtures. Manual input still available.");
+    } finally {
+      if (mountedRef.current && requestId === requestIdRef.current) {
+        setLoadingFixtures(false);
+      }
+    }
+  }, [applyAutoFixtures]);
+
+  useEffect(() => {
+    const requestId = ++requestIdRef.current;
+    fetch("/api/v4-predictor/auto", { cache: "no-store" })
+      .then(response => {
+        if (!response.ok) throw new Error("Failed to fetch");
+        return response.json();
+      })
+      .then(data => {
+        if (!mountedRef.current || requestId !== requestIdRef.current) return;
+        const rawRows = Array.isArray(data?.fixtures) ? (data.fixtures as AutoFixtureRow[]) : [];
+        const rows = rawRows.filter(row => row && typeof row.home === "string" && typeof row.away === "string");
+        applyAutoFixtures(rows);
+      })
+      .catch(() => {
+        if (!mountedRef.current || requestId !== requestIdRef.current) return;
+        setAutoError("Failed to fetch real fixtures. Manual input still available.");
+      })
+      .finally(() => {
+        if (mountedRef.current && requestId === requestIdRef.current) {
+          setLoadingFixtures(false);
+        }
+      });
+  }, [applyAutoFixtures]);
 
   function generate() {
     if (fixtures.some(([h, a]) => !h.trim() || !a.trim() || h.trim().toLowerCase() === a.trim().toLowerCase())) {
@@ -79,7 +177,12 @@ export default function V4PredictorPage() {
   return (
     <main className="relative min-h-screen overflow-hidden bg-[#0F1117] px-4 py-6 text-slate-100 sm:px-6 lg:px-8">
       <div className="relative mx-auto max-w-6xl space-y-6">
-        <Link href="/" className="inline-flex items-center rounded-full border border-slate-700 bg-slate-800 px-3 py-2 text-xs font-semibold text-slate-300 hover:bg-slate-700">← Oracle</Link>
+        <div className="flex flex-wrap items-center gap-2">
+          <Link href="/" className="inline-flex items-center rounded-full border border-slate-700 bg-slate-800 px-3 py-2 text-xs font-semibold text-slate-300 hover:bg-slate-700">← Oracle</Link>
+          <button type="button" className={`${ACTION_AMBER} inline-flex items-center rounded-full px-3 py-2 text-xs font-semibold`} disabled={loadingFixtures} onClick={() => void fetchRealFixtures()}>⚡ Fetch Real Fixtures</button>
+        </div>
+        {loadingFixtures && <p role="status" className="text-sm text-slate-300">Loading real fixtures...</p>}
+        {autoError && <p role="alert" className="text-sm text-red-300">{autoError}</p>}
         <header><h1 className="text-3xl font-black text-white">🔮 V4 Ultimate Predictor</h1><p className="mt-2 text-sm text-slate-400">Rule-based Premier League score predictions. Team names are case-sensitive.</p></header>
         <div className={card}>
           <h2 className={heading}>1. Input Fixtures</h2>
@@ -91,7 +194,10 @@ export default function V4PredictorPage() {
               <input className={`${input} min-w-0`} aria-label={`Fixture ${i + 1} away`} placeholder="Away" maxLength={200} value={away} onChange={e => setFixtures(old => old.map((f, j) => j === i ? [f[0], e.target.value] : f))} />
             </div>
           ))}</div>
-          <button type="button" className={`${ACTION_AMBER} mt-4 px-4 py-2 text-sm`} onClick={generate}>Generate Predictions</button>
+          <div className="mt-4 flex flex-wrap items-center gap-2">
+            <button type="button" className={`${ACTION_AMBER} px-4 py-2 text-sm`} onClick={generate}>Generate Predictions</button>
+            <button type="button" className="inline-flex items-center rounded-full border border-slate-700 bg-slate-800 px-3 py-2 text-xs font-semibold text-slate-300 hover:bg-slate-700" disabled={loadingFixtures} onClick={() => void fetchRealFixtures()}>Refresh Fixtures</button>
+          </div>
           {changed && <p className="mt-2 text-sm text-amber-300">Fixtures changed — regenerate predictions before scoring.</p>}
         </div>
         <div className={card}><h2 className={heading}>2. V4 Predictions</h2>
