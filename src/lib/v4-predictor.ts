@@ -44,33 +44,81 @@ export function determineMatchType(home: string, away: string): MatchType {
 export function generatePredictions(fixtures: Fixture[]): Prediction[] {
   let fortressUsed = 0;
   let deadlocksUsed = 0;
+  let totalSnipesUsed = 0;
+
   return fixtures.map(([home, away]) => {
-    const matchType = determineMatchType(home, away);
     let prediction: string;
     let category: string;
     let targetPts: number;
-    if (matchType === "Home_Fortress" && fortressUsed < 1) {
-      [prediction, category, targetPts] = ["2-0", "SNIPE: Home Fortress", 20];
-      fortressUsed++;
-    } else if (matchType === "Mid_Table_Deadlock" && deadlocksUsed < 2) {
-      [prediction, category, targetPts] = ["1-1", "SNIPE: Deadlock", 20];
-      deadlocksUsed++;
-    } else {
-      targetPts = 10;
-      if (matchType === "Chaos") {
-        category = "LOCK: Chaos Rule";
-        prediction = TOP_4.includes(home) ? "2-1" : TOP_4.includes(away) ? "1-2" : "2-2";
-      } else if (matchType === "Elite_Away") {
-        category = "LOCK: Elite Away";
-        prediction = "0-1";
-      } else if (matchType === "Home_Fortress") {
-        category = "LOCK: Standard (Fortress Fallback)";
+
+    const homeIsTop4 = TOP_4.includes(home);
+    const awayIsTop4 = TOP_4.includes(away);
+    const homeIsMid = MID_TABLE.includes(home);
+    const awayIsMid = MID_TABLE.includes(away);
+    const homeIsBottom5 = BOTTOM_5.includes(home);
+    const awayIsBottom5 = BOTTOM_5.includes(away);
+    const homeIsChaos = CHAOS_TEAMS.includes(home);
+    const awayIsChaos = CHAOS_TEAMS.includes(away);
+
+    // 1. Snipes (20-Point Targets)
+    // Crucial Rule: Chaos Teams are PERMANENTLY BANNED from being Snipes.
+    if (!homeIsChaos && !awayIsChaos) {
+      if (homeIsTop4 && awayIsBottom5 && fortressUsed < 1) {
         prediction = "2-0";
+        category = "SNIPE: Home Fortress";
+        targetPts = 20;
+        fortressUsed++;
+        totalSnipesUsed++;
+        return { Match: `${home} vs ${away}`, Category: category, Prediction: prediction, Target_Pts: targetPts };
+      }
+
+      if (homeIsMid && awayIsMid && deadlocksUsed < 2) {
+        prediction = "1-1";
+        category = "SNIPE: Mid-Table Deadlock";
+        targetPts = 20;
+        deadlocksUsed++;
+        totalSnipesUsed++;
+        return { Match: `${home} vs ${away}`, Category: category, Prediction: prediction, Target_Pts: targetPts };
+      }
+
+      if (awayIsTop4 && totalSnipesUsed < 3) {
+        prediction = "0-1";
+        category = "SNIPE: Elite Away";
+        targetPts = 20;
+        totalSnipesUsed++;
+        return { Match: `${home} vs ${away}`, Category: category, Prediction: prediction, Target_Pts: targetPts };
+      }
+    }
+
+    // 2. Locks (10-Point Targets)
+    targetPts = 10;
+
+    if (homeIsChaos || awayIsChaos) {
+      // Rule 1: Chaos Rule
+      category = "LOCK: Chaos Rule";
+      if (homeIsTop4) prediction = "2-1"; // Top 4 home beats Chaos
+      else if (awayIsTop4) prediction = "1-2"; // Top 4 away beats Chaos
+      else prediction = "1-1"; // No Top 4 involved, predict draw
+    } else if (homeIsTop4) {
+      // Rule 2: Smart Top 4 Home
+      category = "LOCK: Smart Top 4 Home";
+      prediction = "2-0";
+    } else if (homeIsMid && awayIsBottom5) {
+      // Rule 3: Mid vs Bottom
+      category = "LOCK: Mid vs Bottom";
+      prediction = "2-1";
+    } else {
+      // Rule 4: Standard Default
+      // If Home is Bottom5 or Standard, and Away is stronger (Mid), predict 0-1
+      if (homeIsBottom5 && awayIsMid) {
+        category = "LOCK: Standard Away";
+        prediction = "0-1";
       } else {
-        category = "LOCK: Standard";
+        category = "LOCK: Standard Home";
         prediction = "1-0";
       }
     }
+
     return { Match: `${home} vs ${away}`, Category: category, Prediction: prediction, Target_Pts: targetPts };
   });
 }
