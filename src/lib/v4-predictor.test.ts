@@ -165,7 +165,7 @@ describe("3-Layer Hybrid route (/api/v4-predictor/auto)", () => {
     }
   });
 
-  it("falls back to V2 rules on Matchweek 1 due to low early-season data and scores 70+", async () => {
+  it("runs the Engine on Matchweek 1 when dataCompletenessScore is high", async () => {
     const mw1: Array<[string, string, [number, number]]> = [
       ["Arsenal FC", "Coventry City FC", [3, 0]],
       ["Hull City AFC", "Manchester United FC", [2, 0]],
@@ -208,7 +208,25 @@ describe("3-Layer Hybrid route (/api/v4-predictor/auto)", () => {
       expect(response.status).toBe(200);
       const { fixtures: rows } = await response.json();
 
-      expect(rows.every((r: { category: string }) => !r.category.startsWith("ENGINE:"))).toBe(true);
+      // The early-season cap is gone: a raw completeness of 85 on week 1 must
+      // clear the 50 gate, so every non-Snipe fixture runs the Engine.
+      const engineRows = rows.filter((r: { category: string }) => r.category === "ENGINE: Winner-First");
+      const nonSnipeRows = rows.filter((r: { category: string }) => !r.category.startsWith("SNIPE:"));
+      expect(nonSnipeRows.length).toBeGreaterThan(0);
+      expect(engineRows).toHaveLength(nonSnipeRows.length);
+      expect(
+        engineRows.every((r: { prediction: string; enginePrediction: string | null }) =>
+          r.prediction === r.enginePrediction,
+        ),
+      ).toBe(true);
+
+      // Snipes are Layer 1: they must still bypass the Engine entirely.
+      expect(
+        rows
+          .filter((r: { category: string }) => r.category.startsWith("SNIPE:"))
+          .every((r: { enginePrediction: string | null }) => r.enginePrediction === null),
+      ).toBe(true);
+
       const preds = generatePredictions(
         rows.map((r: { home: { name: string }; away: { name: string }; enginePrediction: string | null; prediction: string; category: string }) => ({
           home: r.home.name,
@@ -219,7 +237,12 @@ describe("3-Layer Hybrid route (/api/v4-predictor/auto)", () => {
         })),
       );
       const [, total] = calculateScore(preds, rows.map((r: { actual: [number, number] }) => r.actual));
-      expect(total).toBeGreaterThanOrEqual(70);
+      // The mocked Engine always returns "3-0" against real matchweek-1 results,
+      // so the Engine layer whiffs on the away wins and the 2-2 draw: the score
+      // is driven by the 3 Snipe rows plus any exact hits. Assert a sane total
+      // rather than a fixed number, so this test pins the routing layer (which
+      // layers run) and not the mock's football accuracy.
+      expect(total).toBeGreaterThan(0);
     } finally {
       vi.doUnmock("@/lib/espn");
       vi.doUnmock("@/lib/engine");
