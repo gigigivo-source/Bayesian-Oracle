@@ -21,8 +21,8 @@ export const MID_TABLE = ["Fulham", "Brentford", "Everton", "Leeds", "Crystal Pa
 export const BOTTOM_5 = ["Coventry", "Ipswich", "Hull", "Sunderland", "Burnley"];
 export const CHAOS_TEAMS = ["Chelsea", "Man Utd", "Spurs"];
 
-/** A fixture to predict. `enginePrediction` is the Prediction Engine's top
- *  predicted scoreline (e.g. "2-1"); null/undefined when the engine failed. */
+/** A fixture to predict. `enginePrediction` is an engine scoreline, preferably
+ *  the highest-probability score matching the V2 outcome. */
 export type Fixture = { home: string; away: string; enginePrediction?: string | null };
 export type Actual = [number, number];
 export type MatchType = "Chaos" | "Home_Fortress" | "Mid_Table_Deadlock" | "Elite_Away" | "Standard";
@@ -40,6 +40,14 @@ export function isScoreline(value: unknown): value is string {
   return typeof value === "string" && /^\d{1,2}-\d{1,2}$/.test(value);
 }
 
+/** Return the outcome implied by a prediction scoreline. */
+export function getV2Outcome(prediction: string): "H" | "D" | "A" {
+  const [h, a] = prediction.split("-").map(Number);
+  if (h > a) return "H";
+  if (h < a) return "A";
+  return "D";
+}
+
 export function determineMatchType(home: string, away: string): MatchType {
   if (CHAOS_TEAMS.includes(home) || CHAOS_TEAMS.includes(away)) return "Chaos";
   if (TOP_4.includes(home) && BOTTOM_5.includes(away)) return "Home_Fortress";
@@ -53,7 +61,8 @@ export function generatePredictions(fixtures: Fixture[]): Prediction[] {
   let deadlocksUsed = 0;
   let totalSnipesUsed = 0;
 
-  return fixtures.map(({ home, away, enginePrediction }) => {
+  // Compute V2 predictions first, preserving the matchweek-wide Snipe quotas.
+  const v2Predictions = fixtures.map(({ home, away }) => {
     let prediction: string;
     let category: string;
     let targetPts: number;
@@ -103,13 +112,7 @@ export function generatePredictions(fixtures: Fixture[]): Prediction[] {
     // 2. Locks (10-Point Targets)
     targetPts = 10;
 
-    // Engine-driven Locks: the Prediction Engine's top scoreline replaces the
-    // hardcoded 1-0 / 0-1 / 2-1 hierarchy. Without a valid engine score, the
-    // original hierarchy below is used unchanged.
-    if (isScoreline(enginePrediction)) {
-      category = "LOCK: Engine Top Pick";
-      prediction = enginePrediction;
-    } else if (homeIsChaos || awayIsChaos) {
+    if (homeIsChaos || awayIsChaos) {
       category = "LOCK: Chaos Rule";
       if (homeIsTop4) prediction = "2-1";
       else if (awayIsTop4) prediction = "1-2";
@@ -147,6 +150,20 @@ export function generatePredictions(fixtures: Fixture[]): Prediction[] {
     }
 
     return { Match: `${home} vs ${away}`, Category: category, Prediction: prediction, Target_Pts: targetPts };
+  });
+
+  // The route selects from the full engine grid. Also check the outcome here
+  // so callers supplying a single unrestricted engine pick cannot undo V2.
+  return v2Predictions.map((v2, index) => {
+    const enginePrediction = fixtures[index].enginePrediction;
+    if (!isScoreline(enginePrediction) || getV2Outcome(enginePrediction) !== getV2Outcome(v2.Prediction)) {
+      return v2;
+    }
+    return {
+      ...v2,
+      Category: v2.Target_Pts === 10 ? "LOCK: Engine Top Pick" : v2.Category,
+      Prediction: enginePrediction,
+    };
   });
 }
 
