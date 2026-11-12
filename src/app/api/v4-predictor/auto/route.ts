@@ -1,4 +1,5 @@
 import * as espn from "@/lib/espn";
+import type { EngineResult } from "@/lib/engine";
 import { generatePredictions, translateTeamName } from "@/lib/v4-predictor";
 import { NextResponse } from "next/server";
 
@@ -180,26 +181,9 @@ function pickWinnerFirstScore(
   return matchingScores.length > 0 ? matchingScores[0].score : null;
 }
 
-function resolveCompletenessScore(
-  engineResult: {
-    dataCompletenessScore?: number;
-    match?: { dataCompletenessScore?: number };
-  },
-  week: number,
-): number {
-  const raw =
-    typeof engineResult.match?.dataCompletenessScore === "number"
-      ? engineResult.match.dataCompletenessScore
-      : typeof engineResult.dataCompletenessScore === "number"
-        ? engineResult.dataCompletenessScore
-        : 0;
-  if (!Number.isFinite(raw)) return 0;
-  // Early season matchweeks (< 3 prior league rounds) lack real 3-game form;
-  // cap completeness so mid-season cached profiles do not leak backward.
-  if (week <= 3) {
-    return Math.min(raw, 30 + (week - 1) * 8);
-  }
-  return raw;
+function resolveCompletenessScore(engineResult: EngineResult | null, week: number): number {
+  if (!engineResult?.match?.dataCompletenessScore) return 0;
+  return engineResult.match.dataCompletenessScore;
 }
 
 export async function GET(request: Request) {
