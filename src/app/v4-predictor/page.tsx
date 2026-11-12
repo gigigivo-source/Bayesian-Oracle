@@ -19,6 +19,8 @@ type AutoFixtureRow = {
   state: "pre" | "in" | "post";
   actual: Actual | null;
   enginePrediction: string | null;
+  prediction: string | null;
+  category: string | null;
 };
 
 const MATCHWEEKS = Array.from({ length: 38 }, (_, i) => i + 1);
@@ -49,6 +51,8 @@ function normalizeRow(raw: unknown): AutoFixtureRow | null {
     state?: unknown;
     actual?: unknown;
     enginePrediction?: unknown;
+    prediction?: unknown;
+    category?: unknown;
   };
   const home = normalizeTeam(row.home);
   const away = normalizeTeam(row.away);
@@ -61,6 +65,14 @@ function normalizeRow(raw: unknown): AutoFixtureRow | null {
     typeof row.enginePrediction === "string" && isScoreline(row.enginePrediction)
       ? row.enginePrediction
       : null;
+  const prediction =
+    typeof row.prediction === "string" && isScoreline(row.prediction)
+      ? row.prediction
+      : null;
+  const category =
+    typeof row.category === "string" && row.category.trim() !== ""
+      ? row.category.trim()
+      : null;
   const actual: Actual | null =
     Array.isArray(row.actual) &&
     row.actual.length === 2 &&
@@ -68,7 +80,7 @@ function normalizeRow(raw: unknown): AutoFixtureRow | null {
     Number.isFinite(Number(row.actual[1]))
       ? [Number(row.actual[0]), Number(row.actual[1])]
       : null;
-  return { home, away, state, actual, enginePrediction };
+  return { home, away, state, actual, enginePrediction, prediction, category };
 }
 
 function StatusBadge({ state }: { state: AutoFixtureRow["state"] }) {
@@ -166,6 +178,8 @@ export default function V4PredictorPage() {
         home: row.home.name,
         away: row.away.name,
         enginePrediction: row.enginePrediction,
+        prediction: row.prediction,
+        category: row.category,
       }));
       const newPredictions = generatePredictions(v4Fixtures);
       const finished = rows
