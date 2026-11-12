@@ -1,5 +1,5 @@
 import * as espn from "@/lib/espn";
-import { translateTeamName } from "@/lib/v4-predictor";
+import { generatePredictions, getV2Outcome, translateTeamName } from "@/lib/v4-predictor";
 import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
@@ -29,24 +29,19 @@ function parseWeekParam(raw: string | null): number | null {
   return parsed;
 }
 
-/**
- * The engine's top predicted scoreline: the Correct Score market with the
- * highest probability (e.g. "2-1"). Returns null if none is present.
- *
- * NOTE: the engine's Correct Score markets belong to the "Goals" family, so
- * they are matched by their market NAME (`Correct Score h-a`) rather than by
- * family. `result.markets` contains every market the registry built, including
- * Correct Score lines, so this always sees the full CS grid.
- */
+/** Pick the most likely engine scoreline with the outcome selected by V2. */
 function topCorrectScore(
   markets: Array<{ name: string; hitRate: number }>,
+  outcome: "H" | "D" | "A",
 ): string | null {
   let best: { score: string; prob: number } | null = null;
   for (const m of markets) {
     const match = /^Correct Score (\d{1,2})-(\d{1,2})$/.exec(m.name);
-    if (!match) continue;
+    if (!match || !Number.isFinite(m.hitRate)) continue;
+    const score = `${match[1]}-${match[2]}`;
+    if (getV2Outcome(score) !== outcome) continue;
     if (!best || m.hitRate > best.prob) {
-      best = { score: `${match[1]}-${match[2]}`, prob: m.hitRate };
+      best = { score, prob: m.hitRate };
     }
   }
   return best ? best.score : null;
@@ -85,6 +80,13 @@ export async function GET(request: Request) {
     (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime(),
   );
 
+  // Evaluate the V2 rules across the sorted week, not per fixture: Snipe
+  // quotas affect the outcome of later fixtures.
+  const v2Predictions = generatePredictions(sorted.map((fx) => ({
+    home: toV4TeamName(fx.home.name),
+    away: toV4TeamName(fx.away.name),
+  })));
+
   // The engine is loaded at REQUEST time via a dynamic import so the module
   // graph (@/lib/engine/engine → @/lib/engine/dataMesh → @/db) is evaluated
   // with the runtime environment already in place. Importing the engine
@@ -93,15 +95,16 @@ export async function GET(request: Request) {
   //
   // There is deliberately NO catch around the engine call (or the summary
   // fetch): if the database, keys, or data feeds fail, the error propagates
-  // and Next.js returns a 500 with the full cause in the server logs. The V4
-  // Predictor must never silently fall back to V2 rules for Locks.
+  // and Next.js returns a 500 with the full cause in the server logs.
   const { runEngineFromRealWithProfiles } = await import("@/lib/engine/engine");
 
   const result = await Promise.all(
-    sorted.map(async (fx) => {
+    sorted.map(async (fx, index) => {
       const summary = await espn.fetchSummary(fx.leagueSlug, fx.id);
       const engineResult = await runEngineFromRealWithProfiles(fx, summary);
-      const enginePrediction = topCorrectScore(engineResult.markets);
+      const enginePrediction = topCorrectScore(
+        engineResult.markets, getV2Outcome(v2Predictions[index].Prediction),
+      );
 
       const homeScore = fx.home.score;
       const awayScore = fx.away.score;
