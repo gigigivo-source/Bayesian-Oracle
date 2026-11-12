@@ -21,9 +21,15 @@ export const MID_TABLE = ["Fulham", "Brentford", "Everton", "Leeds", "Crystal Pa
 export const BOTTOM_5 = ["Coventry", "Ipswich", "Hull", "Sunderland", "Burnley"];
 export const CHAOS_TEAMS = ["Chelsea", "Man Utd", "Spurs"];
 
-/** A fixture to predict. `enginePrediction` is an engine scoreline, preferably
- *  the highest-probability score matching the V2 outcome. */
-export type Fixture = { home: string; away: string; enginePrediction?: string | null };
+/** A fixture to predict. `enginePrediction` is the Engine Winner-First scoreline
+ *  for non-Snipe matches; null/undefined falls back to V2 Lock rules. */
+export type Fixture = {
+  home: string;
+  away: string;
+  enginePrediction?: string | null;
+  prediction?: string | null;
+  category?: string | null;
+};
 export type Actual = [number, number];
 export type MatchType = "Chaos" | "Home_Fortress" | "Mid_Table_Deadlock" | "Elite_Away" | "Standard";
 export type Prediction = { Match: string; Category: string; Prediction: string; Target_Pts: number };
@@ -152,18 +158,37 @@ export function generatePredictions(fixtures: Fixture[]): Prediction[] {
     return { Match: `${home} vs ${away}`, Category: category, Prediction: prediction, Target_Pts: targetPts };
   });
 
-  // The route selects from the full engine grid. Also check the outcome here
-  // so callers supplying a single unrestricted engine pick cannot undo V2.
+  // 3-Layer Hybrid System:
+  // Layer 1 (Snipes): Keep V2 Snipe predictions untouched.
+  // Layer 2 (Engine Winner-First): Use the Engine scoreline for non-Snipes.
+  // Layer 3 (Safety Net): Fall back to V2 Lock rules when Engine score is absent.
   return v2Predictions.map((v2, index) => {
-    const enginePrediction = fixtures[index].enginePrediction;
-    if (!isScoreline(enginePrediction) || getV2Outcome(enginePrediction) !== getV2Outcome(v2.Prediction)) {
+    if (v2.Category.includes("SNIPE")) {
       return v2;
     }
-    return {
-      ...v2,
-      Category: v2.Target_Pts === 10 ? "LOCK: Engine Top Pick" : v2.Category,
-      Prediction: enginePrediction,
-    };
+    const fixture = fixtures[index];
+    if (isScoreline(fixture.enginePrediction)) {
+      return {
+        ...v2,
+        Category:
+          typeof fixture.category === "string" && fixture.category
+            ? fixture.category
+            : "ENGINE: Winner-First",
+        Prediction: fixture.enginePrediction,
+      };
+    }
+    if (
+      isScoreline(fixture.prediction) &&
+      typeof fixture.category === "string" &&
+      fixture.category
+    ) {
+      return {
+        ...v2,
+        Category: fixture.category,
+        Prediction: fixture.prediction,
+      };
+    }
+    return v2;
   });
 }
 
