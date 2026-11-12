@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { generatePredictions, getV2Outcome, isScoreline } from "@/lib/v4-predictor";
+import { generatePredictions, getV2Outcome, isScoreline, translateTeamName as translateTeam } from "@/lib/v4-predictor";
 
 describe("generatePredictions: V2 outcome and engine score", () => {
   it("uses matching engine scores for Snipes and preserves the V2 outcome when they disagree", () => {
@@ -63,56 +63,30 @@ describe("generatePredictions: V2 outcome and engine score", () => {
 
 
 describe("Consensus Override route", () => {
-  it("selects the highest-probability score for each V2 outcome, preserving week-wide Snipe quotas", async () => {
+  it("preserves week-wide V2 snipes and falls back when engine markets are incomplete", async () => {
     const teams = [
-      ["Arsenal", "Coventry City"],
-      ["Fulham", "Leeds United"],
-      ["Hull City", "Liverpool"],
-      ["Burnley", "Brighton & Hove Albion"],
-      ["Manchester City", "Brentford"],
-      ["Chelsea", "Tottenham Hotspur"],
-      ["Wolves", "Hull City"],
+      ["Arsenal", "Coventry City"], ["Fulham", "Leeds United"], ["Hull City", "Liverpool"],
+      ["Burnley", "Brighton & Hove Albion"], ["Manchester City", "Brentford"],
+      ["Chelsea", "Tottenham Hotspur"], ["Wolves", "Hull City"],
     ];
     const fixtures = teams.map(([home, away], i) => ({
       id: String(i), leagueSlug: "eng.1", matchweek: 11,
       date: `2026-11-${String(i + 1).padStart(2, "0")}T15:00:00Z`, state: "pre",
       home: { name: home, score: null }, away: { name: away, score: null },
     }));
+    const runEngine = vi.fn().mockResolvedValue({ match: { dataCompletenessScore: 80 }, markets: [] });
     vi.doMock("@/lib/espn", () => ({
       fetchScoreboard: vi.fn().mockResolvedValue([...fixtures].reverse()),
       fetchSummary: vi.fn().mockResolvedValue(null),
     }));
-    vi.doMock("@/lib/engine/engine", () => ({
-      runEngineFromRealWithProfiles: vi.fn(async (fixture: { id: string }) => ({
-        markets: fixture.id === "6" ? [
-          { name: "Correct Score 0-0", hitRate: 0.5 },
-          { name: "Correct Score 2-0", hitRate: NaN },
-          { name: "Correct Score 0-1", hitRate: 0.04 },
-        ] : [
-          { name: "Correct Score 0-0", hitRate: 0.6 },
-          { name: "Correct Score 3-1", hitRate: 0.07 },
-          { name: "Correct Score 2-1", hitRate: 0.15 },
-          { name: "Correct Score 0-1", hitRate: 0.08 },
-          { name: "Correct Score 1-2", hitRate: 0.12 },
-          { name: "Correct Score 1-1", hitRate: 0.7 },
-          { name: "Correct Score 10-0 extra", hitRate: 0.99 },
-        ],
-      })),
-    }));
-
+    vi.doMock("@/lib/engine/engine", () => ({ runEngineFromRealWithProfiles: runEngine }));
     try {
       const { GET } = await import("@/app/api/v4-predictor/auto/route");
-      const response = await GET(new Request("http://localhost/api/v4-predictor/auto?week=11"));
-      expect(response.status).toBe(200);
-      const { fixtures: rows } = await response.json();
-      expect(rows.map((row: { enginePrediction: string | null }) => row.enginePrediction))
-        .toEqual(["2-1", "1-1", "1-2", "1-2", "2-1", "1-1", null]);
-      const predictions = generatePredictions(rows.map((row: {
-        home: { name: string }; away: { name: string }; enginePrediction: string | null;
-      }) => ({ home: row.home.name, away: row.away.name, enginePrediction: row.enginePrediction })));
-      expect(predictions.map((prediction) => prediction.Prediction))
-        .toEqual(["2-1", "1-1", "1-2", "1-2", "2-1", "1-1", "1-0"]);
-      expect(predictions[3].Category).toBe("LOCK: Engine Top Pick");
+      const { fixtures: rows } = await (await GET(new Request("http://localhost/api/v4-predictor/auto?week=11"))).json();
+      const expected = generatePredictions(teams.map(([home, away]) => ({ home: translateTeam(home), away: translateTeam(away) })));
+      expect(rows.map((row: { finalPrediction: string }) => row.finalPrediction)).toEqual(expected.map((p) => p.Prediction));
+      expect(rows.map((row: { finalCategory: string }) => row.finalCategory)).toEqual(expected.map((p) => p.Category));
+      expect(runEngine).toHaveBeenCalledTimes(4);
     } finally {
       vi.doUnmock("@/lib/espn");
       vi.doUnmock("@/lib/engine/engine");

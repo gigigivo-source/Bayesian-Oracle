@@ -19,6 +19,8 @@ type AutoFixtureRow = {
   state: "pre" | "in" | "post";
   actual: Actual | null;
   enginePrediction: string | null;
+  finalPrediction: string | null;
+  finalCategory: string | null;
 };
 
 const MATCHWEEKS = Array.from({ length: 38 }, (_, i) => i + 1);
@@ -49,6 +51,8 @@ function normalizeRow(raw: unknown): AutoFixtureRow | null {
     state?: unknown;
     actual?: unknown;
     enginePrediction?: unknown;
+    finalPrediction?: unknown;
+    finalCategory?: unknown;
   };
   const home = normalizeTeam(row.home);
   const away = normalizeTeam(row.away);
@@ -68,7 +72,9 @@ function normalizeRow(raw: unknown): AutoFixtureRow | null {
     Number.isFinite(Number(row.actual[1]))
       ? [Number(row.actual[0]), Number(row.actual[1])]
       : null;
-  return { home, away, state, actual, enginePrediction };
+  const finalPrediction = isScoreline(row.finalPrediction) ? row.finalPrediction : null;
+  const finalCategory = typeof row.finalCategory === "string" ? row.finalCategory : null;
+  return { home, away, state, actual, enginePrediction, finalPrediction, finalCategory };
 }
 
 function StatusBadge({ state }: { state: AutoFixtureRow["state"] }) {
@@ -167,7 +173,14 @@ export default function V4PredictorPage() {
         away: row.away.name,
         enginePrediction: row.enginePrediction,
       }));
-      const newPredictions = generatePredictions(v4Fixtures);
+      // The API owns the hybrid decision; do not reapply V2's outcome guard.
+      // Retain the legacy calculation only for responses without final fields.
+      const legacyPredictions = generatePredictions(v4Fixtures);
+      const newPredictions = rows.map((row, index) =>
+        row.finalPrediction && row.finalCategory
+          ? { ...legacyPredictions[index], Prediction: row.finalPrediction, Category: row.finalCategory }
+          : legacyPredictions[index],
+      );
       const finished = rows
         .map((row, index) =>
           Array.isArray(row.actual) && row.actual.length === 2
