@@ -222,3 +222,35 @@ describe("buildTeamStatProfile — bounded-parallel boxscore walk", () => {
     expect(profile!.corners.mean).toBeCloseTo(12, 10); // mean of 4..20
   });
 });
+
+
+describe("point-in-time profile", () => {
+  it("uses only dated completed events before the cutoff and selects seasons relative to it", async () => {
+    const events = [
+      { id: "future", date: "2020-10-01T15:00:00Z" },
+      { id: "target", date: "2020-08-15T15:00:00Z" },
+      { id: "prior", date: "2020-08-01T15:00:00Z" },
+      { id: "undated" },
+      { id: "same-day-unknown", date: "2020-08-15" },
+    ].map((e) => ({ ...e, competitions: [{ status: { type: { state: "post" } } }] }));
+    espnJson.mockImplementation(async (url?: string) => {
+      const u = url ?? "";
+      if (u.endsWith("/teams")) return teamsResponse();
+      if (u.includes("/schedule")) return { events };
+      if (u.includes("/summary")) return boxscoreResponse([{ name: "totalShots", displayValue: "12" }]);
+      return null;
+    });
+    const result = await buildTeamStatProfile("Arsenal", "eng.1", "2020-08-15T15:00:00Z");
+    expect(result?.samples).toBe(1);
+    expect(summaryCalls()).toEqual(["prior"]);
+    const schedules = espnJson.mock.calls.map((c) => String(c[0])).filter((u) => u.includes("/schedule"));
+    expect(schedules).toHaveLength(2);
+    expect(schedules[0]).toContain("season=2020");
+    expect(schedules[1]).toContain("season=2019");
+  });
+
+  it("fails closed on an invalid cutoff", async () => {
+    expect(await buildTeamStatProfile("Arsenal", "eng.1", "not-a-date")).toBeNull();
+    expect(espnJson).not.toHaveBeenCalled();
+  });
+});

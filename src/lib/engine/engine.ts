@@ -196,12 +196,13 @@ export async function runEngineFromRealWithProfiles(
   sum:         MatchSummary | null,
   liveStats?:  Record<string, number> | null,
   rankingMode?: RankingMode,
+  beforeDate?: string,
 ): Promise<EngineResult> {
   let profiles: RealProfiles | undefined;
   try {
     const [home, away] = await Promise.all([
-      getCachedMeshProfile(fx.home.name, fx.leagueSlug).catch(() => null),
-      getCachedMeshProfile(fx.away.name, fx.leagueSlug).catch(() => null),
+      getCachedMeshProfile(fx.home.name, fx.leagueSlug, beforeDate).catch(() => null),
+      getCachedMeshProfile(fx.away.name, fx.leagueSlug, beforeDate).catch(() => null),
     ]);
     if (home || away) profiles = { home, away };
   } catch {
@@ -216,10 +217,12 @@ export async function runEngineFromRealWithProfiles(
     (profiles?.home?.samples ?? 0) > 0 &&
     (profiles?.away?.samples ?? 0) > 0;
 
-  if (haveMesh) {
+  // The aggregator has no as-of guarantee even in pre-match mode; in a
+  // point-in-time run use only the cutoff-filtered mesh and model fallbacks.
+  if (haveMesh || beforeDate !== undefined) {
     console.log(
-      `[engine] mesh profiles present for ${fx.home.name} vs ${fx.away.name} ` +
-      `— skipping aggregator walk (saves ~5s)`
+      `[engine] ${beforeDate !== undefined ? "point-in-time mode" : "mesh profiles present"} for ${fx.home.name} vs ${fx.away.name} ` +
+      `— skipping aggregator walk`
     );
     const fastOpts: SelectOptions = {
       stats: null,

@@ -131,11 +131,12 @@ function blendInto(
 export async function buildMeshProfile(
   teamName:   string,
   leagueSlug: string,
+  beforeDate?: string,
 ): Promise<MeshProfile | null> {
   const providers: string[] = [];
 
   // Provider 1: ESPN per-match boxscore distributions (primary).
-  const base = await buildTeamStatProfile(teamName, leagueSlug).catch(() => null);
+  const base = await buildTeamStatProfile(teamName, leagueSlug, beforeDate).catch(() => null);
   if (base) providers.push("ESPN Boxscore");
 
   // Provider 4: resolve cross-provider IDs via TheSportsDB.
@@ -145,7 +146,8 @@ export async function buildMeshProfile(
   // Provider 2: ESPN Core season aggregates (second independent ESPN signal).
   const espnId = base?.teamId ?? ids?.espnId;
   let core: ProviderStat | null = null;
-  if (espnId) {
+  // Current season aggregates cannot be reconstructed as of a past cutoff.
+  if (espnId && beforeDate === undefined) {
     core = await espnCoreSeasonStats(leagueSlug, espnId).catch(() => null);
     if (core) providers.push(core.provider);
   }
@@ -198,7 +200,11 @@ const PROFILE_TTL_MS = 6 * 60 * 60 * 1000;
 export async function getCachedMeshProfile(
   teamName:   string,
   leagueSlug: string,
+  beforeDate?: string,
 ): Promise<MeshProfile | null> {
+  // Current cache entries are not point-in-time snapshots. Never read or
+  // overwrite them for a cutoff request.
+  if (beforeDate !== undefined) return buildMeshProfile(teamName, leagueSlug, beforeDate);
   const key = `${leagueSlug}|${teamName}`.toLowerCase().trim();
 
   // 1. Try cache.

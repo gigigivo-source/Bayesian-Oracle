@@ -255,8 +255,42 @@ export async function GET(request: Request) {
         // Layer 1 (Snipes): Keep V2 prediction untouched and skip the Engine entirely.
         if (!v2Pred.Category.includes("SNIPE") && runEngine) {
           try {
-            const summary = await espn.fetchSummary(fx.leagueSlug, fx.id).catch(() => null);
-            const engineResult = await runEngine(fx, summary);
+            // ESPN's current summary and scoreboard can contain post-match data.
+            // Only retain dated historical form/H2H and recompute their aggregates.
+            const cutoff = Date.parse(fx.date);
+            const isBefore = (date: string) => {
+              const time = Date.parse(date);
+              // Date-only values on the match day cannot prove pre-kickoff availability.
+              return Number.isFinite(cutoff) && Number.isFinite(time) && time < cutoff &&
+                (date.includes("T") || date.slice(0, 10) < fx.date.slice(0, 10));
+            };
+            const filterForm = (form: espn.TeamForm | null): espn.TeamForm | null => {
+              if (!form) return null;
+              const games = form.games.filter((game) => isBefore(game.date));
+              if (!games.length) return null;
+              return {
+                ...form, games,
+                gfAvg: games.reduce((n, game) => n + game.scoreFor, 0) / games.length,
+                gaAvg: games.reduce((n, game) => n + game.scoreAgainst, 0) / games.length,
+                points: games.reduce((n, game) => n + (game.result === "W" ? 3 : game.result === "D" ? 1 : 0), 0),
+              };
+            };
+            const engineFx = {
+              ...fx, state: "pre" as const, statusDetail: "", clock: undefined, odds: null,
+              home: { ...fx.home, score: null, record: null, form: null },
+              away: { ...fx.away, score: null, record: null, form: null },
+            };
+            const rawSummary = await espn.fetchSummary(fx.leagueSlug, fx.id).catch(() => null);
+            const summary = rawSummary ? {
+              // Explicit allowlist: no match xG, boxscore, or unverified odds/lineups.
+              venue: rawSummary.venue,
+              homeForm: filterForm(rawSummary.homeForm),
+              awayForm: filterForm(rawSummary.awayForm),
+              h2h: (rawSummary.h2h ?? []).filter((game) => isBefore(game.date)),
+              odds: null, homeLineup: [], awayLineup: [], lineupAvailable: false,
+              homeFormation: null, awayFormation: null, boxscore: null,
+            } : null;
+            const engineResult = await runEngine(engineFx, summary, null, undefined, fx.date);
             const dataCompletenessScore = resolveCompletenessScore(engineResult, week);
 
             // Layer 2 (Engine Winner-First): requires dataCompletenessScore >= 50.

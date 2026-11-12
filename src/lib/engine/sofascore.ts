@@ -67,6 +67,7 @@ interface EspnTeamsResponse {
 interface EspnScheduleResponse {
   events?: Array<{
     id?:           string;
+    date?:         string;
     competitions?: Array<{
       status?:      { type?: { state?: string } };
       competitors?: Array<{ id?: string; homeAway?: string }>;
@@ -215,26 +216,43 @@ async function matchStatsForTeam(
 export async function buildTeamStatProfile(
   teamName:    string,
   preferSlug?: string,
-  lastN        = 20,
+  beforeDate?: string,
 ): Promise<TeamStatProfile | null> {
+  const lastN = 20;
+  const cutoff = beforeDate === undefined ? null : Date.parse(beforeDate);
+  if (cutoff !== null && !Number.isFinite(cutoff)) return null;
   const resolved = await findTeamId(teamName, preferSlug);
   if (!resolved) return null;
   const { id, slug } = resolved;
 
-  // Soccer seasons span two calendar years — try current and previous.
-  const yr = new Date().getFullYear();
+  // Historical requests must choose seasons relative to the fixture, not today.
+  const yr = cutoff === null ? new Date().getFullYear() : new Date(cutoff).getUTCFullYear();
   let events: NonNullable<EspnScheduleResponse["events"]> = [];
   for (const season of [yr, yr - 1]) {
     const sched = await ej<EspnScheduleResponse>(
       `${ESPN}/${slug}/teams/${id}/schedule?season=${season}`,
     );
-    events = sched?.events ?? [];
-    if (events.some((e) => e.competitions?.[0]?.status?.type?.state === "post")) break;
+    const seasonEvents = sched?.events ?? [];
+    if (cutoff === null) {
+      events = seasonEvents;
+      if (events.some((e) => e.competitions?.[0]?.status?.type?.state === "post")) break;
+    } else {
+      events.push(...seasonEvents);
+    }
   }
 
-  const finished = events
-    .filter((e) => e.competitions?.[0]?.status?.type?.state === "post" && e.id)
-    .slice(-lastN);
+  const eligible = events.filter((e) => {
+    if (e.competitions?.[0]?.status?.type?.state !== "post" || !e.id) return false;
+    if (cutoff === null) return true;
+    if (!e.date) return false;
+    const time = Date.parse(e.date);
+    return Number.isFinite(time) && time < cutoff &&
+      (e.date.includes("T") || e.date.slice(0, 10) < beforeDate!.slice(0, 10));
+  });
+  // Deduplicate overlapping season schedules and sort before selecting the window.
+  const unique = [...new Map(eligible.map((e) => [e.id, e])).values()];
+  if (cutoff !== null) unique.sort((a, b) => Date.parse(a.date!) - Date.parse(b.date!));
+  const finished = unique.slice(-lastN);
   if (finished.length === 0) return null;
 
   // Walk the finished matches with bounded concurrency (8 in flight) instead
