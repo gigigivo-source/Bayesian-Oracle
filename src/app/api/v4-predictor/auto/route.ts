@@ -1,6 +1,7 @@
 import * as espn from "@/lib/espn";
 import { generatePredictions, getV2Outcome, translateTeamName } from "@/lib/v4-predictor";
 import { NextResponse } from "next/server";
+import type { Market } from "@/lib/engine/types";
 
 export const dynamic = "force-dynamic";
 // The engine runs once per fixture, so allow the same budget as daily-picks.
@@ -29,22 +30,39 @@ function parseWeekParam(raw: string | null): number | null {
   return parsed;
 }
 
-/** Pick the most likely engine scoreline with the outcome selected by V2. */
-function topCorrectScore(
-  markets: Array<{ name: string; hitRate: number }>,
-  outcome: "H" | "D" | "A",
-): string | null {
-  let best: { score: string; prob: number } | null = null;
-  for (const m of markets) {
-    const match = /^Correct Score (\d{1,2})-(\d{1,2})$/.exec(m.name);
-    if (!match || !Number.isFinite(m.hitRate)) continue;
-    const score = `${match[1]}-${match[2]}`;
-    if (getV2Outcome(score) !== outcome) continue;
-    if (!best || m.hitRate > best.prob) {
-      best = { score, prob: m.hitRate };
+/** Pick the most probable score for the engine's most probable 1X2 outcome. */
+function winnerFirstScore(markets: Market[], home: string, away: string): string | null {
+  const outcomeForSelection = (selection: string): "H" | "D" | "A" | null => {
+    const value = selection.trim().toLowerCase();
+    if (["home", "home win", "1", `${home.toLowerCase()} win`].includes(value)) return "H";
+    if (["draw", "x"].includes(value)) return "D";
+    if (["away", "away win", "2", `${away.toLowerCase()} win`].includes(value)) return "A";
+    return null;
+  };
+
+  let bestOutcome: { outcome: "H" | "D" | "A"; hitRate: number } | null = null;
+  for (const market of markets) {
+    // The engine emits e.g. "Match Result: Arsenal Win", one row per outcome.
+    if (market.family !== "Goals" || !/^(?:1X2|(?:Match )?Result)(?::.*)?$/i.test(market.name)) continue;
+    const outcome = outcomeForSelection(market.selection);
+    if (!outcome || !Number.isFinite(market.hitRate)) continue;
+    if (!bestOutcome || market.hitRate > bestOutcome.hitRate) {
+      bestOutcome = { outcome, hitRate: market.hitRate };
     }
   }
-  return best ? best.score : null;
+  if (!bestOutcome) return null;
+
+  let bestScore: { score: string; hitRate: number } | null = null;
+  for (const market of markets) {
+    if (market.family !== "Goals" || !Number.isFinite(market.hitRate)) continue;
+    const match = /^Correct Score (\d{1,2}-\d{1,2})$/i.exec(market.name)
+      ?? (market.name === "Correct Score" ? /^(?:Score )?(\d{1,2}-\d{1,2})$/i.exec(market.selection) : null);
+    if (!match || getV2Outcome(match[1]) !== bestOutcome.outcome) continue;
+    if (!bestScore || market.hitRate > bestScore.hitRate) {
+      bestScore = { score: match[1], hitRate: market.hitRate };
+    }
+  }
+  return bestScore?.score ?? null;
 }
 
 export async function GET(request: Request) {
@@ -87,24 +105,39 @@ export async function GET(request: Request) {
     away: toV4TeamName(fx.away.name),
   })));
 
-  // The engine is loaded at REQUEST time via a dynamic import so the module
-  // graph (@/lib/engine/engine → @/lib/engine/dataMesh → @/db) is evaluated
-  // with the runtime environment already in place. Importing the engine
-  // statically at the top of this file would evaluate @/db at module load
-  // time and crash the route with "DATABASE_URL is required".
-  //
-  // There is deliberately NO catch around the engine call (or the summary
-  // fetch): if the database, keys, or data feeds fail, the error propagates
-  // and Next.js returns a 500 with the full cause in the server logs.
-  const { runEngineFromRealWithProfiles } = await import("@/lib/engine/engine");
+  // Import at most once per request, and only if a non-Snipe needs the engine.
+  // Import failures (including missing database configuration) are also fallback cases.
+  const engineModule = v2Predictions.some((prediction) => !prediction.Category.includes("SNIPE"))
+    ? import("@/lib/engine/engine").catch((error) => {
+        console.error("[v4-predictor] Engine unavailable; using V2", error);
+        return null;
+      })
+    : null;
 
   const result = await Promise.all(
     sorted.map(async (fx, index) => {
-      const summary = await espn.fetchSummary(fx.leagueSlug, fx.id);
-      const engineResult = await runEngineFromRealWithProfiles(fx, summary);
-      const enginePrediction = topCorrectScore(
-        engineResult.markets, getV2Outcome(v2Predictions[index].Prediction),
-      );
+      const v2Pred = v2Predictions[index];
+      let finalPrediction = v2Pred.Prediction;
+      let finalCategory = v2Pred.Category;
+      let enginePrediction: string | null = null;
+
+      if (!v2Pred.Category.includes("SNIPE")) {
+        try {
+          const loadedEngine = await engineModule;
+          if (!loadedEngine) throw new Error("Engine unavailable");
+          const summary = await espn.fetchSummary(fx.leagueSlug, fx.id);
+          const engineResult = await loadedEngine.runEngineFromRealWithProfiles(fx, summary);
+          if (Number.isFinite(engineResult.match.dataCompletenessScore) && engineResult.match.dataCompletenessScore >= 50) {
+            enginePrediction = winnerFirstScore(engineResult.markets, fx.home.name, fx.away.name);
+            if (enginePrediction) {
+              finalPrediction = enginePrediction;
+              finalCategory = "ENGINE: Winner-First";
+            }
+          }
+        } catch (error) {
+          console.error(`[v4-predictor] Engine failed for fixture ${fx.id}; using V2`, error);
+        }
+      }
 
       const homeScore = fx.home.score;
       const awayScore = fx.away.score;
@@ -127,6 +160,8 @@ export async function GET(request: Request) {
         state: fx.state,
         actual,
         enginePrediction,
+        finalPrediction,
+        finalCategory,
       };
     }),
   );
