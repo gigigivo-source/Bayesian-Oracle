@@ -1,6 +1,4 @@
 import * as espn from "@/lib/espn";
-import { runEngineFromRealWithProfiles } from "@/lib/engine";
-import type { Market } from "@/lib/engine/types";
 import { translateTeamName } from "@/lib/v4-predictor";
 import { NextResponse } from "next/server";
 
@@ -34,8 +32,15 @@ function parseWeekParam(raw: string | null): number | null {
 /**
  * The engine's top predicted scoreline: the Correct Score market with the
  * highest probability (e.g. "2-1"). Returns null if none is present.
+ *
+ * NOTE: the engine's Correct Score markets belong to the "Goals" family, so
+ * they are matched by their market NAME (`Correct Score h-a`) rather than by
+ * family. `result.markets` contains every market the registry built, including
+ * Correct Score lines, so this always sees the full CS grid.
  */
-function topCorrectScore(markets: Market[]): string | null {
+function topCorrectScore(
+  markets: Array<{ name: string; hitRate: number }>,
+): string | null {
   let best: { score: string; prob: number } | null = null;
   for (const m of markets) {
     const match = /^Correct Score (\d{1,2})-(\d{1,2})$/.exec(m.name);
@@ -47,79 +52,81 @@ function topCorrectScore(markets: Market[]): string | null {
   return best ? best.score : null;
 }
 
-/** Runs the Prediction Engine for one fixture. Any failure yields null. */
-async function fetchEnginePrediction(
-  fixture: espn.FixtureLite,
-): Promise<string | null> {
-  try {
-    const summary = await espn.fetchSummary(fixture.leagueSlug, fixture.id).catch(() => null);
-    const result = await runEngineFromRealWithProfiles(fixture, summary);
-    return topCorrectScore(result.markets);
-  } catch (error) {
-    console.error("V4 engine prediction failed", fixture.id, error);
-    return null;
-  }
-}
-
 export async function GET(request: Request) {
-  try {
-    const rawWeek = new URL(request.url).searchParams.get("week");
-    const requestedWeek = parseWeekParam(rawWeek);
-    if (Number.isNaN(requestedWeek)) {
-      return NextResponse.json(
-        { error: "Invalid week parameter. Expected an integer between 1 and 38." },
-        { status: 400 },
-      );
-    }
-
-    let week = requestedWeek;
-    if (week === null) {
-      try {
-        week =
-          typeof espn.getCurrentMatchweek === "function"
-            ? await espn.getCurrentMatchweek("eng.1")
-            : DEFAULT_WEEK;
-      } catch {
-        week = DEFAULT_WEEK;
-      }
-    }
-
-    const fixtures = await espn.fetchScoreboard("eng.1", undefined, week);
-
-    const hasMatchweeks = fixtures.some((f) => typeof f.matchweek === "number");
-    const forWeek = hasMatchweeks
-      ? fixtures.filter((f) => f.matchweek === week)
-      : fixtures;
-
-    const sorted = [...forWeek].sort(
-      (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime(),
+  const rawWeek = new URL(request.url).searchParams.get("week");
+  const requestedWeek = parseWeekParam(rawWeek);
+  if (Number.isNaN(requestedWeek)) {
+    return NextResponse.json(
+      { error: "Invalid week parameter. Expected an integer between 1 and 38." },
+      { status: 400 },
     );
+  }
 
-    const result = await Promise.all(sorted.map(async (f) => {
-      const enginePrediction = await fetchEnginePrediction(f);
-      const homeScore = f.home.score;
-      const awayScore = f.away.score;
+  let week = requestedWeek;
+  if (week === null) {
+    try {
+      week =
+        typeof espn.getCurrentMatchweek === "function"
+          ? await espn.getCurrentMatchweek("eng.1")
+          : DEFAULT_WEEK;
+    } catch {
+      week = DEFAULT_WEEK;
+    }
+  }
+
+  const fixtures = await espn.fetchScoreboard("eng.1", undefined, week);
+
+  const hasMatchweeks = fixtures.some((f) => typeof f.matchweek === "number");
+  const forWeek = hasMatchweeks
+    ? fixtures.filter((f) => f.matchweek === week)
+    : fixtures;
+
+  const sorted = [...forWeek].sort(
+    (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime(),
+  );
+
+  // The engine is loaded at REQUEST time via a dynamic import so the module
+  // graph (@/lib/engine/engine → @/lib/engine/dataMesh → @/db) is evaluated
+  // with the runtime environment already in place. Importing the engine
+  // statically at the top of this file would evaluate @/db at module load
+  // time and crash the route with "DATABASE_URL is required".
+  //
+  // There is deliberately NO catch around the engine call (or the summary
+  // fetch): if the database, keys, or data feeds fail, the error propagates
+  // and Next.js returns a 500 with the full cause in the server logs. The V4
+  // Predictor must never silently fall back to V2 rules for Locks.
+  const { runEngineFromRealWithProfiles } = await import("@/lib/engine/engine");
+
+  const result = await Promise.all(
+    sorted.map(async (fx) => {
+      const summary = await espn.fetchSummary(fx.leagueSlug, fx.id);
+      const engineResult = await runEngineFromRealWithProfiles(fx, summary);
+      const enginePrediction = topCorrectScore(engineResult.markets);
+
+      const homeScore = fx.home.score;
+      const awayScore = fx.away.score;
       const hasScore =
-        homeScore !== null && homeScore !== "" && awayScore !== null && awayScore !== "";
+        homeScore !== null &&
+        homeScore !== "" &&
+        awayScore !== null &&
+        awayScore !== "";
       const actual =
-        f.state === "post" &&
+        fx.state === "post" &&
         hasScore &&
         Number.isFinite(Number(homeScore)) &&
         Number.isFinite(Number(awayScore))
           ? [Number(homeScore), Number(awayScore)]
           : null;
+
       return {
-        home: { name: toV4TeamName(f.home.name), logo: f.home.logo ?? null },
-        away: { name: toV4TeamName(f.away.name), logo: f.away.logo ?? null },
-        state: f.state,
+        home: { name: toV4TeamName(fx.home.name), logo: fx.home.logo ?? null },
+        away: { name: toV4TeamName(fx.away.name), logo: fx.away.logo ?? null },
+        state: fx.state,
         actual,
         enginePrediction,
       };
-    }));
+    }),
+  );
 
-    return NextResponse.json({ week, fixtures: result });
-  } catch (error) {
-    console.error("V4 auto-fetch error", error);
-    return NextResponse.json({ error: "Failed to fetch" }, { status: 500 });
-  }
+  return NextResponse.json({ week, fixtures: result });
 }
