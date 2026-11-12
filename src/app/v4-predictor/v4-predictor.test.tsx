@@ -207,7 +207,11 @@ describe("GET /api/v4-predictor/auto", () => {
     expect(fetchSummaryMock).toHaveBeenCalledWith("eng.1", "m1");
     expect(fetchSummaryMock).toHaveBeenCalledWith("eng.1", "m3");
     expect(runEngineMock).toHaveBeenCalledTimes(2);
-    expect(runEngineMock).toHaveBeenCalledWith(expect.objectContaining({ id: "m1" }), summary);
+    expect(runEngineMock).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "m1", state: "pre", home: expect.objectContaining({ score: null }) }),
+      expect.objectContaining({ venue: "Emirates", boxscore: null, odds: null }),
+      null, undefined, "2026-11-07T15:00:00Z",
+    );
     expect(body.fixtures.map((f: { category: string; prediction: string; enginePrediction: string | null }) => [
       f.category,
       f.prediction,
@@ -217,6 +221,33 @@ describe("GET /api/v4-predictor/auto", () => {
       ["SNIPE: Mid-Table Deadlock", "1-1", null],
       ["ENGINE: Winner-First", "0-2", "0-2"],
     ]);
+  });
+
+  it("isolates a finished fixture while preserving its scorecard result", async () => {
+    const fixture = makeFixture("m1", "2020-08-15T15:00:00Z", "Arsenal FC", "Chelsea FC", "post", "4", "2", 1);
+    fetchScoreboardMock.mockResolvedValue([fixture]);
+    const game = (date: string, scoreFor: number) => ({ date, scoreFor, scoreAgainst: 1, result: "W" });
+    fetchSummaryMock.mockResolvedValue({
+      venue: "Emirates", odds: { homeML: -100 }, boxscore: { homeCorners: 12 }, __homeXg: 5,
+      homeForm: { teamId: "a", teamName: "Arsenal", games: [game("2020-08-01T15:00:00Z", 2), game("2020-09-01T15:00:00Z", 10)], gfAvg: 6, gaAvg: 1, points: 6 },
+      awayForm: null,
+      h2h: [{ date: "2020-08-01T15:00:00Z", score: "1 - 0" }, { date: "2020-08-15T15:00:00Z", score: "4 - 2" }],
+      homeLineup: [{ starter: true }], awayLineup: [{ starter: true }], lineupAvailable: true,
+      homeFormation: "4-4-2", awayFormation: "4-3-3",
+    });
+    runEngineMock.mockResolvedValue(engineResultWithWinnerFirst("Arsenal FC", "Chelsea FC", "Home", "3-1"));
+    const { GET } = await import("@/app/api/v4-predictor/auto/route");
+    const response = await GET(new Request("http://localhost/api/v4-predictor/auto?week=1"));
+    const body = await response.json();
+    expect(body.fixtures[0].actual).toEqual([4, 2]);
+    const [fx, summary, , , cutoff] = runEngineMock.mock.calls[0];
+    expect(fx).toMatchObject({ state: "pre", statusDetail: "", odds: null, home: { score: null }, away: { score: null } });
+    expect(cutoff).toBe(fixture.date);
+    expect(summary).toMatchObject({ boxscore: null, odds: null, lineupAvailable: false, homeFormation: null,
+      homeForm: { gfAvg: 2, gaAvg: 1, points: 3, games: [game("2020-08-01T15:00:00Z", 2)] },
+      h2h: [{ date: "2020-08-01T15:00:00Z", score: "1 - 0" }] });
+    expect(summary).not.toHaveProperty("__homeXg");
+    expect(fixture.home.score).toBe("4");
   });
 
   it("falls back to V2 Lock prediction when the engine fails or dataCompletenessScore < 50", async () => {
