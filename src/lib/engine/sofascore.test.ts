@@ -23,7 +23,7 @@ const espnJson = vi.hoisted(() =>
 );
 vi.mock("@/lib/httpClient", () => ({ resilientJson: espnJson }));
 
-const { buildTeamStatProfile } = await import("./sofascore");
+const { buildTeamStatProfile, buildHistoricalTeamForm, findTeamId } = await import("./sofascore");
 
 // ─── ESPN response builders ──────────────────────────────────────────────────
 
@@ -252,5 +252,111 @@ describe("point-in-time profile", () => {
   it("fails closed on an invalid cutoff", async () => {
     expect(await buildTeamStatProfile("Arsenal", "eng.1", "not-a-date")).toBeNull();
     expect(espnJson).not.toHaveBeenCalled();
+  });
+});
+
+describe("buildHistoricalTeamForm — point-in-time schedule form", () => {
+  it("constructs last-5 form strictly before beforeDate across [yr, yr-1] schedules", async () => {
+    const mkEvent = (
+      id: string,
+      date: string,
+      usHome: boolean,
+      usScore: unknown,
+      oppScore: unknown,
+      oppName: string,
+      state = "post",
+    ) => ({
+      id,
+      date,
+      league: { name: "Premier League" },
+      competitions: [{
+        status: { type: { state } },
+        competitors: [
+          {
+            id: usHome ? TEAM_ID : RIVAL_ID,
+            homeAway: "home",
+            score: usHome ? usScore : oppScore,
+            team: { id: usHome ? TEAM_ID : RIVAL_ID, displayName: usHome ? "Arsenal" : oppName },
+          },
+          {
+            id: usHome ? RIVAL_ID : TEAM_ID,
+            homeAway: "away",
+            score: usHome ? oppScore : usScore,
+            team: { id: usHome ? RIVAL_ID : TEAM_ID, displayName: usHome ? oppName : "Arsenal" },
+          },
+        ],
+      }],
+    });
+
+    const events2026 = [
+      mkEvent("old-1", "2026-08-01T15:00:00Z", true, { value: 5, displayValue: "5" }, { value: 0, displayValue: "0" }, "Old Rival"),
+      mkEvent("g-1", "2026-08-08T15:00:00Z", true, { value: 2, displayValue: "2" }, { value: 1, displayValue: "1" }, "Fulham"),
+      mkEvent("g-2", "2026-08-15T15:00:00Z", false, { value: 1, displayValue: "1" }, { value: 1, displayValue: "1" }, "Everton"),
+      mkEvent("g-3", "2026-08-22T15:00:00Z", true, "3", "0", "Leeds"),
+      mkEvent("g-4", "2026-08-29T15:00:00Z", false, 0, 2, "Liverpool"),
+      mkEvent("g-5", "2026-09-12T15:00:00Z", true, { displayValue: "2" }, { displayValue: "0" }, "Wolves"),
+      mkEvent("same-time", "2026-09-19T15:00:00Z", true, { value: 4 }, { value: 0 }, "Target Match"),
+      mkEvent("same-day-date-only", "2026-09-19", true, { value: 4 }, { value: 0 }, "Same Day Unknown"),
+      mkEvent("future", "2026-09-26T15:00:00Z", true, { value: 6 }, { value: 0 }, "Future Match"),
+      mkEvent("pre-before", "2026-09-05T15:00:00Z", true, { value: 0 }, { value: 0 }, "Postponed", "pre"),
+    ];
+
+    espnJson.mockImplementation(async (url?: string) => {
+      const u = url ?? "";
+      if (u.endsWith("/teams")) return teamsResponse();
+      if (u.includes("schedule?season=2026")) return { events: events2026 };
+      if (u.includes("schedule?season=2025")) return { events: [events2026[0]] }; // duplicate old-1
+      return null;
+    });
+
+    const form = await buildHistoricalTeamForm("Arsenal FC", "eng.1", "2026-09-19T15:00:00Z");
+    expect(form).not.toBeNull();
+    expect(form!.teamId).toBe(TEAM_ID);
+    expect(form!.teamName).toBe("Arsenal");
+    expect(form!.games).toHaveLength(5);
+    expect(form!.games.map((g) => [g.opponent, g.result, g.scoreFor, g.scoreAgainst, g.atVs])).toEqual([
+      ["Fulham", "W", 2, 1, "vs"],
+      ["Everton", "D", 1, 1, "@"],
+      ["Leeds", "W", 3, 0, "vs"],
+      ["Liverpool", "L", 0, 2, "@"],
+      ["Wolves", "W", 2, 0, "vs"],
+    ]);
+    // GF = 2+1+3+0+2 = 8 (/5 = 1.6), GA = 1+1+0+2+0 = 4 (/5 = 0.8), Pts = 3+1+3+0+3 = 10
+    expect(form!.gfAvg).toBeCloseTo(1.6, 5);
+    expect(form!.gaAvg).toBeCloseTo(0.8, 5);
+    expect(form!.points).toBe(10);
+  });
+
+  it("does not let 3-letter abbreviations like CHE hijack Manchester City in findTeamId", async () => {
+    espnJson.mockImplementation(async (url?: string) => {
+      if ((url ?? "").endsWith("/teams")) {
+        return {
+          sports: [{
+            leagues: [{
+              teams: [
+                { team: { id: "363", displayName: "Chelsea", shortDisplayName: "Chelsea", abbreviation: "CHE" } },
+                { team: { id: "382", displayName: "Manchester City", shortDisplayName: "Man City", abbreviation: "MCI" } },
+              ],
+            }],
+          }],
+        };
+      }
+      return null;
+    });
+
+    const resolved = await findTeamId("Manchester City", "eng.1");
+    expect(resolved).toEqual({ id: "382", slug: "eng.1" });
+  });
+
+  it("returns null on invalid cutoff or when no completed matches precede cutoff", async () => {
+    expect(await buildHistoricalTeamForm("Arsenal", "eng.1", "invalid")).toBeNull();
+    expect(espnJson).not.toHaveBeenCalled();
+
+    espnJson.mockImplementation(async (url?: string) => {
+      if ((url ?? "").endsWith("/teams")) return teamsResponse();
+      if ((url ?? "").includes("/schedule")) return { events: [] };
+      return null;
+    });
+    expect(await buildHistoricalTeamForm("Arsenal", "eng.1", "2026-08-10T15:00:00Z")).toBeNull();
   });
 });

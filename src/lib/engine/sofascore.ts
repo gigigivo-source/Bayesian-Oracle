@@ -9,6 +9,7 @@
 
 import { LEAGUES } from "../leagues";
 import { resilientJson } from "../httpClient";
+import type { FormGame, TeamForm } from "../espn";
 
 const ESPN = "https://site.api.espn.com/apis/site/v2/sports/soccer";
 const CORE = "https://sports.core.api.espn.com/v2/sports/soccer";
@@ -64,13 +65,28 @@ interface EspnTeamsResponse {
   }>;
 }
 
+interface EspnScheduleCompetitor {
+  id?:       string;
+  homeAway?: string;
+  score?:    number | string | { value?: number; displayValue?: string } | null;
+  team?:     {
+    id?:               string;
+    displayName?:      string;
+    shortDisplayName?: string;
+    logo?:             string;
+    logos?:            Array<{ href?: string }>;
+  };
+}
+
 interface EspnScheduleResponse {
   events?: Array<{
     id?:           string;
     date?:         string;
+    seasonType?:   { name?: string };
+    league?:       { name?: string };
     competitions?: Array<{
       status?:      { type?: { state?: string } };
-      competitors?: Array<{ id?: string; homeAway?: string }>;
+      competitors?: EspnScheduleCompetitor[];
     }>;
   }>;
 }
@@ -135,8 +151,16 @@ export async function findTeamId(
       const names = [t.team?.displayName, t.team?.shortDisplayName, t.team?.abbreviation]
         .filter(Boolean)
         .map((x) => x!.toLowerCase());
+      if (names.some((nm) => nm === target) && t.team?.id) {
+        return { id: t.team.id, slug };
+      }
+    }
+    for (const t of teams) {
+      const names = [t.team?.displayName, t.team?.shortDisplayName]
+        .filter(Boolean)
+        .map((x) => x!.toLowerCase());
       if (
-        names.some((nm) => nm === target || nm.includes(target) || target.includes(nm)) &&
+        names.some((nm) => nm.length >= 4 && (nm.includes(target) || target.includes(nm))) &&
         t.team?.id
       ) {
         return { id: t.team.id, slug };
@@ -154,7 +178,15 @@ export async function findTeamId(
       const names = [t.team?.displayName, t.team?.shortDisplayName]
         .filter(Boolean)
         .map((x) => x!.toLowerCase());
-      if (names.some((nm) => nm === target || nm.includes(target)) && t.team?.id) {
+      if (names.some((nm) => nm === target) && t.team?.id) {
+        return { id: t.team.id, slug: lg.slug };
+      }
+    }
+    for (const t of teams) {
+      const names = [t.team?.displayName, t.team?.shortDisplayName]
+        .filter(Boolean)
+        .map((x) => x!.toLowerCase());
+      if (names.some((nm) => nm.length >= 4 && nm.includes(target)) && t.team?.id) {
         return { id: t.team.id, slug: lg.slug };
       }
     }
@@ -294,6 +326,118 @@ export async function buildTeamStatProfile(
     clearances:    distribution(rows.map((r) => r.clearances)),
     interceptions: distribution(rows.map((r) => r.interceptions)),
     blockedShots:  distribution(rows.map((r) => r.blockedShots)),
+  };
+}
+
+function parseCompetitorScore(
+  raw: EspnScheduleCompetitor["score"],
+): number | null {
+  if (typeof raw === "number") return Number.isFinite(raw) ? raw : null;
+  if (typeof raw === "string") {
+    const trimmed = raw.trim();
+    if (!trimmed) return null;
+    const n = Number(trimmed);
+    return Number.isFinite(n) ? n : null;
+  }
+  if (raw && typeof raw === "object") {
+    if (typeof raw.value === "number" && Number.isFinite(raw.value)) return raw.value;
+    if (typeof raw.displayValue === "string" && raw.displayValue.trim() !== "") {
+      const n = Number(raw.displayValue.trim());
+      return Number.isFinite(n) ? n : null;
+    }
+  }
+  return null;
+}
+
+/**
+ * Build a point-in-time TeamForm from the last `lastN` (default 5) completed
+ * matches played strictly BEFORE `beforeDate` using the team's ESPN schedule.
+ */
+export async function buildHistoricalTeamForm(
+  teamName:   string,
+  preferSlug: string | undefined,
+  beforeDate: string,
+  lastN = 5,
+): Promise<TeamForm | null> {
+  const cutoff = Date.parse(beforeDate);
+  if (!Number.isFinite(cutoff)) return null;
+
+  const resolved = await findTeamId(teamName, preferSlug);
+  if (!resolved) return null;
+  const { id, slug } = resolved;
+
+  const yr = new Date(cutoff).getUTCFullYear();
+  const events: NonNullable<EspnScheduleResponse["events"]> = [];
+  for (const season of [yr, yr - 1]) {
+    const sched = await ej<EspnScheduleResponse>(
+      `${ESPN}/${slug}/teams/${id}/schedule?season=${season}`,
+    );
+    events.push(...(sched?.events ?? []));
+  }
+
+  const eligible = events.filter((e) => {
+    if (e.competitions?.[0]?.status?.type?.state !== "post" || !e.id || !e.date) return false;
+    const time = Date.parse(e.date);
+    return (
+      Number.isFinite(time) &&
+      time < cutoff &&
+      (e.date.includes("T") || e.date.slice(0, 10) < beforeDate.slice(0, 10))
+    );
+  });
+
+  // Deduplicate overlapping season schedules and sort chronologically ascending.
+  const unique = [...new Map(eligible.map((e) => [e.id, e])).values()];
+  unique.sort((a, b) => Date.parse(a.date!) - Date.parse(b.date!));
+
+  const parsedGames: FormGame[] = [];
+  let resolvedTeamName = teamName;
+
+  for (const ev of unique) {
+    const competitors = ev.competitions?.[0]?.competitors ?? [];
+    if (competitors.length < 2) continue;
+
+    const us = competitors.find((c) => (c.id ?? c.team?.id) === id);
+    const opp = competitors.find((c) => (c.id ?? c.team?.id) !== id);
+    if (!us || !opp) continue;
+
+    const scoreFor = parseCompetitorScore(us.score);
+    const scoreAgainst = parseCompetitorScore(opp.score);
+    if (scoreFor === null || scoreAgainst === null) continue;
+
+    if (us.team?.displayName) resolvedTeamName = us.team.displayName;
+
+    const result: "W" | "L" | "D" =
+      scoreFor > scoreAgainst ? "W" : scoreFor < scoreAgainst ? "L" : "D";
+
+    parsedGames.push({
+      date: ev.date!,
+      opponent: opp.team?.displayName ?? opp.team?.shortDisplayName ?? "?",
+      opponentLogo: opp.team?.logo ?? opp.team?.logos?.[0]?.href ?? null,
+      result,
+      scoreFor,
+      scoreAgainst,
+      atVs: us.homeAway === "away" ? "@" : "vs",
+      competition: ev.league?.name ?? ev.seasonType?.name ?? slug,
+    });
+  }
+
+  const games = parsedGames.slice(-lastN);
+  if (games.length === 0) return null;
+
+  const gfTotal = games.reduce((sum, g) => sum + g.scoreFor, 0);
+  const gaTotal = games.reduce((sum, g) => sum + g.scoreAgainst, 0);
+  const points = games.reduce(
+    (sum, g) => sum + (g.result === "W" ? 3 : g.result === "D" ? 1 : 0),
+    0,
+  );
+
+  return {
+    teamId: id,
+    teamName: resolvedTeamName,
+    games,
+    gfAvg: gfTotal / games.length,
+    gaAvg: gaTotal / games.length,
+    points,
   };
 }
 

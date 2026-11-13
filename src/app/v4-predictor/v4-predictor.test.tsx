@@ -9,12 +9,17 @@ import { TEAM_NAME_MAP, translateTeamName } from "@/lib/v4-predictor";
 const fetchScoreboardMock = vi.fn();
 const getCurrentMatchweekMock = vi.fn();
 const fetchSummaryMock = vi.fn();
+const buildHistoricalTeamFormMock = vi.fn();
 const runEngineMock = vi.fn();
 
 vi.mock("@/lib/espn", () => ({
   fetchScoreboard: (...args: unknown[]) => fetchScoreboardMock(...args),
   getCurrentMatchweek: (...args: unknown[]) => getCurrentMatchweekMock(...args),
   fetchSummary: (...args: unknown[]) => fetchSummaryMock(...args),
+}));
+
+vi.mock("@/lib/engine/sofascore", () => ({
+  buildHistoricalTeamForm: (...args: unknown[]) => buildHistoricalTeamFormMock(...args),
 }));
 
 // The real engine needs a database; the route only needs its markets.
@@ -110,6 +115,8 @@ beforeEach(() => {
   getCurrentMatchweekMock.mockResolvedValue(11);
   fetchSummaryMock.mockReset();
   fetchSummaryMock.mockResolvedValue(null);
+  buildHistoricalTeamFormMock.mockReset();
+  buildHistoricalTeamFormMock.mockResolvedValue(null);
   runEngineMock.mockReset();
   runEngineMock.mockResolvedValue({ markets: [] });
 });
@@ -229,22 +236,32 @@ describe("GET /api/v4-predictor/auto", () => {
     const game = (date: string, scoreFor: number) => ({ date, scoreFor, scoreAgainst: 1, result: "W" });
     fetchSummaryMock.mockResolvedValue({
       venue: "Emirates", odds: { homeML: -100 }, boxscore: { homeCorners: 12 }, __homeXg: 5,
-      homeForm: { teamId: "a", teamName: "Arsenal", games: [game("2020-08-01T15:00:00Z", 2), game("2020-09-01T15:00:00Z", 10)], gfAvg: 6, gaAvg: 1, points: 6 },
-      awayForm: null,
+      // Polluted today's lastFiveGames — must be ignored for finished ("post") fixtures!
+      homeForm: { teamId: "a", teamName: "Arsenal", games: [game("2020-09-01T15:00:00Z", 10)], gfAvg: 10, gaAvg: 1, points: 3 },
+      awayForm: { teamId: "c", teamName: "Chelsea", games: [game("2020-09-01T15:00:00Z", 8)], gfAvg: 8, gaAvg: 0, points: 3 },
       h2h: [{ date: "2020-08-01T15:00:00Z", score: "1 - 0" }, { date: "2020-08-15T15:00:00Z", score: "4 - 2" }],
       homeLineup: [{ starter: true }], awayLineup: [{ starter: true }], lineupAvailable: true,
       homeFormation: "4-4-2", awayFormation: "4-3-3",
+    });
+    buildHistoricalTeamFormMock.mockImplementation(async (teamName: string) => {
+      if (teamName === "Arsenal FC") {
+        return { teamId: "a", teamName: "Arsenal", games: [game("2020-08-01T15:00:00Z", 2)], gfAvg: 2, gaAvg: 1, points: 3 };
+      }
+      return null;
     });
     runEngineMock.mockResolvedValue(engineResultWithWinnerFirst("Arsenal FC", "Chelsea FC", "Home", "3-1"));
     const { GET } = await import("@/app/api/v4-predictor/auto/route");
     const response = await GET(new Request("http://localhost/api/v4-predictor/auto?week=1"));
     const body = await response.json();
     expect(body.fixtures[0].actual).toEqual([4, 2]);
+    expect(buildHistoricalTeamFormMock).toHaveBeenCalledWith("Arsenal FC", "eng.1", fixture.date);
+    expect(buildHistoricalTeamFormMock).toHaveBeenCalledWith("Chelsea FC", "eng.1", fixture.date);
     const [fx, summary, , , cutoff] = runEngineMock.mock.calls[0];
     expect(fx).toMatchObject({ state: "pre", statusDetail: "", odds: null, home: { score: null }, away: { score: null } });
     expect(cutoff).toBe(fixture.date);
     expect(summary).toMatchObject({ boxscore: null, odds: null, lineupAvailable: false, homeFormation: null,
       homeForm: { gfAvg: 2, gaAvg: 1, points: 3, games: [game("2020-08-01T15:00:00Z", 2)] },
+      awayForm: null,
       h2h: [{ date: "2020-08-01T15:00:00Z", score: "1 - 0" }] });
     expect(summary).not.toHaveProperty("__homeXg");
     expect(fixture.home.score).toBe("4");
