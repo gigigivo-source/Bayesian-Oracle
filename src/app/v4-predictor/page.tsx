@@ -285,13 +285,9 @@ export default function V4PredictorPage() {
             🔮 V4 Ultimate Predictor
           </h1>
           <p className="mt-2 text-sm text-slate-400">
-            Pure Expected-Points Premier League score predictions, loaded
-            automatically for Matchweek {selectedWeek}. Every scoreline from
-            0-0 to 8-8 is valued by{" "}
-            <span className="text-amber-400">
-              EP = 10 × P(outcome) + 10 × P(exact score)
-            </span>{" "}
-            and the highest-EP score wins — no floors, no ceilings.
+            Blended engine and bookmaker anchors select outcomes, with three
+            snipes and a safe bank for Matchweek {selectedWeek}. Blowout hunts
+            are enabled only on strong slates with sufficient data.
           </p>
         </header>
 
@@ -305,7 +301,6 @@ export default function V4PredictorPage() {
                   <th className="p-2 text-slate-400">Match</th>
                   <th className="p-2 text-slate-400">Category</th>
                   <th className="p-2 text-slate-400">Prediction</th>
-                  <th className="p-2 text-slate-400">Expected Pts</th>
                 </tr>
               </thead>
               <tbody>
@@ -322,9 +317,6 @@ export default function V4PredictorPage() {
                     </td>
                     <td className="p-2 font-mono text-slate-100">
                       {predictions[i]?.Prediction ?? ""}
-                    </td>
-                    <td className="p-2 font-mono text-amber-400">
-                      {row.ep === null ? "" : row.ep.toFixed(2)}
                     </td>
                   </tr>
                 ))}
@@ -349,6 +341,7 @@ export default function V4PredictorPage() {
                     <th className="p-2 text-slate-400">Prediction</th>
                     <th className="p-2 text-slate-400">Actual Result</th>
                     <th className="p-2 text-slate-400">Points</th>
+                    <th className="p-2 text-slate-400">Miss Reason</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -372,6 +365,7 @@ export default function V4PredictorPage() {
                         <td className="p-2">
                           <PointsCell points={s.Points} />
                         </td>
+                        <td className="p-2">{s.MissReason}</td>
                       </tr>
                     );
                   })}

@@ -11,50 +11,17 @@ import {
   buildCorrectScoreGrid,
   DIXON_COLES_RHO,
   pickBestScoreForOutcome,
-  pickMaxExpectedPoints,
-  type ScoreCell,
 } from "@/lib/engine/markets";
 import {
-  formatScore,
   get1X2,
   getCorrectScores,
-  maxExpectedPointsPick,
-  type OneX2,
 } from "@/app/api/v4-predictor/auto/route";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-/** Deterministic prediction bundle straight from the engine's own grid. */
-function priced(
-  homeLambda: number,
-  awayLambda: number,
-  overrides: Partial<OneX2> = {},
-): { probs: OneX2; scores: ScoreCell[] } {
-  const grid = buildCorrectScoreGrid(homeLambda, awayLambda, DIXON_COLES_RHO);
-  return {
-    probs: { h: overrides.h ?? grid.outcome.home, d: overrides.d ?? grid.outcome.draw, a: overrides.a ?? grid.outcome.away },
-    scores: grid.cells,
-  };
-}
-
-/** The pure-EP winner for a λ pair, straight from the grid. */
-function maxEpScore(homeLambda: number, awayLambda: number): string {
-  const grid = buildCorrectScoreGrid(homeLambda, awayLambda, DIXON_COLES_RHO);
-  const pick = pickMaxExpectedPoints(grid.cells, grid.outcome)!;
-  return `${pick.homeGoals}-${pick.awayGoals}`;
-}
-
-function modalScore(scores: ScoreCell[], outcome: "H" | "D" | "A"): string {
+function modalScore(scores: import("@/lib/engine/markets").ScoreCell[], outcome: "H" | "D" | "A"): string {
   const cell = pickBestScoreForOutcome(scores, outcome)!;
   return `${cell.homeGoals}-${cell.awayGoals}`;
-}
-
-/** Recompute EP by hand for the chosen scoreline — the formula, not the code. */
-function epOf(scores: ScoreCell[], probs: OneX2, score: string): number {
-  const [h, a] = score.split("-").map(Number);
-  const cell = scores.find((c) => c.homeGoals === h && c.awayGoals === a)!;
-  const outcomeProb = h > a ? probs.h : h === a ? probs.d : probs.a;
-  return 10 * outcomeProb + 10 * cell.probability;
 }
 
 // ─── Client model ────────────────────────────────────────────────────────────
@@ -112,6 +79,7 @@ describe("v4-predictor presentation model", () => {
     const [scored, total] = calculateScore(predictions, [[2, 0], [2, 2], [3, 1]]);
     expect(scored.map((row) => row.Points)).toEqual([20, 10, 0]);
     expect(total).toBe(30);
+    expect(scored.map((row) => row.MissReason)).toEqual(["—", "❌ MISS: Wrong Score", "❌ MISS: Wrong Outcome"]);
   });
 });
 
@@ -166,73 +134,6 @@ describe("get1X2 / getCorrectScores", () => {
     const twoOne = scores.find((c) => c.homeGoals === 2 && c.awayGoals === 1)!;
     expect(oneOne.probability).toBe(0.19);
     expect(twoOne.probability).toBe(0.12);
-  });
-});
-
-// ─── Pure Expected Points maximiser ─────────────────────────────────────────
-
-describe("maxExpectedPointsPick — Pure Points Maximiser", () => {
-  it("publishes the highest-EP scoreline from the whole 0-0 … 8-8 grid", () => {
-    for (const [home, away] of [[2.4, 0.5], [1.7, 1.1], [1.35, 1.15], [1.0, 1.0], [0.6, 2.0], [3.2, 2.8]]) {
-      const bundle = priced(home, away);
-      const pick = maxExpectedPointsPick(bundle);
-      expect(pick.prediction).toBe(maxEpScore(home, away));
-      expect(pick.category).toBe(`MAX EP: ${pick.prediction}`);
-      // Every one of the 121 cells is valued, not just the low-score block.
-      expect(pick.ep).toBeGreaterThan(0);
-      expect(pick.ep).toBeCloseTo(epOf(bundle.scores, bundle.probs, pick.prediction), 10);
-      // EP = 10 × P(outcome) + 10 × P(exact) — no floor, no ceiling, no bias.
-      expect(pick.ep).toBeCloseTo(10 * pick.outcomeProbability + 10 * pick.exactProbability, 10);
-    }
-  });
-
-  it("beats the modal scoreline whenever the outcome bonus says so", () => {
-    // λ 1.7 / 1.1: the most likely single score is 1-1 (a draw), but the Home
-    // outcome is worth far more, so the pure-EP pick is a home win.
-    const bundle = priced(1.7, 1.1);
-    const pick = maxExpectedPointsPick(bundle);
-    expect(pick.prediction).toBe("2-1");
-    expect(pick.outcome).toBe("H");
-    expect(pick.exactProbability).toBeLessThan(1);
-    const best = pickMaxExpectedPoints(bundle.scores, { home: bundle.probs.h, draw: bundle.probs.d, away: bundle.probs.a })!;
-    // No cell on the grid earns more than the published pick.
-    for (const cell of bundle.scores) {
-      const cellEp = epOf(bundle.scores, bundle.probs, `${cell.homeGoals}-${cell.awayGoals}`);
-      expect(cellEp).toBeLessThanOrEqual(best.ep + 1e-12);
-    }
-  });
-
-  it("picks the draw in a genuine coin flip and high-scoring lines in open games", () => {
-    // λ 1.0 / 1.0: P(Draw) ≈ 0.34 outweighs either win, and 0-0 is the modal draw.
-    expect(maxExpectedPointsPick(priced(1.0, 1.0)).prediction).toBe("0-0");
-    // λ 1.3 / 1.3: the draw is still the best-value outcome, via 1-1.
-    expect(maxExpectedPointsPick(priced(1.3, 1.3)).prediction).toBe("1-1");
-    // Wide-open games are no longer capped at 1-1 / 2-1.
-    expect(maxExpectedPointsPick(priced(3.2, 2.8)).prediction).toBe("3-2");
-    expect(maxExpectedPointsPick(priced(2.8, 2.4)).prediction).toBe("3-2");
-  });
-
-  it("honours bookmaker-anchored probabilities over the raw grid", () => {
-    // A market-implied 0.55 / 0.25 / 0.20 split on a mid-table λ pair: the Home
-    // outcome alone is worth 5.5 points, so the pick must be a home win even
-    // though the grid's own draw is fat.
-    const bundle = priced(1.2, 1.2, { h: 0.55, d: 0.25, a: 0.20 });
-    const pick = maxExpectedPointsPick(bundle);
-    expect(pick.outcome).toBe("H");
-    expect(getScorelineOutcome(pick.prediction)).toBe("H");
-    // Same grid, odds-implied away favourite → away win.
-    const awayFav = maxExpectedPointsPick(priced(1.2, 1.2, { h: 0.20, d: 0.25, a: 0.55 }));
-    expect(awayFav.outcome).toBe("A");
-  });
-
-  it("falls back to 1-1 only for a degenerate (empty) grid", () => {
-    const pick = maxExpectedPointsPick({ probs: { h: 0.4, d: 0.3, a: 0.3 }, scores: [] });
-    expect(pick).toMatchObject({ prediction: "1-1", category: "MAX EP: 1-1", outcome: "D", ep: 0 });
-  });
-
-  it("formats scorelines the way the dashboard renders them", () => {
-    expect(formatScore(3, 1)).toBe("3-1");
-    expect(formatScore(0, 0)).toBe("0-0");
   });
 });
 
@@ -338,20 +239,14 @@ describe("GET /api/v4-predictor/auto — Pure Points Maximiser route", () => {
       expect(post.fx.odds).toBeNull();
       expect(post.summary?.odds).toBeNull();
 
-      // Pure EP maximiser: every row carries a "MAX EP: <score>" label, its EP,
-      // and no tranche at all.
       expect(rows).toHaveLength(3);
       for (const row of rows) {
         expect(row.prediction).toMatch(/^\d{1,2}-\d{1,2}$/);
-        expect(row.category).toBe(`MAX EP: ${row.prediction}`);
-        expect(row).not.toHaveProperty("tranche");
-        expect(row.ep).toBeGreaterThan(0);
+        expect(row.category).toBe(`SNIPE: ${row.prediction}`);
         expect(row.probabilities.home + row.probabilities.draw + row.probabilities.away).toBeCloseTo(1, 2);
       }
-      // Rows stay in kick-off order: the finished game sorts first.
       expect(rows[0]).toMatchObject({ state: "post", actual: [2, 1] });
-      // Arsenal (λ 2.2 / 0.6) → the highest-EP line is the modal Home win 2-0.
-      expect(rows[1]).toMatchObject({ category: "MAX EP: 2-0", prediction: "2-0", actual: null });
+      expect(rows[1].blendedProbabilities.h).toBeCloseTo((rows[1].probabilities.home + 180 / 280) / 2, 3);
     } finally {
       vi.doUnmock("@/lib/espn");
       vi.doUnmock("@/lib/engine/sofascore");
@@ -400,12 +295,7 @@ describe("GET /api/v4-predictor/auto — Pure Points Maximiser route", () => {
       const response = await GET(new Request("http://localhost/api/v4-predictor/auto?week=9"));
       expect(response.status).toBe(200);
       const { fixtures: rows } = await response.json();
-      // Model-only pricing (λ 1.35 / 1.15): P(Home) 0.394 outweighs the draw,
-      // so the highest-EP scoreline is the modal Home win 1-0.
-      expect(rows.map((r: { prediction: string; category: string }) => [r.category, r.prediction])).toEqual([
-        ["MAX EP: 1-0", "1-0"],
-        ["MAX EP: 1-0", "1-0"],
-      ]);
+      expect(rows.every((r: { category: string }) => r.category.startsWith("SNIPE: "))).toBe(true);
       expect(rows[0].actual).toEqual([1, 1]);
       expect(rows[1].actual).toBeNull();
     } finally {
@@ -414,6 +304,42 @@ describe("GET /api/v4-predictor/auto — Pure Points Maximiser route", () => {
       vi.doUnmock("@/lib/engine/sofascore");
       vi.doUnmock("@/lib/engine");
       vi.resetModules();
+    }
+  });
+});
+
+describe("six-pillar slate", () => {
+  it("selects three snipes, enables blowouts only on a strong slate, and protects low-data picks", async () => {
+    const fixtures = Array.from({ length: 10 }, (_, i) => ({
+      id: String(i), leagueSlug: "eng.1", matchweek: 11, date: `2026-11-${String(i + 1).padStart(2, "0")}T15:00:00Z`, state: "pre",
+      odds: { homeML: i < 3 ? -250 : 150, drawML: 300, awayML: i < 3 ? 650 : 190 },
+      home: { name: `Home ${i}`, score: null, logo: null }, away: { name: `Away ${i}`, score: null, logo: null },
+    }));
+    vi.resetModules();
+    vi.doMock("@/lib/espn", () => ({ fetchScoreboard: vi.fn().mockResolvedValue(fixtures), fetchSummary: vi.fn().mockResolvedValue(null) }));
+    vi.doMock("@/lib/engine/sofascore", () => ({ buildHistoricalTeamForm: vi.fn() }));
+    vi.doMock("@/lib/engine", () => ({ runEngineFromRealWithProfiles: vi.fn(async (fx: typeof fixtures[number]) => {
+      const index = Number(fx.id);
+      const grid = buildCorrectScoreGrid(index < 3 ? 3 : 1.3, index < 3 ? 0.3 : 1.1, DIXON_COLES_RHO);
+      return { match: { homeTeam: fx.home.name, awayTeam: fx.away.name, dataCompletenessScore: index === 0 ? 20 : 80 },
+        lambdas: { "λ Home Goals": index < 3 ? 3 : 1.3, "λ Away Goals": index < 3 ? 0.3 : 1.1 }, scoreGrid: grid, markets: [] };
+    }) }));
+    try {
+      const { GET } = await import("@/app/api/v4-predictor/auto/route");
+      const data = await (await GET(new Request("http://localhost/api/v4-predictor/auto?week=11"))).json();
+      expect(data.slateStrength).toBe("Strong");
+      expect(data.favoriteCount).toBe(3);
+      expect(data.fixtures.filter((r: { category: string }) => r.category.startsWith("SNIPE:"))).toHaveLength(3);
+      expect(data.fixtures.filter((r: { category: string }) => r.category.startsWith("WINNER:"))).toHaveLength(7);
+      expect(["1-0", "2-0"]).toContain(data.fixtures[0].prediction);
+      for (const row of data.fixtures.slice(1, 3)) {
+        expect(row.category).toMatch(/^SNIPE:/);
+        expect(Number(row.prediction.split("-")[0])).toBeGreaterThanOrEqual(3);
+        expect(row.lockedOutcome).toBe("H");
+      }
+      for (const row of data.fixtures.slice(3)) expect(getScorelineOutcome(row.prediction)).toBe(row.lockedOutcome);
+    } finally {
+      vi.doUnmock("@/lib/espn"); vi.doUnmock("@/lib/engine/sofascore"); vi.doUnmock("@/lib/engine"); vi.resetModules();
     }
   });
 });

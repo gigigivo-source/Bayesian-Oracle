@@ -3,8 +3,6 @@ import type { EngineResult } from "@/lib/engine";
 import {
   buildCorrectScoreGrid,
   DIXON_COLES_RHO,
-  pickMaxExpectedPoints,
-  type ExpectedPointsPick,
   type ScoreCell,
 } from "@/lib/engine/markets";
 import { buildHistoricalTeamForm } from "@/lib/engine/sofascore";
@@ -17,19 +15,7 @@ export const maxDuration = 60;
 
 const DEFAULT_WEEK = 11;
 
-/**
- * V4 Predictor — Pure Points Maximiser (no safety nets).
- *
- * The blind V2 static rules are gone, and so are the FLOOR / CEILING tranches
- * that used to force a favourite's safest line or a draw snipe. Every fixture
- * in the matchweek is priced by the Engine (Dixon–Coles corrected 1X2 +
- * Correct Score grid 0-0 … 8-8) and the route simply returns the scoreline
- * with the highest Expected Points:
- *
- *   EP(score) = 10 × P(outcome of score) + 10 × P(exactly that score)
- *
- * If the math says 3-2 or 4-4, the app publishes 3-2 or 4-4.
- */
+// V4 uses a bookmaker/engine anchor and slate-wide snipe selection.
 
 const EXTRA_TEAM_MAP: Record<string, string> = {
   "AFC Bournemouth": "Bournemouth",
@@ -161,66 +147,19 @@ export function getCorrectScores(
   });
 }
 
-// The EP maximiser (`pickMaxExpectedPoints`) lives in the market registry, next
-// to the grid it ranks, so the route and the Engine agree on what "best
-// scoreline" means.
-
-// ─── Pure Expected Points maximiser ─────────────────────────────────────────
-
-/** Scoreline formatted the way the dashboard renders it: "3-1". */
-export function formatScore(homeGoals: number, awayGoals: number): string {
-  return `${homeGoals}-${awayGoals}`;
+// ESPN money lines are American odds, not decimal odds.
+function decimalOdds(ml: number | null | undefined): number | null {
+  if (typeof ml !== "number" || !Number.isFinite(ml) || ml === 0) return null;
+  return ml > 0 ? 1 + ml / 100 : 1 + 100 / -ml;
 }
 
-/** Everything the route needs to publish one fixture's MAX EP pick. */
-export interface MaxExpectedPointsOutcome {
-  /** "3-1" — the highest-EP scoreline on the grid. */
-  prediction: string;
-  /** "MAX EP: 3-1" — the label the table shows. */
-  category: string;
-  outcome: Outcome;
-  /** 10 × P(outcome) + 10 × P(exact score). */
-  ep: number;
-  /** P(Home) / P(Draw) / P(Away) for the picked scoreline's outcome. */
-  outcomeProbability: number;
-  /** Probability of the picked scoreline itself. */
-  exactProbability: number;
+function scoreOutcome(cell: ScoreCell): Outcome {
+  return cell.homeGoals > cell.awayGoals ? "H" : cell.homeGoals < cell.awayGoals ? "A" : "D";
 }
 
-/** The label prefix every row carries — the pick is chosen purely on EP. */
-export const MAX_EP_PREFIX = "MAX EP";
-
-/** One fixture's probabilities + corrected score grid → its MAX EP pick. */
-export function maxExpectedPointsPick(
-  prediction: { probs: OneX2; scores: ScoreCell[] },
-): MaxExpectedPointsOutcome {
-  const pick: ExpectedPointsPick | null = pickMaxExpectedPoints(
-    prediction.scores,
-    { home: prediction.probs.h, draw: prediction.probs.d, away: prediction.probs.a },
-  );
-
-  // Degenerate grid (no cells at all — never produced by the Engine, but the
-  // model-only fallback must still emit a row): price the canonical 1-1.
-  if (!pick) {
-    return {
-      prediction: "1-1",
-      category: `${MAX_EP_PREFIX}: 1-1`,
-      outcome: "D",
-      ep: 0,
-      outcomeProbability: prediction.probs.d,
-      exactProbability: 0,
-    };
-  }
-
-  const scoreline = formatScore(pick.homeGoals, pick.awayGoals);
-  return {
-    prediction: scoreline,
-    category: `${MAX_EP_PREFIX}: ${scoreline}`,
-    outcome: pick.outcome,
-    ep: pick.ep,
-    outcomeProbability: pick.outcomeProb,
-    exactProbability: pick.exactProb,
-  };
+function bestScore(scores: ScoreCell[]): ScoreCell | undefined {
+  return scores.reduce<ScoreCell | undefined>((best, cell) =>
+    !best || cell.probability > best.probability ? cell : best, undefined);
 }
 
 export async function GET(request: Request) {
@@ -300,6 +239,7 @@ export async function GET(request: Request) {
 
         const isFinished = fx.state === "post";
         let engineResult: EngineResult | null = null;
+        let odds: espn.OddsInfo | null = fx.state === "post" ? null : (fx.odds ?? null);
 
         if (runEngine) {
           try {
@@ -328,7 +268,7 @@ export async function GET(request: Request) {
             // closing line (it would leak the result into the model), while
             // upcoming fixtures keep the bookmaker prices so the Engine can
             // anchor its lambdas to the market.
-            const odds = fx.state === "post" ? null : (rawSummary?.odds ?? fx.odds ?? null);
+            odds = fx.state === "post" ? null : (rawSummary?.odds ?? fx.odds ?? null);
             const engineFx = {
               ...fx, state: "pre" as const, statusDetail: "", clock: undefined, odds,
               home: { ...fx.home, score: null, record: null, form: null },
@@ -363,13 +303,51 @@ export async function GET(request: Request) {
         const probs = get1X2(engineResult, fallback);
         const scores = getCorrectScores(engineResult, fallback);
 
-        return { fx, index, homeName, awayName, probs, scores };
+        const book = { h: decimalOdds(odds?.homeML), d: decimalOdds(odds?.drawML), a: decimalOdds(odds?.awayML) };
+        // A partial market is not a comparable 1X2 book; use the engine alone.
+        const blended = book.h && book.d && book.a
+          ? { h: (probs.h + 1 / book.h) / 2, d: (probs.d + 1 / book.d) / 2, a: (probs.a + 1 / book.a) / 2 }
+          : probs;
+        const ranked: Outcome[] = (["H", "D", "A"] as Outcome[]).sort((a, b) =>
+          blended[b.toLowerCase() as keyof OneX2] - blended[a.toLowerCase() as keyof OneX2]);
+        // With no draw price, retain the engine's draw rather than inventing odds.
+        const locked = ranked[0] === "D" && book.d !== null && book.d >= 3.4 ? ranked[1] : ranked[0];
+        const lockedBest = bestScore(scores.filter((cell) => scoreOutcome(cell) === locked));
+        return { fx, index, homeName, awayName, probs, scores, book, blended, locked, lockedBest,
+          lambdas: fallback, completeness: engineResult?.match?.dataCompletenessScore ?? 0 } ;
       }),
     );
 
-    // STEP 3 — value every scoreline on every fixture's grid by its Expected
-    // Points and publish the highest one. No tranching, no floor, no ceiling.
-    const picks = priced.map((p) => maxExpectedPointsPick({ probs: p.probs, scores: p.scores }));
+    const favoriteCount = priced.filter(({ book }) =>
+      (book.h !== null && book.h < 1.5) || (book.a !== null && book.a < 1.5)).length;
+    const strong = favoriteCount >= 3;
+    const snipeIndices = new Set([...priced]
+      .sort((a, b) => (b.lockedBest?.probability ?? 0) - (a.lockedBest?.probability ?? 0) || a.index - b.index)
+      .slice(0, 3).map((p) => p.index));
+
+    const picks = priced.map((p) => {
+      const snipe = snipeIndices.has(p.index);
+      let candidates = p.scores.filter((cell) => scoreOutcome(cell) === p.locked);
+      if (p.completeness < 50) {
+        // No correct-score bookmaker market is available: use the more likely
+        // 1-0/2-0 line for the book's shorter-priced side. Without a book,
+        // retain the locked outcome and its best normal score.
+        const side = p.book.h !== null && p.book.a !== null
+          ? (p.book.h <= p.book.a ? "H" : "A") : null;
+        if (side) candidates = p.scores.filter((cell) => side === "H"
+          ? cell.awayGoals === 0 && (cell.homeGoals === 1 || cell.homeGoals === 2)
+          : cell.homeGoals === 0 && (cell.awayGoals === 1 || cell.awayGoals === 2));
+      } else if (snipe && strong && p.locked !== "D" &&
+        (p.locked === "H" ? p.lambdas.homeGoals : p.lambdas.awayGoals) >= 2.4) {
+        candidates = candidates.filter((cell) => (p.locked === "H" ? cell.homeGoals : cell.awayGoals) >= 3);
+      } else if (snipe) {
+        candidates = p.scores;
+      }
+      const cell = bestScore(candidates) ?? p.lockedBest ?? bestScore(p.scores);
+      const prediction = cell ? `${cell.homeGoals}-${cell.awayGoals}` : (p.locked === "H" ? "1-0" : p.locked === "A" ? "0-1" : "1-1");
+      return { prediction, category: `${snipe ? "SNIPE" : "WINNER"}: ${prediction}`,
+        exactProbability: cell?.probability ?? 0, outcome: cell ? scoreOutcome(cell) : p.locked };
+    });
 
     const result = priced.map(({ fx, index, homeName, awayName }) => {
       const pick = picks[index];
@@ -404,16 +382,15 @@ export async function GET(request: Request) {
           draw: Math.round(priced[index].probs.d * 1000) / 1000,
           away: Math.round(priced[index].probs.a * 1000) / 1000,
         },
-        // Expected Points of the published pick: 10 for the outcome plus 10
-        // for the exact scoreline, weighted by the grid probabilities.
-        ep: Math.round(pick.ep * 1000) / 1000,
-        outcomeProbability: Math.round(pick.outcomeProbability * 1000) / 1000,
-        exactProbability: Math.round(pick.exactProbability * 1000) / 1000,
+        blendedProbabilities: priced[index].blended,
+        lockedOutcome: priced[index].locked,
+        exactProbability: pick.exactProbability,
         outcome: pick.outcome,
+        dataCompletenessScore: priced[index].completeness,
       };
     });
 
-    return NextResponse.json({ week, fixtures: result });
+    return NextResponse.json({ week, slateStrength: strong ? "Strong" : "Weak", favoriteCount, fixtures: result });
   } catch (error) {
     console.error("V4 auto predictor failed", error);
     return NextResponse.json({ error: "Failed to fetch" }, { status: 500 });
