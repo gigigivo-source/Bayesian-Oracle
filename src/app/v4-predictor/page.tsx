@@ -21,7 +21,7 @@ type AutoFixtureRow = {
   enginePrediction: string | null;
   prediction: string | null;
   category: string | null;
-  /** Expected Points the pick was chosen on: 10 × P(outcome) + 10 × P(exact). */
+  /** Weighted Expected Points: (10 × P(outcome)) + (15 × P(exact)). */
   ep: number | null;
 };
 
@@ -281,17 +281,23 @@ export default function V4PredictorPage() {
         )}
 
         <header>
+          <div className="mb-2 inline-flex items-center gap-2 rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-xs font-semibold text-amber-300">
+            <span>🏆 Tournament Winner: Expected Points Champion (Weighted)</span>
+          </div>
           <h1 className="text-3xl font-black text-white">
             🔮 V4 Ultimate Predictor
           </h1>
           <p className="mt-2 text-sm text-slate-400">
-            Pure Expected-Points Premier League score predictions, loaded
-            automatically for Matchweek {selectedWeek}. Every scoreline from
-            0-0 to 8-8 is valued by{" "}
-            <span className="text-amber-400">
-              EP = 10 × P(outcome) + 10 × P(exact score)
+            Premier League score predictions powered exclusively by{" "}
+            <span className="font-semibold text-slate-200">
+              System E — Expected Points Champion (Weighted)
             </span>{" "}
-            and the highest-EP score wins — no floors, no ceilings.
+            for Matchweek {selectedWeek}. Every scoreline on the 0–8 Dixon–Coles
+            grid is ranked by{" "}
+            <span className="text-amber-400">
+              EP = (10 × P(outcome)) + (15 × P(exact score))
+            </span>{" "}
+            and published as <span className="font-mono text-amber-300">WEIGHTED EP: &lt;score&gt;</span>.
           </p>
         </header>
 
