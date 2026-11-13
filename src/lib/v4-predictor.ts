@@ -1,17 +1,15 @@
 // ĞIGI GIVØ — V4 Predictor client model.
 //
-// The blind V2 static rules (SNIPE / LOCK tiers driven by hard-coded team
-// lists) are gone, and so is FLOOR / CEILING tranching. Predictions are
-// produced by the Pure Points Maximiser in `/api/v4-predictor/auto`: every
-// fixture is priced by the MarketEngine (Dixon–Coles corrected 1X2 + Correct
-// Score grid 0-0 … 8-8) and the scoreline with the highest Expected Points is
-// published — `EP = 10 × P(outcome) + 10 × P(exact score)`.
+// All legacy systems (V2 static rules, Pure EP, Consensus, Pure Engine) have
+// been retired in favour of the MW1–MW10 Tournament Winner: System E — The
+// Expected Points Champion (Weighted) in `/api/v4-predictor/auto`. Every
+// fixture is priced by the MarketEngine on the 0–8 Dixon–Coles corrected score
+// grid and ranked by `EP = (10 × P(Outcome)) + (15 × P(Exact))`, labelled
+// `"WEIGHTED EP: <score>"`.
 //
 // This module keeps the presentation helpers the dashboard needs — team-name
 // translation, scoreline validation, and the points scorecard — plus a thin
-// projection of the route's rows into the shape the table renders. It applies
-// no team lists and no static rules: the category shown is exactly the
-// Engine-driven pick the route returned.
+// projection of the route's rows into the shape the table renders.
 
 export const TEAM_NAME_MAP: Record<string, string> = {
   "Manchester City": "Man City",
@@ -33,9 +31,9 @@ export function translateTeamName(espnName: string): string {
 
 /**
  * A fixture as delivered by `/api/v4-predictor/auto`. `prediction` and
- * `category` are the maximiser's output ("3-1", "MAX EP: 3-1"); `ep` is the
- * Expected Points the pick was chosen on and `enginePrediction` mirrors the
- * scoreline for callers that only read that field.
+ * `category` are the winning system's output ("2-1", "WEIGHTED EP: 2-1");
+ * `ep` is the weighted Expected Points (`10 * P(Outcome) + 15 * P(Exact)`) and
+ * `enginePrediction` mirrors the scoreline for callers that read that field.
  */
 export type Fixture = {
   home: string;

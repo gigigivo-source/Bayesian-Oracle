@@ -3,12 +3,11 @@ import type { EngineResult } from "@/lib/engine";
 import {
   buildCorrectScoreGrid,
   DIXON_COLES_RHO,
-  pickMaxExpectedPoints,
-  type ExpectedPointsPick,
   type ScoreCell,
 } from "@/lib/engine/markets";
 import { buildHistoricalTeamForm } from "@/lib/engine/sofascore";
 import { translateTeamName } from "@/lib/v4-predictor";
+import { SYSTEM_PREFIX, systemEWeightedEpPick } from "@/lib/v4-tournament";
 import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
@@ -18,17 +17,14 @@ export const maxDuration = 60;
 const DEFAULT_WEEK = 11;
 
 /**
- * V4 Predictor — Pure Points Maximiser (no safety nets).
+ * V4 Predictor — Expected Points Champion (Weighted) [Tournament Winner].
  *
- * The blind V2 static rules are gone, and so are the FLOOR / CEILING tranches
- * that used to force a favourite's safest line or a draw snipe. Every fixture
- * in the matchweek is priced by the Engine (Dixon–Coles corrected 1X2 +
- * Correct Score grid 0-0 … 8-8) and the route simply returns the scoreline
- * with the highest Expected Points:
+ * Selected by the MW1–MW10 5-system tournament backtest (Floor: 40 vs 20 for
+ * all rivals; Average: 63.0 pts/week; 50/100 outcomes and 13/100 exact scores).
+ * Every fixture in the matchweek is priced by the Engine on the 0–8 Dixon–Coles
+ * corrected score grid and ranked exclusively by System E's weighted objective:
  *
- *   EP(score) = 10 × P(outcome of score) + 10 × P(exactly that score)
- *
- * If the math says 3-2 or 4-4, the app publishes 3-2 or 4-4.
+ *   EP(score) = (10 × P(Outcome)) + (15 × P(Exact))
  */
 
 const EXTRA_TEAM_MAP: Record<string, string> = {
@@ -161,25 +157,21 @@ export function getCorrectScores(
   });
 }
 
-// The EP maximiser (`pickMaxExpectedPoints`) lives in the market registry, next
-// to the grid it ranks, so the route and the Engine agree on what "best
-// scoreline" means.
-
-// ─── Pure Expected Points maximiser ─────────────────────────────────────────
+// ─── Expected Points Champion (Weighted) — Tournament Winner ────────────────
 
 /** Scoreline formatted the way the dashboard renders it: "3-1". */
 export function formatScore(homeGoals: number, awayGoals: number): string {
   return `${homeGoals}-${awayGoals}`;
 }
 
-/** Everything the route needs to publish one fixture's MAX EP pick. */
-export interface MaxExpectedPointsOutcome {
-  /** "3-1" — the highest-EP scoreline on the grid. */
+/** Everything the route needs to publish one fixture's WEIGHTED EP pick. */
+export interface WeightedExpectedPointsOutcome {
+  /** "2-1" — the highest weighted-EP scoreline on the 0–8 grid. */
   prediction: string;
-  /** "MAX EP: 3-1" — the label the table shows. */
+  /** "WEIGHTED EP: 2-1" — the winning system's display label. */
   category: string;
   outcome: Outcome;
-  /** 10 × P(outcome) + 10 × P(exact score). */
+  /** (10 × P(outcome)) + (15 × P(exact score)). */
   ep: number;
   /** P(Home) / P(Draw) / P(Away) for the picked scoreline's outcome. */
   outcomeProbability: number;
@@ -187,39 +179,31 @@ export interface MaxExpectedPointsOutcome {
   exactProbability: number;
 }
 
-/** The label prefix every row carries — the pick is chosen purely on EP. */
-export const MAX_EP_PREFIX = "MAX EP";
+/** The winning tournament system's label prefix. */
+export const WEIGHTED_EP_PREFIX = SYSTEM_PREFIX.E;
 
-/** One fixture's probabilities + corrected score grid → its MAX EP pick. */
-export function maxExpectedPointsPick(
+/** One fixture's probabilities + corrected score grid → its WEIGHTED EP pick. */
+export function weightedExpectedPointsPick(
   prediction: { probs: OneX2; scores: ScoreCell[] },
-): MaxExpectedPointsOutcome {
-  const pick: ExpectedPointsPick | null = pickMaxExpectedPoints(
-    prediction.scores,
-    { home: prediction.probs.h, draw: prediction.probs.d, away: prediction.probs.a },
-  );
-
-  // Degenerate grid (no cells at all — never produced by the Engine, but the
-  // model-only fallback must still emit a row): price the canonical 1-1.
-  if (!pick) {
+): WeightedExpectedPointsOutcome {
+  if (prediction.scores.length === 0) {
     return {
       prediction: "1-1",
-      category: `${MAX_EP_PREFIX}: 1-1`,
+      category: `${WEIGHTED_EP_PREFIX}: 1-1`,
       outcome: "D",
       ep: 0,
       outcomeProbability: prediction.probs.d,
       exactProbability: 0,
     };
   }
-
-  const scoreline = formatScore(pick.homeGoals, pick.awayGoals);
+  const pick = systemEWeightedEpPick(prediction);
   return {
-    prediction: scoreline,
-    category: `${MAX_EP_PREFIX}: ${scoreline}`,
+    prediction: pick.prediction,
+    category: pick.category,
     outcome: pick.outcome,
     ep: pick.ep,
-    outcomeProbability: pick.outcomeProb,
-    exactProbability: pick.exactProb,
+    outcomeProbability: pick.outcomeProbability,
+    exactProbability: pick.exactProbability,
   };
 }
 
@@ -367,9 +351,12 @@ export async function GET(request: Request) {
       }),
     );
 
-    // STEP 3 — value every scoreline on every fixture's grid by its Expected
-    // Points and publish the highest one. No tranching, no floor, no ceiling.
-    const picks = priced.map((p) => maxExpectedPointsPick({ probs: p.probs, scores: p.scores }));
+    // STEP 3 — Expected Points Champion (Weighted): value every scoreline on
+    // the 0–8 Dixon–Coles grid by EP = (10 × P(Outcome)) + (15 × P(Exact)) and
+    // publish ONLY the tournament-winning system's pick.
+    const picks = priced.map((p) =>
+      weightedExpectedPointsPick({ probs: p.probs, scores: p.scores }),
+    );
 
     const result = priced.map(({ fx, index, homeName, awayName }) => {
       const pick = picks[index];
@@ -404,8 +391,8 @@ export async function GET(request: Request) {
           draw: Math.round(priced[index].probs.d * 1000) / 1000,
           away: Math.round(priced[index].probs.a * 1000) / 1000,
         },
-        // Expected Points of the published pick: 10 for the outcome plus 10
-        // for the exact scoreline, weighted by the grid probabilities.
+        // Weighted Expected Points of the published pick:
+        // (10 × P(outcome)) + (15 × P(exact scoreline)).
         ep: Math.round(pick.ep * 1000) / 1000,
         outcomeProbability: Math.round(pick.outcomeProbability * 1000) / 1000,
         exactProbability: Math.round(pick.exactProbability * 1000) / 1000,

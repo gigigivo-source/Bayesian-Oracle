@@ -14,7 +14,6 @@
 
 import { buildTeamStatProfile, type TeamStatProfile, type StatDistribution } from "./sofascore";
 import { resilientJson } from "./httpClient";
-import { db } from "@/db";
 import { teamProfiles } from "@/db/schema";
 import { eq, desc } from "drizzle-orm";
 
@@ -208,8 +207,10 @@ export async function getCachedMeshProfile(
   const key = `${leagueSlug}|${teamName}`.toLowerCase().trim();
 
   // 1. Try cache.
+  let dbMod: typeof import("@/db") | null = null;
   try {
-    const rows = await db
+    dbMod = await import("@/db");
+    const rows = await dbMod.db
       .select()
       .from(teamProfiles)
       .where(eq(teamProfiles.teamKey, key))
@@ -228,25 +229,27 @@ export async function getCachedMeshProfile(
   if (!fresh) return null;
 
   // 3. Persist — best-effort upsert by team key.
-  try {
-    const existing = await db
-      .select({ id: teamProfiles.id })
-      .from(teamProfiles)
-      .where(eq(teamProfiles.teamKey, key))
-      .limit(1);
+  if (dbMod) {
+    try {
+      const existing = await dbMod.db
+        .select({ id: teamProfiles.id })
+        .from(teamProfiles)
+        .where(eq(teamProfiles.teamKey, key))
+        .limit(1);
 
-    if (existing[0]) {
-      await db
-        .update(teamProfiles)
-        .set({ profile: fresh, providers: fresh.providers, updatedAt: new Date() })
-        .where(eq(teamProfiles.id, existing[0].id));
-    } else {
-      await db
-        .insert(teamProfiles)
-        .values({ teamKey: key, profile: fresh, providers: fresh.providers });
+      if (existing[0]) {
+        await dbMod.db
+          .update(teamProfiles)
+          .set({ profile: fresh, providers: fresh.providers, updatedAt: new Date() })
+          .where(eq(teamProfiles.id, existing[0].id));
+      } else {
+        await dbMod.db
+          .insert(teamProfiles)
+          .values({ teamKey: key, profile: fresh, providers: fresh.providers });
+      }
+    } catch {
+      // persistence is optional — return the fresh profile regardless
     }
-  } catch {
-    // persistence is optional — return the fresh profile regardless
   }
 
   return fresh;

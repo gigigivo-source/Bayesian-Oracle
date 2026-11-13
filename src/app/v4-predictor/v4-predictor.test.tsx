@@ -4,8 +4,9 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FixtureLite } from "@/lib/espn";
-import { buildCorrectScoreGrid, DIXON_COLES_RHO, pickMaxExpectedPoints } from "@/lib/engine/markets";
+import { buildCorrectScoreGrid, DIXON_COLES_RHO } from "@/lib/engine/markets";
 import { TEAM_NAME_MAP, translateTeamName } from "@/lib/v4-predictor";
+import { systemEWeightedEpPick } from "@/lib/v4-tournament";
 
 const fetchScoreboardMock = vi.fn();
 const getCurrentMatchweekMock = vi.fn();
@@ -167,7 +168,7 @@ describe("V4 team name translation", () => {
   });
 });
 
-describe("GET /api/v4-predictor/auto — Pure Points Maximiser", () => {
+describe("GET /api/v4-predictor/auto — Expected Points Champion (Weighted)", () => {
   it("accepts ?week=X, passes week to fetchScoreboard, translates names, extracts logos and actual scores", async () => {
     fetchScoreboardMock.mockResolvedValue([
       makeFixture("other", "2026-11-21T15:00:00Z", "Arsenal FC", "Chelsea FC", "pre", null, null, 11, "https://example.com/arsenal.png", "https://example.com/chelsea.png"),
@@ -193,16 +194,16 @@ describe("GET /api/v4-predictor/auto — Pure Points Maximiser", () => {
     expect(body.fixtures[0].home.logo).toBe("https://example.com/mancity.png");
     expect(body.fixtures[2].home.logo).toBeNull();
 
-    // Every row is a pure EP pick: "MAX EP: <score>" and no tranche field.
+    // Every row carries the winning system's label: "WEIGHTED EP: <score>".
     for (const row of body.fixtures) {
-      expect(row.category).toBe(`MAX EP: ${row.prediction}`);
+      expect(row.category).toBe(`WEIGHTED EP: ${row.prediction}`);
       expect(row.prediction).toMatch(/^\d{1,2}-\d{1,2}$/);
       expect(row).not.toHaveProperty("tranche");
       expect(row.ep).toBeGreaterThan(0);
       expect(row.probabilities.home + row.probabilities.draw + row.probabilities.away).toBeCloseTo(1, 2);
     }
-    // Man City (default λ 1.35 / 1.15): P(Home) 0.394 takes the EP win at 1-0.
-    expect(body.fixtures[0]).toMatchObject({ category: "MAX EP: 1-0", prediction: "1-0" });
+    // Man City (default λ 1.35 / 1.15): weighted EP picks 1-0.
+    expect(body.fixtures[0]).toMatchObject({ category: "WEIGHTED EP: 1-0", prediction: "1-0" });
   });
 
   it("uses current matchweek when ?week is omitted", async () => {
@@ -225,7 +226,7 @@ describe("GET /api/v4-predictor/auto — Pure Points Maximiser", () => {
       away: { name: "Man City", logo: "https://example.com/mancity.png" },
       state: "pre",
       actual: null,
-      category: "MAX EP: 1-0",
+      category: "WEIGHTED EP: 1-0",
       prediction: "1-0",
     });
   });
@@ -282,26 +283,28 @@ describe("GET /api/v4-predictor/auto — Pure Points Maximiser", () => {
     expect(fetchSummaryMock).toHaveBeenCalledTimes(10);
     expect(body.fixtures).toHaveLength(10);
 
-    // No tranching: every row is labelled purely by its MAX EP scoreline.
+    // No tranching: every row is labelled purely by the winning system ("WEIGHTED EP: <score>").
     for (const row of body.fixtures) {
-      expect(row.category).toBe(`MAX EP: ${row.prediction}`);
+      expect(row.category).toBe(`WEIGHTED EP: ${row.prediction}`);
       expect(row).not.toHaveProperty("tranche");
     }
 
-    // Each published pick is the highest-EP cell on its own grid (recomputed
-    // here from the λ pair, straight from the formula).
+    // Each published pick is the highest weighted-EP cell on its own grid.
     expect(pricedPairs).toHaveLength(10);
     body.fixtures.forEach((row: { prediction: string; ep: number }, i: number) => {
       const [homeLambda, awayLambda] = pricedPairs[i];
       const grid = buildCorrectScoreGrid(homeLambda, awayLambda, DIXON_COLES_RHO);
-      const best = pickMaxExpectedPoints(grid.cells, grid.outcome)!;
-      expect(row.prediction).toBe(`${best.homeGoals}-${best.awayGoals}`);
+      const best = systemEWeightedEpPick({
+        probs: { h: grid.outcome.home, d: grid.outcome.draw, a: grid.outcome.away },
+        scores: grid.cells,
+      });
+      expect(row.prediction).toBe(best.prediction);
       expect(row.ep).toBeCloseTo(best.ep, 3);
     });
 
     // Arsenal (λ 2.4 / 0.5) is the biggest favourite: modal Home win 2-0.
     const arsenal = body.fixtures.find((f: { home: { name: string } }) => f.home.name === "Arsenal");
-    expect(arsenal).toMatchObject({ category: "MAX EP: 2-0", prediction: "2-0" });
+    expect(arsenal).toMatchObject({ category: "WEIGHTED EP: 2-0", prediction: "2-0" });
     // Newcastle (λ 0.6 / 2.0) is the strongest away favourite: an away win.
     const newcastle = body.fixtures.find((f: { home: { name: string } }) => f.home.name === "Newcastle");
     expect(newcastle.prediction.startsWith("0-")).toBe(true);
@@ -370,8 +373,8 @@ describe("GET /api/v4-predictor/auto — Pure Points Maximiser", () => {
       h2h: [{ date: "2020-08-01T15:00:00Z", score: "1 - 0" }] });
     expect(summary).not.toHaveProperty("__homeXg");
     expect(fixture.home.score).toBe("4");
-    // Finished fixtures are priced too — the EP maximiser covers the slate.
-    expect(body.fixtures[0].category).toBe("MAX EP: 2-0");
+    // Finished fixtures are priced too — the winning system covers the slate.
+    expect(body.fixtures[0].category).toBe("WEIGHTED EP: 2-0");
     expect(body.fixtures[0].prediction).toBe("2-0");
   });
 
@@ -388,10 +391,10 @@ describe("GET /api/v4-predictor/auto — Pure Points Maximiser", () => {
     expect(response.status).toBe(200);
     const body = await response.json();
 
-    // Model-only pricing (λ 1.35 / 1.15): every row is still a MAX EP pick.
+    // Model-only pricing (λ 1.35 / 1.15): every row is still a WEIGHTED EP pick.
     expect(body.fixtures).toHaveLength(2);
     for (const row of body.fixtures) {
-      expect(row.category).toBe("MAX EP: 1-0");
+      expect(row.category).toBe("WEIGHTED EP: 1-0");
       expect(row.prediction).toBe("1-0");
       expect(row.ep).toBeGreaterThan(0);
     }
@@ -428,8 +431,8 @@ describe("V4PredictorPage auto-dashboard", () => {
     const week11Body = {
       week: 11,
       fixtures: [
-        { home: { name: "Man City", logo: "https://example.com/mancity.png" }, away: { name: "Hull", logo: "https://example.com/hull.png" }, state: "post", actual: [2, 0], prediction: "2-0", category: "MAX EP: 2-0", ep: 9.38 },
-        { home: { name: "Spurs", logo: "https://example.com/spurs.png" }, away: { name: "Brighton", logo: "https://example.com/brighton.png" }, state: "pre", actual: null, prediction: "1-2", category: "MAX EP: 1-2", ep: 6.12 },
+        { home: { name: "Man City", logo: "https://example.com/mancity.png" }, away: { name: "Hull", logo: "https://example.com/hull.png" }, state: "post", actual: [2, 0], prediction: "2-0", category: "WEIGHTED EP: 2-0", ep: 9.38 },
+        { home: { name: "Spurs", logo: "https://example.com/spurs.png" }, away: { name: "Brighton", logo: "https://example.com/brighton.png" }, state: "pre", actual: null, prediction: "1-2", category: "WEIGHTED EP: 1-2", ep: 6.12 },
       ],
     };
 
@@ -455,7 +458,7 @@ describe("V4PredictorPage auto-dashboard", () => {
           json: async () => ({
             week: 10,
             fixtures: [
-              { home: { name: "Arsenal", logo: "https://example.com/arsenal.png" }, away: { name: "Hull", logo: "https://example.com/hull.png" }, state: "post", actual: [2, 0], prediction: "2-0", category: "MAX EP: 2-0", ep: 9.38 },
+              { home: { name: "Arsenal", logo: "https://example.com/arsenal.png" }, away: { name: "Hull", logo: "https://example.com/hull.png" }, state: "post", actual: [2, 0], prediction: "2-0", category: "WEIGHTED EP: 2-0", ep: 9.38 },
             ],
           }),
         } as unknown as Response);
@@ -521,11 +524,12 @@ describe("V4PredictorPage auto-dashboard", () => {
     expect(images.some((img) => img.getAttribute("alt") === "Hull")).toBe(true);
     expect(images.some((img) => (img.getAttribute("src") ?? "").includes("mancity.png"))).toBe(true);
 
-    // Predictions populated by the tranching engine (translated team names)
+    // Predictions populated by the winning system (translated team names)
+    expect(container.textContent).toContain("Expected Points Champion (Weighted)");
     expect(container.textContent).toContain("Man City vs Hull");
-    expect(container.textContent).toContain("MAX EP: 2-0");
+    expect(container.textContent).toContain("WEIGHTED EP: 2-0");
     expect(container.textContent).toContain("Spurs vs Brighton");
-    expect(container.textContent).toContain("MAX EP: 1-2");
+    expect(container.textContent).toContain("WEIGHTED EP: 1-2");
     expect(container.textContent).toContain("2-0");
     // The EP the pick was chosen on is shown for each fixture.
     expect(container.textContent).toContain("Expected Pts");
@@ -575,7 +579,7 @@ describe("V4PredictorPage auto-dashboard", () => {
           status: 200,
           json: async () => ({
             week: 11,
-            fixtures: [{ home: { name: "Man City", logo: "https://example.com/mancity.png" }, away: { name: "Fulham", logo: "https://example.com/fulham.png" }, state: "pre", actual: null, prediction: "2-0", category: "MAX EP: 2-0", ep: 9.38 }],
+            fixtures: [{ home: { name: "Man City", logo: "https://example.com/mancity.png" }, away: { name: "Fulham", logo: "https://example.com/fulham.png" }, state: "pre", actual: null, prediction: "2-0", category: "WEIGHTED EP: 2-0", ep: 9.38 }],
           }),
         } as unknown as Response);
       }
@@ -621,7 +625,7 @@ describe("V4PredictorPage auto-dashboard", () => {
         status: 200,
         json: async () => ({
           week: 10,
-          fixtures: [{ home: { name: "Arsenal", logo: "https://example.com/arsenal.png" }, away: { name: "Hull", logo: "https://example.com/hull.png" }, state: "post", actual: [2, 0], prediction: "2-0", category: "MAX EP: 2-0", ep: 9.38 }],
+          fixtures: [{ home: { name: "Arsenal", logo: "https://example.com/arsenal.png" }, away: { name: "Hull", logo: "https://example.com/hull.png" }, state: "post", actual: [2, 0], prediction: "2-0", category: "WEIGHTED EP: 2-0", ep: 9.38 }],
         }),
       } as unknown as Response);
       await Promise.resolve();
@@ -642,9 +646,9 @@ describe("V4PredictorPage auto-dashboard", () => {
           json: async () => ({
             week: 11,
             fixtures: [
-              { home: { name: "Arsenal", logo: "https://example.com/arsenal.png" }, away: { name: "Hull", logo: "https://example.com/hull.png" }, state: "in", actual: null, prediction: "2-0", category: "MAX EP: 2-0", ep: 9.38 },
-              { home: { name: "Fulham", logo: "https://example.com/fulham.png" }, away: { name: "Brentford", logo: "https://example.com/brentford.png" }, state: "post", actual: [2, 0], prediction: "1-1", category: "MAX EP: 1-1", ep: 4.38 },
-              { home: { name: "Chelsea", logo: "https://example.com/chelsea.png" }, away: { name: "Leeds", logo: "https://example.com/leeds.png" }, state: "post", actual: [0, 1], prediction: "1-1", category: "MAX EP: 1-1", ep: 4.38 },
+              { home: { name: "Arsenal", logo: "https://example.com/arsenal.png" }, away: { name: "Hull", logo: "https://example.com/hull.png" }, state: "in", actual: null, prediction: "2-0", category: "WEIGHTED EP: 2-0", ep: 9.38 },
+              { home: { name: "Fulham", logo: "https://example.com/fulham.png" }, away: { name: "Brentford", logo: "https://example.com/brentford.png" }, state: "post", actual: [2, 0], prediction: "1-1", category: "WEIGHTED EP: 1-1", ep: 4.38 },
+              { home: { name: "Chelsea", logo: "https://example.com/chelsea.png" }, away: { name: "Leeds", logo: "https://example.com/leeds.png" }, state: "post", actual: [0, 1], prediction: "1-1", category: "WEIGHTED EP: 1-1", ep: 4.38 },
             ],
           }),
         } as unknown as Response);
@@ -669,15 +673,15 @@ describe("V4PredictorPage auto-dashboard", () => {
     expect(liveBadge?.className).toContain("text-red-400");
     expect(liveBadge?.className).toContain("animate-pulse");
 
-    // Fulham vs Brentford: MAX EP 1-1, actual 2-0 -> missed (0)
-    // Chelsea vs Leeds: MAX EP 1-1, actual 0-1 -> missed (0) => total 0
+    // Fulham vs Brentford: WEIGHTED EP 1-1, actual 2-0 -> missed (0)
+    // Chelsea vs Leeds: WEIGHTED EP 1-1, actual 0-1 -> missed (0) => total 0
     expect(container.textContent).toContain("TOTAL SCORE: 0 / 200");
     const missedPoints = Array.from(container.querySelectorAll("span")).find((s) => s.textContent?.includes("❌"));
     expect(missedPoints?.className).toContain("text-red-400");
     expect(missedPoints?.className).toContain("font-bold");
   });
 
-  it("renders pure MAX EP picks (including a 2-1 and a draw) and scores accurately", async () => {
+  it("renders WEIGHTED EP picks (including a 2-1 and a draw) and scores accurately", async () => {
     const fetchMock = vi.fn((url: string) => {
       if (url === "/api/v4-predictor/auto?week=11") {
         return Promise.resolve({
@@ -692,7 +696,7 @@ describe("V4PredictorPage auto-dashboard", () => {
                 state: "post",
                 actual: [2, 0],
                 prediction: "2-0",
-                category: "MAX EP: 2-0",
+                category: "WEIGHTED EP: 2-0",
                 enginePrediction: "2-0",
               },
               {
@@ -701,7 +705,7 @@ describe("V4PredictorPage auto-dashboard", () => {
                 state: "post",
                 actual: [2, 1],
                 prediction: "2-1",
-                category: "MAX EP: 2-1",
+                category: "WEIGHTED EP: 2-1",
                 enginePrediction: "2-1",
               },
               {
@@ -710,7 +714,7 @@ describe("V4PredictorPage auto-dashboard", () => {
                 state: "post",
                 actual: [0, 2],
                 prediction: "0-2",
-                category: "MAX EP: 0-2",
+                category: "WEIGHTED EP: 0-2",
                 enginePrediction: "0-2",
               },
               {
@@ -719,7 +723,7 @@ describe("V4PredictorPage auto-dashboard", () => {
                 state: "post",
                 actual: [1, 1],
                 prediction: "1-1",
-                category: "MAX EP: 1-1",
+                category: "WEIGHTED EP: 1-1",
                 enginePrediction: "1-1",
               },
             ],
@@ -740,10 +744,10 @@ describe("V4PredictorPage auto-dashboard", () => {
       await Promise.resolve();
     });
 
-    expect(container.textContent).toContain("MAX EP: 2-0");
-    expect(container.textContent).toContain("MAX EP: 2-1");
-    expect(container.textContent).toContain("MAX EP: 0-2");
-    expect(container.textContent).toContain("MAX EP: 1-1");
+    expect(container.textContent).toContain("WEIGHTED EP: 2-0");
+    expect(container.textContent).toContain("WEIGHTED EP: 2-1");
+    expect(container.textContent).toContain("WEIGHTED EP: 0-2");
+    expect(container.textContent).toContain("WEIGHTED EP: 1-1");
     expect(container.textContent).toContain("2-1");
     expect(container.textContent).toContain("0-2");
     // 2-0 exact (20) + 2-1 exact (20) + 0-2 exact (20) + 1-1 exact (20) = 80.
