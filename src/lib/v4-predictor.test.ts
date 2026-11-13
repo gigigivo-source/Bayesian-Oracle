@@ -129,6 +129,9 @@ describe("3-Layer Hybrid route (/api/v4-predictor/auto)", () => {
       fetchScoreboard: vi.fn().mockResolvedValue([...fixtures].reverse()),
       fetchSummary: fetchSummaryMock,
     }));
+    vi.doMock("@/lib/engine/sofascore", () => ({
+      buildHistoricalTeamForm: vi.fn().mockResolvedValue(null),
+    }));
     vi.doMock("@/lib/engine", () => ({
       runEngineFromRealWithProfiles: runEngineMock,
     }));
@@ -160,6 +163,7 @@ describe("3-Layer Hybrid route (/api/v4-predictor/auto)", () => {
     } finally {
       errSpy.mockRestore();
       vi.doUnmock("@/lib/espn");
+      vi.doUnmock("@/lib/engine/sofascore");
       vi.doUnmock("@/lib/engine");
       vi.resetModules();
     }
@@ -191,6 +195,9 @@ describe("3-Layer Hybrid route (/api/v4-predictor/auto)", () => {
     vi.doMock("@/lib/espn", () => ({
       fetchScoreboard: vi.fn().mockResolvedValue(fixtures),
       fetchSummary: vi.fn().mockResolvedValue(null),
+    }));
+    vi.doMock("@/lib/engine/sofascore", () => ({
+      buildHistoricalTeamForm: vi.fn().mockResolvedValue(null),
     }));
     vi.doMock("@/lib/engine", () => ({
       runEngineFromRealWithProfiles: vi.fn(async (fx: { home: { name: string }; away: { name: string } }) => ({
@@ -245,6 +252,7 @@ describe("3-Layer Hybrid route (/api/v4-predictor/auto)", () => {
       expect(total).toBeGreaterThan(0);
     } finally {
       vi.doUnmock("@/lib/espn");
+      vi.doUnmock("@/lib/engine/sofascore");
       vi.doUnmock("@/lib/engine");
       vi.resetModules();
     }
@@ -314,38 +322,37 @@ describe("3-Layer Hybrid route (/api/v4-predictor/auto)", () => {
       },
     ];
 
+    const historicalFormMock = vi.fn(async (teamName: string, _slug: string | undefined, beforeDate: string) => {
+      if (beforeDate === "2026-10-24T15:00:00Z") {
+        if (teamName === "Chelsea FC") return makeForm("che", "Chelsea FC", 2.2, 1.0, 5);
+        if (teamName === "Tottenham Hotspur FC") return makeForm("tot", "Tottenham Hotspur FC", 1.2, 1.6, 5);
+      }
+      if (beforeDate === "2026-10-24T17:30:00Z") {
+        if (teamName === "Hull City AFC") return makeForm("hul", "Hull City AFC", 0.6, 2.2, 5);
+        if (teamName === "Tottenham Hotspur FC") return makeForm("spu", "Tottenham Hotspur FC", 2.4, 0.8, 5);
+      }
+      return null;
+    });
+
     vi.doMock("@/lib/espn", () => ({
       fetchScoreboard: vi.fn().mockResolvedValue(mw8Fixtures),
-      fetchSummary: vi.fn(async (_slug: string, id: string) => {
-        if (id === "che-tot") {
-          return {
-            odds: null,
-            homeForm: makeForm("che", "Chelsea FC", 2.2, 1.0, 5),
-            awayForm: makeForm("tot", "Tottenham Hotspur FC", 1.2, 1.6, 5),
-            h2h: [],
-            homeLineup: [],
-            awayLineup: [],
-            lineupAvailable: false,
-            homeFormation: null,
-            awayFormation: null,
-            venue: "Stamford Bridge",
-            boxscore: null,
-          };
-        }
-        return {
-          odds: null,
-          homeForm: makeForm("hul", "Hull City AFC", 0.6, 2.2, 5),
-          awayForm: makeForm("spu", "Tottenham Hotspur FC", 2.4, 0.8, 5),
-          h2h: [],
-          homeLineup: [],
-          awayLineup: [],
-          lineupAvailable: false,
-          homeFormation: null,
-          awayFormation: null,
-          venue: "MKM Stadium",
-          boxscore: null,
-        };
-      }),
+      // Summary returns polluted today's lastFiveGames — route MUST ignore them for post fixtures!
+      fetchSummary: vi.fn(async (_slug: string, id: string) => ({
+        odds: null,
+        homeForm: makeForm("wrong", "Wrong Today Form", 0.0, 5.0, 5),
+        awayForm: makeForm("wrong", "Wrong Today Form", 5.0, 0.0, 5),
+        h2h: [],
+        homeLineup: [],
+        awayLineup: [],
+        lineupAvailable: false,
+        homeFormation: null,
+        awayFormation: null,
+        venue: id === "che-tot" ? "Stamford Bridge" : "MKM Stadium",
+        boxscore: null,
+      })),
+    }));
+    vi.doMock("@/lib/engine/sofascore", () => ({
+      buildHistoricalTeamForm: historicalFormMock,
     }));
     vi.doMock("@/lib/engine", () => ({
       runEngineFromRealWithProfiles: vi.fn(async (fx, sum) => runEngineFromReal(fx, sum)),
@@ -369,9 +376,64 @@ describe("3-Layer Hybrid route (/api/v4-predictor/auto)", () => {
       // 2: Hull vs Spurs -> ENGINE: Winner-First with Away win score (h < a)
       expect(rows[2].category).toBe("ENGINE: Winner-First");
       expect(getV2Outcome(rows[2].prediction)).toBe("A");
+      expect(historicalFormMock).toHaveBeenCalledTimes(4);
     } finally {
       vi.doUnmock("@/db");
       vi.doUnmock("@/lib/espn");
+      vi.doUnmock("@/lib/engine/sofascore");
+      vi.doUnmock("@/lib/engine");
+      vi.resetModules();
+    }
+  });
+
+  it("Expected Points Maximizer picks 1-1 Draw when 10*drawProb + 10*P(1-1) beats fragmented Home Win scores", async () => {
+    const fixture = {
+      id: "tight-1",
+      leagueSlug: "eng.1",
+      matchweek: 9,
+      date: "2026-10-31T15:00:00Z",
+      state: "post" as const,
+      home: { name: "Chelsea FC", score: "1", logo: null },
+      away: { name: "Tottenham Hotspur FC", score: "1", logo: null },
+    };
+
+    vi.doMock("@/lib/espn", () => ({
+      fetchScoreboard: vi.fn().mockResolvedValue([fixture]),
+      fetchSummary: vi.fn().mockResolvedValue(null),
+    }));
+    vi.doMock("@/lib/engine/sofascore", () => ({
+      buildHistoricalTeamForm: vi.fn().mockResolvedValue(null),
+    }));
+    vi.doMock("@/lib/engine", () => ({
+      // Home Win (38%) > Draw (35%) > Away Win (27%),
+      // but EP(1-1) = 10*0.35 + 10*0.16 = 5.10 > EP(1-0) = 10*0.38 + 10*0.10 = 4.80!
+      runEngineFromRealWithProfiles: vi.fn(async () => ({
+        match: { homeTeam: "Chelsea FC", awayTeam: "Tottenham Hotspur FC", dataCompletenessScore: 80 },
+        markets: [
+          { family: "Goals", name: "Match Result: Chelsea FC Win", selection: "Chelsea FC Win", hitRate: 0.38 },
+          { family: "Goals", name: "Match Result: Draw", selection: "Draw", hitRate: 0.35 },
+          { family: "Goals", name: "Match Result: Tottenham Hotspur FC Win", selection: "Tottenham Hotspur FC Win", hitRate: 0.27 },
+          { family: "Goals", name: "Correct Score 1-1", selection: "Score 1-1", hitRate: 0.16 },
+          { family: "Goals", name: "Correct Score 1-0", selection: "Score 1-0", hitRate: 0.10 },
+          { family: "Goals", name: "Correct Score 2-1", selection: "Score 2-1", hitRate: 0.09 },
+          { family: "Goals", name: "Correct Score 0-1", selection: "Score 0-1", hitRate: 0.08 },
+        ],
+      })),
+    }));
+
+    try {
+      const { GET } = await import("@/app/api/v4-predictor/auto/route");
+      const response = await GET(new Request("http://localhost/api/v4-predictor/auto?week=9"));
+      expect(response.status).toBe(200);
+      const { fixtures: rows } = await response.json();
+      expect(rows[0]).toMatchObject({
+        category: "ENGINE: Winner-First",
+        prediction: "1-1",
+        enginePrediction: "1-1",
+      });
+    } finally {
+      vi.doUnmock("@/lib/espn");
+      vi.doUnmock("@/lib/engine/sofascore");
       vi.doUnmock("@/lib/engine");
       vi.resetModules();
     }

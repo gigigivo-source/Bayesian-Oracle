@@ -1,5 +1,6 @@
 import * as espn from "@/lib/espn";
 import type { EngineResult } from "@/lib/engine";
+import { buildHistoricalTeamForm } from "@/lib/engine/sofascore";
 import { generatePredictions, translateTeamName } from "@/lib/v4-predictor";
 import { NextResponse } from "next/server";
 
@@ -31,8 +32,6 @@ function parseWeekParam(raw: string | null): number | null {
   return parsed;
 }
 
-type Outcome1X2 = "Home" | "Draw" | "Away";
-
 type MarketLike = {
   family?: string;
   name: string;
@@ -40,148 +39,70 @@ type MarketLike = {
   hitRate: number;
 };
 
-function classify1X2Outcome(
-  market: MarketLike,
-  homeNames: string[],
-  awayNames: string[],
-): Outcome1X2 | null {
-  const name = market.name.trim();
-  const sel = (market.selection ?? "").trim();
-
-  for (const h of homeNames) {
-    if (!h) continue;
-    if (
-      name === `Match Result: ${h} Win` ||
-      name === `1X2: ${h} Win` ||
-      name === `1X2: ${h}` ||
-      name === `Result: ${h} Win` ||
-      sel === `${h} Win` ||
-      sel === h
-    ) {
-      return "Home";
-    }
-  }
-
-  for (const a of awayNames) {
-    if (!a) continue;
-    if (
-      name === `Match Result: ${a} Win` ||
-      name === `1X2: ${a} Win` ||
-      name === `1X2: ${a}` ||
-      name === `Result: ${a} Win` ||
-      sel === `${a} Win` ||
-      sel === a
-    ) {
-      return "Away";
-    }
-  }
-
-  if (
-    name === "Match Result: Draw" ||
-    /:\s*Draw$/i.test(name) ||
-    /^(?:Draw|X)$/i.test(sel)
-  ) {
-    return "Draw";
-  }
-
-  if (
-    /:\s*(?:Home(?:\s+Win)?|1)$/i.test(name) ||
-    /^(?:Home(?:\s+Win)?|1)$/i.test(sel)
-  ) {
-    return "Home";
-  }
-
-  if (
-    /:\s*(?:Away(?:\s+Win)?|2)$/i.test(name) ||
-    /^(?:Away(?:\s+Win)?|2)$/i.test(sel)
-  ) {
-    return "Away";
-  }
-
-  return null;
-}
-
-function parseCorrectScore(
-  market: MarketLike,
-): { homeScore: number; awayScore: number; score: string } | null {
-  const fromName = /^Correct Score (\d{1,2})-(\d{1,2})$/.exec(market.name.trim());
-  if (fromName) {
-    const homeScore = Number(fromName[1]);
-    const awayScore = Number(fromName[2]);
-    return { homeScore, awayScore, score: `${homeScore}-${awayScore}` };
-  }
-  if (market.name.trim() === "Correct Score" && market.selection) {
-    const fromSel = /^(?:Score\s+)?(\d{1,2})-(\d{1,2})$/i.exec(
-      market.selection.trim(),
-    );
-    if (fromSel) {
-      const homeScore = Number(fromSel[1]);
-      const awayScore = Number(fromSel[2]);
-      return { homeScore, awayScore, score: `${homeScore}-${awayScore}` };
-    }
-  }
-  return null;
-}
-
-function matchesOutcome(
-  homeScore: number,
-  awayScore: number,
-  outcome: Outcome1X2,
-): boolean {
-  if (outcome === "Home") return homeScore > awayScore;
-  if (outcome === "Draw") return homeScore === awayScore;
-  return homeScore < awayScore;
-}
-
 /**
- * Layer 2 (Engine Winner-First):
- * 1. Find the Engine's highest-probability 1X2 outcome (Home, Draw, Away).
- * 2. Filter Correct Score markets to only scores matching that outcome.
- * 3. Sort by hitRate descending and return the top scoreline.
+ * Layer 2 (Expected Points Maximizer):
+ * Maximizes E[Points] = 10 * P(Outcome) + 10 * P(Exact Score) across all
+ * Correct Score markets so high-value scorelines like 1-1 can win even when
+ * aggregate Draw probability trails a fragmented Home/Away Win probability.
  */
-function pickWinnerFirstScore(
+function pickExpectedPointsScore(
   markets: MarketLike[],
   homeNames: string[],
   awayNames: string[],
 ): string | null {
-  const outcomeMarkets = markets
-    .filter(
-      (m) =>
-        (m.family === "Goals" || m.family === undefined) &&
-        (m.name.includes("1X2") || m.name.includes("Result")) &&
-        Number.isFinite(m.hitRate),
-    )
-    .map((m) => ({
-      outcome: classify1X2Outcome(m, homeNames, awayNames),
-      hitRate: m.hitRate,
-    }))
-    .filter((entry): entry is { outcome: Outcome1X2; hitRate: number } => entry.outcome !== null)
-    .sort((a, b) => b.hitRate - a.hitRate);
+  const validHomeNames = homeNames.filter(Boolean);
+  const validAwayNames = awayNames.filter(Boolean);
+  const oneX2 = markets.filter(
+    (m) => m.name.includes("1X2") || m.name.includes("Result"),
+  );
 
-  if (outcomeMarkets.length === 0) return null;
-  const topOutcome = outcomeMarkets[0].outcome;
+  const getProb = (selectionMatch: (sel: string) => boolean) => {
+    const m = oneX2.find((item) => selectionMatch(item.selection ?? item.name));
+    return m?.hitRate || 0;
+  };
 
-  const matchingScores = markets
-    .filter(
-      (m) =>
-        (m.family === "Goals" || m.family === undefined) &&
-        m.name.includes("Correct Score") &&
-        Number.isFinite(m.hitRate),
-    )
-    .map((m) => {
-      const parsed = parseCorrectScore(m);
-      return parsed ? { ...parsed, hitRate: m.hitRate } : null;
-    })
-    .filter(
-      (entry): entry is { homeScore: number; awayScore: number; score: string; hitRate: number } =>
-        entry !== null && matchesOutcome(entry.homeScore, entry.awayScore, topOutcome),
-    )
-    .sort((a, b) => b.hitRate - a.hitRate);
+  const homeWinProb = getProb(
+    (sel) => sel.includes("Win") && validHomeNames.some((n) => sel.includes(n)),
+  );
+  const awayWinProb = getProb(
+    (sel) => sel.includes("Win") && validAwayNames.some((n) => sel.includes(n)),
+  );
+  const drawProb = getProb((sel) => sel.toLowerCase().includes("draw"));
 
-  return matchingScores.length > 0 ? matchingScores[0].score : null;
+  const csMarkets = markets.filter((m) => m.name.includes("Correct Score"));
+
+  let bestScore: string | null = null;
+  let bestEP = -1;
+
+  for (const m of csMarkets) {
+    const scoreStr = (
+      m.selection
+        ? m.selection.replace("Score ", "")
+        : m.name.replace(/^Correct Score\s+/i, "")
+    ).trim();
+    const parts = scoreStr.split("-");
+    if (parts.length !== 2 || !parts[0] || !parts[1]) continue;
+    const [h, a] = parts.map(Number);
+    if (isNaN(h) || isNaN(a)) continue;
+
+    let outcomeProb = 0;
+    if (h > a) outcomeProb = homeWinProb;
+    else if (h < a) outcomeProb = awayWinProb;
+    else outcomeProb = drawProb;
+
+    const exactProb = m.hitRate || 0;
+    // 10 points for outcome + 10 for exact score = max 20
+    const expectedPoints = 10 * outcomeProb + 10 * exactProb;
+
+    if (expectedPoints > bestEP) {
+      bestEP = expectedPoints;
+      bestScore = `${h}-${a}`;
+    }
+  }
+  return bestScore;
 }
 
-function resolveCompletenessScore(engineResult: EngineResult | null, week: number): number {
+function resolveCompletenessScore(engineResult: EngineResult | null): number {
   if (!engineResult?.match?.dataCompletenessScore) return 0;
   return engineResult.match.dataCompletenessScore;
 }
@@ -280,30 +201,56 @@ export async function GET(request: Request) {
               home: { ...fx.home, score: null, record: null, form: null },
               away: { ...fx.away, score: null, record: null, form: null },
             };
-            const rawSummary = await espn.fetchSummary(fx.leagueSlug, fx.id).catch(() => null);
-            const summary = rawSummary ? {
-              // Explicit allowlist: no match xG, boxscore, or unverified odds/lineups.
-              venue: rawSummary.venue,
-              homeForm: filterForm(rawSummary.homeForm),
-              awayForm: filterForm(rawSummary.awayForm),
-              h2h: (rawSummary.h2h ?? []).filter((game) => isBefore(game.date)),
-              odds: null, homeLineup: [], awayLineup: [], lineupAvailable: false,
-              homeFormation: null, awayFormation: null, boxscore: null,
-            } : null;
+            const isFinished = fx.state === "post";
+            const [rawSummary, historicalHomeForm, historicalAwayForm] = await Promise.all([
+              espn.fetchSummary(fx.leagueSlug, fx.id).catch(() => null),
+              isFinished
+                ? buildHistoricalTeamForm(fx.home.name, fx.leagueSlug, fx.date).catch(() => null)
+                : Promise.resolve(null),
+              isFinished
+                ? buildHistoricalTeamForm(fx.away.name, fx.leagueSlug, fx.date).catch(() => null)
+                : Promise.resolve(null),
+            ]);
+            // Finished fixtures must NOT rely on summary.homeForm/awayForm (which is
+            // ESPN's rolling lastFiveGames as of today); construct form from schedules
+            // strictly before fx.date instead.
+            const homeForm = isFinished
+              ? historicalHomeForm
+              : filterForm(rawSummary?.homeForm ?? null);
+            const awayForm = isFinished
+              ? historicalAwayForm
+              : filterForm(rawSummary?.awayForm ?? null);
+            const summary: espn.MatchSummary | null =
+              rawSummary || homeForm || awayForm
+                ? {
+                    // Explicit allowlist: no match xG, boxscore, or unverified odds/lineups.
+                    venue: rawSummary?.venue ?? fx.venue ?? null,
+                    homeForm,
+                    awayForm,
+                    h2h: (rawSummary?.h2h ?? []).filter((game) => isBefore(game.date)),
+                    odds: null,
+                    homeLineup: [],
+                    awayLineup: [],
+                    lineupAvailable: false,
+                    homeFormation: null,
+                    awayFormation: null,
+                    boxscore: null,
+                  }
+                : null;
             const engineResult = await runEngine(engineFx, summary, null, undefined, fx.date);
-            const dataCompletenessScore = resolveCompletenessScore(engineResult, week);
+            const dataCompletenessScore = resolveCompletenessScore(engineResult);
 
-            // Layer 2 (Engine Winner-First): requires dataCompletenessScore >= 50.
+            // Layer 2 (Expected Points Maximizer): requires dataCompletenessScore >= 50.
             if (dataCompletenessScore >= MIN_COMPLETENESS_SCORE) {
-              const winnerFirstScore = pickWinnerFirstScore(
+              const epScore = pickExpectedPointsScore(
                 engineResult.markets ?? [],
                 [fx.home.name, engineResult.match?.homeTeam ?? "", homeName],
                 [fx.away.name, engineResult.match?.awayTeam ?? "", awayName],
               );
-              if (winnerFirstScore) {
-                finalPrediction = winnerFirstScore;
+              if (epScore) {
+                finalPrediction = epScore;
                 finalCategory = "ENGINE: Winner-First";
-                enginePrediction = winnerFirstScore;
+                enginePrediction = epScore;
               }
             }
             // Layer 3 (Safety Net): dataCompletenessScore < 50 or missing markets
