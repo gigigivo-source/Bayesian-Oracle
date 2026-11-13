@@ -4,8 +4,8 @@ import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { TeamBadge } from "@/app/_components/ui";
 import {
+  buildPredictions,
   calculateScore,
-  generatePredictions,
   isScoreline,
   type Actual,
   type Fixture,
@@ -181,7 +181,7 @@ export default function V4PredictorPage() {
         prediction: row.prediction,
         category: row.category,
       }));
-      const newPredictions = generatePredictions(v4Fixtures);
+      const newPredictions = buildPredictions(v4Fixtures);
       const finished = rows
         .map((row, index) =>
           Array.isArray(row.actual) && row.actual.length === 2
@@ -277,8 +277,12 @@ export default function V4PredictorPage() {
             🔮 V4 Ultimate Predictor
           </h1>
           <p className="mt-2 text-sm text-slate-400">
-            Rule-based Premier League score predictions, loaded automatically
-            for Matchweek {selectedWeek}.
+            Portfolio-tranched Premier League score predictions, loaded
+            automatically for Matchweek {selectedWeek}.{" "}
+            <span className="text-emerald-400">FLOOR</span> picks the safest
+            winner in each fixture;{" "}
+            <span className="text-amber-400">CEILING</span> snipes the draw in
+            the slate&apos;s truest toss-ups.
           </p>
         </header>
 
@@ -290,7 +294,7 @@ export default function V4PredictorPage() {
                 <tr>
                   <th className="p-2 text-slate-400">Status</th>
                   <th className="p-2 text-slate-400">Match</th>
-                  <th className="p-2 text-slate-400">V4 Rule</th>
+                  <th className="p-2 text-slate-400">Tranche</th>
                   <th className="p-2 text-slate-400">Prediction</th>
                 </tr>
               </thead>

@@ -78,10 +78,13 @@ function assemble(
   deepStats?: DeepStatsVector,
   opts?:      SelectOptions,
 ): EngineResult {
-  const engine    = new MarketEngine(match, lam);
-  const markets   = engine.buildAll();
-  const qualified = markets.filter((m) => !m.rejected);
-  const rejected  = markets.filter((m) => m.rejected);
+  const engine     = new MarketEngine(match, lam);
+  const markets    = engine.buildAll();
+  // The corrected score grid the 1X2 + Correct Score families were priced from
+  // — published on the result so consumers never re-derive it.
+  const scoreGrid  = engine.correctScoreGrid();
+  const qualified  = markets.filter((m) => !m.rejected);
+  const rejected   = markets.filter((m) => m.rejected);
 
   const rankOrder = rankByHit(qualified, qualified.length);
   const confidenceMap: Record<string, number> = {};
@@ -125,7 +128,7 @@ function assemble(
   };
 
   return {
-    match, input, lambdas, deepStats, agents: AGENTS,
+    match, input, lambdas, scoreGrid, deepStats, agents: AGENTS,
     markets, top1, top3, top5, top10,
     safeMode, ultraSafe, rejected, familyCounts,
     totalMarkets:    markets.length,

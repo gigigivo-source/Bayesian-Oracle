@@ -1,3 +1,15 @@
+// ĞIGI GIVØ — V4 Predictor client model.
+//
+// The blind V2 static rules (SNIPE / LOCK tiers driven by hard-coded team
+// lists) are gone. Predictions are produced by the Portfolio Tranching engine
+// in `/api/v4-predictor/auto`: every fixture is priced by the MarketEngine
+// (Dixon–Coles corrected 1X2 + Correct Score grid) and the slate is split into
+// a FLOOR tranche of safe favourites and a CEILING tranche of draw snipes.
+//
+// This module keeps the presentation helpers the dashboard needs — team-name
+// translation, scoreline validation, and the points scorecard — plus a thin
+// projection of the route's rows into the shape the table renders.
+
 export const TEAM_NAME_MAP: Record<string, string> = {
   "Manchester City": "Man City",
   "Manchester United": "Man Utd",
@@ -16,13 +28,15 @@ export function translateTeamName(espnName: string): string {
   return TEAM_NAME_MAP[espnName] || espnName;
 }
 
-export const TOP_4 = ["Arsenal", "Liverpool", "Man City", "Brighton"];
-export const MID_TABLE = ["Fulham", "Brentford", "Everton", "Leeds", "Crystal Palace", "Newcastle", "Aston Villa"];
-export const BOTTOM_5 = ["Coventry", "Ipswich", "Hull", "Sunderland", "Burnley"];
-export const CHAOS_TEAMS = ["Chelsea", "Man Utd", "Spurs"];
+/** The two tranches the portfolio is split into. */
+export type Tranche = "FLOOR" | "CEILING";
 
-/** A fixture to predict. `enginePrediction` is the Engine Winner-First scoreline
- *  for non-Snipe matches; null/undefined falls back to V2 Lock rules. */
+/**
+ * A fixture as delivered by `/api/v4-predictor/auto`. `prediction` and
+ * `category` are the tranching engine's output ("2-1", "FLOOR: Home Win",
+ * "CEILING: Draw Snipe"); `enginePrediction` mirrors the scoreline for callers
+ * that only read that field.
+ */
 export type Fixture = {
   home: string;
   away: string;
@@ -31,15 +45,13 @@ export type Fixture = {
   category?: string | null;
 };
 export type Actual = [number, number];
-export type MatchType = "Chaos" | "Home_Fortress" | "Mid_Table_Deadlock" | "Elite_Away" | "Standard";
 export type Prediction = { Match: string; Category: string; Prediction: string; Target_Pts: number };
 export type ScoredPrediction = { Match: string; Prediction: string; Actual: string; Points: number; Status: string };
 
-export const MW11_FIXTURES: Fixture[] = [
-  { home: "Man City", away: "Fulham" }, { home: "Bournemouth", away: "Nott'm Forest" }, { home: "Coventry", away: "Crystal Palace" },
-  { home: "Spurs", away: "Ipswich" }, { home: "Chelsea", away: "Leeds" }, { home: "Aston Villa", away: "Sunderland" },
-  { home: "Newcastle", away: "Arsenal" }, { home: "Hull", away: "Brighton" }, { home: "Liverpool", away: "Man Utd" }, { home: "Brentford", away: "Everton" },
-];
+/** Points the tranche is aiming for: safe floor vs. the 20-point ceiling snipe. */
+export function targetPointsForCategory(category: string): number {
+  return category.trim().toUpperCase().startsWith("CEILING") ? 20 : 10;
+}
 
 /** Accepts only well-formed scorelines like "2-1"; anything else is ignored. */
 export function isScoreline(value: unknown): value is string {
@@ -47,148 +59,32 @@ export function isScoreline(value: unknown): value is string {
 }
 
 /** Return the outcome implied by a prediction scoreline. */
-export function getV2Outcome(prediction: string): "H" | "D" | "A" {
+export function getScorelineOutcome(prediction: string): "H" | "D" | "A" {
   const [h, a] = prediction.split("-").map(Number);
   if (h > a) return "H";
   if (h < a) return "A";
   return "D";
 }
 
-export function determineMatchType(home: string, away: string): MatchType {
-  if (CHAOS_TEAMS.includes(home) || CHAOS_TEAMS.includes(away)) return "Chaos";
-  if (TOP_4.includes(home) && BOTTOM_5.includes(away)) return "Home_Fortress";
-  if (MID_TABLE.includes(home) && MID_TABLE.includes(away)) return "Mid_Table_Deadlock";
-  if (TOP_4.includes(away)) return "Elite_Away";
-  return "Standard";
-}
-
-export function generatePredictions(fixtures: Fixture[]): Prediction[] {
-  let fortressUsed = 0;
-  let deadlocksUsed = 0;
-  let totalSnipesUsed = 0;
-
-  // Compute V2 predictions first, preserving the matchweek-wide Snipe quotas.
-  const v2Predictions = fixtures.map(({ home, away }) => {
-    let prediction: string;
-    let category: string;
-    let targetPts: number;
-
-    const homeIsTop4 = TOP_4.includes(home);
-    const awayIsTop4 = TOP_4.includes(away);
-    const homeIsMid = MID_TABLE.includes(home);
-    const awayIsMid = MID_TABLE.includes(away);
-    const homeIsBottom5 = BOTTOM_5.includes(home);
-    const awayIsBottom5 = BOTTOM_5.includes(away);
-    const homeIsChaos = CHAOS_TEAMS.includes(home);
-    const awayIsChaos = CHAOS_TEAMS.includes(away);
-    // "Standard" = not in any tier (not Top 4, Mid, Bottom 5, or Chaos)
-    const homeIsStandard = !homeIsTop4 && !homeIsMid && !homeIsBottom5 && !homeIsChaos;
-    const awayIsStandard = !awayIsTop4 && !awayIsMid && !awayIsBottom5 && !awayIsChaos;
-
-    // 1. Snipes (20-Point Targets)
-    // Crucial Rule: Chaos Teams are PERMANENTLY BANNED from being Snipes.
-    if (!homeIsChaos && !awayIsChaos) {
-      if (homeIsTop4 && awayIsBottom5 && fortressUsed < 1) {
-        prediction = "2-0";
-        category = "SNIPE: Home Fortress";
-        targetPts = 20;
-        fortressUsed++;
-        totalSnipesUsed++;
-        return { Match: `${home} vs ${away}`, Category: category, Prediction: prediction, Target_Pts: targetPts };
-      }
-
-      if (homeIsMid && awayIsMid && deadlocksUsed < 2) {
-        prediction = "1-1";
-        category = "SNIPE: Mid-Table Deadlock";
-        targetPts = 20;
-        deadlocksUsed++;
-        totalSnipesUsed++;
-        return { Match: `${home} vs ${away}`, Category: category, Prediction: prediction, Target_Pts: targetPts };
-      }
-
-      if (awayIsTop4 && totalSnipesUsed < 3) {
-        prediction = "0-1";
-        category = "SNIPE: Elite Away";
-        targetPts = 20;
-        totalSnipesUsed++;
-        return { Match: `${home} vs ${away}`, Category: category, Prediction: prediction, Target_Pts: targetPts };
-      }
-    }
-
-    // 2. Locks (10-Point Targets)
-    targetPts = 10;
-
-    if (homeIsChaos || awayIsChaos) {
-      category = "LOCK: Chaos Rule";
-      if (homeIsTop4) prediction = "2-1";
-      else if (awayIsTop4) prediction = "1-2";
-      else if (homeIsChaos && awayIsChaos) prediction = "1-1";
-      else if (homeIsChaos) prediction = "2-1"; // Chaos team at home beats Mid/Standard/Bottom
-      else prediction = "1-2"; // Chaos team away beats Mid/Standard/Bottom
-    } else if (homeIsTop4) {
-      category = "LOCK: Smart Top 4 Home";
-      prediction = "2-0";
-    } else if (awayIsTop4) {
-      category = "LOCK: Elite Away (Exhausted)";
-      prediction = "0-1"; // Top 4 away always wins, even if Snipe is used
-    } else if (homeIsMid && awayIsBottom5) {
-      category = "LOCK: Mid vs Bottom";
-      prediction = "2-1";
-    } else if (homeIsBottom5 && awayIsMid) {
-      category = "LOCK: Bottom vs Mid";
-      prediction = "0-1"; // Mid always beats Bottom, even away
-    } else if (homeIsMid && awayIsStandard) {
-      category = "LOCK: Mid vs Standard";
-      prediction = "1-0";
-    } else if (homeIsStandard && awayIsMid) {
-      category = "LOCK: Standard vs Mid";
-      prediction = "0-1"; // Mid always beats Standard, even away
-    } else if (homeIsBottom5 && awayIsStandard) {
-      category = "LOCK: Bottom vs Standard";
-      prediction = "0-1";
-    } else if (homeIsStandard && awayIsBottom5) {
-      category = "LOCK: Standard vs Bottom";
-      prediction = "1-0";
-    } else {
-      // Both Standard, both Bottom5, or Mid vs Mid (if deadlock used up)
-      category = "LOCK: Standard Home";
-      prediction = "1-0";
-    }
-
-    return { Match: `${home} vs ${away}`, Category: category, Prediction: prediction, Target_Pts: targetPts };
-  });
-
-  // 3-Layer Hybrid System:
-  // Layer 1 (Snipes): Keep V2 Snipe predictions untouched.
-  // Layer 2 (Engine Winner-First): Use the Engine scoreline for non-Snipes.
-  // Layer 3 (Safety Net): Fall back to V2 Lock rules when Engine score is absent.
-  return v2Predictions.map((v2, index) => {
-    if (v2.Category.includes("SNIPE")) {
-      return v2;
-    }
-    const fixture = fixtures[index];
-    if (isScoreline(fixture.enginePrediction)) {
-      return {
-        ...v2,
-        Category:
-          typeof fixture.category === "string" && fixture.category
-            ? fixture.category
-            : "ENGINE: Winner-First",
-        Prediction: fixture.enginePrediction,
-      };
-    }
-    if (
-      isScoreline(fixture.prediction) &&
-      typeof fixture.category === "string" &&
-      fixture.category
-    ) {
-      return {
-        ...v2,
-        Category: fixture.category,
-        Prediction: fixture.prediction,
-      };
-    }
-    return v2;
+/**
+ * Project the route's rows into the table's `Prediction` shape.
+ *
+ * The route is the single source of truth: it already ran the Engine on every
+ * fixture and assigned each one to a tranche. Rows without a usable scoreline
+ * (a malformed payload, a fixture the Engine could not price at all) render
+ * with no prediction rather than silently falling back to a static rule.
+ */
+export function buildPredictions(fixtures: Fixture[]): Prediction[] {
+  return fixtures.map(({ home, away, prediction, category, enginePrediction }) => {
+    const resolved =
+      isScoreline(prediction) ? prediction : isScoreline(enginePrediction) ? enginePrediction : "";
+    const label = typeof category === "string" ? category.trim() : "";
+    return {
+      Match: `${home} vs ${away}`,
+      Category: label,
+      Prediction: resolved,
+      Target_Pts: resolved ? targetPointsForCategory(label) : 0,
+    };
   });
 }
 
