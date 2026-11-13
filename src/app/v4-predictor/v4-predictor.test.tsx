@@ -4,7 +4,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FixtureLite } from "@/lib/espn";
-import { buildCorrectScoreGrid, DIXON_COLES_RHO, pickBestScoreForOutcome } from "@/lib/engine/markets";
+import { buildCorrectScoreGrid, DIXON_COLES_RHO, pickMaxExpectedPoints } from "@/lib/engine/markets";
 import { TEAM_NAME_MAP, translateTeamName } from "@/lib/v4-predictor";
 
 const fetchScoreboardMock = vi.fn();
@@ -49,7 +49,6 @@ function engineResult(
       { family: "Goals", name: "Match Result: Draw", selection: "Draw", hitRate: grid.outcome.draw },
       { family: "Goals", name: `Match Result: ${awayTeam} Win`, selection: `${awayTeam} Win`, hitRate: grid.outcome.away },
       ...grid.cells
-        .filter((cell) => cell.homeGoals <= 3 && cell.awayGoals <= 3)
         .map((cell) => ({
           family: "Goals",
           name: `Correct Score ${cell.homeGoals}-${cell.awayGoals}`,
@@ -168,7 +167,7 @@ describe("V4 team name translation", () => {
   });
 });
 
-describe("GET /api/v4-predictor/auto — Portfolio Tranching", () => {
+describe("GET /api/v4-predictor/auto — Pure Points Maximiser", () => {
   it("accepts ?week=X, passes week to fetchScoreboard, translates names, extracts logos and actual scores", async () => {
     fetchScoreboardMock.mockResolvedValue([
       makeFixture("other", "2026-11-21T15:00:00Z", "Arsenal FC", "Chelsea FC", "pre", null, null, 11, "https://example.com/arsenal.png", "https://example.com/chelsea.png"),
@@ -194,16 +193,16 @@ describe("GET /api/v4-predictor/auto — Portfolio Tranching", () => {
     expect(body.fixtures[0].home.logo).toBe("https://example.com/mancity.png");
     expect(body.fixtures[2].home.logo).toBeNull();
 
-    // Every row is tranched: a safe favourite or a draw snipe.
+    // Every row is a pure EP pick: "MAX EP: <score>" and no tranche field.
     for (const row of body.fixtures) {
-      expect(row.category).toMatch(/^(FLOOR: (Home|Away) Win|CEILING: Draw Snipe)$/);
+      expect(row.category).toBe(`MAX EP: ${row.prediction}`);
       expect(row.prediction).toMatch(/^\d{1,2}-\d{1,2}$/);
-      expect(["FLOOR", "CEILING"]).toContain(row.tranche);
+      expect(row).not.toHaveProperty("tranche");
+      expect(row.ep).toBeGreaterThan(0);
       expect(row.probabilities.home + row.probabilities.draw + row.probabilities.away).toBeCloseTo(1, 2);
     }
-    // Man City (default λ 1.35 / 1.15) floors as a Home win; the toss-up Spurs
-    // fixture against Brighton (same λ pair) is a 1-0 / draw away from it.
-    expect(body.fixtures[0]).toMatchObject({ category: "FLOOR: Home Win", prediction: "1-0" });
+    // Man City (default λ 1.35 / 1.15): P(Home) 0.394 takes the EP win at 1-0.
+    expect(body.fixtures[0]).toMatchObject({ category: "MAX EP: 1-0", prediction: "1-0" });
   });
 
   it("uses current matchweek when ?week is omitted", async () => {
@@ -226,12 +225,12 @@ describe("GET /api/v4-predictor/auto — Portfolio Tranching", () => {
       away: { name: "Man City", logo: "https://example.com/mancity.png" },
       state: "pre",
       actual: null,
-      category: "FLOOR: Home Win",
-      tranche: "FLOOR",
+      category: "MAX EP: 1-0",
+      prediction: "1-0",
     });
   });
 
-  it("runs the Engine on every fixture and splits the slate into floor and ceiling tranches", async () => {
+  it("runs the Engine on every fixture and publishes the highest-EP scoreline for each", async () => {
     const summary = { venue: "Emirates" };
     fetchSummaryMock.mockResolvedValue(summary);
     // Ten fixtures: eight lopsided favourites plus two true toss-ups.
@@ -264,8 +263,12 @@ describe("GET /api/v4-predictor/auto — Portfolio Tranching", () => {
         makeFixture(`m${i}`, `2026-11-0${1 + Math.floor(i / 3)}T1${i % 9}:00:00Z`, home, away, "pre", null, null, 8),
       ),
     );
+    // The λ pair each fixture was priced at, in kick-off order (the same order
+    // the route returns rows in).
+    const pricedPairs: Array<[number, number]> = [];
     runEngineMock.mockImplementation(async (fx: FixtureLite) => {
       const pair = lambdaTable[`${fx.home.name}|${fx.away.name}`] ?? [1.35, 1.15];
+      pricedPairs.push(pair);
       return engineResult(fx.home.name, fx.away.name, pair[0], pair[1]);
     });
 
@@ -279,34 +282,30 @@ describe("GET /api/v4-predictor/auto — Portfolio Tranching", () => {
     expect(fetchSummaryMock).toHaveBeenCalledTimes(10);
     expect(body.fixtures).toHaveLength(10);
 
-    const floor = body.fixtures.filter((f: { tranche: string }) => f.tranche === "FLOOR");
-    const ceiling = body.fixtures.filter((f: { tranche: string }) => f.tranche === "CEILING");
-    expect(floor).toHaveLength(8);
-    expect(ceiling).toHaveLength(2);
-
-    // Ceiling: the two coin-flips, sniped as the modal draw (0-0 at λ = 1 / 1).
-    for (const row of ceiling) {
-      expect(row.category).toBe("CEILING: Draw Snipe");
-      expect(row.prediction).toBe("0-0");
-      expect(row.probabilities.draw).toBeGreaterThanOrEqual(0.29);
+    // No tranching: every row is labelled purely by its MAX EP scoreline.
+    for (const row of body.fixtures) {
+      expect(row.category).toBe(`MAX EP: ${row.prediction}`);
+      expect(row).not.toHaveProperty("tranche");
     }
-    expect(ceiling.map((r: { home: { name: string } }) => r.home.name).sort()).toEqual(["Spurs", "Wolves"]);
 
-    // Floor: modal scoreline inside the favourite's outcome.
-    for (const row of floor) {
-      const homeFav = row.probabilities.home > row.probabilities.away;
-      expect(row.category).toBe(`FLOOR: ${homeFav ? "Home" : "Away"} Win`);
-      const [h, a] = row.prediction.split("-").map(Number);
-      if (homeFav) expect(h).toBeGreaterThan(a);
-      else expect(h).toBeLessThan(a);
-    }
-    // Arsenal (2.4 vs 0.5) is the biggest favourite: modal Home win is 2-0.
+    // Each published pick is the highest-EP cell on its own grid (recomputed
+    // here from the λ pair, straight from the formula).
+    expect(pricedPairs).toHaveLength(10);
+    body.fixtures.forEach((row: { prediction: string; ep: number }, i: number) => {
+      const [homeLambda, awayLambda] = pricedPairs[i];
+      const grid = buildCorrectScoreGrid(homeLambda, awayLambda, DIXON_COLES_RHO);
+      const best = pickMaxExpectedPoints(grid.cells, grid.outcome)!;
+      expect(row.prediction).toBe(`${best.homeGoals}-${best.awayGoals}`);
+      expect(row.ep).toBeCloseTo(best.ep, 3);
+    });
+
+    // Arsenal (λ 2.4 / 0.5) is the biggest favourite: modal Home win 2-0.
     const arsenal = body.fixtures.find((f: { home: { name: string } }) => f.home.name === "Arsenal");
-    expect(arsenal).toMatchObject({ category: "FLOOR: Home Win", prediction: "2-0" });
-    // Newell-to-Burnley is the strongest away favourite: 0-1 or 0-2.
+    expect(arsenal).toMatchObject({ category: "MAX EP: 2-0", prediction: "2-0" });
+    // Newcastle (λ 0.6 / 2.0) is the strongest away favourite: an away win.
     const newcastle = body.fixtures.find((f: { home: { name: string } }) => f.home.name === "Newcastle");
-    expect(newcastle.category).toBe("FLOOR: Away Win");
     expect(newcastle.prediction.startsWith("0-")).toBe(true);
+    expect(newcastle.ep).toBeGreaterThan(0);
   });
 
   it("anchors upcoming fixtures to the bookmaker odds and strips them for finished ones", async () => {
@@ -371,8 +370,8 @@ describe("GET /api/v4-predictor/auto — Portfolio Tranching", () => {
       h2h: [{ date: "2020-08-01T15:00:00Z", score: "1 - 0" }] });
     expect(summary).not.toHaveProperty("__homeXg");
     expect(fixture.home.score).toBe("4");
-    // Finished fixtures are priced too — the tranching engine covers the slate.
-    expect(body.fixtures[0].category).toBe("FLOOR: Home Win");
+    // Finished fixtures are priced too — the EP maximiser covers the slate.
+    expect(body.fixtures[0].category).toBe("MAX EP: 2-0");
     expect(body.fixtures[0].prediction).toBe("2-0");
   });
 
@@ -389,12 +388,12 @@ describe("GET /api/v4-predictor/auto — Portfolio Tranching", () => {
     expect(response.status).toBe(200);
     const body = await response.json();
 
-    // Model-only pricing (λ 1.35 / 1.15): every row is still tranched.
+    // Model-only pricing (λ 1.35 / 1.15): every row is still a MAX EP pick.
     expect(body.fixtures).toHaveLength(2);
     for (const row of body.fixtures) {
-      expect(row.category).toBe("FLOOR: Home Win");
+      expect(row.category).toBe("MAX EP: 1-0");
       expect(row.prediction).toBe("1-0");
-      expect(row.tranche).toBe("FLOOR");
+      expect(row.ep).toBeGreaterThan(0);
     }
     errSpy.mockRestore();
   });
@@ -429,8 +428,8 @@ describe("V4PredictorPage auto-dashboard", () => {
     const week11Body = {
       week: 11,
       fixtures: [
-        { home: { name: "Man City", logo: "https://example.com/mancity.png" }, away: { name: "Hull", logo: "https://example.com/hull.png" }, state: "post", actual: [2, 0], prediction: "2-0", category: "FLOOR: Home Win", tranche: "FLOOR" },
-        { home: { name: "Spurs", logo: "https://example.com/spurs.png" }, away: { name: "Brighton", logo: "https://example.com/brighton.png" }, state: "pre", actual: null, prediction: "1-2", category: "FLOOR: Away Win", tranche: "FLOOR" },
+        { home: { name: "Man City", logo: "https://example.com/mancity.png" }, away: { name: "Hull", logo: "https://example.com/hull.png" }, state: "post", actual: [2, 0], prediction: "2-0", category: "MAX EP: 2-0", ep: 9.38 },
+        { home: { name: "Spurs", logo: "https://example.com/spurs.png" }, away: { name: "Brighton", logo: "https://example.com/brighton.png" }, state: "pre", actual: null, prediction: "1-2", category: "MAX EP: 1-2", ep: 6.12 },
       ],
     };
 
@@ -456,7 +455,7 @@ describe("V4PredictorPage auto-dashboard", () => {
           json: async () => ({
             week: 10,
             fixtures: [
-              { home: { name: "Arsenal", logo: "https://example.com/arsenal.png" }, away: { name: "Hull", logo: "https://example.com/hull.png" }, state: "post", actual: [2, 0], prediction: "2-0", category: "FLOOR: Home Win", tranche: "FLOOR" },
+              { home: { name: "Arsenal", logo: "https://example.com/arsenal.png" }, away: { name: "Hull", logo: "https://example.com/hull.png" }, state: "post", actual: [2, 0], prediction: "2-0", category: "MAX EP: 2-0", ep: 9.38 },
             ],
           }),
         } as unknown as Response);
@@ -524,10 +523,13 @@ describe("V4PredictorPage auto-dashboard", () => {
 
     // Predictions populated by the tranching engine (translated team names)
     expect(container.textContent).toContain("Man City vs Hull");
-    expect(container.textContent).toContain("FLOOR: Home Win");
+    expect(container.textContent).toContain("MAX EP: 2-0");
     expect(container.textContent).toContain("Spurs vs Brighton");
-    expect(container.textContent).toContain("FLOOR: Away Win");
+    expect(container.textContent).toContain("MAX EP: 1-2");
     expect(container.textContent).toContain("2-0");
+    // The EP the pick was chosen on is shown for each fixture.
+    expect(container.textContent).toContain("Expected Pts");
+    expect(container.textContent).toContain("9.38");
 
     // Scorecard populated automatically for the finished match (2-0 vs 2-0 = 20 pts)
     expect(container.textContent).toContain("TOTAL SCORE: 20 / 200");
@@ -573,7 +575,7 @@ describe("V4PredictorPage auto-dashboard", () => {
           status: 200,
           json: async () => ({
             week: 11,
-            fixtures: [{ home: { name: "Man City", logo: "https://example.com/mancity.png" }, away: { name: "Fulham", logo: "https://example.com/fulham.png" }, state: "pre", actual: null, prediction: "2-0", category: "FLOOR: Home Win", tranche: "FLOOR" }],
+            fixtures: [{ home: { name: "Man City", logo: "https://example.com/mancity.png" }, away: { name: "Fulham", logo: "https://example.com/fulham.png" }, state: "pre", actual: null, prediction: "2-0", category: "MAX EP: 2-0", ep: 9.38 }],
           }),
         } as unknown as Response);
       }
@@ -619,7 +621,7 @@ describe("V4PredictorPage auto-dashboard", () => {
         status: 200,
         json: async () => ({
           week: 10,
-          fixtures: [{ home: { name: "Arsenal", logo: "https://example.com/arsenal.png" }, away: { name: "Hull", logo: "https://example.com/hull.png" }, state: "post", actual: [2, 0], prediction: "2-0", category: "FLOOR: Home Win", tranche: "FLOOR" }],
+          fixtures: [{ home: { name: "Arsenal", logo: "https://example.com/arsenal.png" }, away: { name: "Hull", logo: "https://example.com/hull.png" }, state: "post", actual: [2, 0], prediction: "2-0", category: "MAX EP: 2-0", ep: 9.38 }],
         }),
       } as unknown as Response);
       await Promise.resolve();
@@ -640,9 +642,9 @@ describe("V4PredictorPage auto-dashboard", () => {
           json: async () => ({
             week: 11,
             fixtures: [
-              { home: { name: "Arsenal", logo: "https://example.com/arsenal.png" }, away: { name: "Hull", logo: "https://example.com/hull.png" }, state: "in", actual: null, prediction: "2-0", category: "FLOOR: Home Win", tranche: "FLOOR" },
-              { home: { name: "Fulham", logo: "https://example.com/fulham.png" }, away: { name: "Brentford", logo: "https://example.com/brentford.png" }, state: "post", actual: [2, 0], prediction: "1-1", category: "CEILING: Draw Snipe", tranche: "CEILING" },
-              { home: { name: "Chelsea", logo: "https://example.com/chelsea.png" }, away: { name: "Leeds", logo: "https://example.com/leeds.png" }, state: "post", actual: [0, 1], prediction: "1-1", category: "CEILING: Draw Snipe", tranche: "CEILING" },
+              { home: { name: "Arsenal", logo: "https://example.com/arsenal.png" }, away: { name: "Hull", logo: "https://example.com/hull.png" }, state: "in", actual: null, prediction: "2-0", category: "MAX EP: 2-0", ep: 9.38 },
+              { home: { name: "Fulham", logo: "https://example.com/fulham.png" }, away: { name: "Brentford", logo: "https://example.com/brentford.png" }, state: "post", actual: [2, 0], prediction: "1-1", category: "MAX EP: 1-1", ep: 4.38 },
+              { home: { name: "Chelsea", logo: "https://example.com/chelsea.png" }, away: { name: "Leeds", logo: "https://example.com/leeds.png" }, state: "post", actual: [0, 1], prediction: "1-1", category: "MAX EP: 1-1", ep: 4.38 },
             ],
           }),
         } as unknown as Response);
@@ -667,15 +669,15 @@ describe("V4PredictorPage auto-dashboard", () => {
     expect(liveBadge?.className).toContain("text-red-400");
     expect(liveBadge?.className).toContain("animate-pulse");
 
-    // Fulham vs Brentford: ceiling draw snipe 1-1, actual 2-0 -> missed (0)
-    // Chelsea vs Leeds: ceiling draw snipe 1-1, actual 0-1 -> missed (0) => total 0
+    // Fulham vs Brentford: MAX EP 1-1, actual 2-0 -> missed (0)
+    // Chelsea vs Leeds: MAX EP 1-1, actual 0-1 -> missed (0) => total 0
     expect(container.textContent).toContain("TOTAL SCORE: 0 / 200");
     const missedPoints = Array.from(container.querySelectorAll("span")).find((s) => s.textContent?.includes("❌"));
     expect(missedPoints?.className).toContain("text-red-400");
     expect(missedPoints?.className).toContain("font-bold");
   });
 
-  it("renders Portfolio Tranching picks (floor wins + a ceiling draw snipe) and scores accurately", async () => {
+  it("renders pure MAX EP picks (including a 2-1 and a draw) and scores accurately", async () => {
     const fetchMock = vi.fn((url: string) => {
       if (url === "/api/v4-predictor/auto?week=11") {
         return Promise.resolve({
@@ -690,7 +692,7 @@ describe("V4PredictorPage auto-dashboard", () => {
                 state: "post",
                 actual: [2, 0],
                 prediction: "2-0",
-                category: "FLOOR: Home Win",
+                category: "MAX EP: 2-0",
                 enginePrediction: "2-0",
               },
               {
@@ -699,7 +701,7 @@ describe("V4PredictorPage auto-dashboard", () => {
                 state: "post",
                 actual: [2, 1],
                 prediction: "2-1",
-                category: "FLOOR: Home Win",
+                category: "MAX EP: 2-1",
                 enginePrediction: "2-1",
               },
               {
@@ -708,7 +710,7 @@ describe("V4PredictorPage auto-dashboard", () => {
                 state: "post",
                 actual: [0, 2],
                 prediction: "0-2",
-                category: "FLOOR: Away Win",
+                category: "MAX EP: 0-2",
                 enginePrediction: "0-2",
               },
               {
@@ -717,7 +719,7 @@ describe("V4PredictorPage auto-dashboard", () => {
                 state: "post",
                 actual: [1, 1],
                 prediction: "1-1",
-                category: "CEILING: Draw Snipe",
+                category: "MAX EP: 1-1",
                 enginePrediction: "1-1",
               },
             ],
@@ -738,9 +740,10 @@ describe("V4PredictorPage auto-dashboard", () => {
       await Promise.resolve();
     });
 
-    expect(container.textContent).toContain("FLOOR: Home Win");
-    expect(container.textContent).toContain("FLOOR: Away Win");
-    expect(container.textContent).toContain("CEILING: Draw Snipe");
+    expect(container.textContent).toContain("MAX EP: 2-0");
+    expect(container.textContent).toContain("MAX EP: 2-1");
+    expect(container.textContent).toContain("MAX EP: 0-2");
+    expect(container.textContent).toContain("MAX EP: 1-1");
     expect(container.textContent).toContain("2-1");
     expect(container.textContent).toContain("0-2");
     // 2-0 exact (20) + 2-1 exact (20) + 0-2 exact (20) + 1-1 exact (20) = 80.

@@ -1,6 +1,6 @@
-// ĞIGI GIVØ — Explicit Market Registry Engine (14 Market Families, 220 markets)
+// ĞIGI GIVØ — Explicit Market Registry Engine (14 Market Families, 285 markets)
 //
-// F1  Goals            — 50 lines (Total O/U, Team O/U, BTTS, 1X2, DC, Exact, CS, Halves)
+// F1  Goals            —115 lines (Total O/U, Team O/U, BTTS, 1X2, DC, Exact, CS 0-0…8-8, Halves)
 // F2  Corners          — 26 lines (Total O/U ×15, Team O/U ×3×2, Most, Race ×3)
 // F3  Yellow Cards     —  9 lines (Total O/U ×3, Team O/U ×3×2)
 // F4  Shots on Target  — 25 lines (Total O/U ×17, Team O/U ×4×2)
@@ -16,7 +16,7 @@
 // F14 Consecutive Goals—  3 lines (Chip-only markets — Team A/B/Either "No",
 //                        scored by every engine factor but NEVER ranked into
 //                        top1/top3/top5/top10 — see selector.isRankingExcluded)
-// TOTAL: 219 (one race-to-corners per-match adds 1 = 220)
+// TOTAL: 284 (one race-to-corners per-match adds 1 = 285)
 
 import {
   poissonPmf,
@@ -60,6 +60,15 @@ export const DIXON_COLES_RHO = -0.13;
  */
 const SCORE_GRID_MAX_GOALS = 10;
 
+/**
+ * Highest goal count the Correct Score *markets* are published up to — the
+ * 9×9 grid 0-0 … 8-8. Historically the registry stopped at 3-3, which capped
+ * every consumer at low-scoring lines; publishing the full grid lets the V4
+ * predictor value high-scoring scorelines (3-2, 4-4, 5-3) on the same
+ * Dixon–Coles corrected scale as the 1X2 split.
+ */
+export const CORRECT_SCORE_MAX_GOALS = 8;
+
 export interface ScoreCell {
   homeGoals: number;
   awayGoals: number;
@@ -90,10 +99,94 @@ export function scoreOutcome(homeGoals: number, awayGoals: number): "H" | "D" | 
   return homeGoals > awayGoals ? "H" : homeGoals === awayGoals ? "D" : "A";
 }
 
+// ─── Expected Points (EP) maximiser ──────────────────────────────────────────
+//
+// The V4 scoreline picks are pure math: every scoreline on the published grid
+// is valued by the points a prediction of it would earn,
+//
+//   EP(score) = 10 × P(outcome of score)  +  10 × P(exactly that score)
+//
+// (10 for the correct 1X2 outcome, 10 more for the exact scoreline), and the
+// scoreline with the highest EP is published. There is no floor, no ceiling,
+// no favourite/draw bias — a 4-4 that out-earns a 1-0 wins.
+
+/** Points awarded for calling the right 1X2 outcome. */
+export const EP_OUTCOME_POINTS = 10;
+/** Additional points awarded for calling the exact scoreline. */
+export const EP_EXACT_POINTS = 10;
+
+export interface ExpectedPointsCell {
+  homeGoals: number;
+  awayGoals: number;
+  /** P(Home) / P(Draw) / P(Away) for this scoreline's outcome. */
+  outcomeProb: number;
+  /** Probability of this exact scoreline. */
+  exactProb: number;
+  /** 10 × outcomeProb + 10 × exactProb. */
+  ep: number;
+}
+
+export interface ExpectedPointsPick extends ExpectedPointsCell {
+  outcome: "H" | "D" | "A";
+  /** `homeGoals-awayGoals`, e.g. "3-1". */
+  scoreline: string;
+}
+
 /**
- * Highest-probability scoreline inside one outcome — the pick the V4 portfolio
- * tranches publish ("the most likely Home win is 2-1", "the most likely draw is
- * 1-1"). Returns null when the grid carries no cell in that outcome.
+ * Value every scoreline on the grid by its expected points, descending.
+ *
+ * `outcome` is the normalised 1X2 split the score grid was priced from, so the
+ * two halves of the EP formula always share one probability scale. Cells are
+ * returned highest-EP first; ties break toward the lower total goal count and
+ * then the lower home goal count, so the pick is deterministic.
+ */
+export function expectedPointsGrid(
+  cells: ScoreCell[],
+  outcome: { home: number; draw: number; away: number },
+): ExpectedPointsCell[] {
+  return cells
+    .map((cell) => {
+      const side = scoreOutcome(cell.homeGoals, cell.awayGoals);
+      const outcomeProb = side === "H" ? outcome.home : side === "D" ? outcome.draw : outcome.away;
+      const exactProb = cell.probability;
+      return {
+        homeGoals: cell.homeGoals,
+        awayGoals: cell.awayGoals,
+        outcomeProb,
+        exactProb,
+        ep: EP_OUTCOME_POINTS * outcomeProb + EP_EXACT_POINTS * exactProb,
+      };
+    })
+    .sort(
+      (a, b) =>
+        b.ep - a.ep ||
+        a.homeGoals + a.awayGoals - (b.homeGoals + b.awayGoals) ||
+        a.homeGoals - b.homeGoals,
+    );
+}
+
+/**
+ * The single highest-EP scoreline on the grid — the V4 "MAX EP" pick.
+ * Returns null only for an empty grid.
+ */
+export function pickMaxExpectedPoints(
+  cells: ScoreCell[],
+  outcome: { home: number; draw: number; away: number },
+): ExpectedPointsPick | null {
+  const ranked = expectedPointsGrid(cells, outcome);
+  const best = ranked[0];
+  if (!best) return null;
+  return {
+    ...best,
+    outcome: scoreOutcome(best.homeGoals, best.awayGoals),
+    scoreline: `${best.homeGoals}-${best.awayGoals}`,
+  };
+}
+
+/**
+ * Highest-probability scoreline inside one outcome — "the most likely Home win
+ * is 2-1", "the most likely draw is 1-1". Returns null when the grid carries
+ * no cell in that outcome.
  */
 export function pickBestScoreForOutcome(
   scores: ScoreCell[],
@@ -347,7 +440,7 @@ export class MarketEngine {
     });
   }
 
-  // ─── FAMILY 1: GOALS (50 lines) ───────────────────────────────────────────
+  // ─── FAMILY 1: GOALS (115 lines) ──────────────────────────────────────────
   private buildGoals() {
     const { homeGoals, awayGoals } = this.lam;
     const total = homeGoals + awayGoals;
@@ -381,11 +474,12 @@ export class MarketEngine {
       }
       this.add(pfx, `${tm} 4+ Goals`, F, "4 or more Goals", "3 or fewer Goals", poissonSf(4, lam));
     }
-    // Correct Scores 4×4 = 16 — Dixon–Coles corrected + renormalised, so the
-    // grid carries the same low-score shape as the 1X2 split above.
+    // Correct Scores 9×9 = 81 (0-0 … 8-8) — Dixon–Coles corrected and
+    // renormalised, so the grid carries the same low-score shape as the 1X2
+    // split above while still pricing the high-scoring tail (3-2, 4-4, 5-3).
     const scoreGrid = buildCorrectScoreGrid(homeGoals, awayGoals, DIXON_COLES_RHO);
-    for (let h = 0; h <= 3; h++) {
-      for (let a = 0; a <= 3; a++) {
+    for (let h = 0; h <= CORRECT_SCORE_MAX_GOALS; h++) {
+      for (let a = 0; a <= CORRECT_SCORE_MAX_GOALS; a++) {
         const cell = scoreGrid.cells.find((c) => c.homeGoals === h && c.awayGoals === a);
         this.add("CS", `Correct Score ${h}-${a}`, F, `Score ${h}-${a}`, "Other Score",
           cell?.probability ?? 0, true);
@@ -653,16 +747,16 @@ export class MarketEngine {
   // ─── Orchestrate ──────────────────────────────────────────────────────────
   /**
    * The Dixon–Coles corrected 1X2 + Correct Score grid the buildings above
-   * priced from — exposed so downstream consumers (the V4 portfolio tranching
-   * route) read the exact probabilities the Engine published instead of
-   * re-deriving them.
+   * priced from — exposed so downstream consumers (the V4 expected-points
+   * maximiser in `/api/v4-predictor/auto`) read the exact probabilities the
+   * Engine published instead of re-deriving them.
    */
   correctScoreGrid(): CorrectScoreGrid {
     return buildCorrectScoreGrid(this.lam.homeGoals, this.lam.awayGoals, DIXON_COLES_RHO);
   }
 
   buildAll(): Market[] {
-    this.buildGoals();       // F1  — 50 lines
+    this.buildGoals();       // F1  —115 lines
     this.buildCorners();     // F2  — 26 lines
     this.buildCards();       // F3  —  9 lines
     this.buildSot();         // F4  — 25 lines
@@ -676,7 +770,7 @@ export class MarketEngine {
     this.buildGoalSequence();// F12 —  2 lines
     this.buildGoalkeeper();  // F13 —  8 lines
     this.buildConsecutiveGoals(); // F14 —  3 lines (chip-only)
-    return this.markets;     // TOTAL: 219 + 1 race-corner = 220
+    return this.markets;     // TOTAL: 284 + 1 race-corner = 285
   }
 }
 

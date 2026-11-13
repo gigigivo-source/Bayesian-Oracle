@@ -21,6 +21,8 @@ type AutoFixtureRow = {
   enginePrediction: string | null;
   prediction: string | null;
   category: string | null;
+  /** Expected Points the pick was chosen on: 10 × P(outcome) + 10 × P(exact). */
+  ep: number | null;
 };
 
 const MATCHWEEKS = Array.from({ length: 38 }, (_, i) => i + 1);
@@ -53,6 +55,7 @@ function normalizeRow(raw: unknown): AutoFixtureRow | null {
     enginePrediction?: unknown;
     prediction?: unknown;
     category?: unknown;
+    ep?: unknown;
   };
   const home = normalizeTeam(row.home);
   const away = normalizeTeam(row.away);
@@ -80,7 +83,11 @@ function normalizeRow(raw: unknown): AutoFixtureRow | null {
     Number.isFinite(Number(row.actual[1]))
       ? [Number(row.actual[0]), Number(row.actual[1])]
       : null;
-  return { home, away, state, actual, enginePrediction, prediction, category };
+  const ep =
+    typeof row.ep === "number" && Number.isFinite(row.ep) && row.ep >= 0
+      ? row.ep
+      : null;
+  return { home, away, state, actual, enginePrediction, prediction, category, ep };
 }
 
 function StatusBadge({ state }: { state: AutoFixtureRow["state"] }) {
@@ -180,6 +187,7 @@ export default function V4PredictorPage() {
         enginePrediction: row.enginePrediction,
         prediction: row.prediction,
         category: row.category,
+        ep: row.ep,
       }));
       const newPredictions = buildPredictions(v4Fixtures);
       const finished = rows
@@ -277,12 +285,13 @@ export default function V4PredictorPage() {
             🔮 V4 Ultimate Predictor
           </h1>
           <p className="mt-2 text-sm text-slate-400">
-            Portfolio-tranched Premier League score predictions, loaded
-            automatically for Matchweek {selectedWeek}.{" "}
-            <span className="text-emerald-400">FLOOR</span> picks the safest
-            winner in each fixture;{" "}
-            <span className="text-amber-400">CEILING</span> snipes the draw in
-            the slate&apos;s truest toss-ups.
+            Pure Expected-Points Premier League score predictions, loaded
+            automatically for Matchweek {selectedWeek}. Every scoreline from
+            0-0 to 8-8 is valued by{" "}
+            <span className="text-amber-400">
+              EP = 10 × P(outcome) + 10 × P(exact score)
+            </span>{" "}
+            and the highest-EP score wins — no floors, no ceilings.
           </p>
         </header>
 
@@ -294,8 +303,9 @@ export default function V4PredictorPage() {
                 <tr>
                   <th className="p-2 text-slate-400">Status</th>
                   <th className="p-2 text-slate-400">Match</th>
-                  <th className="p-2 text-slate-400">Tranche</th>
+                  <th className="p-2 text-slate-400">Category</th>
                   <th className="p-2 text-slate-400">Prediction</th>
+                  <th className="p-2 text-slate-400">Expected Pts</th>
                 </tr>
               </thead>
               <tbody>
@@ -312,6 +322,9 @@ export default function V4PredictorPage() {
                     </td>
                     <td className="p-2 font-mono text-slate-100">
                       {predictions[i]?.Prediction ?? ""}
+                    </td>
+                    <td className="p-2 font-mono text-amber-400">
+                      {row.ep === null ? "" : row.ep.toFixed(2)}
                     </td>
                   </tr>
                 ))}
