@@ -1,17 +1,4 @@
-// ĞIGI GIVØ — V4 Predictor client model.
-//
-// The blind V2 static rules (SNIPE / LOCK tiers driven by hard-coded team
-// lists) are gone, and so is FLOOR / CEILING tranching. Predictions are
-// produced by the Pure Points Maximiser in `/api/v4-predictor/auto`: every
-// fixture is priced by the MarketEngine (Dixon–Coles corrected 1X2 + Correct
-// Score grid 0-0 … 8-8) and the scoreline with the highest Expected Points is
-// published — `EP = 10 × P(outcome) + 10 × P(exact score)`.
-//
-// This module keeps the presentation helpers the dashboard needs — team-name
-// translation, scoreline validation, and the points scorecard — plus a thin
-// projection of the route's rows into the shape the table renders. It applies
-// no team lists and no static rules: the category shown is exactly the
-// Engine-driven pick the route returned.
+// V4 presentation and scorecard helpers.
 
 export const TEAM_NAME_MAP: Record<string, string> = {
   "Manchester City": "Man City",
@@ -31,12 +18,6 @@ export function translateTeamName(espnName: string): string {
   return TEAM_NAME_MAP[espnName] || espnName;
 }
 
-/**
- * A fixture as delivered by `/api/v4-predictor/auto`. `prediction` and
- * `category` are the maximiser's output ("3-1", "MAX EP: 3-1"); `ep` is the
- * Expected Points the pick was chosen on and `enginePrediction` mirrors the
- * scoreline for callers that only read that field.
- */
 export type Fixture = {
   home: string;
   away: string;
@@ -47,16 +28,9 @@ export type Fixture = {
 };
 export type Actual = [number, number];
 export type Prediction = { Match: string; Category: string; Prediction: string; Target_Pts: number };
-export type ScoredPrediction = { Match: string; Prediction: string; Actual: string; Points: number; Status: string };
+export type ScoredPrediction = { Match: string; Prediction: string; Actual: string; Points: number; Status: string; MissReason: string };
 
-/**
- * Points the pick is aiming for.
- *
- * The maximiser targets the full 20 — 10 for the outcome plus 10 for the exact
- * scoreline — so the target is 20 whenever the route returned a scoreline, and
- * the pick's own Expected Points when the payload carries them (a value
- * between 0 and 20 that says how much of that 20 the math actually expects).
- */
+/** Legacy target-points presentation helper. */
 export function targetPointsForPick(ep?: number | null): number {
   if (typeof ep !== "number" || !Number.isFinite(ep) || ep < 0) return 20;
   return Math.min(20, Math.round(ep));
@@ -78,8 +52,8 @@ export function getScorelineOutcome(prediction: string): "H" | "D" | "A" {
 /**
  * Project the route's rows into the table's `Prediction` shape.
  *
- * The route is the single source of truth: it already ran the Engine on every
- * fixture and published the highest-EP scoreline. Rows without a usable scoreline
+ * The route is the single source of truth: it selects the scoreline for every
+ * fixture using the blended-anchor strategy. Rows without a usable scoreline
  * (a malformed payload, a fixture the Engine could not price at all) render
  * with no prediction rather than silently falling back to a static rule.
  */
@@ -110,7 +84,8 @@ export function calculateScore(predictions: Prediction[], actuals: Actual[]): [S
     else if (predOutcome === actOutcome) [points, status] = [10, "✅ OUTCOME (10 pts)"];
     else [points, status] = [0, "❌ MISSED (0 pts)"];
     total += points;
-    return { Match: row.Match, Prediction: row.Prediction, Actual: `${actH}-${actA}`, Points: points, Status: status };
+    const missReason = !isScoreline(row.Prediction) ? "—" : points === 0 ? "❌ MISS: Wrong Outcome" : points === 10 ? "❌ MISS: Wrong Score" : "—";
+    return { Match: row.Match, Prediction: row.Prediction, Actual: `${actH}-${actA}`, Points: points, Status: status, MissReason: missReason };
   });
   return [scored, total];
 }
