@@ -1,0 +1,132 @@
+{
+  "season": "2026/27",
+  "competition": "eng.1",
+  "weeks": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10
+  ],
+  "fixtureCount": 100,
+  "winner": "consensus",
+  "mode": "Pinned GitHub snapshots, 2026/27 EPL",
+  "generatedAt": "2026-11-13T07:56:23.210Z",
+  "systems": [
+    {
+      "id": "pure-ep",
+      "name": "Pure EP (Current)",
+      "weekly": [
+        50,
+        80,
+        50,
+        60,
+        60,
+        40,
+        70,
+        20,
+        70,
+        50
+      ],
+      "average": 55,
+      "floor": 20,
+      "hundredPlus": 0,
+      "exact": 10,
+      "outcome": 35,
+      "miss": 55
+    },
+    {
+      "id": "v2-hybrid",
+      "name": "V2 Hybrid",
+      "weekly": [
+        20,
+        70,
+        90,
+        50,
+        30,
+        20,
+        30,
+        40,
+        40,
+        40
+      ],
+      "average": 43,
+      "floor": 20,
+      "hundredPlus": 0,
+      "exact": 7,
+      "outcome": 29,
+      "miss": 64
+    },
+    {
+      "id": "consensus",
+      "name": "Consensus Override",
+      "weekly": [
+        80,
+        50,
+        40,
+        40,
+        80,
+        70,
+        100,
+        30,
+        80,
+        70
+      ],
+      "average": 64,
+      "floor": 30,
+      "hundredPlus": 1,
+      "exact": 14,
+      "outcome": 36,
+      "miss": 50
+    },
+    {
+      "id": "pure-engine",
+      "name": "Pure Engine",
+      "weekly": [
+        20,
+        60,
+        90,
+        50,
+        20,
+        20,
+        30,
+        40,
+        30,
+        40
+      ],
+      "average": 40,
+      "floor": 20,
+      "hundredPlus": 0,
+      "exact": 5,
+      "outcome": 30,
+      "miss": 65
+    },
+    {
+      "id": "ep-draw-guard",
+      "name": "EP + Draw Guard",
+      "weekly": [
+        30,
+        60,
+        110,
+        50,
+        50,
+        40,
+        70,
+        30,
+        60,
+        70
+      ],
+      "average": 57,
+      "floor": 30,
+      "hundredPlus": 1,
+      "exact": 13,
+      "outcome": 31,
+      "miss": 56
+    }
+  ]
+}

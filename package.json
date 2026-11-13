@@ -10,7 +10,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "validate:stats": "tsx scripts/validate-stats.ts",
-    "verify:prematch": "tsx scripts/verify-prematch.ts"
+    "verify:prematch": "tsx scripts/verify-prematch.ts",
+    "backtest:v4": "tsx scripts/backtest-v4.ts"
   },
   "dependencies": {
     "@sindicuab/sofascore-api": "^0.1.7",

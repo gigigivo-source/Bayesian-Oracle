@@ -4,7 +4,8 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FixtureLite } from "@/lib/espn";
-import { buildCorrectScoreGrid, DIXON_COLES_RHO, pickMaxExpectedPoints } from "@/lib/engine/markets";
+import { buildCorrectScoreGrid, DIXON_COLES_RHO, pickBestScoreForOutcome } from "@/lib/engine/markets";
+import { generateV2Predictions } from "@/lib/engine/v4-strategies";
 import { TEAM_NAME_MAP, translateTeamName } from "@/lib/v4-predictor";
 
 const fetchScoreboardMock = vi.fn();
@@ -167,7 +168,7 @@ describe("V4 team name translation", () => {
   });
 });
 
-describe("GET /api/v4-predictor/auto — Pure Points Maximiser", () => {
+describe("GET /api/v4-predictor/auto — Consensus Override", () => {
   it("accepts ?week=X, passes week to fetchScoreboard, translates names, extracts logos and actual scores", async () => {
     fetchScoreboardMock.mockResolvedValue([
       makeFixture("other", "2026-11-21T15:00:00Z", "Arsenal FC", "Chelsea FC", "pre", null, null, 11, "https://example.com/arsenal.png", "https://example.com/chelsea.png"),
@@ -183,6 +184,11 @@ describe("GET /api/v4-predictor/auto — Pure Points Maximiser", () => {
 
     expect(fetchScoreboardMock).toHaveBeenCalledWith("eng.1", undefined, 10);
     expect(body.week).toBe(10);
+    expect(body.strategy).toMatchObject({
+      id: "consensus",
+      name: "Consensus Override",
+      backtest: { fixtureCount: 100, average: 64, floor: 30, hundredPlus: 1 },
+    });
     expect(body.fixtures.map((f: { home: { name: string }; away: { name: string }; state: string; actual: number[] | null }) => [
       f.home.name, f.away.name, f.state, f.actual,
     ])).toEqual([
@@ -193,16 +199,16 @@ describe("GET /api/v4-predictor/auto — Pure Points Maximiser", () => {
     expect(body.fixtures[0].home.logo).toBe("https://example.com/mancity.png");
     expect(body.fixtures[2].home.logo).toBeNull();
 
-    // Every row is a pure EP pick: "MAX EP: <score>" and no tranche field.
+    // Every row is a consensus pick: "CONSENSUS: <score>" and no tranche field.
     for (const row of body.fixtures) {
-      expect(row.category).toBe(`MAX EP: ${row.prediction}`);
+      expect(row.category).toBe(`CONSENSUS: ${row.prediction}`);
       expect(row.prediction).toMatch(/^\d{1,2}-\d{1,2}$/);
       expect(row).not.toHaveProperty("tranche");
       expect(row.ep).toBeGreaterThan(0);
       expect(row.probabilities.home + row.probabilities.draw + row.probabilities.away).toBeCloseTo(1, 2);
     }
-    // Man City (default λ 1.35 / 1.15): P(Home) 0.394 takes the EP win at 1-0.
-    expect(body.fixtures[0]).toMatchObject({ category: "MAX EP: 1-0", prediction: "1-0" });
+    // Man City vs Hull is a V2 Home Fortress; the fallback grid's modal H score is 1-0.
+    expect(body.fixtures[0]).toMatchObject({ category: "CONSENSUS: 1-0", prediction: "1-0" });
   });
 
   it("uses current matchweek when ?week is omitted", async () => {
@@ -225,12 +231,12 @@ describe("GET /api/v4-predictor/auto — Pure Points Maximiser", () => {
       away: { name: "Man City", logo: "https://example.com/mancity.png" },
       state: "pre",
       actual: null,
-      category: "MAX EP: 1-0",
-      prediction: "1-0",
+      category: "CONSENSUS: 0-1",
+      prediction: "0-1",
     });
   });
 
-  it("runs the Engine on every fixture and publishes the highest-EP scoreline for each", async () => {
+  it("runs the Engine on every fixture and publishes the V2 outcome's modal score", async () => {
     const summary = { venue: "Emirates" };
     fetchSummaryMock.mockResolvedValue(summary);
     // Ten fixtures: eight lopsided favourites plus two true toss-ups.
@@ -282,29 +288,36 @@ describe("GET /api/v4-predictor/auto — Pure Points Maximiser", () => {
     expect(fetchSummaryMock).toHaveBeenCalledTimes(10);
     expect(body.fixtures).toHaveLength(10);
 
-    // No tranching: every row is labelled purely by its MAX EP scoreline.
+    // Every row is labelled by the shared consensus selector.
     for (const row of body.fixtures) {
-      expect(row.category).toBe(`MAX EP: ${row.prediction}`);
+      expect(row.category).toBe(`CONSENSUS: ${row.prediction}`);
+      expect(row.v2Category).toBeTruthy();
       expect(row).not.toHaveProperty("tranche");
     }
 
-    // Each published pick is the highest-EP cell on its own grid (recomputed
-    // here from the λ pair, straight from the formula).
+    // Recompute V2 quotas in kickoff order, then the modal Engine score in
+    // that outcome. This is deliberately independent of the route selector.
     expect(pricedPairs).toHaveLength(10);
+    const v2 = generateV2Predictions(names.map(([home, away]) => ({ home: translateTeamName(home.replace(/\s+(?:AFC|FC)$/i, "")), away: translateTeamName(away.replace(/\s+(?:AFC|FC)$/i, "")) })));
     body.fixtures.forEach((row: { prediction: string; ep: number }, i: number) => {
       const [homeLambda, awayLambda] = pricedPairs[i];
       const grid = buildCorrectScoreGrid(homeLambda, awayLambda, DIXON_COLES_RHO);
-      const best = pickMaxExpectedPoints(grid.cells, grid.outcome)!;
+      const [vh, va] = v2[i].prediction.split("-").map(Number);
+      const outcome = vh > va ? "H" : vh < va ? "A" : "D";
+      const best = pickBestScoreForOutcome(grid.cells, outcome)!;
       expect(row.prediction).toBe(`${best.homeGoals}-${best.awayGoals}`);
-      expect(row.ep).toBeCloseTo(best.ep, 3);
+      const outcomeProb = outcome === "H" ? grid.outcome.home : outcome === "D" ? grid.outcome.draw : grid.outcome.away;
+      expect(row.ep).toBeCloseTo(10 * outcomeProb + 10 * best.probability, 3);
     });
 
     // Arsenal (λ 2.4 / 0.5) is the biggest favourite: modal Home win 2-0.
     const arsenal = body.fixtures.find((f: { home: { name: string } }) => f.home.name === "Arsenal");
-    expect(arsenal).toMatchObject({ category: "MAX EP: 2-0", prediction: "2-0" });
-    // Newcastle (λ 0.6 / 2.0) is the strongest away favourite: an away win.
+    expect(arsenal).toMatchObject({ category: "CONSENSUS: 2-0", prediction: "2-0" });
+    // Newcastle vs Burnley is Mid vs Bottom in V2: consensus must keep H even
+    // though the Engine's raw away lambda is much stronger.
     const newcastle = body.fixtures.find((f: { home: { name: string } }) => f.home.name === "Newcastle");
-    expect(newcastle.prediction.startsWith("0-")).toBe(true);
+    expect(newcastle.v2Category).toBe("LOCK: Mid vs Bottom");
+    expect(newcastle.prediction).toBe("1-0");
     expect(newcastle.ep).toBeGreaterThan(0);
   });
 
@@ -370,8 +383,8 @@ describe("GET /api/v4-predictor/auto — Pure Points Maximiser", () => {
       h2h: [{ date: "2020-08-01T15:00:00Z", score: "1 - 0" }] });
     expect(summary).not.toHaveProperty("__homeXg");
     expect(fixture.home.score).toBe("4");
-    // Finished fixtures are priced too — the EP maximiser covers the slate.
-    expect(body.fixtures[0].category).toBe("MAX EP: 2-0");
+    // Finished fixtures are priced too — consensus covers the slate.
+    expect(body.fixtures[0].category).toBe("CONSENSUS: 2-0");
     expect(body.fixtures[0].prediction).toBe("2-0");
   });
 
@@ -388,10 +401,10 @@ describe("GET /api/v4-predictor/auto — Pure Points Maximiser", () => {
     expect(response.status).toBe(200);
     const body = await response.json();
 
-    // Model-only pricing (λ 1.35 / 1.15): every row is still a MAX EP pick.
+    // Model-only pricing (λ 1.35 / 1.15): both V2 outcomes are H, modal H score 1-0.
     expect(body.fixtures).toHaveLength(2);
     for (const row of body.fixtures) {
-      expect(row.category).toBe("MAX EP: 1-0");
+      expect(row.category).toBe("CONSENSUS: 1-0");
       expect(row.prediction).toBe("1-0");
       expect(row.ep).toBeGreaterThan(0);
     }
@@ -428,8 +441,8 @@ describe("V4PredictorPage auto-dashboard", () => {
     const week11Body = {
       week: 11,
       fixtures: [
-        { home: { name: "Man City", logo: "https://example.com/mancity.png" }, away: { name: "Hull", logo: "https://example.com/hull.png" }, state: "post", actual: [2, 0], prediction: "2-0", category: "MAX EP: 2-0", ep: 9.38 },
-        { home: { name: "Spurs", logo: "https://example.com/spurs.png" }, away: { name: "Brighton", logo: "https://example.com/brighton.png" }, state: "pre", actual: null, prediction: "1-2", category: "MAX EP: 1-2", ep: 6.12 },
+        { home: { name: "Man City", logo: "https://example.com/mancity.png" }, away: { name: "Hull", logo: "https://example.com/hull.png" }, state: "post", actual: [2, 0], prediction: "2-0", category: "CONSENSUS: 2-0", ep: 9.38 },
+        { home: { name: "Spurs", logo: "https://example.com/spurs.png" }, away: { name: "Brighton", logo: "https://example.com/brighton.png" }, state: "pre", actual: null, prediction: "1-2", category: "CONSENSUS: 1-2", ep: 6.12 },
       ],
     };
 
@@ -455,7 +468,7 @@ describe("V4PredictorPage auto-dashboard", () => {
           json: async () => ({
             week: 10,
             fixtures: [
-              { home: { name: "Arsenal", logo: "https://example.com/arsenal.png" }, away: { name: "Hull", logo: "https://example.com/hull.png" }, state: "post", actual: [2, 0], prediction: "2-0", category: "MAX EP: 2-0", ep: 9.38 },
+              { home: { name: "Arsenal", logo: "https://example.com/arsenal.png" }, away: { name: "Hull", logo: "https://example.com/hull.png" }, state: "post", actual: [2, 0], prediction: "2-0", category: "CONSENSUS: 2-0", ep: 9.38 },
             ],
           }),
         } as unknown as Response);
@@ -523,9 +536,9 @@ describe("V4PredictorPage auto-dashboard", () => {
 
     // Predictions populated by the tranching engine (translated team names)
     expect(container.textContent).toContain("Man City vs Hull");
-    expect(container.textContent).toContain("MAX EP: 2-0");
+    expect(container.textContent).toContain("CONSENSUS: 2-0");
     expect(container.textContent).toContain("Spurs vs Brighton");
-    expect(container.textContent).toContain("MAX EP: 1-2");
+    expect(container.textContent).toContain("CONSENSUS: 1-2");
     expect(container.textContent).toContain("2-0");
     // The EP the pick was chosen on is shown for each fixture.
     expect(container.textContent).toContain("Expected Pts");
@@ -575,7 +588,8 @@ describe("V4PredictorPage auto-dashboard", () => {
           status: 200,
           json: async () => ({
             week: 11,
-            fixtures: [{ home: { name: "Man City", logo: "https://example.com/mancity.png" }, away: { name: "Fulham", logo: "https://example.com/fulham.png" }, state: "pre", actual: null, prediction: "2-0", category: "MAX EP: 2-0", ep: 9.38 }],
+            strategy: { id: "consensus", name: "Consensus Override", description: "V2 outcome, Engine score.", backtest: { season: "2026/27", weeks: [1,2,3,4,5,6,7,8,9,10], fixtureCount: 100, average: 64, floor: 30, hundredPlus: 1, weekly: [80,50,40,40,80,70,100,30,80,70], mode: "Pinned GitHub snapshots" } },
+            fixtures: [{ home: { name: "Man City", logo: "https://example.com/mancity.png" }, away: { name: "Fulham", logo: "https://example.com/fulham.png" }, state: "pre", actual: null, prediction: "2-0", category: "CONSENSUS: 2-0", ep: 9.38, v2Category: "LOCK: Smart Top 4 Home", v2Prediction: "2-0" }],
           }),
         } as unknown as Response);
       }
@@ -600,6 +614,10 @@ describe("V4PredictorPage auto-dashboard", () => {
 
     expect(container.textContent).not.toContain("Loading real fixtures...");
     expect(container.textContent).toContain("UPCOMING");
+    expect(container.textContent).toContain("Consensus Override");
+    expect(container.textContent).toContain("64.0 avg");
+    expect(container.textContent).toContain("30 floor");
+    expect(container.textContent).toContain("LOCK: Smart Top 4 Home");
     expect(container.textContent).not.toContain("TOTAL SCORE:");
     expect(container.querySelectorAll("input")).toHaveLength(0);
     const images = Array.from(container.querySelectorAll("img"));
@@ -621,7 +639,7 @@ describe("V4PredictorPage auto-dashboard", () => {
         status: 200,
         json: async () => ({
           week: 10,
-          fixtures: [{ home: { name: "Arsenal", logo: "https://example.com/arsenal.png" }, away: { name: "Hull", logo: "https://example.com/hull.png" }, state: "post", actual: [2, 0], prediction: "2-0", category: "MAX EP: 2-0", ep: 9.38 }],
+          fixtures: [{ home: { name: "Arsenal", logo: "https://example.com/arsenal.png" }, away: { name: "Hull", logo: "https://example.com/hull.png" }, state: "post", actual: [2, 0], prediction: "2-0", category: "CONSENSUS: 2-0", ep: 9.38 }],
         }),
       } as unknown as Response);
       await Promise.resolve();
@@ -642,9 +660,9 @@ describe("V4PredictorPage auto-dashboard", () => {
           json: async () => ({
             week: 11,
             fixtures: [
-              { home: { name: "Arsenal", logo: "https://example.com/arsenal.png" }, away: { name: "Hull", logo: "https://example.com/hull.png" }, state: "in", actual: null, prediction: "2-0", category: "MAX EP: 2-0", ep: 9.38 },
-              { home: { name: "Fulham", logo: "https://example.com/fulham.png" }, away: { name: "Brentford", logo: "https://example.com/brentford.png" }, state: "post", actual: [2, 0], prediction: "1-1", category: "MAX EP: 1-1", ep: 4.38 },
-              { home: { name: "Chelsea", logo: "https://example.com/chelsea.png" }, away: { name: "Leeds", logo: "https://example.com/leeds.png" }, state: "post", actual: [0, 1], prediction: "1-1", category: "MAX EP: 1-1", ep: 4.38 },
+              { home: { name: "Arsenal", logo: "https://example.com/arsenal.png" }, away: { name: "Hull", logo: "https://example.com/hull.png" }, state: "in", actual: null, prediction: "2-0", category: "CONSENSUS: 2-0", ep: 9.38 },
+              { home: { name: "Fulham", logo: "https://example.com/fulham.png" }, away: { name: "Brentford", logo: "https://example.com/brentford.png" }, state: "post", actual: [2, 0], prediction: "1-1", category: "CONSENSUS: 1-1", ep: 4.38 },
+              { home: { name: "Chelsea", logo: "https://example.com/chelsea.png" }, away: { name: "Leeds", logo: "https://example.com/leeds.png" }, state: "post", actual: [0, 1], prediction: "1-1", category: "CONSENSUS: 1-1", ep: 4.38 },
             ],
           }),
         } as unknown as Response);
@@ -669,15 +687,15 @@ describe("V4PredictorPage auto-dashboard", () => {
     expect(liveBadge?.className).toContain("text-red-400");
     expect(liveBadge?.className).toContain("animate-pulse");
 
-    // Fulham vs Brentford: MAX EP 1-1, actual 2-0 -> missed (0)
-    // Chelsea vs Leeds: MAX EP 1-1, actual 0-1 -> missed (0) => total 0
+    // Fulham vs Brentford: consensus 1-1, actual 2-0 -> missed (0)
+    // Chelsea vs Leeds: consensus 1-1, actual 0-1 -> missed (0) => total 0
     expect(container.textContent).toContain("TOTAL SCORE: 0 / 200");
     const missedPoints = Array.from(container.querySelectorAll("span")).find((s) => s.textContent?.includes("❌"));
     expect(missedPoints?.className).toContain("text-red-400");
     expect(missedPoints?.className).toContain("font-bold");
   });
 
-  it("renders pure MAX EP picks (including a 2-1 and a draw) and scores accurately", async () => {
+  it("renders consensus picks (including a 2-1 and a draw) and scores accurately", async () => {
     const fetchMock = vi.fn((url: string) => {
       if (url === "/api/v4-predictor/auto?week=11") {
         return Promise.resolve({
@@ -692,7 +710,7 @@ describe("V4PredictorPage auto-dashboard", () => {
                 state: "post",
                 actual: [2, 0],
                 prediction: "2-0",
-                category: "MAX EP: 2-0",
+                category: "CONSENSUS: 2-0",
                 enginePrediction: "2-0",
               },
               {
@@ -701,7 +719,7 @@ describe("V4PredictorPage auto-dashboard", () => {
                 state: "post",
                 actual: [2, 1],
                 prediction: "2-1",
-                category: "MAX EP: 2-1",
+                category: "CONSENSUS: 2-1",
                 enginePrediction: "2-1",
               },
               {
@@ -710,7 +728,7 @@ describe("V4PredictorPage auto-dashboard", () => {
                 state: "post",
                 actual: [0, 2],
                 prediction: "0-2",
-                category: "MAX EP: 0-2",
+                category: "CONSENSUS: 0-2",
                 enginePrediction: "0-2",
               },
               {
@@ -719,7 +737,7 @@ describe("V4PredictorPage auto-dashboard", () => {
                 state: "post",
                 actual: [1, 1],
                 prediction: "1-1",
-                category: "MAX EP: 1-1",
+                category: "CONSENSUS: 1-1",
                 enginePrediction: "1-1",
               },
             ],
@@ -740,10 +758,10 @@ describe("V4PredictorPage auto-dashboard", () => {
       await Promise.resolve();
     });
 
-    expect(container.textContent).toContain("MAX EP: 2-0");
-    expect(container.textContent).toContain("MAX EP: 2-1");
-    expect(container.textContent).toContain("MAX EP: 0-2");
-    expect(container.textContent).toContain("MAX EP: 1-1");
+    expect(container.textContent).toContain("CONSENSUS: 2-0");
+    expect(container.textContent).toContain("CONSENSUS: 2-1");
+    expect(container.textContent).toContain("CONSENSUS: 0-2");
+    expect(container.textContent).toContain("CONSENSUS: 1-1");
     expect(container.textContent).toContain("2-1");
     expect(container.textContent).toContain("0-2");
     // 2-0 exact (20) + 2-1 exact (20) + 0-2 exact (20) + 1-1 exact (20) = 80.

@@ -14,7 +14,6 @@
 
 import { buildTeamStatProfile, type TeamStatProfile, type StatDistribution } from "./sofascore";
 import { resilientJson } from "./httpClient";
-import { db } from "@/db";
 import { teamProfiles } from "@/db/schema";
 import { eq, desc } from "drizzle-orm";
 
@@ -205,6 +204,9 @@ export async function getCachedMeshProfile(
   // Current cache entries are not point-in-time snapshots. Never read or
   // overwrite them for a cutoff request.
   if (beforeDate !== undefined) return buildMeshProfile(teamName, leagueSlug, beforeDate);
+  // Load the optional persistence layer only when a current profile is asked
+  // for. Pure/historical Engine callers must work without DATABASE_URL.
+  const { db } = await import("@/db");
   const key = `${leagueSlug}|${teamName}`.toLowerCase().trim();
 
   // 1. Try cache.

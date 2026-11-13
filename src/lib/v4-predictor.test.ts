@@ -20,7 +20,7 @@ import {
   getCorrectScores,
   maxExpectedPointsPick,
   type OneX2,
-} from "@/app/api/v4-predictor/auto/route";
+} from "@/lib/engine/v4-pricing";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -80,7 +80,7 @@ describe("v4-predictor presentation model", () => {
   });
 
   it("targets the 20-point full hit, scaled by the pick's Expected Points when known", () => {
-    // No EP on the payload: the maximiser is aiming at the full exact-score 20.
+    // No EP on the payload: the selector is aiming at the full exact-score 20.
     expect(targetPointsForPick(undefined)).toBe(20);
     expect(targetPointsForPick(null)).toBe(20);
     expect(targetPointsForPick(Number.NaN)).toBe(20);
@@ -238,7 +238,7 @@ describe("maxExpectedPointsPick — Pure Points Maximiser", () => {
 
 // ─── Route integration ───────────────────────────────────────────────────────
 
-describe("GET /api/v4-predictor/auto — Pure Points Maximiser route", () => {
+describe("GET /api/v4-predictor/auto — Consensus Override route", () => {
   it("runs the Engine on every fixture, keeps odds for pre-match and strips them for finished games", async () => {
     // Two upcoming fixtures (with bookmaker odds) and one finished fixture
     // whose summary carries a closing line — which must NOT reach the Engine.
@@ -310,7 +310,11 @@ describe("GET /api/v4-predictor/auto — Pure Points Maximiser route", () => {
       const { GET } = await import("@/app/api/v4-predictor/auto/route");
       const response = await GET(new Request("http://localhost/api/v4-predictor/auto?week=8"));
       expect(response.status).toBe(200);
-      const { fixtures: rows } = await response.json();
+      const { fixtures: rows, strategy } = await response.json();
+      expect(strategy).toMatchObject({
+        id: "consensus",
+        backtest: { fixtureCount: 100, average: 64, floor: 30, hundredPlus: 1 },
+      });
 
       // The Engine ran on all three fixtures — no Snipe bypass any more.
       expect(runEngineMock).toHaveBeenCalledTimes(3);
@@ -338,20 +342,20 @@ describe("GET /api/v4-predictor/auto — Pure Points Maximiser route", () => {
       expect(post.fx.odds).toBeNull();
       expect(post.summary?.odds).toBeNull();
 
-      // Pure EP maximiser: every row carries a "MAX EP: <score>" label, its EP,
-      // and no tranche at all.
+      // Consensus Override: V2 outcome, Engine modal score inside that outcome.
       expect(rows).toHaveLength(3);
       for (const row of rows) {
         expect(row.prediction).toMatch(/^\d{1,2}-\d{1,2}$/);
-        expect(row.category).toBe(`MAX EP: ${row.prediction}`);
+        expect(row.category).toBe(`CONSENSUS: ${row.prediction}`);
+        expect(row.v2Prediction).toMatch(/^\d{1,2}-\d{1,2}$/);
         expect(row).not.toHaveProperty("tranche");
         expect(row.ep).toBeGreaterThan(0);
         expect(row.probabilities.home + row.probabilities.draw + row.probabilities.away).toBeCloseTo(1, 2);
       }
       // Rows stay in kick-off order: the finished game sorts first.
       expect(rows[0]).toMatchObject({ state: "post", actual: [2, 1] });
-      // Arsenal (λ 2.2 / 0.6) → the highest-EP line is the modal Home win 2-0.
-      expect(rows[1]).toMatchObject({ category: "MAX EP: 2-0", prediction: "2-0", actual: null });
+      // Arsenal's V2 Home Fortress outcome is H; the Engine's modal H score is 2-0.
+      expect(rows[1]).toMatchObject({ category: "CONSENSUS: 2-0", prediction: "2-0", v2Category: "SNIPE: Home Fortress", actual: null });
     } finally {
       vi.doUnmock("@/lib/espn");
       vi.doUnmock("@/lib/engine/sofascore");
@@ -360,7 +364,7 @@ describe("GET /api/v4-predictor/auto — Pure Points Maximiser route", () => {
     }
   });
 
-  it("still scores finished fixtures and drops predictions when the Engine cannot load", async () => {
+  it("still scores finished fixtures and uses V2 + model pricing when the Engine cannot load", async () => {
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const fixtures = [
       {
@@ -400,11 +404,11 @@ describe("GET /api/v4-predictor/auto — Pure Points Maximiser route", () => {
       const response = await GET(new Request("http://localhost/api/v4-predictor/auto?week=9"));
       expect(response.status).toBe(200);
       const { fixtures: rows } = await response.json();
-      // Model-only pricing (λ 1.35 / 1.15): P(Home) 0.394 outweighs the draw,
-      // so the highest-EP scoreline is the modal Home win 1-0.
+      // Both slates have a V2 draw outcome (chaos-vs-chaos / mid-table deadlock);
+      // the fallback grid's most probable draw is 1-1.
       expect(rows.map((r: { prediction: string; category: string }) => [r.category, r.prediction])).toEqual([
-        ["MAX EP: 1-0", "1-0"],
-        ["MAX EP: 1-0", "1-0"],
+        ["CONSENSUS: 1-1", "1-1"],
+        ["CONSENSUS: 1-1", "1-1"],
       ]);
       expect(rows[0].actual).toEqual([1, 1]);
       expect(rows[1].actual).toBeNull();

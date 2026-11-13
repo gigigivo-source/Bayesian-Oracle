@@ -290,7 +290,7 @@ function enumerateDays(from: string, to: string): string[] {
 
 // ─── Matchweek helpers ────────────────────────────────────────────────────────
 
-interface OpenfootballScheduleRow {
+export interface OpenfootballScheduleRow {
   round?:  string;
   date?:   string;
   time?:   string;
@@ -461,17 +461,29 @@ function clusterCalendarDays(calendar: string[], week: number): string[] {
   return clusters[week - 1] ?? [];
 }
 
+/** Optional archived schedule for deterministic replays. mergeEspn=false
+ * keeps the reader entirely offline; production callers retain ESPN merging. */
+export interface ScoreboardScheduleSnapshot {
+  rows: readonly OpenfootballScheduleRow[];
+  mergeEspn?: boolean;
+}
+
 async function fetchMatchweekFixtures(
   slug: string,
   leagueName: string,
   week: number,
   probeData: EspnScoreboard | null,
+  snapshot?: ScoreboardScheduleSnapshot,
 ): Promise<FixtureLite[]> {
-  const rows = await fetchOpenfootballSeasonRows(slug);
+  const rows = snapshot?.rows ?? await fetchOpenfootballSeasonRows(slug);
   const weekRows = (rows ?? []).filter((r) => parseRoundNumber(r.round) === week);
   const ofFixtures = weekRows
     .map((r) => openfootballRowToFixture(r, slug, leagueName, week))
     .filter((f): f is FixtureLite => f !== null);
+
+  if (ofFixtures.length > 0 && snapshot?.mergeEspn === false) {
+    return ofFixtures.sort((a, b) => Date.parse(a.date) - Date.parse(b.date));
+  }
 
   let espnData = probeData;
   if (!espnData) {
@@ -592,6 +604,7 @@ export async function getCurrentMatchweek(
  *                (yesterday → tomorrow) to catch all live, upcoming and very
  *                recently finished matches.
  * @param week    Optional matchweek number (1–38). Probes ESPN `?week=X` first;
+ * @param scheduleSnapshot Optional archived rows; set mergeEspn=false for no network.
  *                if ESPN soccer omits week metadata (or is unreachable), resolves
  *                the exact matchweek fixtures from the season schedule and merges
  *                ESPN scores/states for those match dates.
@@ -600,6 +613,7 @@ export async function fetchScoreboard(
   slug:   string,
   dates?: string | null,
   week?:  number,
+  scheduleSnapshot?: ScoreboardScheduleSnapshot,
 ): Promise<FixtureLite[]> {
   const leagueName = LEAGUE_MAP[slug]?.name ?? slug;
 
@@ -607,7 +621,7 @@ export async function fetchScoreboard(
     if (slug === "all") return [];
 
     const probeUrl = `${BASE}/${slug}/scoreboard?week=${week}&limit=50`;
-    const probeData = await espnFetch<EspnScoreboard>(probeUrl, 60_000, {
+    const probeData = scheduleSnapshot ? null : await espnFetch<EspnScoreboard>(probeUrl, 60_000, {
       retries: 1,
       timeoutMs: 4000,
       totalTimeoutMs: 6000,
@@ -626,7 +640,7 @@ export async function fetchScoreboard(
       if (matched.length > 0) return matched;
     }
 
-    return fetchMatchweekFixtures(slug, leagueName, week, probeData);
+    return fetchMatchweekFixtures(slug, leagueName, week, probeData, scheduleSnapshot);
   }
 
   // When no date supplied, fetch a 3-day window: yesterday, today, tomorrow.

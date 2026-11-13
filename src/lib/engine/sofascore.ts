@@ -65,7 +65,7 @@ interface EspnTeamsResponse {
   }>;
 }
 
-interface EspnScheduleCompetitor {
+export interface EspnScheduleCompetitor {
   id?:       string;
   homeAway?: string;
   score?:    number | string | { value?: number; displayValue?: string } | null;
@@ -349,6 +349,14 @@ function parseCompetitorScore(
   return null;
 }
 
+export type HistoricalScheduleEvent = NonNullable<EspnScheduleResponse["events"]>[number];
+/** Archived team identity + schedule. The same cutoff/dedup/form logic below
+ * applies; supplying a snapshot avoids treating today's ESPN feed as history. */
+export interface HistoricalFormSnapshot {
+  team: { id: string; slug: string };
+  events: readonly HistoricalScheduleEvent[];
+}
+
 /**
  * Build a point-in-time TeamForm from the last `lastN` (default 5) completed
  * matches played strictly BEFORE `beforeDate` using the team's ESPN schedule.
@@ -358,21 +366,26 @@ export async function buildHistoricalTeamForm(
   preferSlug: string | undefined,
   beforeDate: string,
   lastN = 5,
+  snapshot?: HistoricalFormSnapshot,
 ): Promise<TeamForm | null> {
   const cutoff = Date.parse(beforeDate);
   if (!Number.isFinite(cutoff)) return null;
 
-  const resolved = await findTeamId(teamName, preferSlug);
+  const resolved = snapshot?.team ?? await findTeamId(teamName, preferSlug);
   if (!resolved) return null;
   const { id, slug } = resolved;
 
   const yr = new Date(cutoff).getUTCFullYear();
   const events: NonNullable<EspnScheduleResponse["events"]> = [];
-  for (const season of [yr, yr - 1]) {
-    const sched = await ej<EspnScheduleResponse>(
-      `${ESPN}/${slug}/teams/${id}/schedule?season=${season}`,
-    );
-    events.push(...(sched?.events ?? []));
+  if (snapshot) {
+    events.push(...snapshot.events);
+  } else {
+    for (const season of [yr, yr - 1]) {
+      const sched = await ej<EspnScheduleResponse>(
+        `${ESPN}/${slug}/teams/${id}/schedule?season=${season}`,
+      );
+      events.push(...(sched?.events ?? []));
+    }
   }
 
   const eligible = events.filter((e) => {

@@ -23,6 +23,24 @@ type AutoFixtureRow = {
   category: string | null;
   /** Expected Points the pick was chosen on: 10 × P(outcome) + 10 × P(exact). */
   ep: number | null;
+  v2Category: string | null;
+  v2Prediction: string | null;
+};
+
+type StrategyInfo = {
+  id: string;
+  name: string;
+  description: string;
+  backtest: {
+    season: string;
+    weeks: number[];
+    fixtureCount: number;
+    average: number;
+    floor: number;
+    hundredPlus: number;
+    weekly: number[];
+    mode: string;
+  } | null;
 };
 
 const MATCHWEEKS = Array.from({ length: 38 }, (_, i) => i + 1);
@@ -56,6 +74,8 @@ function normalizeRow(raw: unknown): AutoFixtureRow | null {
     prediction?: unknown;
     category?: unknown;
     ep?: unknown;
+    v2Category?: unknown;
+    v2Prediction?: unknown;
   };
   const home = normalizeTeam(row.home);
   const away = normalizeTeam(row.away);
@@ -87,7 +107,30 @@ function normalizeRow(raw: unknown): AutoFixtureRow | null {
     typeof row.ep === "number" && Number.isFinite(row.ep) && row.ep >= 0
       ? row.ep
       : null;
-  return { home, away, state, actual, enginePrediction, prediction, category, ep };
+  const v2Category = typeof row.v2Category === "string" && row.v2Category.trim() ? row.v2Category.trim() : null;
+  const v2Prediction = typeof row.v2Prediction === "string" && isScoreline(row.v2Prediction) ? row.v2Prediction : null;
+  return { home, away, state, actual, enginePrediction, prediction, category, ep, v2Category, v2Prediction };
+}
+
+function normalizeStrategy(raw: unknown): StrategyInfo | null {
+  if (!raw || typeof raw !== "object") return null;
+  const value = raw as Record<string, unknown>;
+  if (typeof value.id !== "string" || typeof value.name !== "string" || typeof value.description !== "string") return null;
+  const bt = value.backtest as Record<string, unknown> | null | undefined;
+  const backtest = bt && typeof bt === "object" &&
+    typeof bt.season === "string" && Array.isArray(bt.weeks) &&
+    typeof bt.fixtureCount === "number" && Number.isFinite(bt.fixtureCount) &&
+    typeof bt.average === "number" && Number.isFinite(bt.average) &&
+    typeof bt.floor === "number" && Number.isFinite(bt.floor) &&
+    typeof bt.hundredPlus === "number" && Number.isFinite(bt.hundredPlus) &&
+    Array.isArray(bt.weekly) && typeof bt.mode === "string"
+    ? {
+        season: bt.season, weeks: bt.weeks.filter((n): n is number => typeof n === "number"),
+        fixtureCount: bt.fixtureCount, average: bt.average, floor: bt.floor,
+        hundredPlus: bt.hundredPlus, weekly: bt.weekly.filter((n): n is number => typeof n === "number"), mode: bt.mode,
+      }
+    : null;
+  return { id: value.id, name: value.name, description: value.description, backtest };
 }
 
 function StatusBadge({ state }: { state: AutoFixtureRow["state"] }) {
@@ -145,6 +188,7 @@ export default function V4PredictorPage() {
   const [total, setTotal] = useState<number | null>(null);
   const [loadingFixtures, setLoadingFixtures] = useState(true);
   const [error, setError] = useState("");
+  const [strategy, setStrategy] = useState<StrategyInfo | null>(null);
   const requestIdRef = useRef(0);
   const mountedRef = useRef(true);
 
@@ -164,7 +208,7 @@ export default function V4PredictorPage() {
         cache: "no-store",
       });
       if (!response.ok) throw new Error("Failed to fetch");
-      const data: { week?: unknown; fixtures?: unknown } =
+      const data: { week?: unknown; fixtures?: unknown; strategy?: unknown } =
         await response.json();
       if (!mountedRef.current || requestId !== requestIdRef.current) return;
       if (
@@ -210,6 +254,7 @@ export default function V4PredictorPage() {
         newScorecard = scored;
         newTotal = points;
       }
+      setStrategy(normalizeStrategy(data?.strategy));
       setFixtures(rows);
       setPredictions(newPredictions);
       setScorecard(newScorecard);
@@ -285,14 +330,24 @@ export default function V4PredictorPage() {
             🔮 V4 Ultimate Predictor
           </h1>
           <p className="mt-2 text-sm text-slate-400">
-            Pure Expected-Points Premier League score predictions, loaded
-            automatically for Matchweek {selectedWeek}. Every scoreline from
-            0-0 to 8-8 is valued by{" "}
-            <span className="text-amber-400">
-              EP = 10 × P(outcome) + 10 × P(exact score)
-            </span>{" "}
-            and the highest-EP score wins — no floors, no ceilings.
+            {strategy?.description ?? "V2 chooses the outcome; the Engine chooses the most probable scoreline matching that outcome."}{" "}
+            Loaded automatically for Matchweek {selectedWeek}.
           </p>
+          <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
+            <span className="rounded-full border border-amber-400/30 bg-amber-400/10 px-3 py-1 font-semibold text-amber-300">
+              {strategy?.name ?? "Consensus Override"}
+            </span>
+            {strategy?.backtest && (
+              <span className="rounded-full border border-white/10 bg-white/[0.03] px-3 py-1 text-slate-300">
+                MW1–10 backtest: {strategy.backtest.average.toFixed(1)} avg · {strategy.backtest.floor} floor · {strategy.backtest.hundredPlus}×100+
+              </span>
+            )}
+          </div>
+          {strategy?.backtest && (
+            <p className="mt-2 text-xs text-slate-500">
+              {strategy.backtest.fixtureCount} fixtures · archived pre-match odds replay. Historical live scorecards may differ because closing odds are stripped; past results do not guarantee future scores.
+            </p>
+          )}
         </header>
 
         <section className="rounded-2xl border border-white/[0.08] bg-white/[0.03] p-4">
@@ -318,7 +373,12 @@ export default function V4PredictorPage() {
                       <MatchCell row={row} />
                     </td>
                     <td className="p-2 text-slate-100">
-                      {predictions[i]?.Category ?? ""}
+                      <span>{predictions[i]?.Category ?? ""}</span>
+                      {row.v2Category && (
+                        <span className="mt-0.5 block text-xs text-slate-500" title={`V2 pick: ${row.v2Prediction ?? ""}`}>
+                          {row.v2Category}
+                        </span>
+                      )}
                     </td>
                     <td className="p-2 font-mono text-slate-100">
                       {predictions[i]?.Prediction ?? ""}

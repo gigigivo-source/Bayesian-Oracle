@@ -1,14 +1,10 @@
 import * as espn from "@/lib/espn";
 import type { EngineResult } from "@/lib/engine";
-import {
-  buildCorrectScoreGrid,
-  DIXON_COLES_RHO,
-  pickMaxExpectedPoints,
-  type ExpectedPointsPick,
-  type ScoreCell,
-} from "@/lib/engine/markets";
 import { buildHistoricalTeamForm } from "@/lib/engine/sofascore";
-import { translateTeamName } from "@/lib/v4-predictor";
+import { toV4TeamName } from "@/lib/v4-predictor";
+import { selectV4Slate, V4_SYSTEMS } from "@/lib/engine/v4-strategies";
+import { engineLambdas, get1X2, getCorrectScores } from "@/lib/engine/v4-pricing";
+import backtestResults from "@/lib/engine/v4-backtest-results.json";
 import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
@@ -18,209 +14,23 @@ export const maxDuration = 60;
 const DEFAULT_WEEK = 11;
 
 /**
- * V4 Predictor — Pure Points Maximiser (no safety nets).
+ * V4 Predictor — Consensus Override.
  *
- * The blind V2 static rules are gone, and so are the FLOOR / CEILING tranches
- * that used to force a favourite's safest line or a draw snipe. Every fixture
- * in the matchweek is priced by the Engine (Dixon–Coles corrected 1X2 +
- * Correct Score grid 0-0 … 8-8) and the route simply returns the scoreline
- * with the highest Expected Points:
- *
- *   EP(score) = 10 × P(outcome of score) + 10 × P(exactly that score)
- *
- * If the math says 3-2 or 4-4, the app publishes 3-2 or 4-4.
+ * The MW1–10 archived-data backtest selected this system: V2 chooses H/D/A
+ * (including its original matchweek snipe quotas), then the Engine publishes
+ * the highest-probability exact score inside that outcome. The selector is
+ * shared with scripts/backtest-v4.ts; the UI never re-picks a scoreline.
  */
-
-const EXTRA_TEAM_MAP: Record<string, string> = {
-  "AFC Bournemouth": "Bournemouth",
-  "Wolverhampton Wanderers": "Wolves",
-  "West Ham United": "West Ham",
-  "Leicester City": "Leicester",
-};
-
-function toV4TeamName(name: string): string {
-  const trimmed = name.trim();
-  const stripped = trimmed.replace(/\s+(?:AFC|FC)$/i, "").trim();
-  const mapped = EXTRA_TEAM_MAP[trimmed] ?? EXTRA_TEAM_MAP[stripped] ?? stripped;
-  return translateTeamName(mapped);
-}
+const ACTIVE_SYSTEM =
+  V4_SYSTEMS.find((system) => system.id === backtestResults.winner) ??
+  V4_SYSTEMS.find((system) => system.id === "consensus")!;
+const WINNER_SUMMARY = backtestResults.systems.find((system) => system.id === ACTIVE_SYSTEM.id)!;
 
 function parseWeekParam(raw: string | null): number | null {
   if (raw === null || raw.trim() === "") return null;
   const parsed = Number(raw);
   if (!Number.isInteger(parsed) || parsed < 1 || parsed > 38) return NaN;
   return parsed;
-}
-
-type MarketLike = {
-  family?: string;
-  name: string;
-  selection?: string;
-  hitRate: number;
-};
-
-// ─── Engine result → probabilities ───────────────────────────────────────────
-
-export type Outcome = "H" | "D" | "A";
-
-export interface OneX2 {
-  h: number;
-  d: number;
-  a: number;
-}
-
-/**
- * Read the 1X2 split the Engine priced. The Engine's markets are already
- * Dixon–Coles corrected and normalised, so this is a straight lookup; when a
- * family is missing, fall back to the canonical Poisson pair the route derives
- * from the Engine lambdas so every fixture always has a usable split.
- */
-export function get1X2(
-  engineResult: EngineResult | null,
-  fallback: { homeGoals: number; awayGoals: number },
-): OneX2 {
-  const markets: MarketLike[] = engineResult?.markets ?? [];
-  const resultMarkets = markets.filter((m) => /Match Result/i.test(m.name));
-  const homeTeam = engineResult?.match?.homeTeam ?? "";
-  const awayTeam = engineResult?.match?.awayTeam ?? "";
-
-  const pick = (test: (sel: string) => boolean) => {
-    const market = resultMarkets.find((m) => test(`${m.selection ?? ""} ${m.name}`));
-    return market && market.hitRate > 0 ? market.hitRate : null;
-  };
-
-  const home =
-    pick((sel) => homeTeam !== "" && sel.includes(homeTeam) && /win/i.test(sel)) ??
-    pick((sel) => /home win/i.test(sel));
-  const away =
-    pick((sel) => awayTeam !== "" && sel.includes(awayTeam) && /win/i.test(sel)) ??
-    pick((sel) => /away win/i.test(sel));
-  const draw = pick((sel) => /draw/i.test(sel) && !/or/i.test(sel));
-
-  // No usable 1X2 family: price the split off the Engine's own lambdas (the
-  // same Poisson pair the Correct Score grid is built from), and only then off
-  // the caller's fallback pair.
-  if (home === null || draw === null || away === null) {
-    const pair = engineLambdas(engineResult) ?? fallback;
-    return outcomeFromLambdas(pair.homeGoals, pair.awayGoals);
-  }
-
-  const total = home + draw + away;
-  if (!Number.isFinite(total) || total <= 0) {
-    const pair = engineLambdas(engineResult) ?? fallback;
-    return outcomeFromLambdas(pair.homeGoals, pair.awayGoals);
-  }
-  return { h: home / total, d: draw / total, a: away / total };
-}
-
-function outcomeFromLambdas(homeGoals: number, awayGoals: number): OneX2 {
-  const { outcome } = buildCorrectScoreGrid(homeGoals, awayGoals, DIXON_COLES_RHO);
-  return { h: outcome.home, d: outcome.draw, a: outcome.away };
-}
-
-/** Engine lambdas → the Poisson pair the score grid is built on. */
-export function engineLambdas(engineResult: EngineResult | null): { homeGoals: number; awayGoals: number } | null {
-  const home = engineResult?.lambdas?.["λ Home Goals"];
-  const away = engineResult?.lambdas?.["λ Away Goals"];
-  if (
-    typeof home !== "number" || typeof away !== "number" ||
-    !Number.isFinite(home) || !Number.isFinite(away) || home < 0 || away < 0
-  ) {
-    return null;
-  }
-  return { homeGoals: home, awayGoals: away };
-}
-
-/**
- * The Correct Score grid the Engine priced — Dixon–Coles corrected and
- * renormalised. Prefers the grid the Engine published with its result; falls
- * back to rebuilding it from the Engine lambdas, then to the caller's pair.
- */
-export function getCorrectScores(
-  engineResult: EngineResult | null,
-  fallback: { homeGoals: number; awayGoals: number },
-): ScoreCell[] {
-  if (engineResult?.scoreGrid?.cells?.length) return engineResult.scoreGrid.cells;
-
-  const lambdas = engineLambdas(engineResult) ?? fallback;
-  const grid = buildCorrectScoreGrid(lambdas.homeGoals, lambdas.awayGoals, DIXON_COLES_RHO);
-
-  const markets: MarketLike[] = engineResult?.markets ?? [];
-  const csMarkets = markets.filter((m) => /Correct Score/i.test(m.name));
-  if (csMarkets.length === 0) return grid.cells;
-
-  // The Engine published its own values; use them where present so the route
-  // picks from exactly what the Engine ranked.
-  return grid.cells.map((cell) => {
-    const label = `${cell.homeGoals}-${cell.awayGoals}`;
-    const market = csMarkets.find((m) => {
-      const text = `${m.selection ?? ""} ${m.name}`;
-      return new RegExp(`(?:^|\\D)${label}(?:\\D|$)`).test(text);
-    });
-    return market && market.hitRate > 0 ? { ...cell, probability: market.hitRate } : cell;
-  });
-}
-
-// The EP maximiser (`pickMaxExpectedPoints`) lives in the market registry, next
-// to the grid it ranks, so the route and the Engine agree on what "best
-// scoreline" means.
-
-// ─── Pure Expected Points maximiser ─────────────────────────────────────────
-
-/** Scoreline formatted the way the dashboard renders it: "3-1". */
-export function formatScore(homeGoals: number, awayGoals: number): string {
-  return `${homeGoals}-${awayGoals}`;
-}
-
-/** Everything the route needs to publish one fixture's MAX EP pick. */
-export interface MaxExpectedPointsOutcome {
-  /** "3-1" — the highest-EP scoreline on the grid. */
-  prediction: string;
-  /** "MAX EP: 3-1" — the label the table shows. */
-  category: string;
-  outcome: Outcome;
-  /** 10 × P(outcome) + 10 × P(exact score). */
-  ep: number;
-  /** P(Home) / P(Draw) / P(Away) for the picked scoreline's outcome. */
-  outcomeProbability: number;
-  /** Probability of the picked scoreline itself. */
-  exactProbability: number;
-}
-
-/** The label prefix every row carries — the pick is chosen purely on EP. */
-export const MAX_EP_PREFIX = "MAX EP";
-
-/** One fixture's probabilities + corrected score grid → its MAX EP pick. */
-export function maxExpectedPointsPick(
-  prediction: { probs: OneX2; scores: ScoreCell[] },
-): MaxExpectedPointsOutcome {
-  const pick: ExpectedPointsPick | null = pickMaxExpectedPoints(
-    prediction.scores,
-    { home: prediction.probs.h, draw: prediction.probs.d, away: prediction.probs.a },
-  );
-
-  // Degenerate grid (no cells at all — never produced by the Engine, but the
-  // model-only fallback must still emit a row): price the canonical 1-1.
-  if (!pick) {
-    return {
-      prediction: "1-1",
-      category: `${MAX_EP_PREFIX}: 1-1`,
-      outcome: "D",
-      ep: 0,
-      outcomeProbability: prediction.probs.d,
-      exactProbability: 0,
-    };
-  }
-
-  const scoreline = formatScore(pick.homeGoals, pick.awayGoals);
-  return {
-    prediction: scoreline,
-    category: `${MAX_EP_PREFIX}: ${scoreline}`,
-    outcome: pick.outcome,
-    ep: pick.ep,
-    outcomeProbability: pick.outcomeProb,
-    exactProbability: pick.exactProb,
-  };
 }
 
 export async function GET(request: Request) {
@@ -367,9 +177,13 @@ export async function GET(request: Request) {
       }),
     );
 
-    // STEP 3 — value every scoreline on every fixture's grid by its Expected
-    // Points and publish the highest one. No tranching, no floor, no ceiling.
-    const picks = priced.map((p) => maxExpectedPointsPick({ probs: p.probs, scores: p.scores }));
+    // STEP 3 — the backtest winner: V2 outcome first, Engine modal score
+    // inside that outcome second. One slate-wide pass preserves V2 quotas.
+    const picks = selectV4Slate(
+      ACTIVE_SYSTEM.id,
+      v4Fixtures,
+      priced.map((p) => ({ probs: p.probs, scores: p.scores })),
+    );
 
     const result = priced.map(({ fx, index, homeName, awayName }) => {
       const pick = picks[index];
@@ -410,10 +224,28 @@ export async function GET(request: Request) {
         outcomeProbability: Math.round(pick.outcomeProbability * 1000) / 1000,
         exactProbability: Math.round(pick.exactProbability * 1000) / 1000,
         outcome: pick.outcome,
+        v2Category: pick.v2Category ?? null,
+        v2Prediction: pick.v2Prediction ?? null,
       };
     });
 
-    return NextResponse.json({ week, fixtures: result });
+    return NextResponse.json({
+      week,
+      strategy: {
+        ...ACTIVE_SYSTEM,
+        backtest: {
+          season: backtestResults.season,
+          weeks: backtestResults.weeks,
+          fixtureCount: backtestResults.fixtureCount,
+          average: WINNER_SUMMARY.average,
+          floor: WINNER_SUMMARY.floor,
+          hundredPlus: WINNER_SUMMARY.hundredPlus,
+          weekly: WINNER_SUMMARY.weekly,
+          mode: backtestResults.mode,
+        },
+      },
+      fixtures: result,
+    });
   } catch (error) {
     console.error("V4 auto predictor failed", error);
     return NextResponse.json({ error: "Failed to fetch" }, { status: 500 });

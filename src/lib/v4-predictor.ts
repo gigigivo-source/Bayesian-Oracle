@@ -1,17 +1,9 @@
 // ĞIGI GIVØ — V4 Predictor client model.
 //
-// The blind V2 static rules (SNIPE / LOCK tiers driven by hard-coded team
-// lists) are gone, and so is FLOOR / CEILING tranching. Predictions are
-// produced by the Pure Points Maximiser in `/api/v4-predictor/auto`: every
-// fixture is priced by the MarketEngine (Dixon–Coles corrected 1X2 + Correct
-// Score grid 0-0 … 8-8) and the scoreline with the highest Expected Points is
-// published — `EP = 10 × P(outcome) + 10 × P(exact score)`.
-//
-// This module keeps the presentation helpers the dashboard needs — team-name
-// translation, scoreline validation, and the points scorecard — plus a thin
-// projection of the route's rows into the shape the table renders. It applies
-// no team lists and no static rules: the category shown is exactly the
-// Engine-driven pick the route returned.
+// The API owns selection: the MW1–10 backtest winner is Consensus Override
+// (V2 chooses the outcome; the Engine chooses its most likely matching score).
+// This module only translates names and projects the API's decision into the
+// dashboard/scorecard. It never applies team lists or re-picks a scoreline.
 
 export const TEAM_NAME_MAP: Record<string, string> = {
   "Manchester City": "Man City",
@@ -31,11 +23,25 @@ export function translateTeamName(espnName: string): string {
   return TEAM_NAME_MAP[espnName] || espnName;
 }
 
+const EXTRA_TEAM_NAME_MAP: Record<string, string> = {
+  "AFC Bournemouth": "Bournemouth",
+  "Wolverhampton Wanderers": "Wolves",
+  "West Ham United": "West Ham",
+  "Leicester City": "Leicester",
+};
+
+/** Normalise ESPN/openfootball club names to the labels the V4 rules use. */
+export function toV4TeamName(name: string): string {
+  const trimmed = name.trim();
+  const stripped = trimmed.replace(/\s+(?:AFC|FC)$/i, "").trim();
+  const mapped = EXTRA_TEAM_NAME_MAP[trimmed] ?? EXTRA_TEAM_NAME_MAP[stripped] ?? stripped;
+  return translateTeamName(mapped);
+}
+
 /**
  * A fixture as delivered by `/api/v4-predictor/auto`. `prediction` and
- * `category` are the maximiser's output ("3-1", "MAX EP: 3-1"); `ep` is the
- * Expected Points the pick was chosen on and `enginePrediction` mirrors the
- * scoreline for callers that only read that field.
+ * `category` are the consensus selector's output; `ep` describes that pick's
+ * expected points and `enginePrediction` mirrors it for legacy callers.
  */
 export type Fixture = {
   home: string;
@@ -79,7 +85,7 @@ export function getScorelineOutcome(prediction: string): "H" | "D" | "A" {
  * Project the route's rows into the table's `Prediction` shape.
  *
  * The route is the single source of truth: it already ran the Engine on every
- * fixture and published the highest-EP scoreline. Rows without a usable scoreline
+ * fixture and published the consensus scoreline. Rows without a usable scoreline
  * (a malformed payload, a fixture the Engine could not price at all) render
  * with no prediction rather than silently falling back to a static rule.
  */
