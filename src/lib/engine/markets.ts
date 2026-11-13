@@ -33,8 +33,141 @@ import {
   clamp,
   round,
 } from "./stats";
+import { dixonColesTau } from "../data/dixonColes";
 import type { LambdaSet } from "./lambdas";
 import type { LockedMatchObject, Market, Grade, PickExplanation } from "./types";
+
+// ─── Dixon–Coles low-score correction (score-dependent markets) ───────────────
+//
+// Independent Poisson mis-prices the four lowest cells of the score grid: real
+// football produces more 0-0 and 1-1 draws and fewer 1-0 / 0-1 wins than the
+// product of two Poissons implies. `dixonColesTau` supplies the published
+// multiplicative factor τ for exactly those four cells (see
+// `src/lib/data/dixonColes.ts`); every other cell is untouched (τ = 1).
+//
+// The correction is applied to the 1X2 outcome split and to the Correct Score
+// grid so both stay on one common, internally consistent scale. Because Στ over
+// the four cells is not exactly 1, the corrected grid is renormalised before
+// any probability is published — the 1X2 probabilities always sum to 1.0.
+
+/** The Dixon–Coles correlation parameter the V4 markets are priced with. */
+export const DIXON_COLES_RHO = -0.13;
+
+/**
+ * Highest goal count the 1X2 / Correct Score grid is evaluated over. 10 is far
+ * beyond any realistic λ, so the truncated grid carries essentially all mass
+ * (the residual tail is renormalised away, which is exactly correct).
+ */
+const SCORE_GRID_MAX_GOALS = 10;
+
+export interface ScoreCell {
+  homeGoals: number;
+  awayGoals: number;
+  /** P(home goals) × P(away goals), before the Dixon–Coles correction. */
+  poisson: number;
+  /** The Dixon–Coles multiplier for this cell (1 outside the low-score block). */
+  tau: number;
+  /** Normalised probability across the whole score grid — this one moves. */
+  probability: number;
+  /** Normalised probability if the grid were plain independent Poisson. */
+  poissonProbability: number;
+}
+
+export interface CorrectScoreGrid {
+  homeLambda: number;
+  awayLambda: number;
+  rho: number;
+  maxGoals: number;
+  /** Σ of the corrected, unnormalised grid — the renormalising constant. */
+  gridProbability: number;
+  /** Normalised 1X2 split (sums to 1) from the corrected grid. */
+  outcome: { home: number; draw: number; away: number };
+  cells: ScoreCell[];
+}
+
+/** Scoreline outcome for a cell: home win, draw or away win. */
+export function scoreOutcome(homeGoals: number, awayGoals: number): "H" | "D" | "A" {
+  return homeGoals > awayGoals ? "H" : homeGoals === awayGoals ? "D" : "A";
+}
+
+/**
+ * Highest-probability scoreline inside one outcome — the pick the V4 portfolio
+ * tranches publish ("the most likely Home win is 2-1", "the most likely draw is
+ * 1-1"). Returns null when the grid carries no cell in that outcome.
+ */
+export function pickBestScoreForOutcome(
+  scores: ScoreCell[],
+  outcome: "H" | "D" | "A",
+): { homeGoals: number; awayGoals: number; probability: number } | null {
+  let best: { homeGoals: number; awayGoals: number; probability: number } | null = null;
+  for (const cell of scores) {
+    if (scoreOutcome(cell.homeGoals, cell.awayGoals) !== outcome) continue;
+    if (!best || cell.probability > best.probability) {
+      best = { homeGoals: cell.homeGoals, awayGoals: cell.awayGoals, probability: cell.probability };
+    }
+  }
+  return best;
+}
+
+/**
+ * Build the Dixon–Coles corrected score grid + 1X2 split for a Poisson pair.
+ *
+ * `maxGoals` is exposed so callers (e.g. the V4 route) can generate the same
+ * grid the markets were priced from instead of re-deriving it.
+ */
+export function buildCorrectScoreGrid(
+  homeLambda: number,
+  awayLambda: number,
+  rho: number = DIXON_COLES_RHO,
+  maxGoals: number = SCORE_GRID_MAX_GOALS,
+): CorrectScoreGrid {
+  const size = Math.max(0, Math.floor(maxGoals));
+  const homePmf: number[] = [];
+  const awayPmf: number[] = [];
+  for (let goals = 0; goals <= size; goals++) {
+    homePmf.push(poissonPmf(goals, homeLambda));
+    awayPmf.push(poissonPmf(goals, awayLambda));
+  }
+
+  const cells: ScoreCell[] = [];
+  let gridProbability = 0;
+  let poissonProbability = 0;
+  for (let homeGoals = 0; homeGoals <= size; homeGoals++) {
+    for (let awayGoals = 0; awayGoals <= size; awayGoals++) {
+      const poisson = homePmf[homeGoals] * awayPmf[awayGoals];
+      const tau = dixonColesTau(homeGoals, awayGoals, homeLambda, awayLambda, rho);
+      const corrected = poisson * tau;
+      gridProbability += corrected;
+      poissonProbability += poisson;
+      cells.push({ homeGoals, awayGoals, poisson, tau, probability: corrected, poissonProbability: poisson });
+    }
+  }
+
+  // Renormalise: the τ factors do not sum to one across the corrected cells.
+  const normaliser = gridProbability > 0 ? gridProbability : 1;
+  const poissonNormaliser = poissonProbability > 0 ? poissonProbability : 1;
+  let home = 0, draw = 0, away = 0;
+  for (const cell of cells) {
+    cell.probability /= normaliser;
+    cell.poissonProbability /= poissonNormaliser;
+    if (cell.homeGoals > cell.awayGoals) home += cell.probability;
+    else if (cell.homeGoals === cell.awayGoals) draw += cell.probability;
+    else away += cell.probability;
+  }
+
+  // Guard against float drift so the published split always sums to exactly 1.
+  const outcomeTotal = home + draw + away;
+  const scale = outcomeTotal > 0 ? 1 / outcomeTotal : 0;
+  return {
+    homeLambda,
+    awayLambda,
+    rho,
+    maxGoals: size,
+    gridProbability,
+    outcome: { home: home * scale, draw: draw * scale, away: away * scale },
+    cells,
+  };
+}
 
 // ─── Consecutive-goals run-length model (F14) ────────────────────────────────
 //
@@ -248,11 +381,14 @@ export class MarketEngine {
       }
       this.add(pfx, `${tm} 4+ Goals`, F, "4 or more Goals", "3 or fewer Goals", poissonSf(4, lam));
     }
-    // Correct Scores 4×4 = 16
+    // Correct Scores 4×4 = 16 — Dixon–Coles corrected + renormalised, so the
+    // grid carries the same low-score shape as the 1X2 split above.
+    const scoreGrid = buildCorrectScoreGrid(homeGoals, awayGoals, DIXON_COLES_RHO);
     for (let h = 0; h <= 3; h++) {
       for (let a = 0; a <= 3; a++) {
+        const cell = scoreGrid.cells.find((c) => c.homeGoals === h && c.awayGoals === a);
         this.add("CS", `Correct Score ${h}-${a}`, F, `Score ${h}-${a}`, "Other Score",
-          poissonPmf(h, homeGoals) * poissonPmf(a, awayGoals), true);
+          cell?.probability ?? 0, true);
       }
     }
     // Halves: 2 × 2 = 4
@@ -263,15 +399,9 @@ export class MarketEngine {
   }
 
   private result1x2(pfx: string, name: string, family: string, lamH: number, lamA: number) {
-    let pHome = 0, pDraw = 0, pAway = 0;
-    for (let h = 0; h <= 9; h++) {
-      for (let a = 0; a <= 9; a++) {
-        const p = poissonPmf(h, lamH) * poissonPmf(a, lamA);
-        if      (h > a) pHome += p;
-        else if (h === a) pDraw += p;
-        else            pAway += p;
-      }
-    }
+    // Dixon–Coles: τ on 0-0 / 1-0 / 0-1 / 1-1, then renormalise to 1.0.
+    const { outcome } = buildCorrectScoreGrid(lamH, lamA, DIXON_COLES_RHO);
+    const pHome = outcome.home, pDraw = outcome.draw, pAway = outcome.away;
     // 1X2: 3
     this.add(pfx, `${name}: ${this.match.homeTeam} Win`, family, `${this.match.homeTeam} Win`, "Draw or Away Win", pHome, true);
     this.add(pfx, `${name}: Draw`,                       family, "Draw",                        "Home or Away Win", pDraw, true);
@@ -521,6 +651,16 @@ export class MarketEngine {
   }
 
   // ─── Orchestrate ──────────────────────────────────────────────────────────
+  /**
+   * The Dixon–Coles corrected 1X2 + Correct Score grid the buildings above
+   * priced from — exposed so downstream consumers (the V4 portfolio tranching
+   * route) read the exact probabilities the Engine published instead of
+   * re-deriving them.
+   */
+  correctScoreGrid(): CorrectScoreGrid {
+    return buildCorrectScoreGrid(this.lam.homeGoals, this.lam.awayGoals, DIXON_COLES_RHO);
+  }
+
   buildAll(): Market[] {
     this.buildGoals();       // F1  — 50 lines
     this.buildCorners();     // F2  — 26 lines

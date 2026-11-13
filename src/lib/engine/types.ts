@@ -1,3 +1,5 @@
+import type { CorrectScoreGrid } from "./markets";
+
 // ĞIGI GIVØ — Shared types
 
 // ─── Primitive aliases ────────────────────────────────────────────────────────
@@ -232,6 +234,12 @@ export interface EngineResult {
   match:             LockedMatchObject;
   input:             PredictInput;
   lambdas:           Record<string, number>;
+  /**
+   * Dixon–Coles corrected 1X2 + Correct Score grid the score-dependent
+   * markets were priced from (see `buildCorrectScoreGrid`). Optional for
+   * back-compat with stored results produced before the correction landed.
+   */
+  scoreGrid?:        CorrectScoreGrid;
   deepStats?:        DeepStatsVector;
   agents:            AgentSignal[];
   markets:           Market[];
