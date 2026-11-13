@@ -1,26 +1,25 @@
 import { describe, expect, it, vi } from "vitest";
+import * as client from "@/lib/v4-predictor";
 import {
   buildPredictions,
   calculateScore,
   getScorelineOutcome,
   isScoreline,
-  targetPointsForCategory,
+  targetPointsForPick,
 } from "@/lib/v4-predictor";
 import {
   buildCorrectScoreGrid,
   DIXON_COLES_RHO,
   pickBestScoreForOutcome,
+  pickMaxExpectedPoints,
   type ScoreCell,
 } from "@/lib/engine/markets";
 import {
-  CEILING_SIZE,
-  FLOOR_SIZE,
-  TOSS_UP_DRAW_FLOOR,
-  TOSS_UP_GAP_CEILING,
+  formatScore,
   get1X2,
   getCorrectScores,
-  trancheSlate,
-  type TranchePrediction,
+  maxExpectedPointsPick,
+  type OneX2,
 } from "@/app/api/v4-predictor/auto/route";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -29,8 +28,8 @@ import {
 function priced(
   homeLambda: number,
   awayLambda: number,
-  overrides: Partial<{ h: number; d: number; a: number }> = {},
-): TranchePrediction {
+  overrides: Partial<OneX2> = {},
+): { probs: OneX2; scores: ScoreCell[] } {
   const grid = buildCorrectScoreGrid(homeLambda, awayLambda, DIXON_COLES_RHO);
   return {
     probs: { h: overrides.h ?? grid.outcome.home, d: overrides.d ?? grid.outcome.draw, a: overrides.a ?? grid.outcome.away },
@@ -38,25 +37,24 @@ function priced(
   };
 }
 
+/** The pure-EP winner for a λ pair, straight from the grid. */
+function maxEpScore(homeLambda: number, awayLambda: number): string {
+  const grid = buildCorrectScoreGrid(homeLambda, awayLambda, DIXON_COLES_RHO);
+  const pick = pickMaxExpectedPoints(grid.cells, grid.outcome)!;
+  return `${pick.homeGoals}-${pick.awayGoals}`;
+}
+
 function modalScore(scores: ScoreCell[], outcome: "H" | "D" | "A"): string {
   const cell = pickBestScoreForOutcome(scores, outcome)!;
   return `${cell.homeGoals}-${cell.awayGoals}`;
 }
 
-/** Ten fixture slate: 8 strong favourites, one toss-up, one lopsided draw. */
-function tenFixtureSlate(): TranchePrediction[] {
-  return [
-    priced(2.4, 0.5),  // 0 — huge home favourite
-    priced(2.0, 0.7),  // 1 — strong home favourite
-    priced(0.5, 2.3),  // 2 — strong away favourite
-    priced(1.8, 0.8),  // 3 — home favourite
-    priced(0.7, 1.9),  // 4 — away favourite
-    priced(1.7, 0.9),  // 5 — home favourite
-    priced(1.6, 0.9),  // 6 — home favourite
-    priced(0.9, 1.6),  // 7 — away favourite
-    priced(1.0, 1.0),  // 8 — coin-flip toss-up (P(Draw) ≈ 0.34)
-    priced(1.0, 1.0),  // 9 — second coin-flip toss-up
-  ];
+/** Recompute EP by hand for the chosen scoreline — the formula, not the code. */
+function epOf(scores: ScoreCell[], probs: OneX2, score: string): number {
+  const [h, a] = score.split("-").map(Number);
+  const cell = scores.find((c) => c.homeGoals === h && c.awayGoals === a)!;
+  const outcomeProb = h > a ? probs.h : h === a ? probs.d : probs.a;
+  return 10 * outcomeProb + 10 * cell.probability;
 }
 
 // ─── Client model ────────────────────────────────────────────────────────────
@@ -64,28 +62,35 @@ function tenFixtureSlate(): TranchePrediction[] {
 describe("v4-predictor presentation model", () => {
   it("projects route rows into table predictions without inventing scorelines", () => {
     const predictions = buildPredictions([
-      { home: "Arsenal", away: "Coventry", prediction: "2-0", category: "FLOOR: Home Win" },
-      { home: "Everton", away: "Fulham", prediction: "1-1", category: "CEILING: Draw Snipe" },
-      { home: "Hull", away: "Leeds", enginePrediction: "0-2", category: "FLOOR: Away Win" },
+      { home: "Arsenal", away: "Coventry", prediction: "2-0", category: "MAX EP: 2-0", ep: 9.4 },
+      { home: "Everton", away: "Fulham", prediction: "3-2", category: "MAX EP: 3-2", ep: 5.31 },
+      { home: "Hull", away: "Leeds", enginePrediction: "0-2", category: "MAX EP: 0-2" },
       // No scoreline from the route — render as unresolved, never a static rule.
       { home: "Chelsea", away: "Spurs" },
       // Malformed scoreline is ignored.
-      { home: "Brentford", away: "Everton", prediction: "two-one", category: "FLOOR: Home Win" },
+      { home: "Brentford", away: "Everton", prediction: "two-one", category: "MAX EP: 2-1" },
     ]);
     expect(predictions).toEqual([
-      { Match: "Arsenal vs Coventry", Category: "FLOOR: Home Win", Prediction: "2-0", Target_Pts: 10 },
-      { Match: "Everton vs Fulham", Category: "CEILING: Draw Snipe", Prediction: "1-1", Target_Pts: 20 },
-      { Match: "Hull vs Leeds", Category: "FLOOR: Away Win", Prediction: "0-2", Target_Pts: 10 },
+      { Match: "Arsenal vs Coventry", Category: "MAX EP: 2-0", Prediction: "2-0", Target_Pts: 9 },
+      { Match: "Everton vs Fulham", Category: "MAX EP: 3-2", Prediction: "3-2", Target_Pts: 5 },
+      { Match: "Hull vs Leeds", Category: "MAX EP: 0-2", Prediction: "0-2", Target_Pts: 20 },
       { Match: "Chelsea vs Spurs", Category: "", Prediction: "", Target_Pts: 0 },
-      { Match: "Brentford vs Everton", Category: "FLOOR: Home Win", Prediction: "", Target_Pts: 0 },
+      { Match: "Brentford vs Everton", Category: "MAX EP: 2-1", Prediction: "", Target_Pts: 0 },
     ]);
   });
 
-  it("targets 20 points for a ceiling snipe and 10 for a floor pick", () => {
-    expect(targetPointsForCategory("CEILING: Draw Snipe")).toBe(20);
-    expect(targetPointsForCategory("ceiling: draw snipe")).toBe(20);
-    expect(targetPointsForCategory("FLOOR: Home Win")).toBe(10);
-    expect(targetPointsForCategory("FLOOR: Away Win")).toBe(10);
+  it("targets the 20-point full hit, scaled by the pick's Expected Points when known", () => {
+    // No EP on the payload: the maximiser is aiming at the full exact-score 20.
+    expect(targetPointsForPick(undefined)).toBe(20);
+    expect(targetPointsForPick(null)).toBe(20);
+    expect(targetPointsForPick(Number.NaN)).toBe(20);
+    // The pick's own EP, rounded and capped at the 20-point maximum.
+    expect(targetPointsForPick(9.383)).toBe(9);
+    expect(targetPointsForPick(4.855)).toBe(5);
+    expect(targetPointsForPick(0)).toBe(0);
+    expect(targetPointsForPick(25)).toBe(20);
+    // There is no FLOOR/CEILING input any more — the old category-based rule is gone.
+    expect("targetPointsForCategory" in client).toBe(false);
   });
 
   it("validates scorelines and outcomes strictly", () => {
@@ -100,9 +105,9 @@ describe("v4-predictor presentation model", () => {
 
   it("scores exact, outcome and missed predictions", () => {
     const predictions = buildPredictions([
-      { home: "A", away: "B", prediction: "2-0", category: "FLOOR: Home Win" },
-      { home: "C", away: "D", prediction: "1-1", category: "CEILING: Draw Snipe" },
-      { home: "E", away: "F", prediction: "0-2", category: "FLOOR: Away Win" },
+      { home: "A", away: "B", prediction: "2-0", category: "MAX EP: 2-0" },
+      { home: "C", away: "D", prediction: "1-1", category: "MAX EP: 1-1" },
+      { home: "E", away: "F", prediction: "0-2", category: "MAX EP: 0-2" },
     ]);
     const [scored, total] = calculateScore(predictions, [[2, 0], [2, 2], [3, 1]]);
     expect(scored.map((row) => row.Points)).toEqual([20, 10, 0]);
@@ -164,131 +169,76 @@ describe("get1X2 / getCorrectScores", () => {
   });
 });
 
-// ─── Portfolio tranching ─────────────────────────────────────────────────────
+// ─── Pure Expected Points maximiser ─────────────────────────────────────────
 
-describe("trancheSlate — Portfolio Tranching", () => {
-  it("splits a 10 fixture slate into 8 floor + 2 ceiling picks", () => {
-    const results = trancheSlate(tenFixtureSlate());
-    expect(results).toHaveLength(10);
-    expect(FLOOR_SIZE).toBe(8);
-    expect(CEILING_SIZE).toBe(2);
-    expect(results.filter((r) => r.tranche === "FLOOR")).toHaveLength(8);
-    expect(results.filter((r) => r.tranche === "CEILING")).toHaveLength(2);
-    expect(results.filter((r) => r.category === "CEILING: Draw Snipe")).toHaveLength(2);
-    expect(results.filter((r) => r.category.startsWith("FLOOR: "))).toHaveLength(8);
-  });
-
-  it("orders by the favourite's confidence and floors the eight safest", () => {
-    const slate = tenFixtureSlate();
-    const results = trancheSlate(slate);
-    const confidence = (i: number) => Math.max(slate[i].probs.h, slate[i].probs.a);
-    const floorIndexes = results.filter((r) => r.tranche === "FLOOR").map((r) => r.index);
-    const ceilingIndexes = results.filter((r) => r.tranche === "CEILING").map((r) => r.index);
-    const minFloor = Math.min(...floorIndexes.map(confidence));
-    const maxCeiling = Math.max(...ceilingIndexes.map(confidence));
-    expect(minFloor).toBeGreaterThanOrEqual(maxCeiling);
-  });
-
-  it("pick the modal scoreline inside the favourite's outcome for floor picks", () => {
-    const slate = tenFixtureSlate();
-    const results = trancheSlate(slate);
-    for (const row of results.filter((r) => r.tranche === "FLOOR")) {
-      const pred = slate[row.index];
-      const outcome = pred.probs.h > pred.probs.a ? "H" : "A";
-      expect(row.outcome).toBe(outcome);
-      expect(row.category).toBe(`FLOOR: ${outcome === "H" ? "Home" : "Away"} Win`);
-      expect(row.prediction).toBe(modalScore(pred.scores, outcome));
-      expect(getScorelineOutcome(row.prediction)).toBe(outcome);
+describe("maxExpectedPointsPick — Pure Points Maximiser", () => {
+  it("publishes the highest-EP scoreline from the whole 0-0 … 8-8 grid", () => {
+    for (const [home, away] of [[2.4, 0.5], [1.7, 1.1], [1.35, 1.15], [1.0, 1.0], [0.6, 2.0], [3.2, 2.8]]) {
+      const bundle = priced(home, away);
+      const pick = maxExpectedPointsPick(bundle);
+      expect(pick.prediction).toBe(maxEpScore(home, away));
+      expect(pick.category).toBe(`MAX EP: ${pick.prediction}`);
+      // Every one of the 121 cells is valued, not just the low-score block.
+      expect(pick.ep).toBeGreaterThan(0);
+      expect(pick.ep).toBeCloseTo(epOf(bundle.scores, bundle.probs, pick.prediction), 10);
+      // EP = 10 × P(outcome) + 10 × P(exact) — no floor, no ceiling, no bias.
+      expect(pick.ep).toBeCloseTo(10 * pick.outcomeProbability + 10 * pick.exactProbability, 10);
     }
   });
 
-  it("snipes the draw only for a true toss-up (P(Draw) ≥ 0.29 and |H − A| < 8%)", () => {
-    const results = trancheSlate(tenFixtureSlate());
-    const ceiling = results.filter((r) => r.tranche === "CEILING");
-    expect(ceiling).toHaveLength(2);
-    for (const row of ceiling) {
-      const pred = tenFixtureSlate()[row.index];
-      expect(pred.probs.d).toBeGreaterThanOrEqual(TOSS_UP_DRAW_FLOOR);
-      expect(Math.abs(pred.probs.h - pred.probs.a)).toBeLessThan(TOSS_UP_GAP_CEILING);
-      expect(row.category).toBe("CEILING: Draw Snipe");
-      expect(getScorelineOutcome(row.prediction)).toBe("D");
-      expect(row.prediction).toBe(modalScore(pred.scores, "D"));
-      expect(row.probability).toBeGreaterThan(0);
-    }
-    // A coin flip at λ = 1.0 / 1.0 prices 0-0 as the modal draw.
-    expect(ceiling.map((r) => r.prediction).sort()).toEqual(["0-0", "0-0"]);
-  });
-
-  it("falls back to the favourite when the bottom of the slate is not a toss-up", () => {
-    const slate = tenFixtureSlate();
-    // Replace the two toss-ups with lopsided matches: high draw chance is gone.
-    slate[8] = priced(2.2, 0.6, { h: 0.7, d: 0.2, a: 0.1 });
-    slate[9] = priced(0.6, 2.2, { h: 0.1, d: 0.2, a: 0.7 });
-    const results = trancheSlate(slate);
-    expect(results.every((r) => r.tranche === "FLOOR")).toBe(true);
-    expect(results.every((r) => r.category.startsWith("FLOOR: "))).toBe(true);
-    expect(results.filter((r) => r.category === "CEILING: Draw Snipe")).toHaveLength(0);
-  });
-
-  it("treats a draw-heavy but one-sided match as a floor pick", () => {
-    const slate = tenFixtureSlate();
-    // P(Draw) clears the 0.29 bar but |H − A| = 12% > 8% → not a toss-up.
-    slate[8] = { probs: { h: 0.44, d: 0.30, a: 0.26 }, scores: priced(1.6, 1.0).scores };
-    slate[9] = { probs: { h: 0.44, d: 0.30, a: 0.26 }, scores: priced(1.6, 1.0).scores };
-    const results = trancheSlate(slate);
-    expect(results.filter((r) => r.category === "CEILING: Draw Snipe")).toHaveLength(0);
-    expect(results.filter((r) => r.tranche === "CEILING")).toHaveLength(0);
-  });
-
-  it("handles short slates: everything floors when there is no ceiling to spend", () => {
-    for (const size of [0, 1, 3, 7]) {
-      const slate = tenFixtureSlate().slice(0, size);
-      const results = trancheSlate(slate);
-      expect(results).toHaveLength(size);
-      expect(results.every((r) => r.tranche === "FLOOR")).toBe(true);
+  it("beats the modal scoreline whenever the outcome bonus says so", () => {
+    // λ 1.7 / 1.1: the most likely single score is 1-1 (a draw), but the Home
+    // outcome is worth far more, so the pure-EP pick is a home win.
+    const bundle = priced(1.7, 1.1);
+    const pick = maxExpectedPointsPick(bundle);
+    expect(pick.prediction).toBe("2-1");
+    expect(pick.outcome).toBe("H");
+    expect(pick.exactProbability).toBeLessThan(1);
+    const best = pickMaxExpectedPoints(bundle.scores, { home: bundle.probs.h, draw: bundle.probs.d, away: bundle.probs.a })!;
+    // No cell on the grid earns more than the published pick.
+    for (const cell of bundle.scores) {
+      const cellEp = epOf(bundle.scores, bundle.probs, `${cell.homeGoals}-${cell.awayGoals}`);
+      expect(cellEp).toBeLessThanOrEqual(best.ep + 1e-12);
     }
   });
 
-  it("spends a single ceiling pick when only the least confident match is a toss-up", () => {
-    const slate = tenFixtureSlate();
-    slate[8] = { probs: { h: 0.55, d: 0.20, a: 0.25 }, scores: priced(2.0, 0.9).scores };
-    const results = trancheSlate(slate);
-    expect(results.filter((r) => r.tranche === "CEILING")).toHaveLength(1);
-    expect(results.filter((r) => r.tranche === "FLOOR")).toHaveLength(9);
-    const ceiling = results.find((r) => r.tranche === "CEILING")!;
-    expect(ceiling.index).toBe(9);
-    expect(ceiling.category).toBe("CEILING: Draw Snipe");
-    expect(ceiling.prediction).toBe("0-0");
+  it("picks the draw in a genuine coin flip and high-scoring lines in open games", () => {
+    // λ 1.0 / 1.0: P(Draw) ≈ 0.34 outweighs either win, and 0-0 is the modal draw.
+    expect(maxExpectedPointsPick(priced(1.0, 1.0)).prediction).toBe("0-0");
+    // λ 1.3 / 1.3: the draw is still the best-value outcome, via 1-1.
+    expect(maxExpectedPointsPick(priced(1.3, 1.3)).prediction).toBe("1-1");
+    // Wide-open games are no longer capped at 1-1 / 2-1.
+    expect(maxExpectedPointsPick(priced(3.2, 2.8)).prediction).toBe("3-2");
+    expect(maxExpectedPointsPick(priced(2.8, 2.4)).prediction).toBe("3-2");
   });
 
-  it("uses both ceiling picks for an 8 fixture slate whose bottom two are toss-ups", () => {
-    const slate = tenFixtureSlate().slice(0, 8);
-    slate[6] = priced(1.0, 1.0);
-    slate[7] = priced(1.0, 1.0);
-    const results = trancheSlate(slate);
-    expect(results.filter((r) => r.tranche === "CEILING")).toHaveLength(2);
-    expect(results.filter((r) => r.tranche === "FLOOR")).toHaveLength(6);
+  it("honours bookmaker-anchored probabilities over the raw grid", () => {
+    // A market-implied 0.55 / 0.25 / 0.20 split on a mid-table λ pair: the Home
+    // outcome alone is worth 5.5 points, so the pick must be a home win even
+    // though the grid's own draw is fat.
+    const bundle = priced(1.2, 1.2, { h: 0.55, d: 0.25, a: 0.20 });
+    const pick = maxExpectedPointsPick(bundle);
+    expect(pick.outcome).toBe("H");
+    expect(getScorelineOutcome(pick.prediction)).toBe("H");
+    // Same grid, odds-implied away favourite → away win.
+    const awayFav = maxExpectedPointsPick(priced(1.2, 1.2, { h: 0.20, d: 0.25, a: 0.55 }));
+    expect(awayFav.outcome).toBe("A");
   });
 
-  it("widens the floor to 9 when a 10-slate toss-up is not a true draw", () => {
-    const slate = tenFixtureSlate();
-    slate[8] = { probs: { h: 0.55, d: 0.20, a: 0.25 }, scores: priced(2.0, 0.9).scores };
-    const results = trancheSlate(slate);
-    // The 9th most confident match is still floored; the 10th is the ceiling.
-    expect(results.filter((r) => r.tranche === "FLOOR")).toHaveLength(9);
-    expect(results.filter((r) => r.tranche === "CEILING")).toHaveLength(1);
+  it("falls back to 1-1 only for a degenerate (empty) grid", () => {
+    const pick = maxExpectedPointsPick({ probs: { h: 0.4, d: 0.3, a: 0.3 }, scores: [] });
+    expect(pick).toMatchObject({ prediction: "1-1", category: "MAX EP: 1-1", outcome: "D", ep: 0 });
   });
 
-  it("returns one prediction per fixture, indexed back to the original order", () => {
-    const results = trancheSlate(tenFixtureSlate());
-    expect(results.map((r) => r.index).sort((a, b) => a - b)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
-    expect(results.every((r) => /^\d{1,2}-\d{1,2}$/.test(r.prediction))).toBe(true);
+  it("formats scorelines the way the dashboard renders them", () => {
+    expect(formatScore(3, 1)).toBe("3-1");
+    expect(formatScore(0, 0)).toBe("0-0");
   });
 });
 
 // ─── Route integration ───────────────────────────────────────────────────────
 
-describe("GET /api/v4-predictor/auto — Portfolio Tranching route", () => {
+describe("GET /api/v4-predictor/auto — Pure Points Maximiser route", () => {
   it("runs the Engine on every fixture, keeps odds for pre-match and strips them for finished games", async () => {
     // Two upcoming fixtures (with bookmaker odds) and one finished fixture
     // whose summary carries a closing line — which must NOT reach the Engine.
@@ -388,20 +338,20 @@ describe("GET /api/v4-predictor/auto — Portfolio Tranching route", () => {
       expect(post.fx.odds).toBeNull();
       expect(post.summary?.odds).toBeNull();
 
-      // Portfolio tranching: every row carries a tranche label + scoreline.
+      // Pure EP maximiser: every row carries a "MAX EP: <score>" label, its EP,
+      // and no tranche at all.
       expect(rows).toHaveLength(3);
       for (const row of rows) {
         expect(row.prediction).toMatch(/^\d{1,2}-\d{1,2}$/);
-        expect(["FLOOR", "CEILING"]).toContain(row.tranche);
-        expect(row.category).toMatch(/^(FLOOR|CEILING): /);
+        expect(row.category).toBe(`MAX EP: ${row.prediction}`);
+        expect(row).not.toHaveProperty("tranche");
+        expect(row.ep).toBeGreaterThan(0);
         expect(row.probabilities.home + row.probabilities.draw + row.probabilities.away).toBeCloseTo(1, 2);
       }
-      // 3 fixtures < the 8-strong floor: everything is a safe floor pick.
-      expect(rows.every((r: { tranche: string }) => r.tranche === "FLOOR")).toBe(true);
       // Rows stay in kick-off order: the finished game sorts first.
       expect(rows[0]).toMatchObject({ state: "post", actual: [2, 1] });
-      // Arsenal (2.2 vs 0.6) is the biggest favourite: modal Home win is 2-0.
-      expect(rows[1]).toMatchObject({ category: "FLOOR: Home Win", prediction: "2-0", actual: null });
+      // Arsenal (λ 2.2 / 0.6) → the highest-EP line is the modal Home win 2-0.
+      expect(rows[1]).toMatchObject({ category: "MAX EP: 2-0", prediction: "2-0", actual: null });
     } finally {
       vi.doUnmock("@/lib/espn");
       vi.doUnmock("@/lib/engine/sofascore");
@@ -450,10 +400,11 @@ describe("GET /api/v4-predictor/auto — Portfolio Tranching route", () => {
       const response = await GET(new Request("http://localhost/api/v4-predictor/auto?week=9"));
       expect(response.status).toBe(200);
       const { fixtures: rows } = await response.json();
-      // Model-only pricing (1.35 / 1.15): the modal Home win is 1-0.
+      // Model-only pricing (λ 1.35 / 1.15): P(Home) 0.394 outweighs the draw,
+      // so the highest-EP scoreline is the modal Home win 1-0.
       expect(rows.map((r: { prediction: string; category: string }) => [r.category, r.prediction])).toEqual([
-        ["FLOOR: Home Win", "1-0"],
-        ["FLOOR: Home Win", "1-0"],
+        ["MAX EP: 1-0", "1-0"],
+        ["MAX EP: 1-0", "1-0"],
       ]);
       expect(rows[0].actual).toEqual([1, 1]);
       expect(rows[1].actual).toBeNull();

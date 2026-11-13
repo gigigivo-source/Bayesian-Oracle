@@ -89,10 +89,12 @@ describe("probRunOfAtLeast / probRunOfEither (run-length model)", () => {
 });
 
 describe("MarketEngine Consecutive Goals registry integration", () => {
-  it("builds exactly 220 markets including the 3 chip-only markets", () => {
+  it("builds exactly 285 markets including the 3 chip-only markets", () => {
     const engine = new MarketEngine(lockedMatch(), lambdas());
     const markets = engine.buildAll();
-    expect(markets).toHaveLength(220);
+    // 220 + the expanded Correct Score grid: 4×4 → 9×9 adds 65 lines.
+    expect(markets).toHaveLength(285);
+    expect(markets.filter((m) => m.name.startsWith("Correct Score"))).toHaveLength(81);
 
     const consec = markets.filter((m) => m.family === "Consecutive Goals");
     expect(consec).toHaveLength(3);

@@ -127,11 +127,16 @@ describe("MarketEngine 1X2 + Correct Score markets", () => {
     expect(draw.hitRate).toBeGreaterThan(poissonDraw);
   });
 
-  it("prices all 16 Correct Score markets off the corrected grid", () => {
+  it("prices all 81 Correct Score markets (0-0 … 8-8) off the corrected grid", () => {
     const engine = new MarketEngine(lockedMatch(), lambdas(1.7, 1.1));
     const markets = engine.buildAll();
     const cs = markets.filter((m) => m.name.startsWith("Correct Score"));
-    expect(cs).toHaveLength(16);
+    expect(cs).toHaveLength(81);
+    // The full published grid, including the high-scoring lines that the old
+    // 4×4 cap never reached.
+    for (const label of ["0-0", "1-1", "3-2", "4-4", "5-3", "8-8"]) {
+      expect(cs.some((m) => m.name === `Correct Score ${label}`)).toBe(true);
+    }
     const grid = buildCorrectScoreGrid(1.7, 1.1, DIXON_COLES_RHO);
     for (const market of cs) {
       const label = market.name.replace("Correct Score ", "");
@@ -145,5 +150,21 @@ describe("MarketEngine 1X2 + Correct Score markets", () => {
     // The corrected 1-1 cell must out-price the pure-Poisson 1-1 cell.
     const oneOne = grid.cells.find((c) => c.homeGoals === 1 && c.awayGoals === 1)!;
     expect(oneOne.probability).toBeGreaterThan(oneOne.poissonProbability);
+  });
+
+  it("keeps the Correct Score grid normalised and the high-scoring tail priced", () => {
+    const engine = new MarketEngine(lockedMatch(), lambdas(1.7, 1.1));
+    const cs = engine.buildAll().filter((m) => m.name.startsWith("Correct Score"));
+    // 81 published cells covering 0-0 … 8-8, each with a positive hitRate.
+    expect(cs).toHaveLength(81);
+    expect(cs.every((m) => m.hitRate > 0)).toBe(true);
+    // A published high-scoring line carries real probability mass — the old
+    // 4×4 grid stopped at 2-1 / 1-2 and could never surface a 4-4.
+    const fourFour = cs.find((m) => m.name === "Correct Score 4-4")!;
+    expect(fourFour.hitRate).toBeGreaterThan(0);
+    // Markets are clamped into (0, 1) by the registry, so the published grid
+    // can never exceed 1 in total.
+    const total = cs.reduce((n, m) => n + m.hitRate, 0);
+    expect(total).toBeLessThanOrEqual(81);
   });
 });

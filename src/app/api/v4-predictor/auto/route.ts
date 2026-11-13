@@ -3,7 +3,8 @@ import type { EngineResult } from "@/lib/engine";
 import {
   buildCorrectScoreGrid,
   DIXON_COLES_RHO,
-  pickBestScoreForOutcome,
+  pickMaxExpectedPoints,
+  type ExpectedPointsPick,
   type ScoreCell,
 } from "@/lib/engine/markets";
 import { buildHistoricalTeamForm } from "@/lib/engine/sofascore";
@@ -17,17 +18,17 @@ export const maxDuration = 60;
 const DEFAULT_WEEK = 11;
 
 /**
- * V4 Predictor — Portfolio Tranching System.
+ * V4 Predictor — Pure Points Maximiser (no safety nets).
  *
- * The blind V2 static rules are gone. Every fixture in the matchweek is priced
- * by the Engine (Dixon–Coles corrected 1X2 + Correct Score grid), then the
- * slate is split into two tranches:
+ * The blind V2 static rules are gone, and so are the FLOOR / CEILING tranches
+ * that used to force a favourite's safest line or a draw snipe. Every fixture
+ * in the matchweek is priced by the Engine (Dixon–Coles corrected 1X2 +
+ * Correct Score grid 0-0 … 8-8) and the route simply returns the scoreline
+ * with the highest Expected Points:
  *
- *   · FLOOR   — the 8 (or 9) most confident favourites. Safe winners: take the
- *               favourite's outcome, then the most likely scoreline inside it.
- *   · CEILING — the 1–2 least confident fixtures. Only a genuine toss-up
- *               (P(Draw) ≥ 0.29 and |P(Home) − P(Away)| < 8%) is sniped as a
- *               draw; anything else falls back into the Floor tranche.
+ *   EP(score) = 10 × P(outcome of score) + 10 × P(exactly that score)
+ *
+ * If the math says 3-2 or 4-4, the app publishes 3-2 or 4-4.
  */
 
 const EXTRA_TEAM_MAP: Record<string, string> = {
@@ -160,127 +161,66 @@ export function getCorrectScores(
   });
 }
 
-// `pickBestScoreForOutcome` (modal scoreline inside one outcome) lives in the
-// market registry, next to the grid it reads, so the route and the Engine agree
-// on what the "best" scoreline for an outcome means.
+// The EP maximiser (`pickMaxExpectedPoints`) lives in the market registry, next
+// to the grid it ranks, so the route and the Engine agree on what "best
+// scoreline" means.
 
-// ─── Portfolio tranching ─────────────────────────────────────────────────────
+// ─── Pure Expected Points maximiser ─────────────────────────────────────────
 
-export const FLOOR_SIZE = 8;
-export const CEILING_SIZE = 2;
-export const TOSS_UP_DRAW_FLOOR = 0.29;
-export const TOSS_UP_GAP_CEILING = 0.08;
-
-export interface TranchePrediction {
-  probs: OneX2;
-  scores: ScoreCell[];
-}
-
-export interface TrancheOutcome {
-  index: number;
-  category: string;
-  prediction: string;
-  outcome: Outcome;
-  tranche: "FLOOR" | "CEILING";
-  probability: number;
-}
-
+/** Scoreline formatted the way the dashboard renders it: "3-1". */
 export function formatScore(homeGoals: number, awayGoals: number): string {
   return `${homeGoals}-${awayGoals}`;
 }
 
-/**
- * Sort by the favourite's confidence, then tranche the slate.
- *
- * The bottom 1–2 fixtures of the sorted slate form the CEILING tranche; the
- * rest (8 or 9 of a full 10-match week) are FLOOR picks. A 10-fixture slate
- * probes both bottoms — the single least confident match and the two least
- * confident matches — and spends the ceiling on the first one that is a true
- * toss-up (P(Draw) ≥ 0.29 and |P(Home) − P(Away)| < 8%):
- *
- *   · both bottoms are toss-ups → 8 floor + 2 ceiling
- *   · only the last match is    → 9 floor + 1 ceiling
- *   · neither is                → 10 floor, no ceiling
- *
- * Short slates (early-season weeks, abandoned fixtures) cannot fill the floor
- * tranche at all, so they never spend picks on a ceiling snipe: every fixture
- * is floored until the slate is at least FLOOR_SIZE deep.
- */
-export function trancheSlate(predictions: TranchePrediction[]): TrancheOutcome[] {
-  const order = predictions
-    .map((pred, index) => ({
-      index,
-      confidence: Math.max(pred.probs.h, pred.probs.a),
-    }))
-    .sort((a, b) => b.confidence - a.confidence);
+/** Everything the route needs to publish one fixture's MAX EP pick. */
+export interface MaxExpectedPointsOutcome {
+  /** "3-1" — the highest-EP scoreline on the grid. */
+  prediction: string;
+  /** "MAX EP: 3-1" — the label the table shows. */
+  category: string;
+  outcome: Outcome;
+  /** 10 × P(outcome) + 10 × P(exact score). */
+  ep: number;
+  /** P(Home) / P(Draw) / P(Away) for the picked scoreline's outcome. */
+  outcomeProbability: number;
+  /** Probability of the picked scoreline itself. */
+  exactProbability: number;
+}
 
-  const isTossUp = (pred: TranchePrediction) =>
-    pred.probs.d >= TOSS_UP_DRAW_FLOOR &&
-    Math.abs(pred.probs.h - pred.probs.a) < TOSS_UP_GAP_CEILING;
+/** The label prefix every row carries — the pick is chosen purely on EP. */
+export const MAX_EP_PREFIX = "MAX EP";
 
-  // How many of the least-confident fixtures get a ceiling probe at all.
-  const probeSize = order.length >= FLOOR_SIZE ? CEILING_SIZE : 0;
-  let ceilingIndexes: number[] = [];
-  if (probeSize === CEILING_SIZE) {
-    const lastTwo = order.slice(-CEILING_SIZE);
-    const last = order[order.length - 1];
-    if (lastTwo.every((entry) => isTossUp(predictions[entry.index]))) {
-      ceilingIndexes = lastTwo.map((entry) => entry.index);
-    } else if (isTossUp(predictions[last.index])) {
-      ceilingIndexes = [last.index];
-    }
+/** One fixture's probabilities + corrected score grid → its MAX EP pick. */
+export function maxExpectedPointsPick(
+  prediction: { probs: OneX2; scores: ScoreCell[] },
+): MaxExpectedPointsOutcome {
+  const pick: ExpectedPointsPick | null = pickMaxExpectedPoints(
+    prediction.scores,
+    { home: prediction.probs.h, draw: prediction.probs.d, away: prediction.probs.a },
+  );
+
+  // Degenerate grid (no cells at all — never produced by the Engine, but the
+  // model-only fallback must still emit a row): price the canonical 1-1.
+  if (!pick) {
+    return {
+      prediction: "1-1",
+      category: `${MAX_EP_PREFIX}: 1-1`,
+      outcome: "D",
+      ep: 0,
+      outcomeProbability: prediction.probs.d,
+      exactProbability: 0,
+    };
   }
-  const ceilingRankStart = order.length - ceilingIndexes.length;
-  const inCeiling = new Set(ceilingIndexes);
 
-  const results: TrancheOutcome[] = [];
-  order.forEach((entry, rank) => {
-    const pred = predictions[entry.index];
-    const isCeilingTossUp = rank >= ceilingRankStart && inCeiling.has(entry.index);
-
-    if (isCeilingTossUp) {
-      const best = pickBestScoreForOutcome(pred.scores, "D");
-      if (best) {
-        results.push({
-          index: entry.index,
-          tranche: "CEILING",
-          category: "CEILING: Draw Snipe",
-          prediction: formatScore(best.homeGoals, best.awayGoals),
-          outcome: "D",
-          probability: best.probability,
-        });
-        return;
-      }
-    }
-
-    // Floor: the favourite's outcome, then its most likely scoreline.
-    const outcome: Outcome = pred.probs.h > pred.probs.a ? "H" : "A";
-    const best = pickBestScoreForOutcome(pred.scores, outcome);
-    if (best) {
-      results.push({
-        index: entry.index,
-        tranche: "FLOOR",
-        category: `FLOOR: ${outcome === "H" ? "Home" : "Away"} Win`,
-        prediction: formatScore(best.homeGoals, best.awayGoals),
-        outcome,
-        probability: best.probability,
-      });
-      return;
-    }
-
-    // Degenerate grid (no cell in the favourite's outcome) — take the modal
-    // favourite side as the scoreline rather than emitting nothing.
-    results.push({
-      index: entry.index,
-      tranche: "FLOOR",
-      category: `FLOOR: ${outcome === "H" ? "Home" : "Away"} Win`,
-      prediction: outcome === "H" ? "1-0" : "0-1",
-      outcome,
-      probability: 0,
-    });
-  });
-
-  return results;
+  const scoreline = formatScore(pick.homeGoals, pick.awayGoals);
+  return {
+    prediction: scoreline,
+    category: `${MAX_EP_PREFIX}: ${scoreline}`,
+    outcome: pick.outcome,
+    ep: pick.ep,
+    outcomeProbability: pick.outcomeProb,
+    exactProbability: pick.exactProb,
+  };
 }
 
 export async function GET(request: Request) {
@@ -427,14 +367,14 @@ export async function GET(request: Request) {
       }),
     );
 
-    // STEP 3 — tranche the slate and materialise the final predictions.
-    const tranches = trancheSlate(priced.map((p) => ({ probs: p.probs, scores: p.scores })));
-    const byIndex = new Map(tranches.map((t) => [t.index, t]));
+    // STEP 3 — value every scoreline on every fixture's grid by its Expected
+    // Points and publish the highest one. No tranching, no floor, no ceiling.
+    const picks = priced.map((p) => maxExpectedPointsPick({ probs: p.probs, scores: p.scores }));
 
     const result = priced.map(({ fx, index, homeName, awayName }) => {
-      const tranche = byIndex.get(index);
-      const prediction = tranche?.prediction ?? "1-0";
-      const category = tranche?.category ?? "FLOOR: Home Win";
+      const pick = picks[index];
+      const prediction = pick.prediction;
+      const category = pick.category;
 
       const homeScore = fx.home.score;
       const awayScore = fx.away.score;
@@ -464,7 +404,12 @@ export async function GET(request: Request) {
           draw: Math.round(priced[index].probs.d * 1000) / 1000,
           away: Math.round(priced[index].probs.a * 1000) / 1000,
         },
-        tranche: tranche?.tranche ?? "FLOOR",
+        // Expected Points of the published pick: 10 for the outcome plus 10
+        // for the exact scoreline, weighted by the grid probabilities.
+        ep: Math.round(pick.ep * 1000) / 1000,
+        outcomeProbability: Math.round(pick.outcomeProbability * 1000) / 1000,
+        exactProbability: Math.round(pick.exactProbability * 1000) / 1000,
+        outcome: pick.outcome,
       };
     });
 
