@@ -76,6 +76,7 @@ function makeFixture(
 }
 
 beforeEach(() => {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false }));
   fetchScoreboardMock.mockReset();
   getCurrentMatchweekMock.mockReset();
   getCurrentMatchweekMock.mockResolvedValue(11);

@@ -117,6 +117,30 @@ describe("generateV2Predictions — V2 Strict 3-Snipe System", () => {
     ]);
   });
 
+  it("uses Engine xG thresholds for Standard locks without changing ineligible tiers", () => {
+    const predictions = generateV2Predictions([
+      ["Bournemouth", "Nott'm Forest"],
+      ["West Ham", "Leicester"],
+      ["Brentford", "Nott'm Forest"],
+      ["Liverpool", "Brighton"],
+      ["West Ham", "Nott'm Forest"],
+    ], new Map([
+      [0, { homeXG: 2.4, awayXG: 1.1 }],
+      [1, { homeXG: 0.9, awayXG: 2.2 }],
+      [2, { homeXG: 1.9, awayXG: 2.0 }],
+      [3, { homeXG: 2.7, awayXG: 1.0 }],
+      [4, { homeXG: 3.6, awayXG: 1.0 }],
+    ]));
+    expect(predictions.map((p) => p.Prediction)).toEqual(["3-0", "0-3", "2-2", "2-0", "4-0"]);
+    expect(predictions.map((p) => p.Category)).toEqual([
+      "LOCK: Standard Home Blowout",
+      "LOCK: Standard Away Blowout",
+      "LOCK: Standard High Draw",
+      "LOCK: Smart Top 4 Home",
+      "LOCK: Standard Home Blowout",
+    ]);
+  });
+
   it("validates scorelines and scores exact (20), outcome (10), and miss (0)", () => {
     expect(isScoreline("2-1")).toBe(true);
     expect(isScoreline("10-0")).toBe(true);
@@ -141,7 +165,7 @@ describe("generateV2Predictions — V2 Strict 3-Snipe System", () => {
 });
 
 describe("GET /api/v4-predictor/auto — V2 Strict 3-Snipe route", () => {
-  it("fetches fixtures, passes them directly to generateV2Predictions, and never loads the Engine", async () => {
+  it("fetches fixtures and skips Engine xG for Chaos and Snipe fixtures", async () => {
     const fixtures = [
       {
         id: "m1",
@@ -177,9 +201,7 @@ describe("GET /api/v4-predictor/auto — V2 Strict 3-Snipe route", () => {
       fetchScoreboard: vi.fn().mockResolvedValue(fixtures),
       getCurrentMatchweek: vi.fn().mockResolvedValue(8),
     }));
-    vi.doMock("@/lib/engine", () => {
-      throw new Error("Engine must not be imported by V4 route");
-    });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false }));
 
     try {
       const { GET } = await import("@/app/api/v4-predictor/auto/route");
@@ -219,7 +241,7 @@ describe("GET /api/v4-predictor/auto — V2 Strict 3-Snipe route", () => {
       ]);
     } finally {
       vi.doUnmock("@/lib/espn");
-      vi.doUnmock("@/lib/engine");
+      vi.unstubAllGlobals();
       vi.resetModules();
     }
   });

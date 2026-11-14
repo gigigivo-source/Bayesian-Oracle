@@ -1,4 +1,6 @@
-// V4 Predictor — True V2 Strict 3-Snipe System (pure rule-based, zero Engine / Poisson).
+// V4 Predictor — V2 Strict 3-Snipe System; qualified Standard locks may use Engine xG.
+import type { FixtureLite, MatchSummary } from "./espn";
+import type { CanonicalMatchStats } from "./data/types";
 
 export const TOP_4 = ["Arsenal", "Liverpool", "Man City", "Brighton"];
 export const MID_TABLE = ["Fulham", "Brentford", "Everton", "Leeds", "Crystal Palace", "Newcastle", "Aston Villa"];
@@ -35,6 +37,12 @@ export function translateTeamName(espnName: string): string {
 }
 
 export type V2FixtureInput = [string, string] | { home: string; away: string };
+export type V2ExpectedGoals = { homeXG: number; awayXG: number };
+export type V2EngineContext = {
+  fixture: FixtureLite;
+  summary?: MatchSummary | null;
+  stats?: CanonicalMatchStats | null;
+};
 
 export type Fixture = {
   home: string;
@@ -82,6 +90,18 @@ function normalizeFixturePair(fixture: V2FixtureInput): [string, string] {
   return [translateTeamName(fixture.home), translateTeamName(fixture.away)];
 }
 
+function validExpectedGoals(value: V2ExpectedGoals | null | undefined): V2ExpectedGoals | null {
+  return value && Number.isFinite(value.homeXG) && Number.isFinite(value.awayXG) &&
+    value.homeXG >= 0 && value.awayXG >= 0 ? value : null;
+}
+
+function isStandardMatch(home: string, away: string): boolean {
+  return !TOP_4.includes(home) && !TOP_4.includes(away) &&
+    !BOTTOM_5.includes(home) && !BOTTOM_5.includes(away) &&
+    !CHAOS_TEAMS.includes(home) && !CHAOS_TEAMS.includes(away) &&
+    !(MID_TABLE.includes(home) && MID_TABLE.includes(away));
+}
+
 /**
  * Exact V2 Strict 3-Snipe System.
  *
@@ -95,9 +115,13 @@ function normalizeFixturePair(fixture: V2FixtureInput): [string, string] {
  *    - Rule 1 (Chaos): 2-1 (if Top 4 Home), 1-2 (if Top 4 Away), 1-1 (if no Top 4). NEVER 2-2.
  *    - Rule 2 (Smart Top 4 Home): Top 4 at Home (not vs Bottom 5) -> 2-0.
  *    - Rule 3 (Mid vs Bottom): Mid at Home vs Bottom 5 -> 2-1.
- *    - Rule 4 (Standard Default): Any other match -> 1-0 (Home) or 0-1 (Away).
+ *    - Rule 4 (Standard): strong Engine xG overrides to 3/4-0, 0-3/4, or 2-2;
+ *      otherwise keep the existing 1-0 (Home) / 0-1 (Away) lock.
  */
-export function generateV2Predictions(fixtures: readonly V2FixtureInput[]): Prediction[] {
+export function generateV2Predictions(
+  fixtures: readonly V2FixtureInput[],
+  xgByFixture?: ReadonlyMap<number, V2ExpectedGoals>,
+): Prediction[] {
   const pairs = fixtures.map(normalizeFixturePair);
   const picks: Array<Prediction | null> = new Array(pairs.length).fill(null);
 
@@ -201,6 +225,25 @@ export function generateV2Predictions(fixtures: readonly V2FixtureInput[]): Pred
       };
     }
 
+    // Step 3 (guardrail-safe): only non-snipe Standard locks can change. If
+    // Engine xG is absent or inconclusive, preserve the original V2 score.
+    if (isStandardMatch(home, away)) {
+      const xg = validExpectedGoals(xgByFixture?.get(i));
+      if (xg) {
+        if (xg.homeXG - xg.awayXG >= 1.2) {
+          const goals = Math.min(4, Math.max(3, Math.round(xg.homeXG)));
+          return { Match: `${home} vs ${away}`, Category: "LOCK: Standard Home Blowout", Prediction: `${goals}-0`, Target_Pts: 10 };
+        }
+        if (xg.awayXG - xg.homeXG >= 1.2) {
+          const goals = Math.min(4, Math.max(3, Math.round(xg.awayXG)));
+          return { Match: `${home} vs ${away}`, Category: "LOCK: Standard Away Blowout", Prediction: `0-${goals}`, Target_Pts: 10 };
+        }
+        if (xg.homeXG >= 1.8 && xg.awayXG >= 1.8) {
+          return { Match: `${home} vs ${away}`, Category: "LOCK: Standard High Draw", Prediction: "2-2", Target_Pts: 10 };
+        }
+      }
+    }
+
     // Rule 4 (Standard Default): Any other match -> 1-0 (Home) or 0-1 (Away).
     const awayIsStronger =
       awayIsTop4 ||
@@ -224,6 +267,42 @@ export function generateV2Predictions(fixtures: readonly V2FixtureInput[]): Pred
       Target_Pts: 10,
     };
   });
+}
+
+/** Run Engine real-lambda xG for eligible non-snipe Standard fixtures only. */
+export async function generateV2PredictionsWithEngine(
+  fixtures: readonly V2FixtureInput[],
+  contexts: readonly (V2EngineContext | null | undefined)[],
+): Promise<Prediction[]> {
+  const baseline = generateV2Predictions(fixtures);
+  const pairs = fixtures.map(normalizeFixturePair);
+  const eligible = pairs.map(([home, away], index) => ({ home, away, index, context: contexts[index] }))
+    .filter(({ home, away, index, context }) => {
+      if (!context || !isStandardMatch(home, away) || baseline[index].Category.startsWith("SNIPE:")) return false;
+      return translateTeamName(context.fixture.home.name) === home &&
+        translateTeamName(context.fixture.away.name) === away;
+    });
+  if (eligible.length === 0) return baseline;
+  const xgByFixture = new Map<number, V2ExpectedGoals>();
+  try {
+    const { buildRealLambdas } = await import("./engine/realLambdas");
+    for (const { index, context } of eligible) {
+      try {
+        const result = buildRealLambdas(context!.fixture, context!.summary ?? null, undefined, context!.stats ?? null);
+        const xg = validExpectedGoals(result.deepStats ? {
+          homeXG: result.deepStats.homeXg,
+          awayXG: result.deepStats.awayXg,
+        } : null);
+        if (xg) xgByFixture.set(index, xg);
+      } catch (error) {
+        console.warn(`[V2] Engine xG unavailable for ${baseline[index].Match}; keeping V2 lock`, error);
+      }
+    }
+  } catch (error) {
+    console.warn("[V2] Engine xG unavailable; keeping V2 locks", error);
+    return baseline;
+  }
+  return generateV2Predictions(fixtures, xgByFixture);
 }
 
 export const generatePredictions = generateV2Predictions;
