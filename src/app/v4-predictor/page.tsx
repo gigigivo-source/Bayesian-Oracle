@@ -18,11 +18,9 @@ type AutoFixtureRow = {
   away: { name: string; logo: string | null };
   state: "pre" | "in" | "post";
   actual: Actual | null;
-  enginePrediction: string | null;
   prediction: string | null;
   category: string | null;
-  /** Expected Points the pick was chosen on: 10 × P(outcome) + 10 × P(exact). */
-  ep: number | null;
+  targetPts: number | null;
 };
 
 const MATCHWEEKS = Array.from({ length: 38 }, (_, i) => i + 1);
@@ -52,10 +50,9 @@ function normalizeRow(raw: unknown): AutoFixtureRow | null {
     away?: unknown;
     state?: unknown;
     actual?: unknown;
-    enginePrediction?: unknown;
     prediction?: unknown;
     category?: unknown;
-    ep?: unknown;
+    targetPts?: unknown;
   };
   const home = normalizeTeam(row.home);
   const away = normalizeTeam(row.away);
@@ -64,10 +61,6 @@ function normalizeRow(raw: unknown): AutoFixtureRow | null {
     row.state === "post" || row.state === "in" || row.state === "pre"
       ? row.state
       : "pre";
-  const enginePrediction =
-    typeof row.enginePrediction === "string" && isScoreline(row.enginePrediction)
-      ? row.enginePrediction
-      : null;
   const prediction =
     typeof row.prediction === "string" && isScoreline(row.prediction)
       ? row.prediction
@@ -83,11 +76,13 @@ function normalizeRow(raw: unknown): AutoFixtureRow | null {
     Number.isFinite(Number(row.actual[1]))
       ? [Number(row.actual[0]), Number(row.actual[1])]
       : null;
-  const ep =
-    typeof row.ep === "number" && Number.isFinite(row.ep) && row.ep >= 0
-      ? row.ep
+  const targetPts =
+    typeof row.targetPts === "number" &&
+    Number.isFinite(row.targetPts) &&
+    row.targetPts > 0
+      ? row.targetPts
       : null;
-  return { home, away, state, actual, enginePrediction, prediction, category, ep };
+  return { home, away, state, actual, prediction, category, targetPts };
 }
 
 function StatusBadge({ state }: { state: AutoFixtureRow["state"] }) {
@@ -184,10 +179,9 @@ export default function V4PredictorPage() {
       const v4Fixtures: Fixture[] = rows.map((row) => ({
         home: row.home.name,
         away: row.away.name,
-        enginePrediction: row.enginePrediction,
         prediction: row.prediction,
         category: row.category,
-        ep: row.ep,
+        targetPts: row.targetPts,
       }));
       const newPredictions = buildPredictions(v4Fixtures);
       const finished = rows
@@ -285,9 +279,9 @@ export default function V4PredictorPage() {
             🔮 V4 Ultimate Predictor
           </h1>
           <p className="mt-2 text-sm text-slate-400">
-            Blended engine and bookmaker anchors select outcomes, with three
-            snipes and a safe bank for Matchweek {selectedWeek}. Blowout hunts
-            are enabled only on strong slates with sufficient data.
+            V2 Strict 3-Snipe System for Matchweek {selectedWeek} — max 3
+            exact-score Snipes (20 pts) with Chaos teams permanently banned,
+            backed by strict rule-based Locks (10 pts).
           </p>
         </header>
 
@@ -304,22 +298,30 @@ export default function V4PredictorPage() {
                 </tr>
               </thead>
               <tbody>
-                {fixtures.map((row, i) => (
-                  <tr key={i} className="border-t border-white/10">
-                    <td className="p-2">
-                      <StatusBadge state={row.state} />
-                    </td>
-                    <td className="p-2">
-                      <MatchCell row={row} />
-                    </td>
-                    <td className="p-2 text-slate-100">
-                      {predictions[i]?.Category ?? ""}
-                    </td>
-                    <td className="p-2 font-mono text-slate-100">
-                      {predictions[i]?.Prediction ?? ""}
-                    </td>
-                  </tr>
-                ))}
+                {fixtures.map((row, i) => {
+                  const category = predictions[i]?.Category ?? "";
+                  const isSnipe = category.startsWith("SNIPE:");
+                  return (
+                    <tr key={i} className="border-t border-white/10">
+                      <td className="p-2">
+                        <StatusBadge state={row.state} />
+                      </td>
+                      <td className="p-2">
+                        <MatchCell row={row} />
+                      </td>
+                      <td
+                        className={`p-2 font-medium ${
+                          isSnipe ? "text-amber-300" : "text-slate-200"
+                        }`}
+                      >
+                        {category}
+                      </td>
+                      <td className="p-2 font-mono text-slate-100">
+                        {predictions[i]?.Prediction ?? ""}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
             {!loadingFixtures && fixtures.length === 0 && (
