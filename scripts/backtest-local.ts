@@ -12,8 +12,11 @@
  *      `openfootball:` fixtures from the real 2026-27 Football-Data EPL CSV on
  *      GitHub when `site.api.espn.com` is blocked).
  *   2. Sort fixtures chronologically and pass them directly into
- *      `generateV2Predictions(fixtures)` — zero Engine calls, zero xG, zero
- *      Poisson grids, zero fake tier ladders.
+ *      `generateV2Predictions(fixtures)` — Snipes stay pure rules; the three
+ *      V2 lock fixes (Chaos gate, Top 4 derby, Standard blowouts) consult the
+ *      Engine's offline Maher xG (`computeMatchExpectedGoals` + season
+ *      snapshot), deviating from the legacy pick only when the margin is
+ *      strongly supported (xG gap >= 0.4).
  *   3. Score the V2 predictions against the real final scores with
  *      `calculateScore` (20 exact / 10 outcome / 0 miss).
  *   4. Print a clean Markdown table: MW1 … MW10 + Average + Floor.
@@ -376,7 +379,7 @@ function renderMarkdown(weeks: WeekResult[], cfg: Config, leagueName: string): s
   );
   lines.push(`- **League:** ${leagueName} (\`${cfg.league}\`)`);
   lines.push(`- **Season:** ${seasonLabel(cfg.season)}`);
-  lines.push(`- **System:** True V2 Strict 3-Snipe System (zero Engine, zero xG, zero Poisson)`);
+  lines.push(`- **System:** True V2 Strict 3-Snipe System (Snipes = pure rules · Locks = Engine-xG-gated V2 fixes)`);
   lines.push(`- **Scoring:** exact = ${PTS_EXACT} · correct outcome = ${PTS_OUTCOME} · miss = ${PTS_MISS}`);
   lines.push("");
 
@@ -473,7 +476,7 @@ function runSelfTest(): void {
     ["Arsenal", "Coventry"],         // Snipe 1: Home Fortress -> 2-0
     ["Fulham", "Brentford"],         // Snipe 2: Mid-Table Deadlock -> 1-1
     ["Everton", "Leeds"],            // Snipe 3: Mid-Table Deadlock -> 1-1
-    ["Chelsea", "Ipswich"],          // Chaos banned from Snipes -> 1-1 (NEVER 2-2)
+    ["Chelsea", "Ipswich"],          // Chaos banned from Snipes; xG gap >= 0.4 -> 2-1 (NEVER 2-2)
     ["Man City", "Newcastle"],       // Smart Top 4 Home -> 2-0
     ["Aston Villa", "Hull"],         // Mid vs Bottom -> 2-1
     ["Sunderland", "Fulham"],        // Standard Default (Away stronger) -> 0-1
@@ -487,7 +490,7 @@ function runSelfTest(): void {
     ["SNIPE: Home Fortress", "2-0", 20],
     ["SNIPE: Mid-Table Deadlock", "1-1", 20],
     ["SNIPE: Mid-Table Deadlock", "1-1", 20],
-    ["LOCK: Chaos Rule", "1-1", 10],
+    ["LOCK: Chaos Rule", "2-1", 10],
     ["LOCK: Smart Top 4 Home", "2-0", 10],
     ["LOCK: Mid vs Bottom", "2-1", 10],
     ["LOCK: Standard Away", "0-1", 10],

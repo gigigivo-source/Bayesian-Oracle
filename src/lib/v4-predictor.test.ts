@@ -85,8 +85,8 @@ describe("generateV2Predictions — V2 Strict 3-Snipe System", () => {
       { home: "Arsenal", away: "Chelsea" }, // Top 4 Home vs Chaos -> 2-1
       { home: "Man Utd", away: "Man City" },// Chaos Home vs Top 4 Away -> 1-2
       { home: "Chelsea", away: "Spurs" },   // Chaos vs Chaos -> 1-1 (NEVER 2-2)
-      { home: "Spurs", away: "Coventry" },  // Chaos vs Bottom 5 -> 1-1 (banned from Snipe)
-      { home: "Everton", away: "Man Utd" }, // Mid vs Chaos -> 1-1
+      { home: "Spurs", away: "Coventry" },  // Chaos Home vs Bottom 5, xG gap >= 0.4 -> 2-1
+      { home: "Everton", away: "Man Utd" }, // Chaos Away, xG gap < 0.4 -> legacy 1-1
     ]);
 
     for (const p of predictions) {
@@ -94,25 +94,64 @@ describe("generateV2Predictions — V2 Strict 3-Snipe System", () => {
       expect(p.Prediction).not.toBe("2-2");
       expect(p.Target_Pts).toBe(10);
     }
+    expect(predictions.map((p) => p.Prediction)).toEqual(["2-1", "1-2", "1-1", "2-1", "1-1"]);
+  });
+
+  it("gates the Chaos rule on the Engine's xG margin (>= 0.4 strongly supports the change)", () => {
+    const predictions = generateV2Predictions([
+      { home: "Man Utd", away: "Ipswich" },   // Chaos Home vs Bottom 5, big xG gap -> 2-1
+      { home: "Everton", away: "Chelsea" },   // Chaos Away vs Mid, big xG gap -> 1-2
+      { home: "Fulham", away: "Man Utd" },    // Chaos Away, small xG gap -> 1-1 (legacy held)
+      { home: "Man Utd", away: "Aston Villa" },// Chaos Home, small xG gap -> 1-1 (legacy held)
+      { home: "Chelsea", away: "Spurs" },     // Both Chaos -> always 1-1
+    ]);
+
     expect(predictions.map((p) => p.Prediction)).toEqual(["2-1", "1-2", "1-1", "1-1", "1-1"]);
+    for (const p of predictions) expect(p.Category).toBe("LOCK: Chaos Rule");
   });
 
   it("applies Smart Top 4 Home, Mid vs Bottom, and Standard Default Lock rules", () => {
     const predictions = generateV2Predictions([
-      { home: "Liverpool", away: "Everton" },       // Smart Top 4 Home -> 2-0
-      { home: "Liverpool", away: "Brighton" },      // Top 4 Home vs Top 4 -> 2-0
+      { home: "Liverpool", away: "Everton" },       // Smart Top 4 Home (non-derby) -> 2-0
+      { home: "Liverpool", away: "Brighton" },      // Top 4 DERBY -> Engine xG -> 2-1
       { home: "Aston Villa", away: "Sunderland" },  // Mid Home vs Bottom 5 -> 2-1
       { home: "Coventry", away: "Fulham" },         // Bottom 5 vs Mid -> 0-1
       { home: "Bournemouth", away: "Sunderland" },  // Standard vs Bottom 5 -> 1-0
-      { home: "Bournemouth", away: "Nott'm Forest" }, // Standard vs Standard -> 1-0
+      { home: "Bournemouth", away: "Nott'm Forest" }, // Standard vs Standard, tight xG -> 1-0
     ]);
 
     expect(predictions).toEqual([
       { Match: "Liverpool vs Everton", Category: "LOCK: Smart Top 4 Home", Prediction: "2-0", Target_Pts: 10 },
-      { Match: "Liverpool vs Brighton", Category: "LOCK: Smart Top 4 Home", Prediction: "2-0", Target_Pts: 10 },
+      { Match: "Liverpool vs Brighton", Category: "LOCK: Top 4 Derby", Prediction: "2-1", Target_Pts: 10 },
       { Match: "Aston Villa vs Sunderland", Category: "LOCK: Mid vs Bottom", Prediction: "2-1", Target_Pts: 10 },
       { Match: "Coventry vs Fulham", Category: "LOCK: Standard Away", Prediction: "0-1", Target_Pts: 10 },
       { Match: "Bournemouth vs Sunderland", Category: "LOCK: Standard Home", Prediction: "1-0", Target_Pts: 10 },
+      { Match: "Bournemouth vs Nott'm Forest", Category: "LOCK: Standard Home", Prediction: "1-0", Target_Pts: 10 },
+    ]);
+  });
+
+  it("runs the Engine xG for Top 4 derbies: 2-1 / 1-2 / 1-1 by margin", () => {
+    const predictions = generateV2Predictions([
+      { home: "Brighton", away: "Arsenal" },  // Home xG > away xG + 0.4 -> 2-1
+      { home: "Man City", away: "Brighton" }, // Away xG > home xG + 0.4 -> 1-2
+    ]);
+
+    expect(predictions).toEqual([
+      { Match: "Brighton vs Arsenal", Category: "LOCK: Top 4 Derby", Prediction: "2-1", Target_Pts: 10 },
+      { Match: "Man City vs Brighton", Category: "LOCK: Top 4 Derby", Prediction: "1-2", Target_Pts: 10 },
+    ]);
+  });
+
+  it("runs the Engine xG for Standard locks: blowout, 2-2 thriller, or legacy default", () => {
+    const predictions = generateV2Predictions([
+      { home: "Bournemouth", away: "Leeds" },      // xG gap >= 1.2 -> home blowout 3-0
+      { home: "Bournemouth", away: "Brentford" },  // both xG >= 1.8 -> 2-2
+      { home: "Bournemouth", away: "Nott'm Forest" }, // tight xG -> legacy 1-0
+    ]);
+
+    expect(predictions).toEqual([
+      { Match: "Bournemouth vs Leeds", Category: "LOCK: xG Blowout", Prediction: "3-0", Target_Pts: 10 },
+      { Match: "Bournemouth vs Brentford", Category: "LOCK: xG High Draw", Prediction: "2-2", Target_Pts: 10 },
       { Match: "Bournemouth vs Nott'm Forest", Category: "LOCK: Standard Home", Prediction: "1-0", Target_Pts: 10 },
     ]);
   });

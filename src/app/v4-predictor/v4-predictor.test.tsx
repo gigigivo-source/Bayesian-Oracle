@@ -173,8 +173,8 @@ describe("GET /api/v4-predictor/auto — V2 Strict 3-Snipe System", () => {
         away: { name: "Man City", logo: "https://example.com/mancity.png" },
         state: "pre",
         actual: null,
-        category: "LOCK: Smart Top 4 Home",
-        prediction: "2-0",
+        category: "LOCK: Top 4 Derby",
+        prediction: "1-1",
         targetPts: 10,
       },
     ]);

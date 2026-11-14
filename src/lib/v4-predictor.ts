@@ -1,4 +1,18 @@
-// V4 Predictor — True V2 Strict 3-Snipe System (pure rule-based, zero Engine / Poisson).
+// V4 Predictor — True V2 Strict 3-Snipe System.
+//
+// Snipes stay pure rules (zero Engine). The three V2 lock fixes — the Chaos
+// rule, the Top 4 derby, and the conservative Standard lock — consult the
+// Engine's xG math (`computeMatchExpectedGoals`, the Maher attack × defence
+// model) through an offline season strength snapshot, and only change the
+// legacy pick when the math STRONGLY supports it (xG margin ≥ 0.4).
+
+import {
+  FALLBACK_LEAGUE_AVERAGES,
+  computeMatchExpectedGoals,
+  type AttackDefenceTable,
+  type TeamAttackDefence,
+} from "./data/attackDefence";
+import { normaliseTeamName } from "./data/historical";
 
 export const TOP_4 = ["Arsenal", "Liverpool", "Man City", "Brighton"];
 export const MID_TABLE = ["Fulham", "Brentford", "Everton", "Leeds", "Crystal Palace", "Newcastle", "Aston Villa"];
@@ -82,20 +96,130 @@ function normalizeFixturePair(fixture: V2FixtureInput): [string, string] {
   return [translateTeamName(fixture.home), translateTeamName(fixture.away)];
 }
 
+// ─── V2 xG snapshot (Engine Maher strengths, 2026-27) ────────────────────────
+//
+// Per-team venue strengths in the Engine's attack/defence parametrisation
+// (see `src/lib/data/attackDefence.ts`): strengths are ratios against the
+// league scoring baseline, so 1.00 = league average. Fed into
+// `computeMatchExpectedGoals` — the same xG function the correct-score route
+// runs — this gives the V2 locks a deterministic, offline expected-goals read.
+type V2XgStrength = {
+  attackHome: number;
+  defenceAway: number;
+  attackAway: number;
+  defenceHome: number;
+};
+
+export const V2_XG_STRENGTH: Record<string, V2XgStrength> = {
+  "Arsenal":        { attackHome: 0.98, defenceAway: 0.98, attackAway: 0.96, defenceHome: 0.95 },
+  "Liverpool":      { attackHome: 1.21, defenceAway: 0.98, attackAway: 1.00, defenceHome: 0.89 },
+  "Man City":       { attackHome: 0.83, defenceAway: 0.95, attackAway: 0.96, defenceHome: 1.19 },
+  "Brighton":       { attackHome: 1.07, defenceAway: 0.95, attackAway: 1.14, defenceHome: 0.92 },
+  "Fulham":         { attackHome: 0.80, defenceAway: 0.97, attackAway: 1.05, defenceHome: 1.06 },
+  "Brentford":      { attackHome: 1.00, defenceAway: 0.99, attackAway: 1.27, defenceHome: 1.04 },
+  "Everton":        { attackHome: 0.94, defenceAway: 1.09, attackAway: 1.27, defenceHome: 1.17 },
+  "Leeds":          { attackHome: 0.97, defenceAway: 1.38, attackAway: 1.16, defenceHome: 0.98 },
+  "Crystal Palace": { attackHome: 0.93, defenceAway: 1.02, attackAway: 0.91, defenceHome: 0.93 },
+  "Newcastle":      { attackHome: 0.93, defenceAway: 0.91, attackAway: 1.03, defenceHome: 1.00 },
+  "Aston Villa":    { attackHome: 1.03, defenceAway: 1.01, attackAway: 1.09, defenceHome: 0.91 },
+  "Coventry":       { attackHome: 0.96, defenceAway: 1.12, attackAway: 1.04, defenceHome: 0.97 },
+  "Ipswich":        { attackHome: 0.97, defenceAway: 0.98, attackAway: 0.81, defenceHome: 0.96 },
+  "Hull":           { attackHome: 0.85, defenceAway: 0.92, attackAway: 0.95, defenceHome: 1.04 },
+  "Sunderland":     { attackHome: 1.01, defenceAway: 0.92, attackAway: 1.00, defenceHome: 1.33 },
+  "Burnley":        { attackHome: 1.08, defenceAway: 1.01, attackAway: 1.12, defenceHome: 0.88 },
+  "Chelsea":        { attackHome: 1.01, defenceAway: 0.84, attackAway: 1.16, defenceHome: 0.93 },
+  "Man Utd":        { attackHome: 1.02, defenceAway: 0.96, attackAway: 1.10, defenceHome: 0.92 },
+  "Spurs":          { attackHome: 1.04, defenceAway: 0.87, attackAway: 0.89, defenceHome: 1.00 },
+  "Bournemouth":    { attackHome: 1.45, defenceAway: 1.01, attackAway: 0.94, defenceHome: 1.21 },
+  "Nott'm Forest":  { attackHome: 0.83, defenceAway: 1.06, attackAway: 0.82, defenceHome: 1.03 },
+};
+
+/** xG margin the Engine must show before a V2 lock may deviate from its legacy pick. */
+export const STRONG_XG_MARGIN = 0.4;
+/** xG gap that turns a Standard lock into a blowout prediction. */
+export const BLOWOUT_XG_MARGIN = 1.2;
+/** Both sides projected at/above this → the Standard lock plays a 2-2 thriller. */
+export const HIGH_DRAW_XG = 1.8;
+
+function buildV2XgTable(): AttackDefenceTable {
+  const teams = new Map<string, TeamAttackDefence>();
+  for (const [name, s] of Object.entries(V2_XG_STRENGTH)) {
+    const key = normaliseTeamName(name);
+    teams.set(key, {
+      team: name,
+      key,
+      leagueSlug: "eng.1",
+      matchesPlayed: 10,
+      homeMatches: 5,
+      awayMatches: 5,
+      attackHome: s.attackHome,
+      defenceHome: s.defenceHome,
+      attackAway: s.attackAway,
+      defenceAway: s.defenceAway,
+      attack: (s.attackHome + s.attackAway) / 2,
+      defence: (s.defenceHome + s.defenceAway) / 2,
+      avgGoalsScoredHome: FALLBACK_LEAGUE_AVERAGES.home,
+      avgGoalsConcededHome: FALLBACK_LEAGUE_AVERAGES.away,
+      avgGoalsScoredAway: FALLBACK_LEAGUE_AVERAGES.away,
+      avgGoalsConcededAway: FALLBACK_LEAGUE_AVERAGES.home,
+    });
+  }
+  return {
+    leagueSlug: "eng.1",
+    league: {
+      leagueSlug: "eng.1",
+      matches: 0,
+      leagueAverageHome: FALLBACK_LEAGUE_AVERAGES.home,
+      leagueAverageAway: FALLBACK_LEAGUE_AVERAGES.away,
+      leagueAverageTotal: FALLBACK_LEAGUE_AVERAGES.home + FALLBACK_LEAGUE_AVERAGES.away,
+      fallback: true,
+    },
+    teams,
+    matchesProcessed: 0,
+  };
+}
+
+const V2_XG_TABLE = buildV2XgTable();
+
 /**
- * Exact V2 Strict 3-Snipe System.
+ * Run the Engine's xG math for one fixture (offline, deterministic).
+ * Teams missing from the snapshot fall back to league-average strengths.
+ */
+export function estimateFixtureXg(
+  home: string,
+  away: string,
+): { homeXg: number; awayXg: number } {
+  const result = computeMatchExpectedGoals({
+    homeTeam: home,
+    awayTeam: away,
+    table: V2_XG_TABLE,
+    applyElo: false,
+  });
+  return { homeXg: result.homeExpectedGoals, awayXg: result.awayExpectedGoals };
+}
+
+/**
+ * Exact V2 Strict 3-Snipe System (with the three V2 lock fixes).
  *
  * 1. Counters: `fortressUsed`, `deadlocksUsed`, `eliteAwayUsed`. Max 3 Snipes total.
- * 2. Snipes (20-Point Targets):
+ * 2. Snipes (20-Point Targets) — pure rules, zero Engine:
  *    - Chaos teams are PERMANENTLY BANNED from Snipes.
  *    - Snipe 1: Top 4 (Home) vs Bottom 5 -> 2-0 (Max 1).
  *    - Snipe 2 & 3: Mid (Home) vs Mid -> 1-1 (Max 2).
  *    - Snipe 3 Alternative: If there are not 2 Mid-Table Deadlocks, Top 4 (Away) -> 0-1.
- * 3. Locks (10-Point Targets):
- *    - Rule 1 (Chaos): 2-1 (if Top 4 Home), 1-2 (if Top 4 Away), 1-1 (if no Top 4). NEVER 2-2.
- *    - Rule 2 (Smart Top 4 Home): Top 4 at Home (not vs Bottom 5) -> 2-0.
+ * 3. Locks (10-Point Targets) — Engine xG consulted, changes only when the
+ *    math STRONGLY supports them (margin >= STRONG_XG_MARGIN):
+ *    - Rule 1 (Chaos): both Chaos -> 1-1. Vs Top 4 keeps the legacy 2-1/1-2.
+ *      Vs Mid / Bottom 5 / Standard: HOME -> 2-1, AWAY -> 1-2 — but only when
+ *      the Engine's xG margin is >= 0.4 in that direction, else 1-1. NEVER 2-2.
+ *    - Rule 2 (Top 4 Home): Top 4 Home (not vs Bottom 5) vs non-Top 4 -> 2-0.
+ *      Top 4 DERBY (home also faces an away Top 4 side) -> Engine xG:
+ *      home xG > away xG + 0.4 -> 2-1 · away xG > home xG + 0.4 -> 1-2 · else 1-1.
  *    - Rule 3 (Mid vs Bottom): Mid at Home vs Bottom 5 -> 2-1.
- *    - Rule 4 (Standard Default): Any other match -> 1-0 (Home) or 0-1 (Away).
+ *    - Rule 4 (Standard xG): matches with no Top 4, no Bottom 5, no Chaos and
+ *      not Mid-vs-Mid run the Engine xG:
+ *      home diff >= 1.2 -> 3-0/4-0 · away diff >= 1.2 -> 0-3/0-4 ·
+ *      both xG >= 1.8 -> 2-2 · otherwise the legacy 1-0 / 0-1 default.
  */
 export function generateV2Predictions(fixtures: readonly V2FixtureInput[]): Prediction[] {
   const pairs = fixtures.map(normalizeFixturePair);
@@ -170,9 +294,27 @@ export function generateV2Predictions(fixtures: readonly V2FixtureInput[]): Pred
     const homeIsStandard = !homeIsTop4 && !homeIsMid && !homeIsBottom5 && !homeIsChaos;
     const awayIsStandard = !awayIsTop4 && !awayIsMid && !awayIsBottom5 && !awayIsChaos;
 
-    // Rule 1 (Chaos): 2-1 (if Top 4 Home), 1-2 (if Top 4 Away), 1-1 (if no Top 4). NEVER 2-2.
+    // Rule 1 (Chaos): both Chaos -> 1-1. Vs Top 4 keeps the legacy 2-1 / 1-2.
+    // Vs Mid / Bottom 5 / Standard: HOME -> 2-1, AWAY -> 1-2 — but ONLY when
+    // the Engine's xG margin strongly supports it (>= STRONG_XG_MARGIN),
+    // otherwise the legacy 1-1 stands. NEVER 2-2.
     if (homeIsChaos || awayIsChaos) {
-      const prediction = homeIsTop4 ? "2-1" : awayIsTop4 ? "1-2" : "1-1";
+      let prediction: string;
+      if (homeIsChaos && awayIsChaos) {
+        prediction = "1-1";
+      } else if (homeIsTop4 || awayIsTop4) {
+        prediction = homeIsTop4 ? "2-1" : "1-2";
+      } else {
+        const { homeXg, awayXg } = estimateFixtureXg(home, away);
+        const chaosIsHome = homeIsChaos;
+        const support = chaosIsHome ? homeXg - awayXg : awayXg - homeXg;
+        prediction =
+          support >= STRONG_XG_MARGIN
+            ? chaosIsHome
+              ? "2-1"
+              : "1-2"
+            : "1-1";
+      }
       return {
         Match: `${home} vs ${away}`,
         Category: "LOCK: Chaos Rule",
@@ -181,12 +323,28 @@ export function generateV2Predictions(fixtures: readonly V2FixtureInput[]): Pred
       };
     }
 
-    // Rule 2 (Smart Top 4 Home): Top 4 at Home -> 2-0.
+    // Rule 2 (Top 4 Home): non-Top 4 opponent -> legacy 2-0.
+    // Top 4 DERBY -> Engine xG decides: 2-1 / 1-2 / 1-1.
     if (homeIsTop4) {
+      if (!awayIsTop4) {
+        return {
+          Match: `${home} vs ${away}`,
+          Category: "LOCK: Smart Top 4 Home",
+          Prediction: "2-0",
+          Target_Pts: 10,
+        };
+      }
+      const { homeXg, awayXg } = estimateFixtureXg(home, away);
+      const prediction =
+        homeXg - awayXg >= STRONG_XG_MARGIN
+          ? "2-1"
+          : awayXg - homeXg >= STRONG_XG_MARGIN
+            ? "1-2"
+            : "1-1";
       return {
         Match: `${home} vs ${away}`,
-        Category: "LOCK: Smart Top 4 Home",
-        Prediction: "2-0",
+        Category: "LOCK: Top 4 Derby",
+        Prediction: prediction,
         Target_Pts: 10,
       };
     }
@@ -201,7 +359,42 @@ export function generateV2Predictions(fixtures: readonly V2FixtureInput[]): Pred
       };
     }
 
-    // Rule 4 (Standard Default): Any other match -> 1-0 (Home) or 0-1 (Away).
+    // Rule 4 (Conservative Standard): no Top 4, no Bottom 5, no Chaos and not
+    // Mid-vs-Mid → run the Engine xG. Only STRONG math deviates from the
+    // legacy default: a >= 1.2 gap becomes a blowout, two >= 1.8 projections
+    // become a 2-2 thriller, anything tighter keeps the old 1-0 / 0-1.
+    const xgEligible =
+      !homeIsTop4 && !awayIsTop4 && !homeIsBottom5 && !awayIsBottom5 && !(homeIsMid && awayIsMid);
+    if (xgEligible) {
+      const { homeXg, awayXg } = estimateFixtureXg(home, away);
+      const margin = homeXg - awayXg;
+      if (margin >= BLOWOUT_XG_MARGIN) {
+        return {
+          Match: `${home} vs ${away}`,
+          Category: "LOCK: xG Blowout",
+          Prediction: Math.round(homeXg) >= 4 ? "4-0" : "3-0",
+          Target_Pts: 10,
+        };
+      }
+      if (margin <= -BLOWOUT_XG_MARGIN) {
+        return {
+          Match: `${home} vs ${away}`,
+          Category: "LOCK: xG Blowout",
+          Prediction: Math.round(awayXg) >= 4 ? "0-4" : "0-3",
+          Target_Pts: 10,
+        };
+      }
+      if (homeXg >= HIGH_DRAW_XG && awayXg >= HIGH_DRAW_XG) {
+        return {
+          Match: `${home} vs ${away}`,
+          Category: "LOCK: xG High Draw",
+          Prediction: "2-2",
+          Target_Pts: 10,
+        };
+      }
+    }
+
+    // Rule 5 (Standard Default): tight game -> 1-0 (Home) or 0-1 (Away).
     const awayIsStronger =
       awayIsTop4 ||
       (homeIsBottom5 && awayIsMid) ||
