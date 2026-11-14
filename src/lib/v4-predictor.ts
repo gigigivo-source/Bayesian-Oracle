@@ -92,8 +92,18 @@ function normalizeFixturePair(fixture: V2FixtureInput): [string, string] {
  *    - Snipe 2 & 3: Mid (Home) vs Mid -> 1-1 (Max 2).
  *    - Snipe 3 Alternative: If there are not 2 Mid-Table Deadlocks, Top 4 (Away) -> 0-1.
  * 3. Locks (10-Point Targets):
- *    - Rule 1 (Chaos): 2-1 (if Top 4 Home), 1-2 (if Top 4 Away), 1-1 (if no Top 4). NEVER 2-2.
+ *    - Rule 1 (Chaos): a Chaos team is never predicted to draw against Top 4,
+ *      Bottom 5 or Standard opposition. `1-1` survives only for Chaos vs Chaos
+ *      and for Chaos vs Mid-Table, which is a genuine coin-flip.
+ *        `CHAOS` at home vs Bottom 5 / Standard  -> 2-1
+ *        `CHAOS` away      at Bottom 5 / Standard -> 1-2
+ *        Top 4 at home vs Chaos                   -> 2-1
+ *        Chaos away at Top 4                      -> 1-2
+ *        Chaos vs Chaos                           -> 1-1 (NEVER 2-2)
+ *        Chaos vs Mid-Table (either side)          -> 1-1
  *    - Rule 2 (Smart Top 4 Home): Top 4 at Home (not vs Bottom 5) -> 2-0.
+ *      This stays 2-0 even for Top 4 vs Top 4: predicting 1-1 in derbies was
+ *      measured to cost MW5 (-30) and MW8 (-20) in the MW1-10 backtest.
  *    - Rule 3 (Mid vs Bottom): Mid at Home vs Bottom 5 -> 2-1.
  *    - Rule 4 (Standard Default): Any other match -> 1-0 (Home) or 0-1 (Away).
  */
@@ -170,9 +180,21 @@ export function generateV2Predictions(fixtures: readonly V2FixtureInput[]): Pred
     const homeIsStandard = !homeIsTop4 && !homeIsMid && !homeIsBottom5 && !homeIsChaos;
     const awayIsStandard = !awayIsTop4 && !awayIsMid && !awayIsBottom5 && !awayIsChaos;
 
-    // Rule 1 (Chaos): 2-1 (if Top 4 Home), 1-2 (if Top 4 Away), 1-1 (if no Top 4). NEVER 2-2.
+    // Rule 1 (Chaos): never a draw against a non-Chaos opponent.
+    // 1-1 is reserved for Chaos vs Chaos; otherwise the side with the clear
+    // edge wins, and genuine coin-flips (Chaos vs Mid-Table) stay 1-1.
     if (homeIsChaos || awayIsChaos) {
-      const prediction = homeIsTop4 ? "2-1" : awayIsTop4 ? "1-2" : "1-1";
+      let prediction = "1-1";
+      if (homeIsChaos && awayIsChaos) {
+        prediction = "1-1";
+      } else if (homeIsChaos) {
+        prediction = awayIsBottom5 || awayIsStandard ? "2-1" : "1-1";
+      } else if (awayIsChaos) {
+        prediction = homeIsBottom5 || homeIsStandard ? "1-2" : "1-1";
+      }
+      // Top 4 hosting Chaos keeps the proven 2-1 (e.g. Arsenal 2-1 Chelsea).
+      if (homeIsTop4 && awayIsChaos) prediction = "2-1";
+      if (awayIsTop4 && homeIsChaos) prediction = "1-2";
       return {
         Match: `${home} vs ${away}`,
         Category: "LOCK: Chaos Rule",
