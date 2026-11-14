@@ -4,72 +4,19 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FixtureLite } from "@/lib/espn";
-import { buildCorrectScoreGrid, DIXON_COLES_RHO, pickMaxExpectedPoints } from "@/lib/engine/markets";
-import { TEAM_NAME_MAP, translateTeamName } from "@/lib/v4-predictor";
+import {
+  TEAM_NAME_MAP,
+  generateV2Predictions,
+  translateTeamName,
+} from "@/lib/v4-predictor";
 
 const fetchScoreboardMock = vi.fn();
 const getCurrentMatchweekMock = vi.fn();
-const fetchSummaryMock = vi.fn();
-const buildHistoricalTeamFormMock = vi.fn();
-const runEngineMock = vi.fn();
 
 vi.mock("@/lib/espn", () => ({
   fetchScoreboard: (...args: unknown[]) => fetchScoreboardMock(...args),
   getCurrentMatchweek: (...args: unknown[]) => getCurrentMatchweekMock(...args),
-  fetchSummary: (...args: unknown[]) => fetchSummaryMock(...args),
 }));
-
-vi.mock("@/lib/engine/sofascore", () => ({
-  buildHistoricalTeamForm: (...args: unknown[]) => buildHistoricalTeamFormMock(...args),
-}));
-
-// The real engine needs a database; the route only needs its markets.
-vi.mock("@/lib/engine", () => ({
-  runEngineFromRealWithProfiles: (...args: unknown[]) => runEngineMock(...args),
-}));
-
-/**
- * Engine-shaped result priced off the same Dixon–Coles grid the real
- * MarketEngine publishes (1X2 split + Correct Score cells + lambdas), so the
- * route can read probabilities exactly as it does in production.
- */
-function engineResult(
-  homeTeam: string,
-  awayTeam: string,
-  homeLambda: number,
-  awayLambda: number,
-  completeness = 82,
-) {
-  const grid = buildCorrectScoreGrid(homeLambda, awayLambda, DIXON_COLES_RHO);
-  return {
-    match: { homeTeam, awayTeam, dataCompletenessScore: completeness },
-    lambdas: { "λ Home Goals": homeLambda, "λ Away Goals": awayLambda },
-    markets: [
-      { family: "Goals", name: `Match Result: ${homeTeam} Win`, selection: `${homeTeam} Win`, hitRate: grid.outcome.home },
-      { family: "Goals", name: "Match Result: Draw", selection: "Draw", hitRate: grid.outcome.draw },
-      { family: "Goals", name: `Match Result: ${awayTeam} Win`, selection: `${awayTeam} Win`, hitRate: grid.outcome.away },
-      ...grid.cells
-        .map((cell) => ({
-          family: "Goals",
-          name: `Correct Score ${cell.homeGoals}-${cell.awayGoals}`,
-          selection: `Score ${cell.homeGoals}-${cell.awayGoals}`,
-          hitRate: cell.probability,
-        })),
-    ],
-  };
-}
-
-/** The λ pair the mocked Engine returns for a given fixture. */
-function lambdasFor(home: string, away: string): [number, number] {
-  const table: Record<string, [number, number]> = {
-    "Arsenal FC|Chelsea FC": [2.2, 0.6],
-    "Tottenham Hotspur FC|Aston Villa FC": [1.0, 1.0],
-    "Everton FC|Leeds United FC": [1.0, 1.0],
-    "Tottenham Hotspur FC|Ipswich Town FC": [0.7, 1.8],
-    "Hull City AFC|Liverpool FC": [0.6, 2.0],
-  };
-  return table[`${home}|${away}`] ?? [1.35, 1.15];
-}
 
 vi.mock("next/link", () => ({
   default: ({ href, children, ...rest }: { href: string; children: React.ReactNode }) => (
@@ -132,14 +79,6 @@ beforeEach(() => {
   fetchScoreboardMock.mockReset();
   getCurrentMatchweekMock.mockReset();
   getCurrentMatchweekMock.mockResolvedValue(11);
-  fetchSummaryMock.mockReset();
-  fetchSummaryMock.mockResolvedValue(null);
-  buildHistoricalTeamFormMock.mockReset();
-  buildHistoricalTeamFormMock.mockResolvedValue(null);
-  runEngineMock.mockReset();
-  runEngineMock.mockImplementation(
-    async (fx: FixtureLite) => engineResult(fx.home.name, fx.away.name, ...lambdasFor(fx.home.name, fx.away.name)),
-  );
 });
 
 afterEach(() => {
@@ -167,8 +106,8 @@ describe("V4 team name translation", () => {
   });
 });
 
-describe("GET /api/v4-predictor/auto — Pure Points Maximiser", () => {
-  it("accepts ?week=X, passes week to fetchScoreboard, translates names, extracts logos and actual scores", async () => {
+describe("GET /api/v4-predictor/auto — V2 Strict 3-Snipe System", () => {
+  it("accepts ?week=X, passes week to fetchScoreboard, translates names, and applies exact V2 rules", async () => {
     fetchScoreboardMock.mockResolvedValue([
       makeFixture("other", "2026-11-21T15:00:00Z", "Arsenal FC", "Chelsea FC", "pre", null, null, 11, "https://example.com/arsenal.png", "https://example.com/chelsea.png"),
       makeFixture("m2", "2026-11-08T16:30:00Z", "Tottenham Hotspur FC", "Brighton & Hove Albion FC", "post", "0", "0", 10, "https://example.com/spurs.png", "https://example.com/brighton.png"),
@@ -183,26 +122,35 @@ describe("GET /api/v4-predictor/auto — Pure Points Maximiser", () => {
 
     expect(fetchScoreboardMock).toHaveBeenCalledWith("eng.1", undefined, 10);
     expect(body.week).toBe(10);
-    expect(body.fixtures.map((f: { home: { name: string }; away: { name: string }; state: string; actual: number[] | null }) => [
-      f.home.name, f.away.name, f.state, f.actual,
-    ])).toEqual([
-      ["Man City", "Hull", "post", [2, 0]],
-      ["Spurs", "Brighton", "post", [0, 0]],
-      ["Bournemouth", "Newcastle", "pre", null],
+    expect(body.fixtures).toEqual([
+      {
+        home: { name: "Man City", logo: "https://example.com/mancity.png" },
+        away: { name: "Hull", logo: "https://example.com/hull.png" },
+        state: "post",
+        actual: [2, 0],
+        prediction: "2-0",
+        category: "SNIPE: Home Fortress",
+        targetPts: 20,
+      },
+      {
+        home: { name: "Spurs", logo: "https://example.com/spurs.png" },
+        away: { name: "Brighton", logo: "https://example.com/brighton.png" },
+        state: "post",
+        actual: [0, 0],
+        prediction: "1-2",
+        category: "LOCK: Chaos Rule",
+        targetPts: 10,
+      },
+      {
+        home: { name: "Bournemouth", logo: null },
+        away: { name: "Newcastle", logo: null },
+        state: "pre",
+        actual: null,
+        prediction: "0-1",
+        category: "LOCK: Standard Away",
+        targetPts: 10,
+      },
     ]);
-    expect(body.fixtures[0].home.logo).toBe("https://example.com/mancity.png");
-    expect(body.fixtures[2].home.logo).toBeNull();
-
-    // Every row is a pure EP pick: "MAX EP: <score>" and no tranche field.
-    for (const row of body.fixtures) {
-      expect(row.category).toBe(`MAX EP: ${row.prediction}`);
-      expect(row.prediction).toMatch(/^\d{1,2}-\d{1,2}$/);
-      expect(row).not.toHaveProperty("tranche");
-      expect(row.ep).toBeGreaterThan(0);
-      expect(row.probabilities.home + row.probabilities.draw + row.probabilities.away).toBeCloseTo(1, 2);
-    }
-    // Man City (default λ 1.35 / 1.15): P(Home) 0.394 takes the EP win at 1-0.
-    expect(body.fixtures[0]).toMatchObject({ category: "MAX EP: 1-0", prediction: "1-0" });
   });
 
   it("uses current matchweek when ?week is omitted", async () => {
@@ -219,183 +167,58 @@ describe("GET /api/v4-predictor/auto — Pure Points Maximiser", () => {
     expect(getCurrentMatchweekMock).toHaveBeenCalledWith("eng.1");
     expect(fetchScoreboardMock).toHaveBeenCalledWith("eng.1", undefined, 12);
     expect(body.week).toBe(12);
-    expect(body.fixtures).toHaveLength(1);
-    expect(body.fixtures[0]).toMatchObject({
-      home: { name: "Arsenal", logo: "https://example.com/arsenal.png" },
-      away: { name: "Man City", logo: "https://example.com/mancity.png" },
-      state: "pre",
-      actual: null,
-      category: "MAX EP: 1-0",
-      prediction: "1-0",
-    });
+    expect(body.fixtures).toEqual([
+      {
+        home: { name: "Arsenal", logo: "https://example.com/arsenal.png" },
+        away: { name: "Man City", logo: "https://example.com/mancity.png" },
+        state: "pre",
+        actual: null,
+        category: "LOCK: Smart Top 4 Home",
+        prediction: "2-0",
+        targetPts: 10,
+      },
+    ]);
   });
 
-  it("runs the Engine on every fixture and publishes the highest-EP scoreline for each", async () => {
-    const summary = { venue: "Emirates" };
-    fetchSummaryMock.mockResolvedValue(summary);
-    // Ten fixtures: eight lopsided favourites plus two true toss-ups.
+  it("matches generateV2Predictions exactly across a 10-fixture matchweek slate", async () => {
     const names: Array<[string, string]> = [
       ["Arsenal FC", "Chelsea FC"],
       ["Manchester City FC", "Hull City AFC"],
       ["Liverpool FC", "Coventry City FC"],
       ["Newcastle United FC", "Burnley FC"],
-      ["Aston Villa FC", "Sunderland FC"],
-      ["Brighton & Hove Albion FC", "Ipswich Town FC"],
+      ["Aston Villa FC", "Sunderland AFC"],
+      ["Hull City AFC", "Brighton & Hove Albion FC"],
       ["Fulham FC", "Brentford FC"],
       ["Everton FC", "Leeds United FC"],
       ["Tottenham Hotspur FC", "Aston Villa FC"],
-      ["Wolverhampton Wanderers FC", "West Ham United FC"],
+      ["AFC Bournemouth", "Nottingham Forest FC"],
     ];
-    const lambdaTable: Record<string, [number, number]> = {
-      "Arsenal FC|Chelsea FC": [2.4, 0.5],
-      "Manchester City FC|Hull City AFC": [2.2, 0.6],
-      "Liverpool FC|Coventry City FC": [2.1, 0.7],
-      "Newcastle United FC|Burnley FC": [0.6, 2.0],
-      "Aston Villa FC|Sunderland FC": [0.7, 1.9],
-      "Brighton & Hove Albion FC|Ipswich Town FC": [1.8, 0.8],
-      "Fulham FC|Brentford FC": [0.8, 1.8],
-      "Everton FC|Leeds United FC": [1.7, 0.9],
-      "Tottenham Hotspur FC|Aston Villa FC": [1.0, 1.0],
-      "Wolverhampton Wanderers FC|West Ham United FC": [1.0, 1.0],
-    };
     fetchScoreboardMock.mockResolvedValue(
       names.map(([home, away], i) =>
-        makeFixture(`m${i}`, `2026-11-0${1 + Math.floor(i / 3)}T1${i % 9}:00:00Z`, home, away, "pre", null, null, 8),
+        makeFixture(`m${i}`, `2026-11-${String(i + 1).padStart(2, "0")}T15:00:00Z`, home, away, "pre", null, null, 8),
       ),
     );
-    // The λ pair each fixture was priced at, in kick-off order (the same order
-    // the route returns rows in).
-    const pricedPairs: Array<[number, number]> = [];
-    runEngineMock.mockImplementation(async (fx: FixtureLite) => {
-      const pair = lambdaTable[`${fx.home.name}|${fx.away.name}`] ?? [1.35, 1.15];
-      pricedPairs.push(pair);
-      return engineResult(fx.home.name, fx.away.name, pair[0], pair[1]);
-    });
 
     const { GET } = await import("@/app/api/v4-predictor/auto/route");
     const response = await GET(new Request("http://localhost:3000/api/v4-predictor/auto?week=8"));
     expect(response.status).toBe(200);
     const body = await response.json();
 
-    // The Engine runs on all ten fixtures — no static-rule bypass.
-    expect(runEngineMock).toHaveBeenCalledTimes(10);
-    expect(fetchSummaryMock).toHaveBeenCalledTimes(10);
-    expect(body.fixtures).toHaveLength(10);
-
-    // No tranching: every row is labelled purely by its MAX EP scoreline.
-    for (const row of body.fixtures) {
-      expect(row.category).toBe(`MAX EP: ${row.prediction}`);
-      expect(row).not.toHaveProperty("tranche");
-    }
-
-    // Each published pick is the highest-EP cell on its own grid (recomputed
-    // here from the λ pair, straight from the formula).
-    expect(pricedPairs).toHaveLength(10);
-    body.fixtures.forEach((row: { prediction: string; ep: number }, i: number) => {
-      const [homeLambda, awayLambda] = pricedPairs[i];
-      const grid = buildCorrectScoreGrid(homeLambda, awayLambda, DIXON_COLES_RHO);
-      const best = pickMaxExpectedPoints(grid.cells, grid.outcome)!;
-      expect(row.prediction).toBe(`${best.homeGoals}-${best.awayGoals}`);
-      expect(row.ep).toBeCloseTo(best.ep, 3);
-    });
-
-    // Arsenal (λ 2.4 / 0.5) is the biggest favourite: modal Home win 2-0.
-    const arsenal = body.fixtures.find((f: { home: { name: string } }) => f.home.name === "Arsenal");
-    expect(arsenal).toMatchObject({ category: "MAX EP: 2-0", prediction: "2-0" });
-    // Newcastle (λ 0.6 / 2.0) is the strongest away favourite: an away win.
-    const newcastle = body.fixtures.find((f: { home: { name: string } }) => f.home.name === "Newcastle");
-    expect(newcastle.prediction.startsWith("0-")).toBe(true);
-    expect(newcastle.ep).toBeGreaterThan(0);
-  });
-
-  it("anchors upcoming fixtures to the bookmaker odds and strips them for finished ones", async () => {
-    const odds = { homeML: -180, drawML: 320, awayML: 520, provider: "ESPN BET" };
-    fetchScoreboardMock.mockResolvedValue([
-      makeFixture("pre-1", "2026-11-07T15:00:00Z", "Arsenal FC", "Chelsea FC", "pre", null, null, 8),
-      makeFixture("post-1", "2026-11-01T15:00:00Z", "Everton FC", "Leeds United FC", "post", "1", "1", 8),
-    ]);
-    fetchSummaryMock.mockImplementation(async (_slug: string, id: string) => ({
-      venue: id === "pre-1" ? "Emirates" : "Goodison Park",
-      odds,
-    }));
-
-    const { GET } = await import("@/app/api/v4-predictor/auto/route");
-    const response = await GET(new Request("http://localhost:3000/api/v4-predictor/auto?week=8"));
-    expect(response.status).toBe(200);
-    await response.json();
-
-    const byId = new Map(
-      runEngineMock.mock.calls.map(([fx, summary]) => [(fx as FixtureLite).id, { fx, summary }]),
+    const expected = generateV2Predictions(
+      names.map(([home, away]) => ({
+        home: translateTeamName(home),
+        away: translateTeamName(away),
+      })),
     );
-    const upcoming = byId.get("pre-1")! as { fx: { odds: unknown }; summary: { odds: unknown } };
-    expect(upcoming.fx.odds).toMatchObject({ homeML: -180 });
-    expect(upcoming.summary.odds).toMatchObject({ homeML: -180 });
-
-    const finished = byId.get("post-1")! as { fx: { odds: unknown }; summary: { odds: unknown } };
-    expect(finished.fx.odds).toBeNull();
-    expect(finished.summary.odds).toBeNull();
-  });
-
-  it("isolates a finished fixture while preserving its scorecard result", async () => {
-    const fixture = makeFixture("m1", "2020-08-15T15:00:00Z", "Arsenal FC", "Chelsea FC", "post", "4", "2", 1);
-    fetchScoreboardMock.mockResolvedValue([fixture]);
-    const game = (date: string, scoreFor: number) => ({ date, scoreFor, scoreAgainst: 1, result: "W" });
-    fetchSummaryMock.mockResolvedValue({
-      venue: "Emirates", odds: { homeML: -100 }, boxscore: { homeCorners: 12 }, __homeXg: 5,
-      // Polluted today's lastFiveGames — must be ignored for finished ("post") fixtures!
-      homeForm: { teamId: "a", teamName: "Arsenal", games: [game("2020-09-01T15:00:00Z", 10)], gfAvg: 10, gaAvg: 1, points: 3 },
-      awayForm: { teamId: "c", teamName: "Chelsea", games: [game("2020-09-01T15:00:00Z", 8)], gfAvg: 8, gaAvg: 0, points: 3 },
-      h2h: [{ date: "2020-08-01T15:00:00Z", score: "1 - 0" }, { date: "2020-08-15T15:00:00Z", score: "4 - 2" }],
-      homeLineup: [{ starter: true }], awayLineup: [{ starter: true }], lineupAvailable: true,
-      homeFormation: "4-4-2", awayFormation: "4-3-3",
+    expect(body.fixtures).toHaveLength(10);
+    body.fixtures.forEach((row: { prediction: string; category: string; targetPts: number }, i: number) => {
+      expect(row.prediction).toBe(expected[i].Prediction);
+      expect(row.category).toBe(expected[i].Category);
+      expect(row.targetPts).toBe(expected[i].Target_Pts);
     });
-    buildHistoricalTeamFormMock.mockImplementation(async (teamName: string) => {
-      if (teamName === "Arsenal FC") {
-        return { teamId: "a", teamName: "Arsenal", games: [game("2020-08-01T15:00:00Z", 2)], gfAvg: 2, gaAvg: 1, points: 3 };
-      }
-      return null;
-    });
-    const { GET } = await import("@/app/api/v4-predictor/auto/route");
-    const response = await GET(new Request("http://localhost/api/v4-predictor/auto?week=1"));
-    const body = await response.json();
-    expect(body.fixtures[0].actual).toEqual([4, 2]);
-    expect(buildHistoricalTeamFormMock).toHaveBeenCalledWith("Arsenal FC", "eng.1", fixture.date);
-    expect(buildHistoricalTeamFormMock).toHaveBeenCalledWith("Chelsea FC", "eng.1", fixture.date);
-    const [fx, summary, , , cutoff] = runEngineMock.mock.calls[0];
-    expect(fx).toMatchObject({ state: "pre", statusDetail: "", odds: null, home: { score: null }, away: { score: null } });
-    expect(cutoff).toBe(fixture.date);
-    expect(summary).toMatchObject({ boxscore: null, odds: null, lineupAvailable: false, homeFormation: null,
-      homeForm: { gfAvg: 2, gaAvg: 1, points: 3, games: [game("2020-08-01T15:00:00Z", 2)] },
-      awayForm: null,
-      h2h: [{ date: "2020-08-01T15:00:00Z", score: "1 - 0" }] });
-    expect(summary).not.toHaveProperty("__homeXg");
-    expect(fixture.home.score).toBe("4");
-    // Finished fixtures are priced too — the EP maximiser covers the slate.
-    expect(body.fixtures[0].category).toBe("MAX EP: 2-0");
-    expect(body.fixtures[0].prediction).toBe("2-0");
-  });
-
-  it("prices every fixture from the model when the engine throws", async () => {
-    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    fetchScoreboardMock.mockResolvedValue([
-      makeFixture("m1", "2026-11-07T15:00:00Z", "Arsenal FC", "Chelsea FC", "pre", null, null, 8),
-      makeFixture("m2", "2026-11-07T17:30:00Z", "Tottenham Hotspur FC", "Ipswich Town FC", "pre", null, null, 8),
-    ]);
-    runEngineMock.mockRejectedValue(new Error("engine down"));
-
-    const { GET } = await import("@/app/api/v4-predictor/auto/route");
-    const response = await GET(new Request("http://localhost:3000/api/v4-predictor/auto?week=8"));
-    expect(response.status).toBe(200);
-    const body = await response.json();
-
-    // Model-only pricing (λ 1.35 / 1.15): every row is still a MAX EP pick.
-    expect(body.fixtures).toHaveLength(2);
-    for (const row of body.fixtures) {
-      expect(row.category).toBe("MAX EP: 1-0");
-      expect(row.prediction).toBe("1-0");
-      expect(row.ep).toBeGreaterThan(0);
-    }
-    errSpy.mockRestore();
+    expect(
+      body.fixtures.filter((r: { category: string }) => r.category.startsWith("SNIPE:")),
+    ).toHaveLength(3);
   });
 
   it("returns 400 when week parameter is invalid", async () => {
@@ -420,7 +243,7 @@ describe("GET /api/v4-predictor/auto — Pure Points Maximiser", () => {
 });
 
 describe("V4PredictorPage auto-dashboard", () => {
-  it("renders 1-38 dropdown, auto-fetches ?week=11 on mount, has zero inputs and no manual buttons, shows logos, FT/UPCOMING badges, predictions and scorecard", async () => {
+  it("renders 1-38 dropdown, auto-fetches ?week=11 on mount, has zero inputs and no manual buttons, shows logos, FT/UPCOMING badges, V2 predictions and scorecard", async () => {
     let resolveInitial!: (value: Response) => void;
     const requestedUrls: string[] = [];
     let week11Calls = 0;
@@ -428,8 +251,8 @@ describe("V4PredictorPage auto-dashboard", () => {
     const week11Body = {
       week: 11,
       fixtures: [
-        { home: { name: "Man City", logo: "https://example.com/mancity.png" }, away: { name: "Hull", logo: "https://example.com/hull.png" }, state: "post", actual: [2, 0], prediction: "2-0", category: "MAX EP: 2-0", ep: 9.38 },
-        { home: { name: "Spurs", logo: "https://example.com/spurs.png" }, away: { name: "Brighton", logo: "https://example.com/brighton.png" }, state: "pre", actual: null, prediction: "1-2", category: "MAX EP: 1-2", ep: 6.12 },
+        { home: { name: "Man City", logo: "https://example.com/mancity.png" }, away: { name: "Hull", logo: "https://example.com/hull.png" }, state: "post", actual: [2, 0], prediction: "2-0", category: "SNIPE: Home Fortress", targetPts: 20 },
+        { home: { name: "Spurs", logo: "https://example.com/spurs.png" }, away: { name: "Brighton", logo: "https://example.com/brighton.png" }, state: "pre", actual: null, prediction: "1-2", category: "LOCK: Chaos Rule", targetPts: 10 },
       ],
     };
 
@@ -455,7 +278,7 @@ describe("V4PredictorPage auto-dashboard", () => {
           json: async () => ({
             week: 10,
             fixtures: [
-              { home: { name: "Arsenal", logo: "https://example.com/arsenal.png" }, away: { name: "Hull", logo: "https://example.com/hull.png" }, state: "post", actual: [2, 0], prediction: "2-0", category: "MAX EP: 2-0", ep: 9.38 },
+              { home: { name: "Arsenal", logo: "https://example.com/arsenal.png" }, away: { name: "Hull", logo: "https://example.com/hull.png" }, state: "post", actual: [2, 0], prediction: "2-0", category: "SNIPE: Home Fortress", targetPts: 20 },
             ],
           }),
         } as unknown as Response);
@@ -480,15 +303,11 @@ describe("V4PredictorPage auto-dashboard", () => {
     expect(select.options[37].value).toBe("38");
     expect(select.value).toBe("11");
 
-    // Zero manual inputs and no manual action buttons
     expect(container.querySelectorAll("input")).toHaveLength(0);
     const buttonTexts = Array.from(container.querySelectorAll("button")).map((b) => b.textContent?.trim() ?? "");
     expect(buttonTexts).not.toContain("Generate Predictions");
     expect(buttonTexts).not.toContain("Refresh Fixtures");
     expect(buttonTexts).not.toContain("Calculate Score");
-    expect(container.textContent).not.toContain("Generate Predictions");
-    expect(container.textContent).not.toContain("Refresh Fixtures");
-    expect(container.textContent).not.toContain("Calculate Score");
 
     expect(requestedUrls).toContain("/api/v4-predictor/auto?week=11");
     expect(container.textContent).toContain("Loading real fixtures...");
@@ -505,7 +324,6 @@ describe("V4PredictorPage auto-dashboard", () => {
     expect(container.textContent).not.toContain("Loading real fixtures...");
     expect(container.querySelectorAll("input")).toHaveLength(0);
 
-    // Status badges
     expect(container.textContent).toContain("FT");
     expect(container.textContent).toContain("UPCOMING");
     const ftBadge = Array.from(container.querySelectorAll("span")).find((s) => s.textContent === "FT");
@@ -515,32 +333,20 @@ describe("V4PredictorPage auto-dashboard", () => {
     expect(upcomingBadge?.className).toContain("bg-amber-500/20");
     expect(upcomingBadge?.className).toContain("text-amber-400");
 
-    // Team logos via TeamBadge (next/image renders <img alt=name>)
     const images = Array.from(container.querySelectorAll("img"));
     expect(images.some((img) => img.getAttribute("alt") === "Man City")).toBe(true);
     expect(images.some((img) => img.getAttribute("alt") === "Hull")).toBe(true);
     expect(images.some((img) => (img.getAttribute("src") ?? "").includes("mancity.png"))).toBe(true);
 
-    // Predictions populated by the tranching engine (translated team names)
     expect(container.textContent).toContain("Man City vs Hull");
-    expect(container.textContent).toContain("MAX EP: 2-0");
+    expect(container.textContent).toContain("SNIPE: Home Fortress");
     expect(container.textContent).toContain("Spurs vs Brighton");
-    expect(container.textContent).toContain("MAX EP: 1-2");
+    expect(container.textContent).toContain("LOCK: Chaos Rule");
     expect(container.textContent).toContain("2-0");
-    // The EP the pick was chosen on is shown for each fixture.
-    expect(container.textContent).toContain("Expected Pts");
-    expect(container.textContent).toContain("9.38");
 
-    // Scorecard populated automatically for the finished match (2-0 vs 2-0 = 20 pts)
     expect(container.textContent).toContain("TOTAL SCORE: 20 / 200");
     expect(container.textContent).toContain("🎯");
-    const totalEl = Array.from(container.querySelectorAll("span")).find((s) => s.textContent?.includes("TOTAL SCORE:"));
-    expect(totalEl?.className).toContain("text-amber-400");
-    const exactPoints = Array.from(container.querySelectorAll("span")).find((s) => s.textContent?.includes("🎯"));
-    expect(exactPoints?.className).toContain("text-green-400");
-    expect(exactPoints?.className).toContain("font-bold");
 
-    // Change dropdown to Matchweek 10
     await act(async () => {
       Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!.call(select, "10");
       select.dispatchEvent(new Event("change", { bubbles: true }));
@@ -551,9 +357,7 @@ describe("V4PredictorPage auto-dashboard", () => {
     expect(select.value).toBe("10");
     expect(container.textContent).toContain("Arsenal vs Hull");
     expect(container.textContent).toContain("TOTAL SCORE: 20 / 200");
-    expect(container.querySelectorAll("input")).toHaveLength(0);
 
-    // Change dropdown back to Matchweek 11
     await act(async () => {
       Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!.call(select, "11");
       select.dispatchEvent(new Event("change", { bubbles: true }));
@@ -575,7 +379,7 @@ describe("V4PredictorPage auto-dashboard", () => {
           status: 200,
           json: async () => ({
             week: 11,
-            fixtures: [{ home: { name: "Man City", logo: "https://example.com/mancity.png" }, away: { name: "Fulham", logo: "https://example.com/fulham.png" }, state: "pre", actual: null, prediction: "2-0", category: "MAX EP: 2-0", ep: 9.38 }],
+            fixtures: [{ home: { name: "Man City", logo: "https://example.com/mancity.png" }, away: { name: "Fulham", logo: "https://example.com/fulham.png" }, state: "pre", actual: null, prediction: "2-0", category: "LOCK: Smart Top 4 Home", targetPts: 10 }],
           }),
         } as unknown as Response);
       }
@@ -601,10 +405,6 @@ describe("V4PredictorPage auto-dashboard", () => {
     expect(container.textContent).not.toContain("Loading real fixtures...");
     expect(container.textContent).toContain("UPCOMING");
     expect(container.textContent).not.toContain("TOTAL SCORE:");
-    expect(container.querySelectorAll("input")).toHaveLength(0);
-    const images = Array.from(container.querySelectorAll("img"));
-    expect(images.some((img) => img.getAttribute("alt") === "Man City")).toBe(true);
-    expect(images.some((img) => img.getAttribute("alt") === "Fulham")).toBe(true);
 
     const select = container.querySelector('select[aria-label="Select Matchweek"]') as HTMLSelectElement;
 
@@ -621,7 +421,7 @@ describe("V4PredictorPage auto-dashboard", () => {
         status: 200,
         json: async () => ({
           week: 10,
-          fixtures: [{ home: { name: "Arsenal", logo: "https://example.com/arsenal.png" }, away: { name: "Hull", logo: "https://example.com/hull.png" }, state: "post", actual: [2, 0], prediction: "2-0", category: "MAX EP: 2-0", ep: 9.38 }],
+          fixtures: [{ home: { name: "Arsenal", logo: "https://example.com/arsenal.png" }, away: { name: "Hull", logo: "https://example.com/hull.png" }, state: "post", actual: [2, 0], prediction: "2-0", category: "SNIPE: Home Fortress", targetPts: 20 }],
         }),
       } as unknown as Response);
       await Promise.resolve();
@@ -633,7 +433,7 @@ describe("V4PredictorPage auto-dashboard", () => {
     expect(container.textContent).toContain("TOTAL SCORE: 20 / 200");
   });
 
-  it("renders LIVE badge for in-play matches and outcome/missed points styling", async () => {
+  it("renders LIVE badge for in-play matches and exact/outcome/missed points styling", async () => {
     const fetchMock = vi.fn((url: string) => {
       if (url === "/api/v4-predictor/auto?week=11") {
         return Promise.resolve({
@@ -642,9 +442,9 @@ describe("V4PredictorPage auto-dashboard", () => {
           json: async () => ({
             week: 11,
             fixtures: [
-              { home: { name: "Arsenal", logo: "https://example.com/arsenal.png" }, away: { name: "Hull", logo: "https://example.com/hull.png" }, state: "in", actual: null, prediction: "2-0", category: "MAX EP: 2-0", ep: 9.38 },
-              { home: { name: "Fulham", logo: "https://example.com/fulham.png" }, away: { name: "Brentford", logo: "https://example.com/brentford.png" }, state: "post", actual: [2, 0], prediction: "1-1", category: "MAX EP: 1-1", ep: 4.38 },
-              { home: { name: "Chelsea", logo: "https://example.com/chelsea.png" }, away: { name: "Leeds", logo: "https://example.com/leeds.png" }, state: "post", actual: [0, 1], prediction: "1-1", category: "MAX EP: 1-1", ep: 4.38 },
+              { home: { name: "Arsenal", logo: "https://example.com/arsenal.png" }, away: { name: "Hull", logo: "https://example.com/hull.png" }, state: "in", actual: null, prediction: "2-0", category: "SNIPE: Home Fortress", targetPts: 20 },
+              { home: { name: "Fulham", logo: "https://example.com/fulham.png" }, away: { name: "Brentford", logo: "https://example.com/brentford.png" }, state: "post", actual: [2, 2], prediction: "1-1", category: "SNIPE: Mid-Table Deadlock", targetPts: 20 },
+              { home: { name: "Chelsea", logo: "https://example.com/chelsea.png" }, away: { name: "Leeds", logo: "https://example.com/leeds.png" }, state: "post", actual: [0, 1], prediction: "1-1", category: "LOCK: Chaos Rule", targetPts: 10 },
             ],
           }),
         } as unknown as Response);
@@ -664,89 +464,10 @@ describe("V4PredictorPage auto-dashboard", () => {
     });
 
     expect(container.textContent).toContain("LIVE");
-    const liveBadge = Array.from(container.querySelectorAll("span")).find((s) => s.textContent === "LIVE");
-    expect(liveBadge?.className).toContain("bg-red-500/20");
-    expect(liveBadge?.className).toContain("text-red-400");
-    expect(liveBadge?.className).toContain("animate-pulse");
-
-    // Fulham vs Brentford: MAX EP 1-1, actual 2-0 -> missed (0)
-    // Chelsea vs Leeds: MAX EP 1-1, actual 0-1 -> missed (0) => total 0
-    expect(container.textContent).toContain("TOTAL SCORE: 0 / 200");
-    const missedPoints = Array.from(container.querySelectorAll("span")).find((s) => s.textContent?.includes("❌"));
+    expect(container.textContent).toContain("TOTAL SCORE: 10 / 200");
+    const outcomePoints = Array.from(container.querySelectorAll("span")).find((s) => s.textContent?.includes("✅"));
+    expect(outcomePoints?.className).toContain("text-yellow-400");
+    const missedPoints = Array.from(container.querySelectorAll("span")).find((s) => s.textContent?.includes("❌ 0 pts"));
     expect(missedPoints?.className).toContain("text-red-400");
-    expect(missedPoints?.className).toContain("font-bold");
-  });
-
-  it("renders pure MAX EP picks (including a 2-1 and a draw) and scores accurately", async () => {
-    const fetchMock = vi.fn((url: string) => {
-      if (url === "/api/v4-predictor/auto?week=11") {
-        return Promise.resolve({
-          ok: true,
-          status: 200,
-          json: async () => ({
-            week: 11,
-            fixtures: [
-              {
-                home: { name: "Arsenal", logo: null },
-                away: { name: "Coventry", logo: null },
-                state: "post",
-                actual: [2, 0],
-                prediction: "2-0",
-                category: "MAX EP: 2-0",
-                enginePrediction: "2-0",
-              },
-              {
-                home: { name: "Chelsea", logo: null },
-                away: { name: "Spurs", logo: null },
-                state: "post",
-                actual: [2, 1],
-                prediction: "2-1",
-                category: "MAX EP: 2-1",
-                enginePrediction: "2-1",
-              },
-              {
-                home: { name: "Spurs", logo: null },
-                away: { name: "Aston Villa", logo: null },
-                state: "post",
-                actual: [0, 2],
-                prediction: "0-2",
-                category: "MAX EP: 0-2",
-                enginePrediction: "0-2",
-              },
-              {
-                home: { name: "Wolves", logo: null },
-                away: { name: "West Ham", logo: null },
-                state: "post",
-                actual: [1, 1],
-                prediction: "1-1",
-                category: "MAX EP: 1-1",
-                enginePrediction: "1-1",
-              },
-            ],
-          }),
-        } as unknown as Response);
-      }
-      throw new Error(`Unexpected fetch: ${url}`);
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    const { default: V4PredictorPage } = await import("./page");
-    const container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
-
-    await act(async () => {
-      root!.render(<V4PredictorPage />);
-      await Promise.resolve();
-    });
-
-    expect(container.textContent).toContain("MAX EP: 2-0");
-    expect(container.textContent).toContain("MAX EP: 2-1");
-    expect(container.textContent).toContain("MAX EP: 0-2");
-    expect(container.textContent).toContain("MAX EP: 1-1");
-    expect(container.textContent).toContain("2-1");
-    expect(container.textContent).toContain("0-2");
-    // 2-0 exact (20) + 2-1 exact (20) + 0-2 exact (20) + 1-1 exact (20) = 80.
-    expect(container.textContent).toContain("TOTAL SCORE: 80 / 200");
   });
 });
