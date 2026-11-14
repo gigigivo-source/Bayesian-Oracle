@@ -15,7 +15,23 @@ export const maxDuration = 60;
 
 const DEFAULT_WEEK = 11;
 
-// V4 uses a bookmaker/engine anchor and slate-wide snipe selection.
+// ─── V4 Grid Search Optimised Thresholds ─────────────────────────────────────
+// These values are the output of scripts/optimize-v4.ts — a grid search over
+// 416 configurations tested against EPL 2024-25 Matchweeks 1-10 (100 matches).
+// The winning configuration maximised the Floor (worst matchweek) and Average.
+//
+//   T (Exact Score Threshold) = 0.13
+//   D (Draw Threshold)        = 0.32
+//   F (Fallback Strategy)     = 0 (V2 Tiers: locked outcome → best score)
+//
+// Backtest results: Floor 30, Average 49.0, 6 exact hits, 37 outcome hits.
+// No configuration achieved a 70+ Floor — MW4/MW8/MW10 contained heavy upsets.
+
+const OPTIMISED_T = 0.13;  // exact-score probability threshold for SNIPE
+const OPTIMISED_D = 0.32;  // draw probability threshold to force draw
+// F=0: V2 Tiers fallback (locked outcome → best score for that outcome)
+
+// V4 uses a bookmaker/engine anchor and threshold-based snipe selection.
 
 const EXTRA_TEAM_MAP: Record<string, string> = {
   "AFC Bournemouth": "Bournemouth",
@@ -321,32 +337,60 @@ export async function GET(request: Request) {
     const favoriteCount = priced.filter(({ book }) =>
       (book.h !== null && book.h < 1.5) || (book.a !== null && book.a < 1.5)).length;
     const strong = favoriteCount >= 3;
-    const snipeIndices = new Set([...priced]
-      .sort((a, b) => (b.lockedBest?.probability ?? 0) - (a.lockedBest?.probability ?? 0) || a.index - b.index)
-      .slice(0, 3).map((p) => p.index));
 
+    // ─── V4 Optimised Prediction Logic ────────────────────────────────────────
+    // Uses the grid-search-optimised thresholds (T, D, F) to pick scorelines.
+    // 1. If P(Draw) >= D → force Draw, pick highest-probability draw scoreline
+    // 2. If top exact score prob >= T → SNIPE that exact score
+    // 3. Else → WINNER: pick locked outcome's highest-prob scoreline (F=0)
     const picks = priced.map((p) => {
-      const snipe = snipeIndices.has(p.index);
+      const oneX2 = p.blended;
+
+      // Step 1: Check draw threshold
+      if (oneX2.d >= OPTIMISED_D) {
+        const drawScores = p.scores.filter((cell) => scoreOutcome(cell) === "D");
+        const cell = bestScore(drawScores) ?? bestScore(p.scores);
+        const prediction = cell
+          ? `${cell.homeGoals}-${cell.awayGoals}`
+          : "1-1";
+        return {
+          prediction,
+          category: `SNIPE: ${prediction}`,
+          exactProbability: cell?.probability ?? 0,
+          outcome: "D" as Outcome,
+        };
+      }
+
+      // Step 2: Check exact score threshold — SNIPE the top score if confident
+      const topScore = bestScore(p.scores);
+      if (topScore && topScore.probability >= OPTIMISED_T) {
+        return {
+          prediction: `${topScore.homeGoals}-${topScore.awayGoals}`,
+          category: `SNIPE: ${topScore.homeGoals}-${topScore.awayGoals}`,
+          exactProbability: topScore.probability,
+          outcome: scoreOutcome(topScore),
+        };
+      }
+
+      // Step 3: Fallback F=0 — V2 Tiers: locked outcome → best score for it
       let candidates = p.scores.filter((cell) => scoreOutcome(cell) === p.locked);
       if (p.completeness < 50) {
-        // No correct-score bookmaker market is available: use the more likely
-        // 1-0/2-0 line for the book's shorter-priced side. Without a book,
-        // retain the locked outcome and its best normal score.
         const side = p.book.h !== null && p.book.a !== null
           ? (p.book.h <= p.book.a ? "H" : "A") : null;
         if (side) candidates = p.scores.filter((cell) => side === "H"
           ? cell.awayGoals === 0 && (cell.homeGoals === 1 || cell.homeGoals === 2)
           : cell.homeGoals === 0 && (cell.awayGoals === 1 || cell.awayGoals === 2));
-      } else if (snipe && strong && p.locked !== "D" &&
-        (p.locked === "H" ? p.lambdas.homeGoals : p.lambdas.awayGoals) >= 2.4) {
-        candidates = candidates.filter((cell) => (p.locked === "H" ? cell.homeGoals : cell.awayGoals) >= 3);
-      } else if (snipe) {
-        candidates = p.scores;
       }
       const cell = bestScore(candidates) ?? p.lockedBest ?? bestScore(p.scores);
-      const prediction = cell ? `${cell.homeGoals}-${cell.awayGoals}` : (p.locked === "H" ? "1-0" : p.locked === "A" ? "0-1" : "1-1");
-      return { prediction, category: `${snipe ? "SNIPE" : "WINNER"}: ${prediction}`,
-        exactProbability: cell?.probability ?? 0, outcome: cell ? scoreOutcome(cell) : p.locked };
+      const prediction = cell
+        ? `${cell.homeGoals}-${cell.awayGoals}`
+        : (p.locked === "H" ? "1-0" : p.locked === "A" ? "0-1" : "1-1");
+      return {
+        prediction,
+        category: `WINNER: ${prediction}`,
+        exactProbability: cell?.probability ?? 0,
+        outcome: cell ? scoreOutcome(cell) : p.locked,
+      };
     });
 
     const result = priced.map(({ fx, index, homeName, awayName }) => {

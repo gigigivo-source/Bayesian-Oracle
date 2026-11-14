@@ -285,10 +285,22 @@ export default function V4PredictorPage() {
             🔮 V4 Ultimate Predictor
           </h1>
           <p className="mt-2 text-sm text-slate-400">
-            Blended engine and bookmaker anchors select outcomes, with three
-            snipes and a safe bank for Matchweek {selectedWeek}. Blowout hunts
-            are enabled only on strong slates with sufficient data.
+            Grid-search optimised thresholds (T=0.13, D=0.32, F=V2 Tiers)
+            deployed from backtesting MW1-10. SNIPE picks fire when exact score
+            probability ≥ 13% or draw probability ≥ 32%; otherwise WINNER picks
+            use the locked outcome's best scoreline.
           </p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-emerald-400">
+              T = 0.13 (Snipe Threshold)
+            </span>
+            <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-xs font-semibold text-amber-400">
+              D = 0.32 (Draw Threshold)
+            </span>
+            <span className="rounded-full border border-sky-500/30 bg-sky-500/10 px-3 py-1 text-xs font-semibold text-sky-400">
+              F = 0 (V2 Tiers Fallback)
+            </span>
+          </div>
         </header>
 
         <section className="rounded-2xl border border-white/[0.08] bg-white/[0.03] p-4">
@@ -328,6 +340,35 @@ export default function V4PredictorPage() {
               </p>
             )}
           </div>
+        </section>
+
+        <section className="rounded-2xl border border-white/[0.08] bg-white/[0.03] p-4">
+          <h2 className="text-lg font-semibold text-white">
+            📊 Optimisation Backtest (MW1-10)
+          </h2>
+          <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 p-3 text-center">
+              <div className="text-2xl font-black text-emerald-400">30</div>
+              <div className="text-xs text-slate-400">Floor (MW)</div>
+            </div>
+            <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 p-3 text-center">
+              <div className="text-2xl font-black text-amber-400">49.0</div>
+              <div className="text-xs text-slate-400">Average (MW)</div>
+            </div>
+            <div className="rounded-xl border border-sky-500/20 bg-sky-500/5 p-3 text-center">
+              <div className="text-2xl font-black text-sky-400">6</div>
+              <div className="text-xs text-slate-400">Exact Hits / 100</div>
+            </div>
+            <div className="rounded-xl border border-purple-500/20 bg-purple-500/5 p-3 text-center">
+              <div className="text-2xl font-black text-purple-400">37</div>
+              <div className="text-xs text-slate-400">Outcome Hits / 100</div>
+            </div>
+          </div>
+          <p className="mt-2 text-xs text-slate-500">
+            Grid search over 416 configurations (13 × 16 × 2) tested against
+            EPL 2024-25 MW1-10. Scoring: 20 pts exact, 10 pts outcome, 0 pts
+            miss. No configuration reached a 70+ floor due to upsets in MW4/MW8/MW10.
+          </p>
         </section>
 
         {scorecard.length > 0 && total !== null && (
