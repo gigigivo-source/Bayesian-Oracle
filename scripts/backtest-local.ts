@@ -11,9 +11,8 @@
  *   1. Fetch the matchweek slate with `fetchScoreboard` (backfilling completed
  *      `openfootball:` fixtures from the real 2026-27 Football-Data EPL CSV on
  *      GitHub when `site.api.espn.com` is blocked).
- *   2. Sort fixtures chronologically and pass them directly into
- *      `generateV2Predictions(fixtures)` — zero Engine calls, zero xG, zero
- *      Poisson grids, zero fake tier ladders.
+ *   2. Sort fixtures chronologically. Eligible non-snipe Standard locks may
+ *      consult the Engine's real-lambda xG, using only prior CSV match history.
  *   3. Score the V2 predictions against the real final scores with
  *      `calculateScore` (20 exact / 10 outcome / 0 miss).
  *   4. Print a clean Markdown table: MW1 … MW10 + Average + Floor.
@@ -24,9 +23,11 @@ import tls from "node:tls";
 import * as espn from "../src/lib/espn";
 import { parseHistoricalDate } from "../src/lib/data/historical";
 import { parseCsv } from "../src/lib/data/sources/githubDatasets";
+import { buildV2EngineContext, fetchCompletedEplResults, type CompletedEplResult } from "../src/lib/v4-history";
 import {
   calculateScore,
   generateV2Predictions,
+  generateV2PredictionsWithEngine,
   translateTeamName,
   type Actual,
   type Prediction,
@@ -97,6 +98,13 @@ interface WeekResult {
 }
 
 let cachedResults: Map<string, CompletedMatchResult> | null | undefined;
+let cachedEngineHistory: CompletedEplResult[] | null | undefined;
+
+async function loadEngineHistory(): Promise<CompletedEplResult[] | null> {
+  if (cachedEngineHistory !== undefined) return cachedEngineHistory;
+  cachedEngineHistory = await fetchCompletedEplResults();
+  return cachedEngineHistory;
+}
 
 function log(message: string): void {
   process.stderr.write(`${message}\n`);
@@ -264,7 +272,9 @@ async function backtestWeek(week: number, cfg: Config): Promise<WeekResult> {
     home: translateTeamName(fx.home.name),
     away: translateTeamName(fx.away.name),
   }));
-  const predictions = generateV2Predictions(v2Inputs);
+  const history = cfg.league === "eng.1" && cfg.season === 2026 ? await loadEngineHistory() : null;
+  const contexts = sorted.map((fx) => history ? buildV2EngineContext(fx, history) : undefined);
+  const predictions = await generateV2PredictionsWithEngine(v2Inputs, contexts);
   const snipes = predictions.filter((p) => p.Category.startsWith("SNIPE:")).length;
 
   const finishedIndices: number[] = [];
@@ -376,7 +386,7 @@ function renderMarkdown(weeks: WeekResult[], cfg: Config, leagueName: string): s
   );
   lines.push(`- **League:** ${leagueName} (\`${cfg.league}\`)`);
   lines.push(`- **Season:** ${seasonLabel(cfg.season)}`);
-  lines.push(`- **System:** True V2 Strict 3-Snipe System (zero Engine, zero xG, zero Poisson)`);
+  lines.push(`- **System:** V2 Strict 3-Snipe System (Engine xG only for eligible Standard locks; no Poisson)`);
   lines.push(`- **Scoring:** exact = ${PTS_EXACT} · correct outcome = ${PTS_OUTCOME} · miss = ${PTS_MISS}`);
   lines.push("");
 

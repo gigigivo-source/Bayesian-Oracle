@@ -1,16 +1,13 @@
 import dns from "node:dns";
 import tls from "node:tls";
 import * as espn from "@/lib/espn";
-import { parseHistoricalDate } from "@/lib/data/historical";
-import { parseCsv } from "@/lib/data/sources/githubDatasets";
-import { generateV2Predictions, translateTeamName } from "@/lib/v4-predictor";
+import { buildV2EngineContext, completedEplResultsByKey, fetchCompletedEplResults, type CompletedEplResult } from "@/lib/v4-history";
+import { generateV2PredictionsWithEngine, translateTeamName } from "@/lib/v4-predictor";
 import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
 
 const DEFAULT_WEEK = 11;
-const RESULTS_CSV_API_URL =
-  "https://api.github.com/repos/brysonhen/football_matchup_predictor/contents/data/raw/pl/E0_2627.csv";
 const RESULTS_TTL_MS = 30 * 60_000;
 
 try {
@@ -29,13 +26,7 @@ try {
   // Ignore on runtimes without custom CA hooks.
 }
 
-interface CompletedMatchResult {
-  homeGoals: number;
-  awayGoals: number;
-  isoDate: string | null;
-}
-
-let cachedResults: { at: number; map: Map<string, CompletedMatchResult> } | null = null;
+let cachedResults: { at: number; rows: CompletedEplResult[] } | null = null;
 
 function parseWeekParam(raw: string | null): number | null {
   if (raw === null || raw.trim() === "") return null;
@@ -44,67 +35,16 @@ function parseWeekParam(raw: string | null): number | null {
   return parsed;
 }
 
-async function loadCompletedEplResults(): Promise<Map<string, CompletedMatchResult> | null> {
-  if (cachedResults && Date.now() - cachedResults.at < RESULTS_TTL_MS) {
-    return cachedResults.map;
-  }
-  try {
-    const token = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN;
-    const response = await fetch(RESULTS_CSV_API_URL, {
-      headers: {
-        Accept: "application/vnd.github.raw+json",
-        "User-Agent": "Mozilla/5.0 (compatible; GigiGivo/1.0)",
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      },
-      signal: AbortSignal.timeout(8_000),
-    });
-    if (!response.ok) return null;
-    const rows = parseCsv((await response.text()).replace(/^\uFEFF/, ""));
-    if (rows.length < 2) return null;
-    const header = rows[0];
-    const divIdx = header.indexOf("Div");
-    const dateIdx = header.indexOf("Date");
-    const timeIdx = header.indexOf("Time");
-    const homeIdx = header.indexOf("HomeTeam");
-    const awayIdx = header.indexOf("AwayTeam");
-    const fthgIdx = header.indexOf("FTHG");
-    const ftagIdx = header.indexOf("FTAG");
-    if (homeIdx < 0 || awayIdx < 0 || fthgIdx < 0 || ftagIdx < 0) return null;
-
-    const map = new Map<string, CompletedMatchResult>();
-    for (const row of rows.slice(1)) {
-      if (divIdx >= 0 && row[divIdx] && row[divIdx] !== "E0") continue;
-      const home = translateTeamName(row[homeIdx] ?? "");
-      const away = translateTeamName(row[awayIdx] ?? "");
-      const homeGoals = Number(row[fthgIdx]);
-      const awayGoals = Number(row[ftagIdx]);
-      if (
-        !home ||
-        !away ||
-        row[fthgIdx] === "" ||
-        row[ftagIdx] === "" ||
-        !Number.isInteger(homeGoals) ||
-        !Number.isInteger(awayGoals) ||
-        homeGoals < 0 ||
-        awayGoals < 0
-      ) {
-        continue;
-      }
-      const dayIso = dateIdx >= 0 ? parseHistoricalDate(row[dateIdx]) : null;
-      const rawTime = timeIdx >= 0 ? (row[timeIdx] ?? "").trim() : "";
-      const hhmm = /^\d{2}:\d{2}$/.test(rawTime) ? rawTime : "15:00";
-      const isoDate = dayIso ? `${dayIso.slice(0, 10)}T${hhmm}:00Z` : null;
-      map.set(`${home}|${away}`, { homeGoals, awayGoals, isoDate });
-    }
-    cachedResults = { at: Date.now(), map };
-    return map;
-  } catch {
-    return null;
-  }
+async function loadCompletedEplResults(): Promise<CompletedEplResult[] | null> {
+  if (cachedResults && Date.now() - cachedResults.at < RESULTS_TTL_MS) return cachedResults.rows;
+  const rows = await fetchCompletedEplResults(8_000);
+  if (rows) cachedResults = { at: Date.now(), rows };
+  return rows;
 }
 
 async function backfillOpenfootballResults(
   fixtures: espn.FixtureLite[],
+  history: readonly CompletedEplResult[],
 ): Promise<espn.FixtureLite[]> {
   const now = Date.now();
   const needsBackfill = fixtures.some(
@@ -115,8 +55,7 @@ async function backfillOpenfootballResults(
   );
   if (!needsBackfill) return fixtures;
 
-  const results = await loadCompletedEplResults();
-  if (!results) return fixtures;
+  const results = completedEplResultsByKey(history);
 
   return fixtures.map((fx) => {
     if (!fx.id.startsWith("openfootball:") || fx.state === "post") return fx;
@@ -163,7 +102,8 @@ export async function GET(request: Request) {
       ? rawFixtures.filter((f) => f.matchweek === week)
       : rawFixtures;
 
-    const enriched = await backfillOpenfootballResults(forWeek);
+    const history = await loadCompletedEplResults();
+    const enriched = history ? await backfillOpenfootballResults(forWeek, history) : forWeek;
     const sorted = [...enriched].sort(
       (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime(),
     );
@@ -172,7 +112,8 @@ export async function GET(request: Request) {
       home: translateTeamName(fx.home.name),
       away: translateTeamName(fx.away.name),
     }));
-    const v2Predictions = generateV2Predictions(v2Fixtures);
+    const contexts = sorted.map((fx) => history ? buildV2EngineContext(fx, history) : undefined);
+    const v2Predictions = await generateV2PredictionsWithEngine(v2Fixtures, contexts);
 
     const result = sorted.map((fx, index) => {
       const { home: homeName, away: awayName } = v2Fixtures[index];
