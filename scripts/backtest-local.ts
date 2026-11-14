@@ -52,6 +52,13 @@ const PTS_EXACT = 20;
 const PTS_OUTCOME = 10;
 const PTS_MISS = 0;
 const DEFAULT_WEEKS: readonly number[] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+// The good weeks of the V2 Strict 3-Snipe System. Rule changes must not take
+// these below their recorded baseline.
+const GUARDRAIL_WEEKS: ReadonlyArray<{ week: number; points: number }> = [
+  { week: 5, points: 100 },
+  { week: 7, points: 90 },
+  { week: 10, points: 90 },
+];
 const DEFAULT_LEAGUE = "eng.1";
 const RESULTS_CSV_API_URL =
   "https://api.github.com/repos/brysonhen/football_matchup_predictor/contents/data/raw/pl/E0_2627.csv";
@@ -441,6 +448,25 @@ function renderMarkdown(weeks: WeekResult[], cfg: Config, leagueName: string): s
   );
   lines.push("");
 
+  // ── Guardrails ────────────────────────────────────────────────────────────
+  // MW5 / MW7 / MW10 are the good weeks of the V2 Strict 3-Snipe System. A rule
+  // change that drops any of them is a regression, so surface it loudly.
+  lines.push("**Guardrails (protected matchweeks)**");
+  lines.push("");
+  for (const guard of GUARDRAIL_WEEKS) {
+    const week = weeks.find((w) => w.week === guard.week);
+    if (!week || week.scored === 0) {
+      lines.push(`- MW${guard.week}: — (not scored in this run)`);
+      continue;
+    }
+    const delta = week.points - guard.points;
+    const verdict = delta < 0 ? `❌ REGRESSED ${delta}` : `✅ held (+${delta})`;
+    lines.push(
+      `- MW${guard.week}: **${week.points}** vs baseline ${guard.points} → ${verdict}`,
+    );
+  }
+  lines.push("");
+
   const notes = weeks.filter((week) => week.note !== null);
   if (notes.length > 0) {
     lines.push("**Warnings**");
@@ -473,12 +499,14 @@ function runSelfTest(): void {
     ["Arsenal", "Coventry"],         // Snipe 1: Home Fortress -> 2-0
     ["Fulham", "Brentford"],         // Snipe 2: Mid-Table Deadlock -> 1-1
     ["Everton", "Leeds"],            // Snipe 3: Mid-Table Deadlock -> 1-1
-    ["Chelsea", "Ipswich"],          // Chaos banned from Snipes -> 1-1 (NEVER 2-2)
+    ["Chelsea", "Ipswich"],          // Chaos Home vs Bottom 5 -> 2-1 (never a draw)
     ["Man City", "Newcastle"],       // Smart Top 4 Home -> 2-0
     ["Aston Villa", "Hull"],         // Mid vs Bottom -> 2-1
     ["Sunderland", "Fulham"],        // Standard Default (Away stronger) -> 0-1
     ["Bournemouth", "Nott'm Forest"],// Standard Default (Home) -> 1-0
-    ["Spurs", "Brighton"],           // Chaos vs Top 4 Away -> 1-2
+    ["Spurs", "Brighton"],           // Chaos Home vs Top 4 Away -> 1-2
+    ["Man Utd", "Chelsea"],          // Chaos vs Chaos -> 1-1 (never a draw vs non-Chaos)
+    ["Spurs", "Coventry"],           // Chaos Home vs Bottom 5 -> 2-1
   ];
 
   const preds = generateV2Predictions(slate);
@@ -487,12 +515,14 @@ function runSelfTest(): void {
     ["SNIPE: Home Fortress", "2-0", 20],
     ["SNIPE: Mid-Table Deadlock", "1-1", 20],
     ["SNIPE: Mid-Table Deadlock", "1-1", 20],
-    ["LOCK: Chaos Rule", "1-1", 10],
+    ["LOCK: Chaos Rule", "2-1", 10],
     ["LOCK: Smart Top 4 Home", "2-0", 10],
     ["LOCK: Mid vs Bottom", "2-1", 10],
     ["LOCK: Standard Away", "0-1", 10],
     ["LOCK: Standard Home", "1-0", 10],
     ["LOCK: Chaos Rule", "1-2", 10],
+    ["LOCK: Chaos Rule", "1-1", 10],
+    ["LOCK: Chaos Rule", "2-1", 10],
   ];
 
   let failures = 0;

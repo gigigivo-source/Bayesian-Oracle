@@ -85,8 +85,8 @@ describe("generateV2Predictions — V2 Strict 3-Snipe System", () => {
       { home: "Arsenal", away: "Chelsea" }, // Top 4 Home vs Chaos -> 2-1
       { home: "Man Utd", away: "Man City" },// Chaos Home vs Top 4 Away -> 1-2
       { home: "Chelsea", away: "Spurs" },   // Chaos vs Chaos -> 1-1 (NEVER 2-2)
-      { home: "Spurs", away: "Coventry" },  // Chaos vs Bottom 5 -> 1-1 (banned from Snipe)
-      { home: "Everton", away: "Man Utd" }, // Mid vs Chaos -> 1-1
+      { home: "Spurs", away: "Coventry" },  // Chaos Home vs Bottom 5 -> 2-1 (banned from Snipe)
+      { home: "Everton", away: "Man Utd" }, // Mid vs Chaos -> 1-1 (genuine coin-flip)
     ]);
 
     for (const p of predictions) {
@@ -94,7 +94,62 @@ describe("generateV2Predictions — V2 Strict 3-Snipe System", () => {
       expect(p.Prediction).not.toBe("2-2");
       expect(p.Target_Pts).toBe(10);
     }
-    expect(predictions.map((p) => p.Prediction)).toEqual(["2-1", "1-2", "1-1", "1-1", "1-1"]);
+    expect(predictions.map((p) => p.Prediction)).toEqual(["2-1", "1-2", "1-1", "2-1", "1-1"]);
+  });
+
+  it("never predicts a Chaos draw against a non-Chaos opponent (Bug Fix 1)", () => {
+    const predictions = generateV2Predictions([
+      { home: "Chelsea", away: "Coventry" },        // Chaos Home vs Bottom 5 -> 2-1
+      { home: "Man Utd", away: "Bournemouth" },     // Chaos Home vs Standard  -> 2-1
+      { home: "Ipswich", away: "Spurs" },           // Chaos Away at Bottom 5 -> 1-2
+      { home: "Bournemouth", away: "Man Utd" },     // Chaos Away at Standard -> 1-2
+      { home: "Arsenal", away: "Spurs" },           // Top 4 Home vs Chaos    -> 2-1
+      { home: "Chelsea", away: "Man City" },        // Chaos Home vs Top 4    -> 1-2
+      { home: "Chelsea", away: "Man Utd" },         // Chaos vs Chaos         -> 1-1
+      { home: "Spurs", away: "Chelsea" },           // Chaos vs Chaos         -> 1-1
+      { home: "Newcastle", away: "Spurs" },         // Chaos Away at Mid      -> 1-1
+    ]);
+
+    expect(predictions.map((p) => p.Prediction)).toEqual([
+      "2-1",
+      "2-1",
+      "1-2",
+      "1-2",
+      "2-1",
+      "1-2",
+      "1-1",
+      "1-1",
+      "1-1",
+    ]);
+
+    // A draw is only allowed vs Chaos itself or vs Mid-Table; never vs
+    // Top 4, Bottom 5 or Standard opposition.
+    predictions.forEach((p) => {
+      if (p.Prediction !== "1-1") return;
+      const [home, away] = p.Match.split(" vs ");
+      const opponent = CHAOS_TEAMS.includes(home) ? away : home;
+      expect([...CHAOS_TEAMS, ...MID_TABLE]).toContain(opponent);
+    });
+  });
+
+  it("keeps the rule shapes that protect the MW5, MW7 and MW10 scores", () => {
+    // These exact fixtures drove the 100 / 90 / 90 scores before the fix and must
+    // not change: Top 4 vs Top 4 stays 2-0, and Chaos vs Mid-Table stays 1-1.
+    const predictions = generateV2Predictions([
+      { home: "Brighton", away: "Arsenal" },        // MW5 Top 4 vs Top 4 -> 2-0
+      { home: "Liverpool", away: "Brighton" },      // MW8 Top 4 vs Top 4 -> 2-0
+      { home: "Fulham", away: "Man Utd" },          // MW5 Chaos Away at Mid -> 1-1
+      { home: "Leeds", away: "Man Utd" },           // MW7 Chaos Away at Mid -> 1-1
+      { home: "Man Utd", away: "Aston Villa" },     // MW10 Chaos Home vs Mid -> 1-1
+    ]);
+
+    expect(predictions.map((p) => `${p.Category} ${p.Prediction}`)).toEqual([
+      "LOCK: Smart Top 4 Home 2-0",
+      "LOCK: Smart Top 4 Home 2-0",
+      "LOCK: Chaos Rule 1-1",
+      "LOCK: Chaos Rule 1-1",
+      "LOCK: Chaos Rule 1-1",
+    ]);
   });
 
   it("applies Smart Top 4 Home, Mid vs Bottom, and Standard Default Lock rules", () => {
