@@ -19,6 +19,7 @@ import {
   computeMatchExpectedGoals,
   type AttackDefenceTable,
 } from "./data/attackDefence";
+import { dixonColesGrid, DEFAULT_RHO, type DixonColesCell } from "./data/dixonColes";
 import type { HistoricalMatch } from "./data/historical";
 
 export const TOP_4 = ["Arsenal", "Liverpool", "Man City", "Brighton"];
@@ -105,6 +106,12 @@ export const TOP4_DERBY_MIN_XG_EDGE = 0.4;
 export const STANDARD_BLOWOUT_GAP = 1.2;
 /** Per-side xG floor for the high-scoring Standard draw (2-2). */
 export const STANDARD_DRAW_XG = 1.8;
+/**
+ * The Correct Score grid covers 0..maxGoals per side. V2 never chases 7+ goal
+ * routs, and the argmax cell never depends on the tail, so this only needs to
+ * cover realistic exact scores (e.g. 4-2).
+ */
+export const CORRECT_SCORE_MAX_GOALS = 6;
 
 export type XgPair = readonly [homeXg: number, awayXg: number];
 
@@ -247,6 +254,14 @@ export function generateV2Predictions(
     const homeIsStandard = !homeIsTop4 && !homeIsMid && !homeIsBottom5 && !homeIsChaos;
     const awayIsStandard = !awayIsTop4 && !awayIsMid && !awayIsBottom5 && !awayIsChaos;
 
+    // Resolve the Engine's xG once per fixture; `null` means the flat V2 line.
+    const xg = resolveXg(i, home, away);
+
+    /** The locked winner (`"H"` / `"D"` / `"A"`) and the flat V2 fallback. */
+    let outcome: "H" | "D" | "A";
+    let fallback: string;
+    let category: string;
+
     // Rule 1 (Chaos): 2-1 (if Top 4 Home), 1-2 (if Top 4 Away), 1-1 (if no Top 4). NEVER 2-2.
     //
     // The xG fix: a Chaos side at home against an ordinary opponent used to be
@@ -256,42 +271,35 @@ export function generateV2Predictions(
     // the draw is still the default for a genuine coin-flip (MW5: Fulham 1-1
     // Man Utd). Two Chaos sides always cancel out to 1-1, and 2-2 stays banned.
     if (homeIsChaos || awayIsChaos) {
+      category = "LOCK: Chaos Rule";
       if (homeIsChaos && awayIsChaos) {
-        return {
-          Match: `${home} vs ${away}`,
-          Category: "LOCK: Chaos Rule",
-          Prediction: "1-1",
-          Target_Pts: 10,
-        };
+        outcome = "D";
+        fallback = "1-1";
+      } else if (homeIsTop4) {
+        outcome = "H";
+        fallback = "2-1";
+      } else if (awayIsTop4) {
+        outcome = "A";
+        fallback = "1-2";
+      } else {
+        const chaosEdge =
+          xg === null
+            ? null
+            : homeIsChaos
+              ? xg[0] - xg[1]
+              : xg[1] - xg[0];
+        const chaosWinner = chaosEdge !== null && chaosEdge >= CHAOS_XG_EDGE;
+        if (chaosWinner) {
+          outcome = homeIsChaos ? "H" : "A";
+          fallback = homeIsChaos ? "2-1" : "1-2";
+        } else {
+          outcome = "D";
+          fallback = "1-1";
+        }
       }
-      if (homeIsTop4) {
-        return {
-          Match: `${home} vs ${away}`,
-          Category: "LOCK: Chaos Rule",
-          Prediction: "2-1",
-          Target_Pts: 10,
-        };
-      }
-      if (awayIsTop4) {
-        return {
-          Match: `${home} vs ${away}`,
-          Category: "LOCK: Chaos Rule",
-          Prediction: "1-2",
-          Target_Pts: 10,
-        };
-      }
-      const edge = resolveXg(i, home, away);
-      const chaosEdge = edge === null ? null : homeIsChaos ? edge[0] - edge[1] : edge[1] - edge[0];
-      const chaosWinner = chaosEdge !== null && chaosEdge >= CHAOS_XG_EDGE;
-      return {
-        Match: `${home} vs ${away}`,
-        Category: "LOCK: Chaos Rule",
-        Prediction: chaosWinner ? (homeIsChaos ? "2-1" : "1-2") : "1-1",
-        Target_Pts: 10,
-      };
-    }
+    } else if (homeIsTop4) {
 
-    // Rule 2 (Smart Top 4 Home): Top 4 at Home -> 2-0 — including in a Top 4 Derby.
+    // Rule 2 (Smart Top 4 Home): Top 4 at Home -> Home Win — including in a Top 4 Derby.
     //
     // The Step 2 xG fix (flip the derby to 1-2 when the away side clears an xG
     // edge) was implemented, measured and REVERTED: over the MW1–MW10 replay it
@@ -301,80 +309,40 @@ export function generateV2Predictions(
     // stronger side in City 0-1 Brighton (2.65 vs 1.15) and Liverpool–Arsenal is
     // only a 0.18 edge. The MW9 miss is variance the xG cannot see, not a bug
     // the rule can fix — see TOP4_DERBY_MIN_XG_EDGE.
-    if (homeIsTop4) {
-      return {
-        Match: `${home} vs ${away}`,
-        Category: "LOCK: Smart Top 4 Home",
-        Prediction: "2-0",
-        Target_Pts: 10,
-      };
-    }
+      outcome = "H";
+      fallback = "2-0";
+      category = "LOCK: Smart Top 4 Home";
+    } else if (homeIsMid && awayIsBottom5) {
 
     // Rule 3 (Mid vs Bottom): Mid at Home vs Bottom 5 -> 2-1.
-    if (homeIsMid && awayIsBottom5) {
-      return {
-        Match: `${home} vs ${away}`,
-        Category: "LOCK: Mid vs Bottom",
-        Prediction: "2-1",
-        Target_Pts: 10,
-      };
-    }
+      outcome = "H";
+      fallback = "2-1";
+      category = "LOCK: Mid vs Bottom";
+    } else {
 
-    // Rule 4 (Standard Default): Any other match -> 1-0 (Home) or 0-1 (Away).
+    // Rule 4 (Standard Default): Any other match -> Home or Away win.
     const awayIsStronger =
       awayIsTop4 ||
       (homeIsBottom5 && awayIsMid) ||
       (homeIsStandard && awayIsMid) ||
       (homeIsBottom5 && awayIsStandard);
 
-    // The xG fix: standard-vs-standard matches (no Top 4, no Bottom 5, no Mid,
-    // no Chaos) used to be pinned to 1-0 / 0-1 even when the model expected a
-    // rout (MW4: Bournemouth 2-2 Brentford, Aston Villa 1-2 Nott'm Forest).
-    // The flat pick is kept unless xG clears one of the documented thresholds.
-    if (homeIsStandard && awayIsStandard) {
-      const standard = resolveXg(i, home, away);
-      if (standard !== null) {
-        const [homeXg, awayXg] = standard;
-        if (homeXg - awayXg >= STANDARD_BLOWOUT_GAP) {
-          return {
-            Match: `${home} vs ${away}`,
-            Category: "LOCK: Standard Blowout",
-            Prediction: `${blowoutGoals(homeXg)}-0`,
-            Target_Pts: 10,
-          };
-        }
-        if (awayXg - homeXg >= STANDARD_BLOWOUT_GAP) {
-          return {
-            Match: `${home} vs ${away}`,
-            Category: "LOCK: Standard Blowout",
-            Prediction: `0-${blowoutGoals(awayXg)}`,
-            Target_Pts: 10,
-          };
-        }
-        if (homeXg >= STANDARD_DRAW_XG && awayXg >= STANDARD_DRAW_XG) {
-          return {
-            Match: `${home} vs ${away}`,
-            Category: "LOCK: Standard Draw",
-            Prediction: "2-2",
-            Target_Pts: 10,
-          };
-        }
-      }
+    outcome = awayIsStronger ? "A" : "H";
+    fallback = awayIsStronger ? "0-1" : "1-0";
+    category = awayIsStronger ? "LOCK: Standard Away" : "LOCK: Standard Home";
     }
 
-    if (awayIsStronger) {
-      return {
-        Match: `${home} vs ${away}`,
-        Category: "LOCK: Standard Away",
-        Prediction: "0-1",
-        Target_Pts: 10,
-      };
-    }
+    // Turn the locked winner into an exact score using the conservative
+    // hybrid: keep the flat V2 scoreline when it is a top-3 grid cell for the
+    // locked winner, otherwise take the Engine's #1 grid cell. Fall back to
+    // the flat V2 line when the Engine is unavailable.
+    const exact =
+      xg === null ? null : pickCorrectScoreHybrid(xg[0], xg[1], outcome, fallback);
 
     return {
       Match: `${home} vs ${away}`,
-      Category: "LOCK: Standard Home",
-      Prediction: "1-0",
+      Category: category,
+      Prediction: exact ?? fallback,
       Target_Pts: 10,
     };
   });
@@ -387,6 +355,82 @@ export function generateV2Predictions(
 export function blowoutGoals(xg: number): number {
   if (!Number.isFinite(xg)) return 3;
   return Math.min(4, Math.max(3, Math.round(xg)));
+}
+
+/**
+ * The most probable exact scoreline from the Engine's Correct Score grid
+ * (Dixon–Coles over the attack/defence xG lambdas) that is consistent with the
+ * locked winner (`"H"` / `"D"` / `"A"`).
+ *
+ * Grid cells are Poisson × τ probabilities; only cells matching `outcome` are
+ * eligible, and the absolute highest-probability cell wins. Ties resolve to the
+ * first cell in grid order (fewer home goals, then fewer away goals), which is
+ * deterministic across runs.
+ *
+ * Returns `null` when the grid holds no eligible cell — the caller then falls
+ * back to the flat V2 scoreline.
+ */
+export function pickCorrectScore(
+  homeXg: number,
+  awayXg: number,
+  outcome: "H" | "D" | "A",
+  maxGoals: number = CORRECT_SCORE_MAX_GOALS,
+  rho: number = DEFAULT_RHO,
+): string | null {
+  const grid = dixonColesGrid(homeXg, awayXg, rho, maxGoals);
+  let best: DixonColesCell | null = null;
+  for (const cell of grid.cells) {
+    const cellOutcome =
+      cell.homeGoals > cell.awayGoals
+        ? "H"
+        : cell.homeGoals < cell.awayGoals
+          ? "A"
+          : "D";
+    if (cellOutcome !== outcome) continue;
+    if (best === null || cell.probability > best.probability) best = cell;
+  }
+  return best ? `${best.homeGoals}-${best.awayGoals}` : null;
+}
+
+/**
+ * Conservative hybrid for Lock exact scores.
+ *
+ * Keeps the tuned flat V2 scoreline when it is among the top 3 most probable
+ * cells of the Engine's Correct Score grid (filtered to the locked winner),
+ * otherwise takes the grid's #1 cell. This preserves flat-V2 guardrail weeks
+ * (e.g. MW5 Newcastle–Hull 2-1, MW7 Nott'm Forest–Arsenal 0-1) while still
+ * letting the Engine override when it clearly disagrees with the flat line.
+ *
+ * Returns `null` when the grid holds no eligible cell — the caller then falls
+ * back to the flat V2 scoreline.
+ */
+export function pickCorrectScoreHybrid(
+  homeXg: number,
+  awayXg: number,
+  outcome: "H" | "D" | "A",
+  flatScore: string,
+  maxGoals: number = CORRECT_SCORE_MAX_GOALS,
+  rho: number = DEFAULT_RHO,
+): string | null {
+  const grid = dixonColesGrid(homeXg, awayXg, rho, maxGoals);
+  const eligible: DixonColesCell[] = [];
+  for (const cell of grid.cells) {
+    const cellOutcome =
+      cell.homeGoals > cell.awayGoals
+        ? "H"
+        : cell.homeGoals < cell.awayGoals
+          ? "A"
+          : "D";
+    if (cellOutcome !== outcome) continue;
+    eligible.push(cell);
+  }
+  if (eligible.length === 0) return null;
+  eligible.sort((a, b) => b.probability - a.probability);
+  const flatRank = eligible.findIndex(
+    (c) => `${c.homeGoals}-${c.awayGoals}` === flatScore,
+  );
+  if (flatRank !== -1 && flatRank < 3) return flatScore;
+  return `${eligible[0].homeGoals}-${eligible[0].awayGoals}`;
 }
 
 export const generatePredictions = generateV2Predictions;

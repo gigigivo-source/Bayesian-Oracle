@@ -29,6 +29,8 @@ vi.mock("next/link", () => ({
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 let root: Root | null = null;
+/** Stubbed global fetch for the route's Engine history loaders (keeps these tests deterministic and off the network). */
+let routeFetchMock: ReturnType<typeof vi.fn> = vi.fn();
 
 function makeFixture(
   id: string,
@@ -79,6 +81,26 @@ beforeEach(() => {
   fetchScoreboardMock.mockReset();
   getCurrentMatchweekMock.mockReset();
   getCurrentMatchweekMock.mockResolvedValue(11);
+
+  // Deterministic, off-network Engine history: no openfootball seasons and no
+  // CSV results ⇒ the route's xG resolver is null ⇒ the route falls back to
+  // the flat V2 lines, which is what this test file's fixtures assert.
+  routeFetchMock = vi.fn((url: string) => {
+    const s = String(url);
+    if (s.includes("api.github.com/repos/openfootball/football.json/contents/")) {
+      return Promise.resolve(
+        new Response(JSON.stringify({ matches: [] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+    }
+    if (s.includes("E0_2627.csv")) {
+      return Promise.resolve(new Response(null, { status: 404 }));
+    }
+    return (globalThis as unknown as { fetch: typeof fetch }).fetch(url);
+  });
+  vi.stubGlobal("fetch", routeFetchMock);
 });
 
 afterEach(() => {
