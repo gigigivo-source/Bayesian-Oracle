@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { BOTTOM_5, CHAOS_DRAW_MAX_XG_GAP, CHAOS_HOME_MIN_XG_EDGE, CHAOS_TEAMS, CHAOS_XG_EDGE, MID_DEADLOCK_MAX_XG_GAP, MID_FAVOURITE_BIG_WIN_XG, MID_TABLE, STANDARD_AWAY_DRAW_MAX_XG_GAP, STANDARD_BLOWOUT_GAP, STANDARD_DRAW_XG, TOP4_DERBY_AWAY_TOLERANCE, TOP4_DERBY_MAX_AWAY_EDGE, TOP4_DERBY_MIN_XG_EDGE, TOP_4, blowoutGoals, buildPredictions, calculateScore, generateV2Predictions, getScorelineOutcome, isScoreline, translateTeamName, type XgPair } from "@/lib/v4-predictor";
+import { BOTTOM_5, CHAOS_DRAW_MAX_XG_GAP, CHAOS_TEAMS, CHAOS_VISITOR_XG_EDGE, MID_DEADLOCK_MAX_XG_GAP, MID_FAVOURITE_BIG_WIN_XG, MID_TABLE, STANDARD_AWAY_DRAW_MAX_XG_GAP, STANDARD_BLOWOUT_GAP, STANDARD_DRAW_XG, TOP4_DERBY_AWAY_TOLERANCE, TOP4_DERBY_MAX_AWAY_EDGE, TOP4_DERBY_MIN_XG_EDGE, TOP_4, blowoutGoals, buildPredictions, calculateScore, generateV2Predictions, getScorelineOutcome, isScoreline, translateTeamName, type XgPair } from "@/lib/v4-predictor";
 import { createMatchXgResolver } from "@/lib/v4-predictor-server";;
 
 describe("V2 team classifications", () => {
@@ -107,13 +107,15 @@ describe("generateV2Predictions — V2 Strict 3-Snipe System", () => {
     ]);
   });
 
-  it("Chaos Rule — home takes 2-1, away still needs the xG edge, two Chaos sides need a gap", () => {
+  it("Chaos Rule — the higher-xG side wins past the draw band, at home or away", () => {
     const slate: Array<[string, string]> = [
       ["Man Utd", "Ipswich"],      // Chaos home, clearly better -> 2-1
       ["Chelsea", "Hull"],         // Chaos home the Engine rates worse -> 1-1 (MW4 guard)
       ["Spurs", "Crystal Palace"], // Chaos home, small edge -> 2-1 (MW9 fix)
-      ["Fulham", "Man Utd"],       // Chaos away, home rated better -> 1-1
+      ["Fulham", "Man Utd"],       // Chaos away, 0.10 gap -> 1-1 (MW5 exact)
       ["Coventry", "Chelsea"],     // Chaos away, big edge -> 1-2
+      ["Hull", "Man Utd"],         // Chaos away, home side 0.20 better -> 2-1 (MW1 fix)
+      ["Everton", "Chelsea"],      // Chaos away, 0.21 better -> 1-2 (MW7 fix)
       ["Chelsea", "Man Utd"],      // both Chaos, 0.40 gap -> 2-1 (MW9 fix)
       ["Man Utd", "Spurs"],        // both Chaos, dead heat -> 1-1
       ["Chelsea", "Brighton"],     // Chaos home vs Top 4 away -> 1-2 (Top 4 precedence)
@@ -124,6 +126,8 @@ describe("generateV2Predictions — V2 Strict 3-Snipe System", () => {
       "Spurs|Crystal Palace": [1.59, 1.33],
       "Fulham|Man Utd": [1.47, 1.37],
       "Coventry|Chelsea": [0.9, 1.9],
+      "Hull|Man Utd": [1.51, 1.31],
+      "Everton|Chelsea": [1.15, 1.36],
       "Chelsea|Man Utd": [1.58, 1.18],
       "Man Utd|Spurs": [1.5, 1.45],
       "Chelsea|Brighton": [1.67, 1.36],
@@ -131,13 +135,13 @@ describe("generateV2Predictions — V2 Strict 3-Snipe System", () => {
 
     const predictions = generateV2Predictions(slate, (_i, home, away) => xg[`${home}|${away}`] ?? null);
 
-    expect(predictions.map((p) => p.Category)).toEqual(Array(8).fill("LOCK: Chaos Rule"));
+    expect(predictions.map((p) => p.Category)).toEqual(Array(10).fill("LOCK: Chaos Rule"));
     expect(predictions.map((p) => p.Prediction)).toEqual([
-      "2-1", "1-1", "2-1", "1-1", "1-2", "2-1", "1-1", "1-2",
+      "2-1", "1-1", "2-1", "1-1", "1-2", "2-1", "1-2", "2-1", "1-1", "1-2",
     ]);
     // Every pick keeps the outcome the rule locked, and 2-2 stays banned.
     expect(predictions.map((p) => getScorelineOutcome(p.Prediction))).toEqual([
-      "H", "D", "H", "D", "A", "H", "D", "A",
+      "H", "D", "H", "D", "A", "H", "A", "H", "D", "A",
     ]);
     expect(predictions.some((p) => p.Prediction === "2-2")).toBe(false);
   });
@@ -151,46 +155,54 @@ describe("generateV2Predictions — V2 Strict 3-Snipe System", () => {
     expect(predictions.map((p) => p.Prediction)).toEqual(["2-1", "1-1", "1-1"]);
   });
 
-  it("Chaos Rule — the away gate is exactly CHAOS_XG_EDGE and the Chaos-derby gap exactly CHAOS_DRAW_MAX_XG_GAP", () => {
-    // 1.5 +/- edge/2 keeps both sides near the middle of the grid where the
+  it("Chaos Rule — the draw band is exactly CHAOS_DRAW_MAX_XG_GAP for a Chaos side away and for two Chaos sides", () => {
+    // 1.5 +/- gap/2 keeps both sides near the middle of the grid where the
     // attack/defence rounding cannot drift a fixture across a threshold.
-    const awayAt = (edge: number) =>
-      generateV2Predictions([["Coventry", "Chelsea"]], () => [1.5 - edge / 2, 1.5 + edge / 2])[0]
-        .Prediction;
-    expect(awayAt(CHAOS_XG_EDGE - 0.02)).toBe("1-1");
-    expect(awayAt(CHAOS_XG_EDGE)).toBe("1-1"); // 0.55 - 0.55 is 5.5e-17 in floats
-    expect(awayAt(CHAOS_XG_EDGE + 0.02)).toBe("1-2");
+    // Positive gap = the home side is rated better.
+    const at = (home: string, away: string) => (gap: number) =>
+      generateV2Predictions([[home, away]], () => [1.5 + gap / 2, 1.5 - gap / 2])[0].Prediction;
 
-    const derbyAt = (gap: number) =>
-      generateV2Predictions([["Chelsea", "Man Utd"]], () => [1.5 + gap / 2, 1.5 - gap / 2])[0]
-        .Prediction;
-    expect(derbyAt(CHAOS_DRAW_MAX_XG_GAP - 0.02)).toBe("1-1");
-    expect(derbyAt(CHAOS_DRAW_MAX_XG_GAP + 0.02)).toBe("2-1");
+    for (const fixture of [at("Coventry", "Chelsea"), at("Chelsea", "Man Utd")]) {
+      expect(fixture(0)).toBe("1-1");
+      expect(fixture(CHAOS_DRAW_MAX_XG_GAP - 0.02)).toBe("1-1");
+      expect(fixture(-(CHAOS_DRAW_MAX_XG_GAP - 0.02))).toBe("1-1");
+      expect(fixture(CHAOS_DRAW_MAX_XG_GAP + 0.02)).toBe("2-1");
+      expect(fixture(-(CHAOS_DRAW_MAX_XG_GAP + 0.02))).toBe("1-2");
+    }
+
+    // The window the band is fitted to: MW5 Brentford 3-0 Chelsea must leave the
+    // draw, MW3 Nott'm Forest 0-0 Spurs and MW5 Fulham 1-1 Man Utd must stay.
+    expect(generateV2Predictions([["Brentford", "Chelsea"]], () => [1.715, 1.562])[0].Prediction).toBe("2-1");
+    expect(generateV2Predictions([["Nott'm Forest", "Spurs"]], () => [1.358, 1.493])[0].Prediction).toBe("1-1");
+    expect(generateV2Predictions([["Fulham", "Man Utd"]], () => [1.473, 1.367])[0].Prediction).toBe("1-1");
   });
 
-  it("Chaos Rule — a Chaos host needs a clear xG edge for 2-1, and the visitor needs CHAOS_XG_EDGE for 1-2", () => {
+  it("Chaos Rule — a Chaos host wins past the draw band, but its visitor needs CHAOS_VISITOR_XG_EDGE for 1-2", () => {
     // Positive gap = the Chaos host is rated better.
     const homeAt = (gap: number) =>
       generateV2Predictions([["Spurs", "Everton"]], () => [1.5 + gap / 2, 1.5 - gap / 2])[0];
 
-    // The host is clearly better: the 2-1 win line.
-    expect(homeAt(CHAOS_HOME_MIN_XG_EDGE + 0.02).Prediction).toBe("2-1");
+    // The host is past the band: the 2-1 win line.
+    expect(homeAt(CHAOS_DRAW_MAX_XG_GAP + 0.02).Prediction).toBe("2-1");
     expect(homeAt(1.0).Prediction).toBe("2-1");
-    // The visitor is within the edge, level, or ahead: a 1-1 (MW5 Spurs–Aston Villa, 0.19).
-    expect(homeAt(CHAOS_HOME_MIN_XG_EDGE - 0.02).Prediction).toBe("1-1");
+    // The visitor is inside the band, level, or ahead by less than its own gate: a 1-1.
+    expect(homeAt(CHAOS_DRAW_MAX_XG_GAP - 0.02).Prediction).toBe("1-1");
     expect(homeAt(0).Prediction).toBe("1-1");
+    expect(homeAt(-(CHAOS_DRAW_MAX_XG_GAP + 0.02)).Prediction).toBe("1-1");
     expect(homeAt(-0.31).Prediction).toBe("1-1"); // MW4 Chelsea 2-2 Hull stays a draw
-    expect(homeAt(-(CHAOS_XG_EDGE - 0.02)).Prediction).toBe("1-1");
+    expect(homeAt(-(CHAOS_VISITOR_XG_EDGE - 0.02)).Prediction).toBe("1-1");
     // The visitor is far better: the away win.
-    expect(homeAt(-(CHAOS_XG_EDGE + 0.02)).Prediction).toBe("1-2");
-    expect(homeAt(-(CHAOS_XG_EDGE + 0.02)).Category).toBe("LOCK: Chaos Rule");
+    expect(homeAt(-(CHAOS_VISITOR_XG_EDGE + 0.02)).Prediction).toBe("1-2");
+    expect(homeAt(-(CHAOS_VISITOR_XG_EDGE + 0.02)).Category).toBe("LOCK: Chaos Rule");
 
+    // The floor guard: the visitor's gate must stay above Hull's 0.31 edge at Chelsea.
+    expect(CHAOS_VISITOR_XG_EDGE).toBeGreaterThan(0.31);
     // The MW9 guardrail: Spurs 2-0 Crystal Palace is a 0.25 edge and must stay 2-1.
-    expect(CHAOS_HOME_MIN_XG_EDGE).toBeLessThan(0.25);
+    expect(CHAOS_DRAW_MAX_XG_GAP).toBeLessThan(0.25);
     expect(
       generateV2Predictions([["Spurs", "Crystal Palace"]], () => [1.59, 1.33])[0].Prediction,
     ).toBe("2-1");
-    // The fixture the fix is named after is a 0.35 Spurs edge: still a 2-1.
+    // MW4 Spurs 0-0 Everton is a 0.35 Spurs edge: still a 2-1.
     expect(generateV2Predictions([["Spurs", "Everton"]], () => [1.48, 1.13])[0].Prediction).toBe("2-1");
   });
 
@@ -525,7 +537,7 @@ describe("GET /api/v4-predictor/auto — V2 Strict 3-Snipe route", () => {
  * model resolves from pre-kickoff history and the real final score, captured
  * from `npx tsx scripts/backtest-local.ts --detail`. Replaying a whole matchweek
  * here reproduces that script's week score without a network, so the guardrails
- * (MW5 = 100, MW7 = 100, MW9 >= 80, MW10 >= 90) are pinned by `npm test` too.
+ * (MW5 >= 100, MW7 >= 100, MW9 >= 80, MW10 >= 90) are pinned by `npm test` too.
  *
  * `xg: null` marks a Home Fortress or Elite Away Snipe: those are pure rules and
  * never read the model. Mid-Table Deadlock rows carry their xG, because that
@@ -561,6 +573,20 @@ describe("V2 fix — full-matchweek backtest replay on real fixtures", () => {
     }));
   };
 
+  // MW1 — 70 points (was 60 before the draw-rule fix).
+  const MW1: Case[] = [
+    { home: "Arsenal", away: "Coventry", xg: null, actual: [3, 0], points: 10, prediction: "2-0" }, // SNIPE: Home Fortress
+    { home: "Hull", away: "Man Utd", xg: [1.51, 1.31], actual: [2, 0], points: 10, prediction: "2-1" }, // LOCK: Chaos Rule
+    { home: "Ipswich", away: "Sunderland", xg: [0.7, 1.6], actual: [2, 1], points: 10, prediction: "1-0" }, // LOCK: Standard Home
+    { home: "Nott'm Forest", away: "Leeds", xg: [1.6, 1.04], actual: [0, 1], points: 20, prediction: "0-1" }, // LOCK: Standard Away
+    { home: "Everton", away: "Crystal Palace", xg: [1.06, 1.09], actual: [2, 0], points: 0, prediction: "1-1" }, // SNIPE: Mid-Table Deadlock
+    { home: "Brentford", away: "Spurs", xg: [1.86, 1.74], actual: [3, 0], points: 0, prediction: "1-1" }, // LOCK: Chaos Rule
+    { home: "Man City", away: "Bournemouth", xg: [3.05, 0.98], actual: [2, 1], points: 10, prediction: "2-0" }, // LOCK: Smart Top 4 Home
+    { home: "Brighton", away: "Aston Villa", xg: [1.56, 1.17], actual: [4, 0], points: 10, prediction: "2-0" }, // LOCK: Smart Top 4 Home
+    { home: "Newcastle", away: "Liverpool", xg: null, actual: [2, 2], points: 0, prediction: "0-1" }, // SNIPE: Elite Away
+    { home: "Fulham", away: "Chelsea", xg: [1.47, 1.5], actual: [2, 3], points: 0, prediction: "1-1" }, // LOCK: Chaos Rule
+  ];
+
   // MW4 — 50 points (was 40 before the MW4 fix).
   const MW4: Case[] = [
     { home: "Crystal Palace", away: "Ipswich", xg: [1.75, 1.17], actual: [2, 3], points: 0, prediction: "2-1" }, // LOCK: Mid vs Bottom
@@ -575,10 +601,10 @@ describe("V2 fix — full-matchweek backtest replay on real fixtures", () => {
     { home: "Leeds", away: "Newcastle", xg: [1.26, 1.73], actual: [4, 1], points: 0, prediction: "1-1" }, // SNIPE: Mid-Table Deadlock
   ];
 
-  // MW5 — 100 points.
+  // MW5 — 110 points (was 100 before the draw-rule fix).
   const MW5: Case[] = [
-    { home: "Brentford", away: "Chelsea", xg: [1.71, 1.56], actual: [3, 0], points: 0, prediction: "1-1" }, // LOCK: Chaos Rule
-    { home: "Spurs", away: "Aston Villa", xg: [1.6, 1.41], actual: [2, 3], points: 0, prediction: "1-1" }, // LOCK: Chaos Rule
+    { home: "Brentford", away: "Chelsea", xg: [1.715, 1.562], actual: [3, 0], points: 10, prediction: "2-1" }, // LOCK: Chaos Rule
+    { home: "Spurs", away: "Aston Villa", xg: [1.6, 1.41], actual: [2, 3], points: 0, prediction: "2-1" }, // LOCK: Chaos Rule
     { home: "Everton", away: "Ipswich", xg: [1.59, 1.17], actual: [1, 0], points: 10, prediction: "2-1" }, // LOCK: Mid vs Bottom
     { home: "Brighton", away: "Arsenal", xg: [0.86, 1.72], actual: [3, 0], points: 10, prediction: "2-0" }, // LOCK: Smart Top 4 Home
     { home: "Newcastle", away: "Hull", xg: [1.37, 1.24], actual: [2, 1], points: 20, prediction: "2-1" }, // LOCK: Mid vs Bottom
@@ -589,9 +615,9 @@ describe("V2 fix — full-matchweek backtest replay on real fixtures", () => {
     { home: "Fulham", away: "Man Utd", xg: [1.47, 1.37], actual: [1, 1], points: 20, prediction: "1-1" }, // LOCK: Chaos Rule
   ];
 
-  // MW7 — 100 points.
+  // MW7 — 110 points (was 100 before the draw-rule fix).
   const MW7: Case[] = [
-    { home: "Everton", away: "Chelsea", xg: [1.15, 1.36], actual: [0, 2], points: 0, prediction: "1-1" }, // LOCK: Chaos Rule
+    { home: "Everton", away: "Chelsea", xg: [1.15, 1.36], actual: [0, 2], points: 10, prediction: "1-2" }, // LOCK: Chaos Rule
     { home: "Fulham", away: "Hull", xg: [1.23, 1.44], actual: [1, 0], points: 10, prediction: "2-1" }, // LOCK: Mid vs Bottom
     { home: "Man City", away: "Ipswich", xg: null, actual: [3, 2], points: 10, prediction: "2-0" }, // SNIPE: Home Fortress
     { home: "Brentford", away: "Liverpool", xg: null, actual: [1, 2], points: 10, prediction: "0-1" }, // SNIPE: Elite Away
@@ -620,18 +646,19 @@ describe("V2 fix — full-matchweek backtest replay on real fixtures", () => {
   // MW10 — 90 points.
   const MW10: Case[] = [
     { home: "Everton", away: "Coventry", xg: [1.25, 0.79], actual: [3, 1], points: 10, prediction: "2-1" }, // LOCK: Mid vs Bottom
-    { home: "Leeds", away: "Spurs", xg: [1.47, 1.76], actual: [1, 0], points: 0, prediction: "1-1" }, // LOCK: Chaos Rule
+    { home: "Leeds", away: "Spurs", xg: [1.47, 1.76], actual: [1, 0], points: 0, prediction: "1-2" }, // LOCK: Chaos Rule
     { home: "Arsenal", away: "Hull", xg: null, actual: [1, 0], points: 10, prediction: "2-0" }, // SNIPE: Home Fortress
     { home: "Fulham", away: "Newcastle", xg: [1.43, 1.56], actual: [1, 1], points: 20, prediction: "1-1" }, // SNIPE: Mid-Table Deadlock
     { home: "Nott'm Forest", away: "Man City", xg: null, actual: [3, 1], points: 0, prediction: "0-1" }, // SNIPE: Elite Away
     { home: "Crystal Palace", away: "Liverpool", xg: [1.18, 1.87], actual: [1, 3], points: 10, prediction: "0-1" }, // LOCK: Standard Away
-    { home: "Sunderland", away: "Chelsea", xg: [1.08, 1.22], actual: [1, 0], points: 0, prediction: "1-1" }, // LOCK: Chaos Rule
+    { home: "Sunderland", away: "Chelsea", xg: [1.076, 1.221], actual: [1, 0], points: 0, prediction: "1-1" }, // LOCK: Chaos Rule
     { home: "Ipswich", away: "Bournemouth", xg: [1.03, 2.29], actual: [1, 2], points: 20, prediction: "1-2" }, // LOCK: Standard Away
     { home: "Brighton", away: "Brentford", xg: [1.6, 1.18], actual: [2, 0], points: 20, prediction: "2-0" }, // LOCK: Smart Top 4 Home
     { home: "Man Utd", away: "Aston Villa", xg: [1.58, 1.14], actual: [4, 4], points: 0, prediction: "2-1" }, // LOCK: Chaos Rule
   ];
 
   it.each([
+    ["MW1", MW1],
     ["MW4", MW4],
     ["MW5", MW5],
     ["MW7", MW7],
@@ -643,12 +670,35 @@ describe("V2 fix — full-matchweek backtest replay on real fixtures", () => {
     expect(results.map((r) => r.points)).toEqual(cases.map((c) => c.points));
   });
 
-  it("holds the guardrail weeks: MW5 = 100, MW7 = 100, MW9 >= 80, MW10 >= 90", () => {
+  it("holds the guardrail weeks: MW5 >= 100, MW7 >= 100, MW9 >= 80, MW10 >= 90", () => {
     const total = (cases: Case[]) => replay(cases).reduce((sum, r) => sum + r.points, 0);
-    expect(total(MW5)).toBe(100);
-    expect(total(MW7)).toBe(100);
+    expect(total(MW5)).toBeGreaterThanOrEqual(100);
+    expect(total(MW7)).toBeGreaterThanOrEqual(100);
     expect(total(MW9)).toBeGreaterThanOrEqual(80);
     expect(total(MW10)).toBeGreaterThanOrEqual(90);
+  });
+
+  it("draw-rule fix — a Chaos side away no longer forces a 1-1: MW1 60 -> 70, MW5 and MW7 100 -> 110", () => {
+    const total = (cases: Case[]) => replay(cases).reduce((sum, r) => sum + r.points, 0);
+    expect(total(MW1)).toBe(70);
+    expect(total(MW5)).toBe(110);
+    expect(total(MW7)).toBe(110);
+
+    const pick = (cases: Case[], match: string) =>
+      replay(cases).find((r) => `${r.case.home} vs ${r.case.away}` === match)!;
+    // The three fixtures the fix scores on: the higher-xG side, home or away.
+    expect(pick(MW1, "Hull vs Man Utd")).toMatchObject({ prediction: "2-1", points: 10 });
+    expect(pick(MW5, "Brentford vs Chelsea")).toMatchObject({ prediction: "2-1", points: 10 });
+    expect(pick(MW7, "Everton vs Chelsea")).toMatchObject({ prediction: "1-2", points: 10 });
+    // The exact 1-1s inside the band survive.
+    expect(pick(MW5, "Fulham vs Man Utd")).toMatchObject({ prediction: "1-1", points: 20 });
+    expect(pick(MW7, "Leeds vs Man Utd")).toMatchObject({ prediction: "1-1", points: 20 });
+    // Not every flip lands: Spurs were rated 0.29 better at Leeds and lost.
+    expect(pick(MW10, "Leeds vs Spurs")).toMatchObject({ prediction: "1-2", points: 0 });
+    // The Deadlock Snipe keeps its own, wider gate: a 0.65 gap is still a 1-1.
+    expect(pick(MW9, "Aston Villa vs Fulham")).toMatchObject({ prediction: "1-1", points: 20 });
+    // The tier pick survives a home xG edge: MW1's exact 0-1 at a 0.56 gap.
+    expect(pick(MW1, "Nott'm Forest vs Leeds")).toMatchObject({ prediction: "0-1", points: 20 });
   });
 
   it("lifts MW4 from 40 to 50 — only the Standard Away draw is fixable by xG", () => {
