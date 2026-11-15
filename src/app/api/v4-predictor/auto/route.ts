@@ -3,12 +3,8 @@ import tls from "node:tls";
 import * as espn from "@/lib/espn";
 import { loadMatchesFromOpenfootball, parseHistoricalDate } from "@/lib/data/historical";
 import { parseCsv } from "@/lib/data/sources/githubDatasets";
-import {
-  createMatchXgResolver,
-  generateV2Predictions,
-  translateTeamName,
-  type MatchXgResolver,
-} from "@/lib/v4-predictor";
+import { generateV2Predictions, translateTeamName, type MatchXgResolver } from "@/lib/v4-predictor";
+import { createMatchXgResolver } from "@/lib/v4-predictor-server";;
 import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";

@@ -1,23 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import {
-  BOTTOM_5,
-  CHAOS_TEAMS,
-  CHAOS_XG_EDGE,
-  MID_TABLE,
-  STANDARD_BLOWOUT_GAP,
-  STANDARD_DRAW_XG,
-  TOP4_DERBY_MIN_XG_EDGE,
-  TOP_4,
-  blowoutGoals,
-  buildPredictions,
-  calculateScore,
-  createMatchXgResolver,
-  generateV2Predictions,
-  getScorelineOutcome,
-  isScoreline,
-  translateTeamName,
-  type XgPair,
-} from "@/lib/v4-predictor";
+import { BOTTOM_5, CHAOS_TEAMS, CHAOS_XG_EDGE, MID_TABLE, STANDARD_BLOWOUT_GAP, STANDARD_DRAW_XG, TOP4_DERBY_MIN_XG_EDGE, TOP_4, blowoutGoals, buildPredictions, calculateScore, generateV2Predictions, getScorelineOutcome, isScoreline, translateTeamName, type XgPair } from "@/lib/v4-predictor";
+import { createMatchXgResolver } from "@/lib/v4-predictor-server";;
 
 describe("V2 team classifications", () => {
   it("exports the exact hardcoded V2 team arrays", () => {

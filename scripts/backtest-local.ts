@@ -30,15 +30,8 @@ import {
   type HistoricalMatch,
 } from "../src/lib/data/historical";
 import { parseCsv } from "../src/lib/data/sources/githubDatasets";
-import {
-  calculateScore,
-  createMatchXgResolver,
-  generateV2Predictions,
-  translateTeamName,
-  type Actual,
-  type MatchXgResolver,
-  type Prediction,
-} from "../src/lib/v4-predictor";
+import { calculateScore, generateV2Predictions, translateTeamName, type Actual, type MatchXgResolver, type Prediction } from "../src/lib/v4-predictor";
+import { createMatchXgResolver } from "../src/lib/v4-predictor-server";;
 
 try {
   dns.setDefaultResultOrder?.("ipv4first");
