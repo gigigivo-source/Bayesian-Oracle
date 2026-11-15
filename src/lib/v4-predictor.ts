@@ -1,17 +1,21 @@
 // V4 Predictor — True V2 Strict 3-Snipe System.
 //
-// The rule tree (Snipes + Locks) is pure and deterministic. Two of the Locks
-// consult expected goals when — and only when — the Engine's xG math strongly
-// supports a change from the flat V2 default:
+// The rule tree (Snipes + Locks) is pure and deterministic. A handful of rules
+// consult expected goals when — and only when — the Engine's xG math supports a
+// change from the flat V2 default:
 //
-//   · Chaos Rule     — a Chaos side at HOME takes the 2-1 win line (the MW9
-//                      fix); two Chaos sides stay a 1-1 unless the xG gap says
-//                      one of them is clearly better. A Chaos side AWAY still
-//                      needs the xG edge to leave the 1-1 (never 2-2).
+//   · Mid-Table Deadlock — the 1-1 Snipe is dropped for a favourite's win when
+//                      the Engine separates the two Mid-Table sides by more
+//                      than a goal (the MW4 fix).
+//   · Chaos Rule     — a Chaos side at HOME takes the 2-1 win line only when
+//                      the Engine rates it clearly better, and a 1-1 otherwise
+//                      (the MW9 + MW4 fixes); two Chaos sides stay a 1-1 unless
+//                      the xG gap says one of them is clearly better. A Chaos
+//                      side AWAY still needs the xG edge to leave the 1-1.
 //   · Top 4 Derby    — a Top 4 host loses its flat 2-0 to a narrow away win
 //                      when the Engine cannot separate the two sides.
-//   · Standard Lock  — standard-vs-standard matches move to a blowout or a 2-2
-//                      only when xG clears the documented thresholds.
+//   · Standard Away  — the flat 0-1 becomes a draw when the Engine cannot
+//                      separate the two sides (the MW4 fix).
 //
 // Every one of those gates was fitted on the MW1–MW10 replay of the 2026-27
 // season; the measurements behind them, including the variants that were
@@ -100,6 +104,16 @@ const MAX_SNIPES = 3;
  */
 export const CHAOS_XG_EDGE = 0.55;
 /**
+ * xG edge a Chaos side *at home* needs before it takes the 2-1 win line; at or
+ * below it ("the away side is higher, or within 0.2") the pick is a 1-1.
+ *
+ * The MW4 spec asked for a stricter 0.3 ("only 2-1 if clearly higher"). That
+ * was measured and reverted: MW9 Spurs 2-0 Crystal Palace is a 0.25 home edge,
+ * so 0.3 turns its correct 2-1 into a wrong 1-1 and drops MW9 from 80 to 70,
+ * which breaks the guardrail — see Rule 1 in `generateV2Predictions`.
+ */
+export const CHAOS_HOME_MIN_XG_EDGE = 0.2;
+/**
  * xG gap below which two Chaos sides cancel each other out to a 1-1.
  *
  * At or above this gap the better Chaos side takes its win line (2-1 home /
@@ -128,6 +142,19 @@ export const TOP4_DERBY_AWAY_TOLERANCE = 0.1;
  * cannot separate the two sides. See Rule 2 for the measurement.
  */
 export const TOP4_DERBY_MAX_AWAY_EDGE = 0.2;
+/**
+ * Mid-Table Deadlock: the xG gap above which two Mid-Table sides are no longer
+ * a deadlock. Past it the 1-1 Snipe is dropped and the Engine's favourite takes
+ * a win Lock instead; at or below it the 1-1 Snipe stands.
+ */
+export const MID_DEADLOCK_MAX_XG_GAP = 1.0;
+/** Favourite xG from which the Mid-Table favourite's 2-1 becomes a 3-1. */
+export const MID_FAVOURITE_BIG_WIN_XG = 2.5;
+/**
+ * Standard Away: the xG gap below which the flat 0-1 becomes a draw — the
+ * Engine cannot separate the two sides, so the tier edge is not trusted alone.
+ */
+export const STANDARD_AWAY_DRAW_MAX_XG_GAP = 0.3;
 /** xG gap that turns a Standard match into a 3-0 / 4-0 / 0-3 / 0-4 blowout. */
 export const STANDARD_BLOWOUT_GAP = 1.2;
 /** Per-side xG floor for the high-scoring Standard draw (2-2). */
@@ -175,20 +202,29 @@ function normalizeFixturePair(fixture: V2FixtureInput): [string, string] {
  * 2. Snipes (20-Point Targets):
  *    - Chaos teams are PERMANENTLY BANNED from Snipes.
  *    - Snipe 1: Top 4 (Home) vs Bottom 5 -> 2-0 (Max 1).
- *    - Snipe 2 & 3: Mid (Home) vs Mid -> 1-1 (Max 2).
+ *    - Snipe 2 & 3: Mid (Home) vs Mid -> 1-1 (Max 2), unless the Engine
+ *      separates the two sides by more than MID_DEADLOCK_MAX_XG_GAP — that
+ *      fixture is not a deadlock and falls through to the Mid-Table Favourite
+ *      Lock without using a Snipe.
  *    - Snipe 3 Alternative: If there are not 2 Mid-Table Deadlocks, Top 4 (Away) -> 0-1.
  * 3. Locks (10-Point Targets):
- *    - Rule 1 (Chaos): 2-1 when the Chaos side is at home, 1-2 when it is away.
- *      Two Chaos sides cancel out to 1-1 unless the Engine separates them by
- *      CHAOS_DRAW_MAX_XG_GAP; a Chaos side away from home still needs
- *      CHAOS_XG_EDGE. NEVER 2-2.
+ *    - Rule 1 (Chaos): 2-1 when the Chaos side is at home and the Engine rates
+ *      it more than CHAOS_HOME_MIN_XG_EDGE better, 1-1 otherwise (1-2 when the
+ *      visitor clears CHAOS_XG_EDGE). Two Chaos sides cancel out to 1-1 unless
+ *      the Engine separates them by CHAOS_DRAW_MAX_XG_GAP; a Chaos side away
+ *      from home still needs CHAOS_XG_EDGE for its 1-2. NEVER 2-2.
  *    - Rule 2 (Smart Top 4 Home): Top 4 at Home (not vs Bottom 5) -> 2-0.
  *      Top 4 Derby: the visiting Top 4 side takes 0-1 when the Engine rates the
  *      two sides level; the flat 2-0 stands otherwise.
  *    - Rule 3 (Mid vs Bottom): Mid at Home vs Bottom 5 -> 2-1.
+ *    - Rule 3b (Mid-Table Favourite): Mid vs Mid that the Engine separates by
+ *      more than MID_DEADLOCK_MAX_XG_GAP -> the favourite wins 2-1 / 1-2
+ *      (3-1 / 1-3 from MID_FAVOURITE_BIG_WIN_XG).
  *    - Rule 4 (Standard Default): Any other match -> 1-0 (Home) or 0-1 (Away).
- *      xG fix: standard-vs-standard matches take a blowout or a 2-2 draw only
- *      when the xG math clears STANDARD_BLOWOUT_GAP / STANDARD_DRAW_XG.
+ *      Standard Away becomes a 1-1 (2-2 when both sides clear STANDARD_DRAW_XG)
+ *      when the xG gap is under STANDARD_AWAY_DRAW_MAX_XG_GAP.
+ *
+ * Without an `xg` resolver every rule above keeps its flat V2 line.
  */
 export function generateV2Predictions(
   fixtures: readonly V2FixtureInput[],
@@ -197,8 +233,8 @@ export function generateV2Predictions(
   const pairs = fixtures.map(normalizeFixturePair);
   const picks: Array<Prediction | null> = new Array(pairs.length).fill(null);
 
-  /** Resolve xG for one fixture, normalised to a pair of finite numbers. */
-  const resolveXg = (index: number, home: string, away: string): XgPair | null => {
+  /** Ask the resolver for one fixture's xG, normalised to a pair of finite numbers. */
+  const readXg = (index: number, home: string, away: string): XgPair | null => {
     if (!xg) return null;
     let pair: XgPair | null;
     try {
@@ -210,6 +246,13 @@ export function generateV2Predictions(
     const [homeXg, awayXg] = pair;
     if (!Number.isFinite(homeXg) || !Number.isFinite(awayXg)) return null;
     return [homeXg, awayXg];
+  };
+
+  /** xG for one fixture, resolved once — the Deadlock Snipe and the Locks both read it. */
+  const xgCache = new Map<number, XgPair | null>();
+  const resolveXg = (index: number, home: string, away: string): XgPair | null => {
+    if (!xgCache.has(index)) xgCache.set(index, readXg(index, home, away));
+    return xgCache.get(index) ?? null;
   };
 
   let fortressUsed = 0;
@@ -233,11 +276,24 @@ export function generateV2Predictions(
   }
 
   // Snipe 2 & 3: Mid (Home) vs Mid -> 1-1 (Max 2)
+  //
+  // The MW4 fix (the Leeds trap): two Mid-Table sides are only a deadlock while
+  // the Engine cannot separate them. When the xG gap is over
+  // MID_DEADLOCK_MAX_XG_GAP the fixture is skipped here — it uses no Snipe and
+  // becomes the Mid-Table Favourite Lock (Rule 3b) below.
+  //
+  // Measured on MW1–MW10: the widest Mid-vs-Mid gap on the window is 0.96
+  // (MW9 Newcastle–Everton), so this gate changes no pick and no score there.
+  // It also cannot rescue the fixture it is named after: the Engine rated
+  // MW4 Leeds 1.26 vs Newcastle 1.73 — a 0.47 edge for the *away* side — and
+  // Leeds won 4-1, so any gap low enough to fire would have picked Newcastle.
   for (let i = 0; i < pairs.length; i += 1) {
     if (picks[i] !== null) continue;
     const [home, away] = pairs[i];
     if (CHAOS_TEAMS.includes(home) || CHAOS_TEAMS.includes(away)) continue;
     if (MID_TABLE.includes(home) && MID_TABLE.includes(away) && deadlocksUsed < 2 && totalSnipes() < MAX_SNIPES) {
+      const midXg = resolveXg(i, home, away);
+      if (midXg !== null && Math.abs(midXg[0] - midXg[1]) > MID_DEADLOCK_MAX_XG_GAP) continue;
       deadlocksUsed += 1;
       picks[i] = {
         Match: `${home} vs ${away}`,
@@ -301,9 +357,22 @@ export function generateV2Predictions(
     //     CHAOS_DRAW_MAX_XG_GAP, in which case the better side wins. Without the
     //     gap test every Chaos derby became a home win and MW6 lost the exact
     //     1-1 in Man Utd 1-1 Spurs (-20).
-    //   · A Chaos side at home that the Engine rates *below* its opponent keeps
-    //     the 1-1 (MW4 Chelsea 2-2 Hull, xG 0.81 vs 1.12: locking a home win for
-    //     the weaker side costs 10 points there).
+    //   · A Chaos side at home needs more than CHAOS_HOME_MIN_XG_EDGE over its
+    //     opponent for the 2-1; level or behind, it takes a 1-1 (MW4 Chelsea
+    //     2-2 Hull, xG 0.81 vs 1.12: locking a home win for the weaker side
+    //     costs 10 points there). The MW4 fix (the Spurs trap) widened this
+    //     from "rated below" to "not clearly above", and two parts of that
+    //     spec were measured and reverted:
+    //       – "Only 2-1 above a 0.3 edge" drops MW9 from 80 to 70: Spurs 2-0
+    //         Crystal Palace is a 0.25 edge, so its correct 2-1 becomes a 1-1.
+    //         The gate therefore sits at 0.2. Spurs 0-0 Everton itself is a
+    //         0.35 edge for Spurs — above either gate — so it stays a 2-1 miss;
+    //         no gap rule sends it to a draw without sending Palace there too.
+    //       – "Away win when the visitor's xG is higher" at a 0.3 edge turns
+    //         MW4 Chelsea 2-2 Hull (a 0.31 away edge) from a correct 1-1 into a
+    //         wrong 1-2 (MW4 -10). The visitor needs CHAOS_XG_EDGE instead, the
+    //         same bar a Chaos side needs away from home; nothing on MW1–MW10
+    //         clears it, so that 1-2 branch is unmeasured.
     //   · A Chaos side AWAY still needs CHAOS_XG_EDGE. The unconditional away
     //     1-2 costs MW5 20 points (Fulham 1-1 Man Utd) and MW7 20 points (Leeds
     //     1-1 Man Utd) — two guardrail weeks — for +20 elsewhere.
@@ -333,9 +402,16 @@ export function generateV2Predictions(
         outcome = "A";
         fallback = "1-2";
       } else if (homeIsChaos) {
-        const homeRatedWorse = chaosGap !== null && chaosGap < 0;
-        outcome = homeRatedWorse ? "D" : "H";
-        fallback = homeRatedWorse ? "1-1" : "2-1";
+        if (chaosGap === null || chaosGap > CHAOS_HOME_MIN_XG_EDGE) {
+          outcome = "H";
+          fallback = "2-1";
+        } else if (-chaosGap >= CHAOS_XG_EDGE) {
+          outcome = "A";
+          fallback = "1-2";
+        } else {
+          outcome = "D";
+          fallback = "1-1";
+        }
       } else {
         const chaosEdge = xg === null ? null : xg[1] - xg[0];
         const chaosWinner = chaosEdge !== null && chaosEdge >= CHAOS_XG_EDGE;
@@ -390,6 +466,21 @@ export function generateV2Predictions(
       outcome = "H";
       fallback = "2-1";
       category = "LOCK: Mid vs Bottom";
+    } else if (
+      homeIsMid &&
+      awayIsMid &&
+      xg !== null &&
+      Math.abs(xg[0] - xg[1]) > MID_DEADLOCK_MAX_XG_GAP
+    ) {
+
+    // Rule 3b (Mid-Table Favourite): two Mid-Table sides the Engine separates
+    // by more than MID_DEADLOCK_MAX_XG_GAP are not a deadlock — the favourite
+    // wins 2-1, or 3-1 once its own xG reaches MID_FAVOURITE_BIG_WIN_XG.
+      const homeIsFavourite = xg[0] > xg[1];
+      const bigWin = Math.max(xg[0], xg[1]) >= MID_FAVOURITE_BIG_WIN_XG;
+      outcome = homeIsFavourite ? "H" : "A";
+      fallback = homeIsFavourite ? (bigWin ? "3-1" : "2-1") : bigWin ? "1-3" : "1-2";
+      category = "LOCK: Mid-Table Favourite";
     } else {
 
     // Rule 4 (Standard Default): Any other match -> Home or Away win.
@@ -399,9 +490,41 @@ export function generateV2Predictions(
       (homeIsStandard && awayIsMid) ||
       (homeIsBottom5 && awayIsStandard);
 
-    outcome = awayIsStronger ? "A" : "H";
-    fallback = awayIsStronger ? "0-1" : "1-0";
-    category = awayIsStronger ? "LOCK: Standard Away" : "LOCK: Standard Home";
+    if (awayIsStronger) {
+
+    // Standard Away — the MW4 fix (the Bournemouth trap): the tier edge alone
+    // locked a 0-1, but when the Engine cannot separate the two sides (gap
+    // under STANDARD_AWAY_DRAW_MAX_XG_GAP) these matches are draws: MW2
+    // Bournemouth 1-1 Everton, MW4 Bournemouth 2-2 Brentford and MW8 Hull 1-1
+    // Brentford were all 0-1 misses (+50 over MW1–MW10). The draw is a 1-1, or
+    // a 2-2 when both sides clear STANDARD_DRAW_XG.
+    //
+    // Outside the draw band the away win stands, and two parts of the MW4 spec
+    // were measured and reverted:
+    //   · "Away edge -> 0-1 or 0-2" would bypass the Correct Score hybrid, which
+    //     is what lands MW10 Ipswich 1-2 Bournemouth exactly; a flat 0-1 / 0-2
+    //     there drops MW10 from 90 to 80 and breaks the guardrail. The hybrid
+    //     keeps choosing the away scoreline.
+    //   · "Home edge -> 1-0 or 2-1" is right once (MW9 Bournemouth 2-0 Leeds,
+    //     +10) and wrong once where the flat line was exact (MW1 Nott'm Forest
+    //     0-1 Leeds, -20), with the other three fixtures drawn either way. It
+    //     nets -10 and pulls MW1 from 60 to 40, back to the old floor, so a home
+    //     xG edge keeps the tier's away win.
+      const standardGap = xg === null ? null : xg[0] - xg[1];
+      category = "LOCK: Standard Away";
+      if (standardGap !== null && Math.abs(standardGap) < STANDARD_AWAY_DRAW_MAX_XG_GAP) {
+        const highScoring = xg !== null && Math.min(xg[0], xg[1]) >= STANDARD_DRAW_XG;
+        outcome = "D";
+        fallback = highScoring ? "2-2" : "1-1";
+      } else {
+        outcome = "A";
+        fallback = "0-1";
+      }
+    } else {
+      outcome = "H";
+      fallback = "1-0";
+      category = "LOCK: Standard Home";
+    }
     }
 
     // Turn the locked winner into an exact score using the conservative
