@@ -4,12 +4,18 @@
 // consult expected goals when — and only when — the Engine's xG math strongly
 // supports a change from the flat V2 default:
 //
-//   · Chaos Rule     — a Chaos side only gets the 2-1 / 1-2 win line when the
-//                      xG edge says it is the better team (never 2-2).
+//   · Chaos Rule     — a Chaos side at HOME takes the 2-1 win line (the MW9
+//                      fix); two Chaos sides stay a 1-1 unless the xG gap says
+//                      one of them is clearly better. A Chaos side AWAY still
+//                      needs the xG edge to leave the 1-1 (never 2-2).
+//   · Top 4 Derby    — a Top 4 host loses its flat 2-0 to a narrow away win
+//                      when the Engine cannot separate the two sides.
 //   · Standard Lock  — standard-vs-standard matches move to a blowout or a 2-2
 //                      only when xG clears the documented thresholds.
 //
-// The third fix (Top 4 Derby) was measured and reverted: see Rule 2 below.
+// Every one of those gates was fitted on the MW1–MW10 replay of the 2026-27
+// season; the measurements behind them, including the variants that were
+// measured and rejected, live next to the rule they gate.
 //
 // `generateV2Predictions` stays synchronous and engine-free; callers hand it an
 // optional `xg` resolver (see `createMatchXgResolver`) when they can build one.
@@ -85,17 +91,43 @@ const MAX_SNIPES = 3;
 // Engine's attack/defence model and keeping the tightest gate that preserves
 // the MW5 (100), MW7 (100) and MW10 (90+) guardrails.
 
-/** xG edge a Chaos side needs before 1-1 becomes 2-1 (home) / 1-2 (away). */
+/**
+ * xG edge a Chaos side *away from home* needs before 1-1 becomes 1-2.
+ *
+ * Kept as a gate (not unconditional) by measurement: an unconditional away 1-2
+ * costs MW5 20 points (Fulham 1-1 Man Utd) and MW7 20 points (Leeds 1-1
+ * Man Utd) — see Rule 1 in `generateV2Predictions`.
+ */
 export const CHAOS_XG_EDGE = 0.55;
 /**
- * The xG edge a visiting Top 4 side needed to flip a Top 4 Derby to 1-2.
+ * xG gap below which two Chaos sides cancel each other out to a 1-1.
  *
- * NOT APPLIED — the Step 2 derby flip is reverted (see Rule 2 in
- * `generateV2Predictions`). Kept, documented, so the rejected design and its
- * measurement are not silently lost and the idea can be retried only when the
- * model demonstrably separates the two sides.
+ * At or above this gap the better Chaos side takes its win line (2-1 home /
+ * 1-2 away). This is the spec value, and it is not free: over MW1–MW10 it wins
+ * MW9 Chelsea 2-0 Man Utd (+10, a 0.40 gap) but also converts MW6 Man Utd 1-1
+ * Spurs (a 0.34 gap) from an exact 1-1 into a wrong 2-1 (-20).
+ */
+export const CHAOS_DRAW_MAX_XG_GAP = 0.2;
+/**
+ * The xG edge a visiting Top 4 side needed to flip a Top 4 Derby to 0-1 / 1-2
+ * on its own. Superseded by the tolerance pair below, kept documented so the
+ * first (unconditional) derby design and its measurement are not lost.
  */
 export const TOP4_DERBY_MIN_XG_EDGE = 0.4;
+/**
+ * Top 4 Derby: how much *better* the home side's xG may be and still lose the
+ * flat 2-0 lock — the spec's "the away xG is higher, or within 0.1".
+ */
+export const TOP4_DERBY_AWAY_TOLERANCE = 0.1;
+/**
+ * Top 4 Derby: how big the visiting side's xG edge may be before the flip stops.
+ *
+ * This is the narrowing that keeps the MW5 guardrail. Flipping on *any* away
+ * edge turns MW5's correct 2-0 into a wrong 0-1 (the Engine rates Brighton 0.86
+ * vs Arsenal 1.72; Brighton won 3-0), so the flip only fires when the Engine
+ * cannot separate the two sides. See Rule 2 for the measurement.
+ */
+export const TOP4_DERBY_MAX_AWAY_EDGE = 0.2;
 /** xG gap that turns a Standard match into a 3-0 / 4-0 / 0-3 / 0-4 blowout. */
 export const STANDARD_BLOWOUT_GAP = 1.2;
 /** Per-side xG floor for the high-scoring Standard draw (2-2). */
@@ -146,12 +178,13 @@ function normalizeFixturePair(fixture: V2FixtureInput): [string, string] {
  *    - Snipe 2 & 3: Mid (Home) vs Mid -> 1-1 (Max 2).
  *    - Snipe 3 Alternative: If there are not 2 Mid-Table Deadlocks, Top 4 (Away) -> 0-1.
  * 3. Locks (10-Point Targets):
- *    - Rule 1 (Chaos): 2-1 (if Top 4 Home), 1-2 (if Top 4 Away), 1-1 (if no Top 4). NEVER 2-2.
- *      xG fix: against a non-Top-4 opponent a Chaos side only takes its win line
- *      when it is clearly the better side by xG (CHAOS_XG_EDGE); two Chaos sides
- *      always cancel out to 1-1. Fallback when no model is available: 1-1.
- *    - Rule 2 (Smart Top 4 Home): Top 4 at Home (not vs Bottom 5) -> 2-0,
- *      Top 4 Derby included. The xG derby flip is deliberately NOT applied.
+ *    - Rule 1 (Chaos): 2-1 when the Chaos side is at home, 1-2 when it is away.
+ *      Two Chaos sides cancel out to 1-1 unless the Engine separates them by
+ *      CHAOS_DRAW_MAX_XG_GAP; a Chaos side away from home still needs
+ *      CHAOS_XG_EDGE. NEVER 2-2.
+ *    - Rule 2 (Smart Top 4 Home): Top 4 at Home (not vs Bottom 5) -> 2-0.
+ *      Top 4 Derby: the visiting Top 4 side takes 0-1 when the Engine rates the
+ *      two sides level; the flat 2-0 stands otherwise.
  *    - Rule 3 (Mid vs Bottom): Mid at Home vs Bottom 5 -> 2-1.
  *    - Rule 4 (Standard Default): Any other match -> 1-0 (Home) or 0-1 (Away).
  *      xG fix: standard-vs-standard matches take a blowout or a 2-2 draw only
@@ -256,36 +289,59 @@ export function generateV2Predictions(
     let fallback: string;
     let category: string;
 
-    // Rule 1 (Chaos): 2-1 (if Top 4 Home), 1-2 (if Top 4 Away), 1-1 (if no Top 4). NEVER 2-2.
+    // Rule 1 (Chaos): 2-1 when the Chaos side is at home, 1-2 when it is away.
+    // NEVER 2-2.
     //
-    // The xG fix: a Chaos side at home against an ordinary opponent used to be
-    // locked to a 1-1 draw even when it was the clearly better team (MW2:
-    // Chelsea 4-3 Brighton, Man Utd 5-2 Ipswich). It now takes the 2-1 (home) /
-    // 1-2 (away) win line, but only when its xG edge clears CHAOS_XG_EDGE — so
-    // the draw is still the default for a genuine coin-flip (MW5: Fulham 1-1
-    // Man Utd). Two Chaos sides always cancel out to 1-1, and 2-2 stays banned.
+    // The MW9 fix: Spurs 2-0 Crystal Palace and Chelsea 2-0 Man Utd were both
+    // home Chaos wins that the old rule locked to a 1-1 draw. The win line is
+    // bounded by three guards, two of them measured reverts from the
+    // unconditional version:
+    //
+    //   · Two Chaos sides cancel out to 1-1 unless the Engine separates them by
+    //     CHAOS_DRAW_MAX_XG_GAP, in which case the better side wins. Without the
+    //     gap test every Chaos derby became a home win and MW6 lost the exact
+    //     1-1 in Man Utd 1-1 Spurs (-20).
+    //   · A Chaos side at home that the Engine rates *below* its opponent keeps
+    //     the 1-1 (MW4 Chelsea 2-2 Hull, xG 0.81 vs 1.12: locking a home win for
+    //     the weaker side costs 10 points there).
+    //   · A Chaos side AWAY still needs CHAOS_XG_EDGE. The unconditional away
+    //     1-2 costs MW5 20 points (Fulham 1-1 Man Utd) and MW7 20 points (Leeds
+    //     1-1 Man Utd) — two guardrail weeks — for +20 elsewhere.
+    //
+    // Top 4 precedence is unchanged: a Chaos side hosting a Top 4 side stays
+    // 1-2 (MW4 Man Utd 0-1 Man City), and a Top 4 host of a Chaos side stays
+    // 2-1 (MW3 Arsenal 2-1 Chelsea, an exact 20).
     if (homeIsChaos || awayIsChaos) {
       category = "LOCK: Chaos Rule";
+      const chaosGap = xg === null ? null : xg[0] - xg[1];
       if (homeIsChaos && awayIsChaos) {
-        outcome = "D";
-        fallback = "1-1";
+        const deadHeat = chaosGap === null || Math.abs(chaosGap) < CHAOS_DRAW_MAX_XG_GAP;
+        if (deadHeat) {
+          outcome = "D";
+          fallback = "1-1";
+        } else if (chaosGap > 0) {
+          outcome = "H";
+          fallback = "2-1";
+        } else {
+          outcome = "A";
+          fallback = "1-2";
+        }
       } else if (homeIsTop4) {
         outcome = "H";
         fallback = "2-1";
       } else if (awayIsTop4) {
         outcome = "A";
         fallback = "1-2";
+      } else if (homeIsChaos) {
+        const homeRatedWorse = chaosGap !== null && chaosGap < 0;
+        outcome = homeRatedWorse ? "D" : "H";
+        fallback = homeRatedWorse ? "1-1" : "2-1";
       } else {
-        const chaosEdge =
-          xg === null
-            ? null
-            : homeIsChaos
-              ? xg[0] - xg[1]
-              : xg[1] - xg[0];
+        const chaosEdge = xg === null ? null : xg[1] - xg[0];
         const chaosWinner = chaosEdge !== null && chaosEdge >= CHAOS_XG_EDGE;
         if (chaosWinner) {
-          outcome = homeIsChaos ? "H" : "A";
-          fallback = homeIsChaos ? "2-1" : "1-2";
+          outcome = "A";
+          fallback = "1-2";
         } else {
           outcome = "D";
           fallback = "1-1";
@@ -293,18 +349,40 @@ export function generateV2Predictions(
       }
     } else if (homeIsTop4) {
 
-    // Rule 2 (Smart Top 4 Home): Top 4 at Home -> Home Win — including in a Top 4 Derby.
+    // Rule 2 (Smart Top 4 Home): Top 4 at Home -> 2-0. In a Top 4 Derby the flat
+    // lock is dropped when the Engine cannot separate the two sides, and the
+    // visiting Top 4 side takes a narrow away win instead.
     //
-    // The Step 2 xG fix (flip the derby to 1-2 when the away side clears an xG
-    // edge) was implemented, measured and REVERTED: over the MW1–MW10 replay it
-    // costs MW5 exactly 10 points (the model's 0.91 vs 1.65 xG for Brighton–
-    // Arsenal flips a correct 2-0 into a wrong 1-2, taking the week from 100 to
-    // 90) while adding nothing to MW9, because the model rates *Man City* as the
-    // stronger side in City 0-1 Brighton (2.65 vs 1.15) and Liverpool–Arsenal is
-    // only a 0.18 edge. The MW9 miss is variance the xG cannot see, not a bug
-    // the rule can fix — see TOP4_DERBY_MIN_XG_EDGE.
-      outcome = "H";
-      fallback = "2-0";
+    // The MW9 fix: Liverpool 0-1 Arsenal was locked to a 2-0 home win.
+    //
+    // Why the flip is bounded on *both* sides — the full MW1–MW10 measurement:
+    //   · Flipping on any away xG edge (the unconditional version) is worth +20
+    //     net and also lifts MW9 to 80, but the Engine rates Brighton 0.86 vs
+    //     Arsenal 1.72, so it turns MW5's correct 2-0 (Brighton won 3-0) into a
+    //     wrong 0-1: MW5 100 → 90, which breaks the guardrail. No xG-based rule
+    //     separates the two games: Liverpool–Arsenal is a 0.18 away edge and
+    //     Brighton–Arsenal a 0.86 away edge, so anything that flips the first
+    //     flips the second. Bounding the flip to a coin flip (TOP4_DERBY_MAX_
+    //     AWAY_EDGE) keeps Brighton at 2-0 and MW5 at 100.
+    //   · The Engine's *direction* is not trusted in derbies — it picks the
+    //     winner in only 2 of the 5 derbies on this window (it rated Arsenal
+    //     1.72 at Brighton, who won 3-0, and Man City 2.65 vs Brighton, who lost
+    //     0-1). Only its *indecision* is used here.
+    //   · Man City 0-1 Brighton, the other MW9 derby miss, is therefore not
+    //     fixable by xG at all: the home edge is 1.50, far outside the band, so
+    //     the 2-0 stands. That miss is variance, not a rule bug.
+      const derbyGap = xg === null ? null : xg[0] - xg[1];
+      const derbyIsCoinFlip =
+        derbyGap !== null &&
+        derbyGap <= TOP4_DERBY_AWAY_TOLERANCE &&
+        derbyGap >= -TOP4_DERBY_MAX_AWAY_EDGE;
+      if (awayIsTop4 && derbyIsCoinFlip) {
+        outcome = "A";
+        fallback = "0-1";
+      } else {
+        outcome = "H";
+        fallback = "2-0";
+      }
       category = "LOCK: Smart Top 4 Home";
     } else if (homeIsMid && awayIsBottom5) {
 

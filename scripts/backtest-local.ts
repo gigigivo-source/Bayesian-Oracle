@@ -542,12 +542,14 @@ function runSelfTest(): void {
     ["Arsenal", "Coventry"],         // Snipe 1: Home Fortress -> 2-0
     ["Fulham", "Brentford"],         // Snipe 2: Mid-Table Deadlock -> 1-1
     ["Everton", "Leeds"],            // Snipe 3: Mid-Table Deadlock -> 1-1
-    ["Chelsea", "Ipswich"],          // Chaos banned from Snipes -> 1-1 (NEVER 2-2)
+    ["Chelsea", "Ipswich"],          // Chaos at Home -> 2-1 (banned from Snipes)
     ["Man City", "Newcastle"],       // Smart Top 4 Home -> 2-0
     ["Aston Villa", "Hull"],         // Mid vs Bottom -> 2-1
     ["Sunderland", "Fulham"],        // Standard Default (Away stronger) -> 0-1
     ["Bournemouth", "Nott'm Forest"],// Standard Default (Home) -> 1-0
     ["Spurs", "Brighton"],           // Chaos vs Top 4 Away -> 1-2
+    ["Chelsea", "Spurs"],            // Chaos vs Chaos, no xG -> 1-1 (NEVER 2-2)
+    ["Liverpool", "Arsenal"],        // Top 4 Derby, no xG -> flat 2-0
   ];
 
   const preds = generateV2Predictions(slate);
@@ -556,12 +558,14 @@ function runSelfTest(): void {
     ["SNIPE: Home Fortress", "2-0", 20],
     ["SNIPE: Mid-Table Deadlock", "1-1", 20],
     ["SNIPE: Mid-Table Deadlock", "1-1", 20],
-    ["LOCK: Chaos Rule", "1-1", 10],
+    ["LOCK: Chaos Rule", "2-1", 10],
     ["LOCK: Smart Top 4 Home", "2-0", 10],
     ["LOCK: Mid vs Bottom", "2-1", 10],
     ["LOCK: Standard Away", "0-1", 10],
     ["LOCK: Standard Home", "1-0", 10],
     ["LOCK: Chaos Rule", "1-2", 10],
+    ["LOCK: Chaos Rule", "1-1", 10],
+    ["LOCK: Smart Top 4 Home", "2-0", 10],
   ];
 
   let failures = 0;

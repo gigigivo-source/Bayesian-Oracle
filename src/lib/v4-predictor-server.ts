@@ -40,11 +40,14 @@ function fixtureReadsXg(home: string, away: string): boolean {
   const homeIsChaos = CHAOS_TEAMS.includes(home);
   const awayIsChaos = CHAOS_TEAMS.includes(away);
   if (homeIsChaos || awayIsChaos) {
-    if (homeIsChaos && awayIsChaos) return false;
+    // Chaos vs Chaos reads xG too: the 1-1 stands only while the gap between
+    // the two sides stays under CHAOS_DRAW_MAX_XG_GAP.
     if (TOP_4.includes(home) || TOP_4.includes(away)) return false;
     return true;
   }
-  if (TOP_4.includes(home)) return false;
+  // A Top 4 host only reads xG in a Top 4 Derby — that is the one case where
+  // the flat 2-0 lock can be dropped.
+  if (TOP_4.includes(home)) return TOP_4.includes(away);
   const homeIsStandard =
     !TOP_4.includes(home) && !MID_TABLE.includes(home) && !BOTTOM_5.includes(home);
   const awayIsStandard =
