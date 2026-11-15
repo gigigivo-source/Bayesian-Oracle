@@ -28,7 +28,15 @@ import { dixonColesGrid, DEFAULT_RHO, type DixonColesCell } from "./data/dixonCo
 
 export const TOP_4 = ["Arsenal", "Liverpool", "Man City", "Brighton"];
 export const MID_TABLE = ["Fulham", "Brentford", "Everton", "Leeds", "Crystal Palace", "Newcastle", "Aston Villa"];
-export const BOTTOM_5 = ["Coventry", "Ipswich", "Hull", "Sunderland", "Burnley"];
+// Hull is deliberately in none of the lists: it plays as a Standard side.
+// Hull was a Bottom 5 club until MW10 and lost only 3 of its first 10 matches.
+// Measured on the MW1–MW10 replay, Standard instead of Bottom 5 scores 810
+// against 790 (81.0 against 79.0, Floor 50 both ways): MW2 Coventry 0-1 Hull
+// becomes an exact 0-1 (+20), MW7 Fulham 1-0 Hull an exact 1-0 (+10), and MW5
+// Newcastle 2-1 Hull drops from an exact 2-1 to a 1-0 (-10), which leaves MW5
+// on its guardrail of 100. Hull in MID_TABLE was measured too: 780, MW5 and
+// MW7 at 90.
+export const BOTTOM_5 = ["Coventry", "Ipswich", "Sunderland", "Burnley"];
 export const CHAOS_TEAMS = ["Chelsea", "Man Utd", "Spurs"];
 
 export const TEAM_NAME_MAP: Record<string, string> = {
@@ -580,7 +588,7 @@ export function pickCorrectScore(
  * Keeps the tuned flat V2 scoreline when it is among the top 3 most probable
  * cells of the Engine's Correct Score grid (filtered to the locked winner),
  * otherwise takes the grid's #1 cell. This preserves flat-V2 guardrail weeks
- * (e.g. MW5 Newcastle–Hull 2-1, MW7 Nott'm Forest–Arsenal 0-1) while still
+ * (e.g. MW7 Fulham–Hull 1-0, MW7 Nott'm Forest–Arsenal 0-1) while still
  * letting the Engine override when it clearly disagrees with the flat line.
  *
  * Returns `null` when the grid holds no eligible cell — the caller then falls

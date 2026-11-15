@@ -151,8 +151,9 @@ describe("GET /api/v4-predictor/auto — V2 Strict 3-Snipe System", () => {
         state: "post",
         actual: [2, 0],
         prediction: "2-0",
-        category: "SNIPE: Home Fortress",
-        targetPts: 20,
+        // Hull is a Standard side, so a Top 4 host takes the Lock, not the Snipe.
+        category: "LOCK: Smart Top 4 Home",
+        targetPts: 10,
       },
       {
         home: { name: "Spurs", logo: "https://example.com/spurs.png" },

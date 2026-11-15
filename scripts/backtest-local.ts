@@ -544,7 +544,7 @@ function runSelfTest(): void {
     ["Everton", "Leeds"],            // Snipe 3: Mid-Table Deadlock -> 1-1
     ["Chelsea", "Ipswich"],          // Chaos at Home -> 2-1 (banned from Snipes)
     ["Man City", "Newcastle"],       // Smart Top 4 Home -> 2-0
-    ["Aston Villa", "Hull"],         // Mid vs Bottom -> 2-1
+    ["Aston Villa", "Ipswich"],      // Mid vs Bottom -> 2-1
     ["Sunderland", "Fulham"],        // Standard Default (Away stronger) -> 0-1
     ["Bournemouth", "Nott'm Forest"],// Standard Default (Home) -> 1-0
     ["Spurs", "Brighton"],           // Chaos vs Top 4 Away -> 1-2

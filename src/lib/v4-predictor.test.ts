@@ -14,7 +14,7 @@ describe("V2 team classifications", () => {
       "Newcastle",
       "Aston Villa",
     ]);
-    expect(BOTTOM_5).toEqual(["Coventry", "Ipswich", "Hull", "Sunderland", "Burnley"]);
+    expect(BOTTOM_5).toEqual(["Coventry", "Ipswich", "Sunderland", "Burnley"]);
     expect(CHAOS_TEAMS).toEqual(["Chelsea", "Man Utd", "Spurs"]);
   });
 
@@ -601,13 +601,13 @@ describe("V2 fix — full-matchweek backtest replay on real fixtures", () => {
     { home: "Leeds", away: "Newcastle", xg: [1.26, 1.73], actual: [4, 1], points: 0, prediction: "1-1" }, // SNIPE: Mid-Table Deadlock
   ];
 
-  // MW5 — 110 points (was 100 before the draw-rule fix).
+  // MW5 — 100 points (110 while Hull was a Bottom 5 side: Newcastle v Hull was an exact 2-1).
   const MW5: Case[] = [
     { home: "Brentford", away: "Chelsea", xg: [1.715, 1.562], actual: [3, 0], points: 10, prediction: "2-1" }, // LOCK: Chaos Rule
     { home: "Spurs", away: "Aston Villa", xg: [1.6, 1.41], actual: [2, 3], points: 0, prediction: "2-1" }, // LOCK: Chaos Rule
     { home: "Everton", away: "Ipswich", xg: [1.59, 1.17], actual: [1, 0], points: 10, prediction: "2-1" }, // LOCK: Mid vs Bottom
     { home: "Brighton", away: "Arsenal", xg: [0.86, 1.72], actual: [3, 0], points: 10, prediction: "2-0" }, // LOCK: Smart Top 4 Home
-    { home: "Newcastle", away: "Hull", xg: [1.37, 1.24], actual: [2, 1], points: 20, prediction: "2-1" }, // LOCK: Mid vs Bottom
+    { home: "Newcastle", away: "Hull", xg: [1.37, 1.24], actual: [2, 1], points: 10, prediction: "1-0" }, // LOCK: Standard Home
     { home: "Nott'm Forest", away: "Coventry", xg: [1.53, 0.54], actual: [0, 1], points: 0, prediction: "1-0" }, // LOCK: Standard Home
     { home: "Bournemouth", away: "Liverpool", xg: null, actual: [0, 1], points: 20, prediction: "0-1" }, // SNIPE: Elite Away
     { home: "Leeds", away: "Crystal Palace", xg: [1.35, 1.33], actual: [0, 0], points: 10, prediction: "1-1" }, // SNIPE: Mid-Table Deadlock
@@ -615,10 +615,10 @@ describe("V2 fix — full-matchweek backtest replay on real fixtures", () => {
     { home: "Fulham", away: "Man Utd", xg: [1.47, 1.37], actual: [1, 1], points: 20, prediction: "1-1" }, // LOCK: Chaos Rule
   ];
 
-  // MW7 — 110 points (was 100 before the draw-rule fix).
+  // MW7 — 120 points (110 while Hull was a Bottom 5 side: Fulham v Hull was a 2-1).
   const MW7: Case[] = [
     { home: "Everton", away: "Chelsea", xg: [1.15, 1.36], actual: [0, 2], points: 10, prediction: "1-2" }, // LOCK: Chaos Rule
-    { home: "Fulham", away: "Hull", xg: [1.23, 1.44], actual: [1, 0], points: 10, prediction: "2-1" }, // LOCK: Mid vs Bottom
+    { home: "Fulham", away: "Hull", xg: [1.23, 1.44], actual: [1, 0], points: 20, prediction: "1-0" }, // LOCK: Standard Home
     { home: "Man City", away: "Ipswich", xg: null, actual: [3, 2], points: 10, prediction: "2-0" }, // SNIPE: Home Fortress
     { home: "Brentford", away: "Liverpool", xg: null, actual: [1, 2], points: 10, prediction: "0-1" }, // SNIPE: Elite Away
     { home: "Newcastle", away: "Aston Villa", xg: [1.99, 1.08], actual: [0, 1], points: 0, prediction: "1-1" }, // SNIPE: Mid-Table Deadlock
@@ -647,7 +647,7 @@ describe("V2 fix — full-matchweek backtest replay on real fixtures", () => {
   const MW10: Case[] = [
     { home: "Everton", away: "Coventry", xg: [1.25, 0.79], actual: [3, 1], points: 10, prediction: "2-1" }, // LOCK: Mid vs Bottom
     { home: "Leeds", away: "Spurs", xg: [1.47, 1.76], actual: [1, 0], points: 0, prediction: "1-2" }, // LOCK: Chaos Rule
-    { home: "Arsenal", away: "Hull", xg: null, actual: [1, 0], points: 10, prediction: "2-0" }, // SNIPE: Home Fortress
+    { home: "Arsenal", away: "Hull", xg: null, actual: [1, 0], points: 10, prediction: "2-0" }, // LOCK: Smart Top 4 Home
     { home: "Fulham", away: "Newcastle", xg: [1.43, 1.56], actual: [1, 1], points: 20, prediction: "1-1" }, // SNIPE: Mid-Table Deadlock
     { home: "Nott'm Forest", away: "Man City", xg: null, actual: [3, 1], points: 0, prediction: "0-1" }, // SNIPE: Elite Away
     { home: "Crystal Palace", away: "Liverpool", xg: [1.18, 1.87], actual: [1, 3], points: 10, prediction: "0-1" }, // LOCK: Standard Away
@@ -678,11 +678,12 @@ describe("V2 fix — full-matchweek backtest replay on real fixtures", () => {
     expect(total(MW10)).toBeGreaterThanOrEqual(90);
   });
 
-  it("draw-rule fix — a Chaos side away no longer forces a 1-1: MW1 60 -> 70, MW5 and MW7 100 -> 110", () => {
+  it("draw-rule fix — a Chaos side away no longer forces a 1-1: +10 each on MW1, MW5 and MW7", () => {
     const total = (cases: Case[]) => replay(cases).reduce((sum, r) => sum + r.points, 0);
     expect(total(MW1)).toBe(70);
-    expect(total(MW5)).toBe(110);
-    expect(total(MW7)).toBe(110);
+    // Totals after Hull moved to Standard (MW5 -10, MW7 +10).
+    expect(total(MW5)).toBe(100);
+    expect(total(MW7)).toBe(120);
 
     const pick = (cases: Case[], match: string) =>
       replay(cases).find((r) => `${r.case.home} vs ${r.case.away}` === match)!;
@@ -739,5 +740,40 @@ describe("V2 fix — full-matchweek backtest replay on real fixtures", () => {
     // home branch keeps 2-0 and the 0-1 away win still misses.
     expect(byMatch.get("Man City vs Brighton")!.prediction).toBe("2-0");
     expect(byMatch.get("Man City vs Brighton")!.points).toBe(0);
+  });
+});
+
+describe("Hull plays as a Standard side", () => {
+  const pickFor = (home: string, away: string, xg: XgPair) =>
+    generateV2Predictions([{ home, away }], () => xg)[0];
+
+  it("is in none of the four tier lists", () => {
+    for (const list of [TOP_4, MID_TABLE, BOTTOM_5, CHAOS_TEAMS]) expect(list).not.toContain("Hull");
+  });
+
+  it("is the stronger side away to a Bottom 5 club (MW2 Coventry 0-1 Hull, exact)", () => {
+    expect(pickFor("Coventry", "Hull", [0.99, 1.97])).toMatchObject({
+      Category: "LOCK: Standard Away",
+      Prediction: "0-1",
+    });
+  });
+
+  it("loses 1-0 away to a Mid-Table club, not 2-1 (MW7 Fulham 1-0 Hull exact, MW5 Newcastle 2-1 Hull outcome)", () => {
+    expect(pickFor("Fulham", "Hull", [1.23, 1.44])).toMatchObject({
+      Category: "LOCK: Standard Home",
+      Prediction: "1-0",
+    });
+    expect(pickFor("Newcastle", "Hull", [1.37, 1.24])).toMatchObject({
+      Category: "LOCK: Standard Home",
+      Prediction: "1-0",
+    });
+  });
+
+  it("is no longer a Home Fortress Snipe target for a Top 4 host", () => {
+    expect(generateV2Predictions([{ home: "Arsenal", away: "Hull" }])[0]).toMatchObject({
+      Category: "LOCK: Smart Top 4 Home",
+      Prediction: "2-0",
+      Target_Pts: 10,
+    });
   });
 });
