@@ -1,9 +1,14 @@
 import dns from "node:dns";
 import tls from "node:tls";
 import * as espn from "@/lib/espn";
-import { parseHistoricalDate } from "@/lib/data/historical";
+import { loadMatchesFromOpenfootball, parseHistoricalDate } from "@/lib/data/historical";
 import { parseCsv } from "@/lib/data/sources/githubDatasets";
-import { generateV2Predictions, translateTeamName } from "@/lib/v4-predictor";
+import {
+  createMatchXgResolver,
+  generateV2Predictions,
+  translateTeamName,
+  type MatchXgResolver,
+} from "@/lib/v4-predictor";
 import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
@@ -134,6 +139,72 @@ async function backfillOpenfootballResults(
   });
 }
 
+const SEASONS_BACK = 4;
+const XG_HISTORY_TTL_MS = 60 * 60_000;
+let cachedXgHistory: { at: number; matches: Awaited<ReturnType<typeof loadMatchesFromOpenfootball>>["matches"] } | null = null;
+
+/** Completed matches strictly before `cutoffIso`, from the CSV results map. */
+function csvHistoryBefore(
+  results: Map<string, CompletedMatchResult> | null,
+  cutoffIso: string,
+) {
+  if (!results) return [];
+  const cutoff = Date.parse(cutoffIso);
+  if (!Number.isFinite(cutoff)) return [];
+  const history: Array<{
+    homeTeam: string;
+    awayTeam: string;
+    matchDate: string;
+    homeGoals: number;
+    awayGoals: number;
+    leagueSlug: string;
+  }> = [];
+  for (const [key, result] of results) {
+    if (!result.isoDate) continue;
+    if (Date.parse(result.isoDate) >= cutoff) continue;
+    const [home, away] = key.split("|");
+    if (!home || !away) continue;
+    history.push({
+      homeTeam: home,
+      awayTeam: away,
+      matchDate: result.isoDate,
+      homeGoals: result.homeGoals,
+      awayGoals: result.awayGoals,
+      leagueSlug: "eng.1",
+    });
+  }
+  return history;
+}
+
+/**
+ * Engine xG for the slate: the Maher-style attack/defence model rebuilt from
+ * completed matches before the first kickoff. Missing history degrades the
+ * xG-aware Locks back to their flat V2 lines — never to fabricated odds.
+ */
+async function buildMatchXgResolver(cutoffIso: string): Promise<MatchXgResolver | null> {
+  const now = Date.now();
+  if (!cachedXgHistory || now - cachedXgHistory.at > XG_HISTORY_TTL_MS) {
+    const season = new Date(cutoffIso).getUTCMonth() >= 6
+      ? new Date(cutoffIso).getUTCFullYear()
+      : new Date(cutoffIso).getUTCFullYear() - 1;
+    const seasons = Array.from({ length: SEASONS_BACK }, (_, back) => {
+      const start = season - back;
+      return `${start}-${String((start + 1) % 100).padStart(2, "0")}`;
+    });
+    try {
+      const { matches } = await loadMatchesFromOpenfootball("eng.1", seasons);
+      cachedXgHistory = { at: now, matches };
+    } catch {
+      cachedXgHistory = { at: now, matches: [] };
+    }
+  }
+
+  const results = await loadCompletedEplResults();
+  const history = [...cachedXgHistory.matches, ...csvHistoryBefore(results, cutoffIso)];
+  const resolver = createMatchXgResolver({ history, leagueSlug: "eng.1", onlyRelevant: false });
+  return resolver;
+}
+
 export async function GET(request: Request) {
   const rawWeek = new URL(request.url).searchParams.get("week");
   const requestedWeek = parseWeekParam(rawWeek);
@@ -172,7 +243,8 @@ export async function GET(request: Request) {
       home: translateTeamName(fx.home.name),
       away: translateTeamName(fx.away.name),
     }));
-    const v2Predictions = generateV2Predictions(v2Fixtures);
+    const xg = await buildMatchXgResolver(sorted[0]?.date ?? new Date().toISOString());
+    const v2Predictions = generateV2Predictions(v2Fixtures, xg);
 
     const result = sorted.map((fx, index) => {
       const { home: homeName, away: awayName } = v2Fixtures[index];

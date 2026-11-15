@@ -1,4 +1,25 @@
-// V4 Predictor — True V2 Strict 3-Snipe System (pure rule-based, zero Engine / Poisson).
+// V4 Predictor — True V2 Strict 3-Snipe System.
+//
+// The rule tree (Snipes + Locks) is pure and deterministic. Two of the Locks
+// consult expected goals when — and only when — the Engine's xG math strongly
+// supports a change from the flat V2 default:
+//
+//   · Chaos Rule     — a Chaos side only gets the 2-1 / 1-2 win line when the
+//                      xG edge says it is the better team (never 2-2).
+//   · Standard Lock  — standard-vs-standard matches move to a blowout or a 2-2
+//                      only when xG clears the documented thresholds.
+//
+// The third fix (Top 4 Derby) was measured and reverted: see Rule 2 below.
+//
+// `generateV2Predictions` stays synchronous and engine-free; callers hand it an
+// optional `xg` resolver (see `createMatchXgResolver`) when they can build one.
+
+import {
+  buildAttackDefenceTable,
+  computeMatchExpectedGoals,
+  type AttackDefenceTable,
+} from "./data/attackDefence";
+import type { HistoricalMatch } from "./data/historical";
 
 export const TOP_4 = ["Arsenal", "Liverpool", "Man City", "Brighton"];
 export const MID_TABLE = ["Fulham", "Brentford", "Everton", "Leeds", "Crystal Palace", "Newcastle", "Aston Villa"];
@@ -62,6 +83,38 @@ export type ScoredPrediction = {
 
 const MAX_SNIPES = 3;
 
+// ─── xG thresholds (V2 fix) ───────────────────────────────────────────────────
+//
+// Every threshold below is a *guard*: below it, the flat V2 rule is kept. These
+// values were fitted by replaying MW1–MW10 of the 2026-27 season against the
+// Engine's attack/defence model and keeping the tightest gate that preserves
+// the MW5 (100), MW7 (100) and MW10 (90+) guardrails.
+
+/** xG edge a Chaos side needs before 1-1 becomes 2-1 (home) / 1-2 (away). */
+export const CHAOS_XG_EDGE = 0.55;
+/**
+ * The xG edge a visiting Top 4 side needed to flip a Top 4 Derby to 1-2.
+ *
+ * NOT APPLIED — the Step 2 derby flip is reverted (see Rule 2 in
+ * `generateV2Predictions`). Kept, documented, so the rejected design and its
+ * measurement are not silently lost and the idea can be retried only when the
+ * model demonstrably separates the two sides.
+ */
+export const TOP4_DERBY_MIN_XG_EDGE = 0.4;
+/** xG gap that turns a Standard match into a 3-0 / 4-0 / 0-3 / 0-4 blowout. */
+export const STANDARD_BLOWOUT_GAP = 1.2;
+/** Per-side xG floor for the high-scoring Standard draw (2-2). */
+export const STANDARD_DRAW_XG = 1.8;
+
+export type XgPair = readonly [homeXg: number, awayXg: number];
+
+/**
+ * Optional expected-goals lookup handed to `generateV2Predictions`.
+ * Index-aligned with the fixture list, or `null` when no model is available —
+ * in which case every xG-aware rule falls back to its flat V2 default.
+ */
+export type MatchXgResolver = (index: number, home: string, away: string) => XgPair | null;
+
 /** Accepts only well-formed scorelines like "2-1"; anything else is ignored. */
 export function isScoreline(value: unknown): value is string {
   return typeof value === "string" && /^\d{1,2}-\d{1,2}$/.test(value);
@@ -93,13 +146,37 @@ function normalizeFixturePair(fixture: V2FixtureInput): [string, string] {
  *    - Snipe 3 Alternative: If there are not 2 Mid-Table Deadlocks, Top 4 (Away) -> 0-1.
  * 3. Locks (10-Point Targets):
  *    - Rule 1 (Chaos): 2-1 (if Top 4 Home), 1-2 (if Top 4 Away), 1-1 (if no Top 4). NEVER 2-2.
- *    - Rule 2 (Smart Top 4 Home): Top 4 at Home (not vs Bottom 5) -> 2-0.
+ *      xG fix: against a non-Top-4 opponent a Chaos side only takes its win line
+ *      when it is clearly the better side by xG (CHAOS_XG_EDGE); two Chaos sides
+ *      always cancel out to 1-1. Fallback when no model is available: 1-1.
+ *    - Rule 2 (Smart Top 4 Home): Top 4 at Home (not vs Bottom 5) -> 2-0,
+ *      Top 4 Derby included. The xG derby flip is deliberately NOT applied.
  *    - Rule 3 (Mid vs Bottom): Mid at Home vs Bottom 5 -> 2-1.
  *    - Rule 4 (Standard Default): Any other match -> 1-0 (Home) or 0-1 (Away).
+ *      xG fix: standard-vs-standard matches take a blowout or a 2-2 draw only
+ *      when the xG math clears STANDARD_BLOWOUT_GAP / STANDARD_DRAW_XG.
  */
-export function generateV2Predictions(fixtures: readonly V2FixtureInput[]): Prediction[] {
+export function generateV2Predictions(
+  fixtures: readonly V2FixtureInput[],
+  xg?: MatchXgResolver | null,
+): Prediction[] {
   const pairs = fixtures.map(normalizeFixturePair);
   const picks: Array<Prediction | null> = new Array(pairs.length).fill(null);
+
+  /** Resolve xG for one fixture, normalised to a pair of finite numbers. */
+  const resolveXg = (index: number, home: string, away: string): XgPair | null => {
+    if (!xg) return null;
+    let pair: XgPair | null;
+    try {
+      pair = xg(index, home, away);
+    } catch {
+      return null;
+    }
+    if (!pair) return null;
+    const [homeXg, awayXg] = pair;
+    if (!Number.isFinite(homeXg) || !Number.isFinite(awayXg)) return null;
+    return [homeXg, awayXg];
+  };
 
   let fortressUsed = 0;
   let deadlocksUsed = 0;
@@ -171,17 +248,59 @@ export function generateV2Predictions(fixtures: readonly V2FixtureInput[]): Pred
     const awayIsStandard = !awayIsTop4 && !awayIsMid && !awayIsBottom5 && !awayIsChaos;
 
     // Rule 1 (Chaos): 2-1 (if Top 4 Home), 1-2 (if Top 4 Away), 1-1 (if no Top 4). NEVER 2-2.
+    //
+    // The xG fix: a Chaos side at home against an ordinary opponent used to be
+    // locked to a 1-1 draw even when it was the clearly better team (MW2:
+    // Chelsea 4-3 Brighton, Man Utd 5-2 Ipswich). It now takes the 2-1 (home) /
+    // 1-2 (away) win line, but only when its xG edge clears CHAOS_XG_EDGE — so
+    // the draw is still the default for a genuine coin-flip (MW5: Fulham 1-1
+    // Man Utd). Two Chaos sides always cancel out to 1-1, and 2-2 stays banned.
     if (homeIsChaos || awayIsChaos) {
-      const prediction = homeIsTop4 ? "2-1" : awayIsTop4 ? "1-2" : "1-1";
+      if (homeIsChaos && awayIsChaos) {
+        return {
+          Match: `${home} vs ${away}`,
+          Category: "LOCK: Chaos Rule",
+          Prediction: "1-1",
+          Target_Pts: 10,
+        };
+      }
+      if (homeIsTop4) {
+        return {
+          Match: `${home} vs ${away}`,
+          Category: "LOCK: Chaos Rule",
+          Prediction: "2-1",
+          Target_Pts: 10,
+        };
+      }
+      if (awayIsTop4) {
+        return {
+          Match: `${home} vs ${away}`,
+          Category: "LOCK: Chaos Rule",
+          Prediction: "1-2",
+          Target_Pts: 10,
+        };
+      }
+      const edge = resolveXg(i, home, away);
+      const chaosEdge = edge === null ? null : homeIsChaos ? edge[0] - edge[1] : edge[1] - edge[0];
+      const chaosWinner = chaosEdge !== null && chaosEdge >= CHAOS_XG_EDGE;
       return {
         Match: `${home} vs ${away}`,
         Category: "LOCK: Chaos Rule",
-        Prediction: prediction,
+        Prediction: chaosWinner ? (homeIsChaos ? "2-1" : "1-2") : "1-1",
         Target_Pts: 10,
       };
     }
 
-    // Rule 2 (Smart Top 4 Home): Top 4 at Home -> 2-0.
+    // Rule 2 (Smart Top 4 Home): Top 4 at Home -> 2-0 — including in a Top 4 Derby.
+    //
+    // The Step 2 xG fix (flip the derby to 1-2 when the away side clears an xG
+    // edge) was implemented, measured and REVERTED: over the MW1–MW10 replay it
+    // costs MW5 exactly 10 points (the model's 0.91 vs 1.65 xG for Brighton–
+    // Arsenal flips a correct 2-0 into a wrong 1-2, taking the week from 100 to
+    // 90) while adding nothing to MW9, because the model rates *Man City* as the
+    // stronger side in City 0-1 Brighton (2.65 vs 1.15) and Liverpool–Arsenal is
+    // only a 0.18 edge. The MW9 miss is variance the xG cannot see, not a bug
+    // the rule can fix — see TOP4_DERBY_MIN_XG_EDGE.
     if (homeIsTop4) {
       return {
         Match: `${home} vs ${away}`,
@@ -208,6 +327,41 @@ export function generateV2Predictions(fixtures: readonly V2FixtureInput[]): Pred
       (homeIsStandard && awayIsMid) ||
       (homeIsBottom5 && awayIsStandard);
 
+    // The xG fix: standard-vs-standard matches (no Top 4, no Bottom 5, no Mid,
+    // no Chaos) used to be pinned to 1-0 / 0-1 even when the model expected a
+    // rout (MW4: Bournemouth 2-2 Brentford, Aston Villa 1-2 Nott'm Forest).
+    // The flat pick is kept unless xG clears one of the documented thresholds.
+    if (homeIsStandard && awayIsStandard) {
+      const standard = resolveXg(i, home, away);
+      if (standard !== null) {
+        const [homeXg, awayXg] = standard;
+        if (homeXg - awayXg >= STANDARD_BLOWOUT_GAP) {
+          return {
+            Match: `${home} vs ${away}`,
+            Category: "LOCK: Standard Blowout",
+            Prediction: `${blowoutGoals(homeXg)}-0`,
+            Target_Pts: 10,
+          };
+        }
+        if (awayXg - homeXg >= STANDARD_BLOWOUT_GAP) {
+          return {
+            Match: `${home} vs ${away}`,
+            Category: "LOCK: Standard Blowout",
+            Prediction: `0-${blowoutGoals(awayXg)}`,
+            Target_Pts: 10,
+          };
+        }
+        if (homeXg >= STANDARD_DRAW_XG && awayXg >= STANDARD_DRAW_XG) {
+          return {
+            Match: `${home} vs ${away}`,
+            Category: "LOCK: Standard Draw",
+            Prediction: "2-2",
+            Target_Pts: 10,
+          };
+        }
+      }
+    }
+
     if (awayIsStronger) {
       return {
         Match: `${home} vs ${away}`,
@@ -226,7 +380,114 @@ export function generateV2Predictions(fixtures: readonly V2FixtureInput[]): Pred
   });
 }
 
+/**
+ * Round a blowout margin to a legal scoreline: `3` for anything up to 3.5 xG,
+ * `4` from 3.5 upward (and no further — V2 never predicts 5+ goals).
+ */
+export function blowoutGoals(xg: number): number {
+  if (!Number.isFinite(xg)) return 3;
+  return Math.min(4, Math.max(3, Math.round(xg)));
+}
+
 export const generatePredictions = generateV2Predictions;
+
+// ─── Engine xG wiring ────────────────────────────────────────────────────────
+
+/** Minimal shape of one completed match, as the history loaders return it. */
+export interface XgHistoryMatch {
+  homeTeam: string;
+  awayTeam: string;
+  matchDate: string;
+  homeGoals: number;
+  awayGoals: number;
+  leagueSlug?: string | null;
+}
+
+export interface MatchXgResolverOptions {
+  /** Completed matches available *before* the slate kicks off. */
+  history: readonly XgHistoryMatch[];
+  leagueSlug?: string;
+  /**
+   * Only hand xG to the fixtures whose rule actually reads it (Chaos, Top 4
+   * Derby, Standard-vs-Standard). Defaults to true so a large slate does not
+   * pay for xG it never uses.
+   */
+  onlyRelevant?: boolean;
+}
+
+/** True when the Lock for this fixture consults xG. */
+function fixtureReadsXg(home: string, away: string): boolean {
+  const homeIsChaos = CHAOS_TEAMS.includes(home);
+  const awayIsChaos = CHAOS_TEAMS.includes(away);
+  if (homeIsChaos || awayIsChaos) {
+    if (homeIsChaos && awayIsChaos) return false;
+    if (TOP_4.includes(home) || TOP_4.includes(away)) return false;
+    return true;
+  }
+  if (TOP_4.includes(home)) return false;
+  const homeIsStandard =
+    !TOP_4.includes(home) && !MID_TABLE.includes(home) && !BOTTOM_5.includes(home);
+  const awayIsStandard =
+    !TOP_4.includes(away) && !MID_TABLE.includes(away) && !BOTTOM_5.includes(away);
+  return homeIsStandard && awayIsStandard;
+}
+
+/**
+ * Build a `MatchXgResolver` from the Engine's Maher-style attack/defence model.
+ *
+ * The model is the same one the Engine uses for its λ: per-team, venue-split
+ * attack and defence strengths shrunk toward the league baseline, multiplied
+ * out into home/away expected goals (`computeMatchExpectedGoals`). Team names
+ * are translated through `translateTeamName` on *both* sides of every lookup so
+ * the short V2 names ("Man Utd", "Spurs") resolve against the long feed names
+ * ("Manchester United", "Tottenham Hotspur").
+ *
+ * Returns `null` when there is no usable history — the caller then runs the
+ * flat V2 tree, which is the documented fallback.
+ */
+export function createMatchXgResolver(
+  options: MatchXgResolverOptions,
+): MatchXgResolver | null {
+  const { history, leagueSlug = "eng.1", onlyRelevant = true } = options;
+  if (!history.length) return null;
+
+  const matches: HistoricalMatch[] = history.map((match, index) => ({
+    id: `${leagueSlug}|${match.homeTeam}|${match.awayTeam}|${match.matchDate}|${index}`,
+    homeTeam: translateTeamName(match.homeTeam),
+    awayTeam: translateTeamName(match.awayTeam),
+    leagueSlug: match.leagueSlug ?? leagueSlug,
+    matchDate: match.matchDate,
+    homeGoals: match.homeGoals,
+    awayGoals: match.awayGoals,
+    competitionName: null,
+    source: "github-datasets",
+  }));
+
+  let table: AttackDefenceTable;
+  try {
+    table = buildAttackDefenceTable(matches, leagueSlug, {});
+  } catch {
+    return null;
+  }
+
+  return (_index, home, away) => {
+    if (onlyRelevant && !fixtureReadsXg(home, away)) return null;
+    try {
+      const { homeExpectedGoals, awayExpectedGoals } = computeMatchExpectedGoals({
+        homeTeam: home,
+        awayTeam: away,
+        table,
+        applyElo: false,
+      });
+      if (!Number.isFinite(homeExpectedGoals) || !Number.isFinite(awayExpectedGoals)) {
+        return null;
+      }
+      return [homeExpectedGoals, awayExpectedGoals];
+    } catch {
+      return null;
+    }
+  };
+}
 
 /**
  * Project route rows into the table's `Prediction` shape, falling back to
