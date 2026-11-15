@@ -251,6 +251,88 @@ describe("GET /api/v4-predictor/auto — V2 Strict 3-Snipe System", () => {
     }
   });
 
+  it("uses the fixed tier lists by default and reports them", async () => {
+    fetchScoreboardMock.mockResolvedValue([
+      makeFixture("m1", "2026-11-21T15:00:00Z", "Hull City AFC", "Aston Villa", "pre", null, null, 12),
+    ]);
+    const { GET } = await import("@/app/api/v4-predictor/auto/route");
+    const body = await (await GET(new Request("http://localhost:3000/api/v4-predictor/auto?week=12"))).json();
+    expect(body.tiers.source).toBe("preseason");
+    expect(body.tiers.top4).toEqual(["Arsenal", "Liverpool", "Man City", "Brighton"]);
+    expect(body.fixtures[0].category).toBe("LOCK: Standard Away");
+  });
+
+  it("falls back to the fixed tier lists when ?tiers=table has no results to build a table from", async () => {
+    fetchScoreboardMock.mockResolvedValue([
+      makeFixture("m1", "2026-11-21T15:00:00Z", "Hull City AFC", "Aston Villa", "pre", null, null, 12),
+    ]);
+    const { GET } = await import("@/app/api/v4-predictor/auto/route");
+    const body = await (
+      await GET(new Request("http://localhost:3000/api/v4-predictor/auto?week=12&tiers=table"))
+    ).json();
+    expect(body.tiers.source).toBe("preseason");
+    expect(body.fixtures[0].category).toBe("LOCK: Standard Away");
+  });
+
+  it("reads the tiers off the league table with ?tiers=table, using only results before the first kickoff", async () => {
+    // One completed round. Hull top the table; Villa are bottom. The last row
+    // is dated after the slate's kickoff and must not reach the table.
+    const csv = [
+      "Div,Date,Time,HomeTeam,AwayTeam,FTHG,FTAG",
+      "E0,14/11/2026,15:00,Hull,Aston Villa,5,0",
+      "E0,14/11/2026,15:00,Arsenal,Fulham,4,0",
+      "E0,14/11/2026,15:00,Man City,Coventry,3,0",
+      "E0,14/11/2026,15:00,Leeds,Crystal Palace,2,0",
+      "E0,14/11/2026,15:00,Brighton,Sunderland,1,0",
+      "E0,14/11/2026,15:00,Everton,Brentford,1,1",
+      "E0,14/11/2026,15:00,Newcastle,Bournemouth,0,0",
+      "E0,22/11/2026,15:00,Aston Villa,Hull,9,0",
+    ].join("\n");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) =>
+        String(url).includes("E0_2627.csv")
+          ? Promise.resolve(new Response(csv, { status: 200 }))
+          : Promise.resolve(
+              new Response(JSON.stringify({ matches: [] }), {
+                status: 200,
+                headers: { "content-type": "application/json" },
+              }),
+            ),
+      ),
+    );
+    fetchScoreboardMock.mockResolvedValue([
+      makeFixture("m1", "2026-11-21T15:00:00Z", "Hull City AFC", "Aston Villa", "pre", null, null, 12),
+    ]);
+
+    // The route caches the results feed per module instance; use a fresh one
+    // and drop it afterwards so the CSV above cannot reach another test.
+    vi.resetModules();
+    try {
+      const { GET } = await import("@/app/api/v4-predictor/auto/route");
+      const body = await (
+        await GET(new Request("http://localhost:3000/api/v4-predictor/auto?week=12&tiers=table"))
+      ).json();
+      expect(body.tiers.source).toBe("table");
+      expect(body.tiers.top4).toEqual(["Hull", "Arsenal", "Man City", "Leeds"]);
+      // Villa stay bottom: the 9-0 dated after kickoff never reached the table.
+      expect(body.tiers.bottom5).toEqual(["Sunderland", "Crystal Palace", "Coventry", "Fulham", "Aston Villa"]);
+      expect(body.tiers.midTable).toEqual(["Brighton", "Brentford", "Everton", "Bournemouth", "Newcastle"]);
+      expect(body.tiers.chaos).toEqual(["Chelsea", "Man Utd", "Spurs"]);
+      // Top of the table at home to a Bottom 5 side: no longer a Standard Away.
+      expect(body.fixtures[0].category).toBe("SNIPE: Home Fortress");
+      expect(body.fixtures[0].prediction).toBe("2-0");
+    } finally {
+      vi.resetModules();
+    }
+  });
+
+  it("returns 400 when the tiers parameter is not a known source", async () => {
+    const { GET } = await import("@/app/api/v4-predictor/auto/route");
+    const response = await GET(new Request("http://localhost:3000/api/v4-predictor/auto?week=10&tiers=bogus"));
+    expect(response.status).toBe(400);
+  });
+
   it("returns 500 with { error: 'Failed to fetch' } when fetching throws", async () => {
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     fetchScoreboardMock.mockRejectedValue(new Error("ESPN down"));

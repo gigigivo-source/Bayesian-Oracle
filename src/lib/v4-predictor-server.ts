@@ -6,11 +6,9 @@ import {
 } from "./data/attackDefence";
 import type { HistoricalMatch } from "./data/historical";
 import {
-  CHAOS_TEAMS,
-  TOP_4,
-  MID_TABLE,
-  BOTTOM_5,
+  PRESEASON_TIERS,
   translateTeamName,
+  type DynamicTiers,
   type MatchXgResolver,
 } from "./v4-predictor";
 
@@ -33,25 +31,31 @@ export interface MatchXgResolverOptions {
    * pay for xG it never uses.
    */
   onlyRelevant?: boolean;
+  /**
+   * The tiers the slate is predicted with; only read by `onlyRelevant`.
+   * Defaults to the fixed lists, like `generateV2Predictions`.
+   */
+  tiers?: DynamicTiers;
 }
 
 /** True when the Lock for this fixture consults xG. */
-function fixtureReadsXg(home: string, away: string): boolean {
-  const homeIsChaos = CHAOS_TEAMS.includes(home);
-  const awayIsChaos = CHAOS_TEAMS.includes(away);
+function fixtureReadsXg(home: string, away: string, tiers: DynamicTiers): boolean {
+  const { top4, midTable, bottom5, chaos } = tiers;
+  const homeIsChaos = chaos.includes(home);
+  const awayIsChaos = chaos.includes(away);
   if (homeIsChaos || awayIsChaos) {
     // Chaos vs Chaos reads xG too: the 1-1 stands only while the gap between
     // the two sides stays under CHAOS_DRAW_MAX_XG_GAP.
-    if (TOP_4.includes(home) || TOP_4.includes(away)) return false;
+    if (top4.includes(home) || top4.includes(away)) return false;
     return true;
   }
   // A Top 4 host only reads xG in a Top 4 Derby — that is the one case where
   // the flat 2-0 lock can be dropped.
-  if (TOP_4.includes(home)) return TOP_4.includes(away);
+  if (top4.includes(home)) return top4.includes(away);
   const homeIsStandard =
-    !TOP_4.includes(home) && !MID_TABLE.includes(home) && !BOTTOM_5.includes(home);
+    !top4.includes(home) && !midTable.includes(home) && !bottom5.includes(home);
   const awayIsStandard =
-    !TOP_4.includes(away) && !MID_TABLE.includes(away) && !BOTTOM_5.includes(away);
+    !top4.includes(away) && !midTable.includes(away) && !bottom5.includes(away);
   return homeIsStandard && awayIsStandard;
 }
 
@@ -71,7 +75,7 @@ function fixtureReadsXg(home: string, away: string): boolean {
 export function createMatchXgResolver(
   options: MatchXgResolverOptions,
 ): MatchXgResolver | null {
-  const { history, leagueSlug = "eng.1", onlyRelevant = true } = options;
+  const { history, leagueSlug = "eng.1", onlyRelevant = true, tiers = PRESEASON_TIERS } = options;
   if (!history.length) return null;
 
   const matches: HistoricalMatch[] = history.map((match, index) => ({
@@ -94,7 +98,7 @@ export function createMatchXgResolver(
   }
 
   return (_index, home, away) => {
-    if (onlyRelevant && !fixtureReadsXg(home, away)) return null;
+    if (onlyRelevant && !fixtureReadsXg(home, away, tiers)) return null;
     try {
       const { homeExpectedGoals, awayExpectedGoals } = computeMatchExpectedGoals({
         homeTeam: home,

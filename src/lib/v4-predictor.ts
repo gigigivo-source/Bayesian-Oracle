@@ -31,6 +31,130 @@ export const MID_TABLE = ["Fulham", "Brentford", "Everton", "Leeds", "Crystal Pa
 export const BOTTOM_5 = ["Coventry", "Ipswich", "Hull", "Sunderland", "Burnley"];
 export const CHAOS_TEAMS = ["Chelsea", "Man Utd", "Spurs"];
 
+/**
+ * The four tier lists the rule tree reads. Any club in none of them is a
+ * "Standard" side.
+ */
+export type DynamicTiers = {
+  top4: string[];
+  midTable: string[];
+  bottom5: string[];
+  /** Hardcoded: Chaos is about volatility, not about league position. */
+  chaos: string[];
+};
+
+/** The fixed lists above — the tiers every rule gate was fitted on. */
+export const PRESEASON_TIERS: DynamicTiers = {
+  top4: TOP_4,
+  midTable: MID_TABLE,
+  bottom5: BOTTOM_5,
+  chaos: CHAOS_TEAMS,
+};
+
+/**
+ * Where the tiers come from: `"preseason"` is the fixed lists, `"table"` the
+ * league standings before the matchweek's first kickoff.
+ *
+ * `"table"` is opt-in (`?tiers=table` on the route, `--tiers table` on the
+ * backtest). On the MW1–MW10 replay of 2026-27 it scores 66.0 / Floor 40
+ * against 79.0 / Floor 50 for the fixed lists and drops MW5 (110 → 40),
+ * MW7 (110 → 90) and MW9 (80 → 70) under their guardrails.
+ */
+export type TierSource = "preseason" | "table";
+export const DEFAULT_TIER_SOURCE: TierSource = "preseason";
+
+export function parseTierSource(raw: string | null | undefined): TierSource | null {
+  const value = raw?.trim().toLowerCase();
+  if (value === "table" || value === "dynamic") return "table";
+  if (value === "preseason" || value === "static" || value === "hardcoded") return "preseason";
+  return null;
+}
+
+/** One completed match, as the standings need it. */
+export interface StandingsMatch {
+  home: string;
+  away: string;
+  homeGoals: number;
+  awayGoals: number;
+}
+
+export interface StandingsRow {
+  team: string;
+  played: number;
+  points: number;
+  goalDifference: number;
+  goalsFor: number;
+}
+
+export const TABLE_TOP_SIZE = 4;
+export const TABLE_BOTTOM_SIZE = 5;
+
+/**
+ * League table from completed matches, best first: points, then goal
+ * difference, then goals scored, then name (so equal records sort the same way
+ * on every run). Team names go through `translateTeamName`.
+ */
+export function buildLeagueTable(matches: readonly StandingsMatch[]): StandingsRow[] {
+  const rows = new Map<string, StandingsRow>();
+  const rowFor = (name: string): StandingsRow => {
+    const team = translateTeamName(name);
+    let row = rows.get(team);
+    if (!row) {
+      row = { team, played: 0, points: 0, goalDifference: 0, goalsFor: 0 };
+      rows.set(team, row);
+    }
+    return row;
+  };
+  for (const match of matches) {
+    if (!Number.isFinite(match.homeGoals) || !Number.isFinite(match.awayGoals)) continue;
+    const home = rowFor(match.home);
+    const away = rowFor(match.away);
+    home.played += 1;
+    away.played += 1;
+    home.goalsFor += match.homeGoals;
+    away.goalsFor += match.awayGoals;
+    home.goalDifference += match.homeGoals - match.awayGoals;
+    away.goalDifference += match.awayGoals - match.homeGoals;
+    if (match.homeGoals > match.awayGoals) home.points += 3;
+    else if (match.homeGoals < match.awayGoals) away.points += 3;
+    else {
+      home.points += 1;
+      away.points += 1;
+    }
+  }
+  return [...rows.values()].sort(
+    (a, b) =>
+      b.points - a.points ||
+      b.goalDifference - a.goalDifference ||
+      b.goalsFor - a.goalsFor ||
+      a.team.localeCompare(b.team),
+  );
+}
+
+/**
+ * Tiers from the league table: positions 1–4 are the Top 4, the last five the
+ * Bottom 5, everyone in between Mid-Table. Chaos clubs stay on the fixed list
+ * and are taken out of whichever band their position puts them in.
+ *
+ * `matches` must hold only games that finished before the slate's first
+ * kickoff. Returns `null` when the table cannot fill all three bands (before
+ * MW1 there is no table at all) — the caller then keeps `PRESEASON_TIERS`.
+ */
+export function buildDynamicTiers(
+  matches: readonly StandingsMatch[],
+  chaos: readonly string[] = CHAOS_TEAMS,
+): DynamicTiers | null {
+  const table = buildLeagueTable(matches).map((row) => row.team);
+  if (table.length <= TABLE_TOP_SIZE + TABLE_BOTTOM_SIZE) return null;
+  const notChaos = (team: string) => !chaos.includes(team);
+  return {
+    top4: table.slice(0, TABLE_TOP_SIZE).filter(notChaos),
+    midTable: table.slice(TABLE_TOP_SIZE, table.length - TABLE_BOTTOM_SIZE).filter(notChaos),
+    bottom5: table.slice(table.length - TABLE_BOTTOM_SIZE).filter(notChaos),
+    chaos: [...chaos],
+  };
+}
+
 export const TEAM_NAME_MAP: Record<string, string> = {
   "Manchester City": "Man City",
   "Manchester United": "Man Utd",
@@ -225,11 +349,17 @@ function normalizeFixturePair(fixture: V2FixtureInput): [string, string] {
  *      when the xG gap is under STANDARD_AWAY_DRAW_MAX_XG_GAP.
  *
  * Without an `xg` resolver every rule above keeps its flat V2 line.
+ *
+ * `tiers` says which clubs are Top 4 / Mid-Table / Bottom 5 / Chaos. It
+ * defaults to the fixed lists (`PRESEASON_TIERS`); pass the result of
+ * `buildDynamicTiers` to read the tiers off the league table instead.
  */
 export function generateV2Predictions(
   fixtures: readonly V2FixtureInput[],
   xg?: MatchXgResolver | null,
+  tiers: DynamicTiers = PRESEASON_TIERS,
 ): Prediction[] {
+  const { top4, midTable, bottom5, chaos } = tiers;
   const pairs = fixtures.map(normalizeFixturePair);
   const picks: Array<Prediction | null> = new Array(pairs.length).fill(null);
 
@@ -263,8 +393,8 @@ export function generateV2Predictions(
   // Snipe 1: Top 4 (Home) vs Bottom 5 -> 2-0 (Max 1)
   for (let i = 0; i < pairs.length; i += 1) {
     const [home, away] = pairs[i];
-    if (CHAOS_TEAMS.includes(home) || CHAOS_TEAMS.includes(away)) continue;
-    if (TOP_4.includes(home) && BOTTOM_5.includes(away) && fortressUsed < 1 && totalSnipes() < MAX_SNIPES) {
+    if (chaos.includes(home) || chaos.includes(away)) continue;
+    if (top4.includes(home) && bottom5.includes(away) && fortressUsed < 1 && totalSnipes() < MAX_SNIPES) {
       fortressUsed += 1;
       picks[i] = {
         Match: `${home} vs ${away}`,
@@ -297,8 +427,8 @@ export function generateV2Predictions(
   for (let i = 0; i < pairs.length; i += 1) {
     if (picks[i] !== null) continue;
     const [home, away] = pairs[i];
-    if (CHAOS_TEAMS.includes(home) || CHAOS_TEAMS.includes(away)) continue;
-    if (MID_TABLE.includes(home) && MID_TABLE.includes(away) && deadlocksUsed < 2 && totalSnipes() < MAX_SNIPES) {
+    if (chaos.includes(home) || chaos.includes(away)) continue;
+    if (midTable.includes(home) && midTable.includes(away) && deadlocksUsed < 2 && totalSnipes() < MAX_SNIPES) {
       const midXg = resolveXg(i, home, away);
       if (midXg !== null && Math.abs(midXg[0] - midXg[1]) > MID_DEADLOCK_MAX_XG_GAP) continue;
       deadlocksUsed += 1;
@@ -323,8 +453,8 @@ export function generateV2Predictions(
     for (let i = 0; i < pairs.length; i += 1) {
       if (picks[i] !== null) continue;
       const [home, away] = pairs[i];
-      if (CHAOS_TEAMS.includes(home) || CHAOS_TEAMS.includes(away)) continue;
-      if (!TOP_4.includes(home) && TOP_4.includes(away) && totalSnipes() < MAX_SNIPES) {
+      if (chaos.includes(home) || chaos.includes(away)) continue;
+      if (!top4.includes(home) && top4.includes(away) && totalSnipes() < MAX_SNIPES) {
         eliteAwayUsed += 1;
         picks[i] = {
           Match: `${home} vs ${away}`,
@@ -340,14 +470,14 @@ export function generateV2Predictions(
   return pairs.map(([home, away], i) => {
     if (picks[i] !== null) return picks[i]!;
 
-    const homeIsTop4 = TOP_4.includes(home);
-    const awayIsTop4 = TOP_4.includes(away);
-    const homeIsMid = MID_TABLE.includes(home);
-    const awayIsMid = MID_TABLE.includes(away);
-    const homeIsBottom5 = BOTTOM_5.includes(home);
-    const awayIsBottom5 = BOTTOM_5.includes(away);
-    const homeIsChaos = CHAOS_TEAMS.includes(home);
-    const awayIsChaos = CHAOS_TEAMS.includes(away);
+    const homeIsTop4 = top4.includes(home);
+    const awayIsTop4 = top4.includes(away);
+    const homeIsMid = midTable.includes(home);
+    const awayIsMid = midTable.includes(away);
+    const homeIsBottom5 = bottom5.includes(home);
+    const awayIsBottom5 = bottom5.includes(away);
+    const homeIsChaos = chaos.includes(home);
+    const awayIsChaos = chaos.includes(away);
     const homeIsStandard = !homeIsTop4 && !homeIsMid && !homeIsBottom5 && !homeIsChaos;
     const awayIsStandard = !awayIsTop4 && !awayIsMid && !awayIsBottom5 && !awayIsChaos;
 

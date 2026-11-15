@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { BOTTOM_5, CHAOS_DRAW_MAX_XG_GAP, CHAOS_TEAMS, CHAOS_VISITOR_XG_EDGE, MID_DEADLOCK_MAX_XG_GAP, MID_FAVOURITE_BIG_WIN_XG, MID_TABLE, STANDARD_AWAY_DRAW_MAX_XG_GAP, STANDARD_BLOWOUT_GAP, STANDARD_DRAW_XG, TOP4_DERBY_AWAY_TOLERANCE, TOP4_DERBY_MAX_AWAY_EDGE, TOP4_DERBY_MIN_XG_EDGE, TOP_4, blowoutGoals, buildPredictions, calculateScore, generateV2Predictions, getScorelineOutcome, isScoreline, translateTeamName, type XgPair } from "@/lib/v4-predictor";
+import { DEFAULT_TIER_SOURCE, PRESEASON_TIERS, buildDynamicTiers, buildLeagueTable, parseTierSource, type DynamicTiers, type StandingsMatch, BOTTOM_5, CHAOS_DRAW_MAX_XG_GAP, CHAOS_TEAMS, CHAOS_VISITOR_XG_EDGE, MID_DEADLOCK_MAX_XG_GAP, MID_FAVOURITE_BIG_WIN_XG, MID_TABLE, STANDARD_AWAY_DRAW_MAX_XG_GAP, STANDARD_BLOWOUT_GAP, STANDARD_DRAW_XG, TOP4_DERBY_AWAY_TOLERANCE, TOP4_DERBY_MAX_AWAY_EDGE, TOP4_DERBY_MIN_XG_EDGE, TOP_4, blowoutGoals, buildPredictions, calculateScore, generateV2Predictions, getScorelineOutcome, isScoreline, translateTeamName, type XgPair } from "@/lib/v4-predictor";
 import { createMatchXgResolver } from "@/lib/v4-predictor-server";;
 
 describe("V2 team classifications", () => {
@@ -739,5 +739,106 @@ describe("V2 fix — full-matchweek backtest replay on real fixtures", () => {
     // home branch keeps 2-0 and the 0-1 away win still misses.
     expect(byMatch.get("Man City vs Brighton")!.prediction).toBe("2-0");
     expect(byMatch.get("Man City vs Brighton")!.points).toBe(0);
+  });
+});
+
+describe("dynamic tiers", () => {
+  // Fourteen clubs, one round each.
+  const match = (home: string, away: string, homeGoals: number, awayGoals: number): StandingsMatch => ({
+    home,
+    away,
+    homeGoals,
+    awayGoals,
+  });
+  const ROUND: StandingsMatch[] = [
+    match("Arsenal", "Sunderland", 4, 0),
+    match("Manchester City FC", "Coventry", 3, 0),
+    match("Hull", "Ipswich", 2, 0),
+    match("Chelsea", "Fulham", 2, 1),
+    match("Leeds", "Everton", 1, 1),
+    match("Brentford", "Newcastle", 0, 0),
+    match("Brighton", "Crystal Palace", 1, 0),
+  ];
+
+  it("keeps the fixed lists as the default tier source", () => {
+    expect(DEFAULT_TIER_SOURCE).toBe("preseason");
+    expect(PRESEASON_TIERS).toEqual({ top4: TOP_4, midTable: MID_TABLE, bottom5: BOTTOM_5, chaos: CHAOS_TEAMS });
+    expect(parseTierSource("table")).toBe("table");
+    expect(parseTierSource(" Dynamic ")).toBe("table");
+    expect(parseTierSource("preseason")).toBe("preseason");
+    expect(parseTierSource("nonsense")).toBeNull();
+    expect(parseTierSource(null)).toBeNull();
+  });
+
+  it("sorts the table by points, goal difference, goals scored, then name", () => {
+    const table = buildLeagueTable(ROUND);
+    expect(table.map((row) => row.team)).toEqual([
+      "Arsenal", // 3 pts, +4
+      "Man City", // 3 pts, +3 — the long feed name is translated
+      "Hull", // 3 pts, +2
+      "Chelsea", // 3 pts, +1, 2 scored
+      "Brighton", // 3 pts, +1, 1 scored
+      "Everton", // 1 pt, 0, 1 scored — level with Leeds, so by name
+      "Leeds",
+      "Brentford", // 1 pt, 0, 0 scored
+      "Newcastle",
+      "Fulham", // 0 pts, -1, 1 scored
+      "Crystal Palace", // 0 pts, -1, 0 scored
+      "Ipswich", // -2
+      "Coventry", // -3
+      "Sunderland", // -4
+    ]);
+    expect(table[0]).toEqual({ team: "Arsenal", played: 1, points: 3, goalDifference: 4, goalsFor: 4 });
+  });
+
+  it("reads Top 4 / Mid-Table / Bottom 5 off the table and keeps Chaos fixed", () => {
+    const tiers = buildDynamicTiers(ROUND)!;
+    // Chelsea is 4th but stays a Chaos side, so the Top 4 band holds three clubs.
+    expect(tiers.top4).toEqual(["Arsenal", "Man City", "Hull"]);
+    expect(tiers.midTable).toEqual(["Brighton", "Everton", "Leeds", "Brentford", "Newcastle"]);
+    expect(tiers.bottom5).toEqual(["Fulham", "Crystal Palace", "Ipswich", "Coventry", "Sunderland"]);
+    expect(tiers.chaos).toEqual(CHAOS_TEAMS);
+    const placed = [...tiers.top4, ...tiers.midTable, ...tiers.bottom5];
+    expect(new Set(placed).size).toBe(placed.length);
+    expect(placed.some((team) => CHAOS_TEAMS.includes(team))).toBe(false);
+  });
+
+  it("has no tiers to offer before a table exists", () => {
+    expect(buildDynamicTiers([])).toBeNull();
+    // Nine clubs cannot fill a Top 4, a Bottom 5 and a middle.
+    expect(buildDynamicTiers(ROUND.slice(0, 4))).toBeNull();
+  });
+
+  it("predicts exactly as before when no tiers are passed", () => {
+    const slate = [
+      { home: "Arsenal", away: "Hull" },
+      { home: "Leeds", away: "Brentford" },
+      { home: "Hull", away: "Aston Villa" },
+      { home: "Chelsea", away: "Fulham" },
+      { home: "Bournemouth", away: "Liverpool" },
+    ];
+    expect(generateV2Predictions(slate, null, PRESEASON_TIERS)).toEqual(generateV2Predictions(slate));
+  });
+
+  it("routes a fixture by the tiers it is given, not by the fixed lists", () => {
+    const tableTiers: DynamicTiers = {
+      top4: ["Hull", "Arsenal", "Man City", "Leeds"],
+      midTable: ["Brighton", "Liverpool", "Everton"],
+      bottom5: ["Aston Villa", "Fulham", "Coventry", "Crystal Palace"],
+      chaos: CHAOS_TEAMS,
+    };
+    const slate = [{ home: "Hull", away: "Aston Villa" }];
+    // Fixed lists: Hull is Bottom 5, Villa Mid-Table -> Standard Away.
+    expect(generateV2Predictions(slate)[0]).toMatchObject({ Category: "LOCK: Standard Away", Prediction: "0-1" });
+    // Table tiers: Hull is Top 4 at home to a Bottom 5 side -> Home Fortress.
+    expect(generateV2Predictions(slate, null, tableTiers)[0]).toMatchObject({
+      Category: "SNIPE: Home Fortress",
+      Prediction: "2-0",
+    });
+    // Chaos still outranks the table: Chelsea never takes a Snipe.
+    const chaosTop: DynamicTiers = { ...tableTiers, top4: ["Chelsea", "Arsenal"] };
+    expect(generateV2Predictions([{ home: "Chelsea", away: "Coventry" }], null, chaosTop)[0].Category).toBe(
+      "LOCK: Chaos Rule",
+    );
   });
 });

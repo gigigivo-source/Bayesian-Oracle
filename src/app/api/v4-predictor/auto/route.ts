@@ -3,7 +3,17 @@ import tls from "node:tls";
 import * as espn from "@/lib/espn";
 import { loadMatchesFromOpenfootball, parseHistoricalDate } from "@/lib/data/historical";
 import { parseCsv } from "@/lib/data/sources/githubDatasets";
-import { generateV2Predictions, translateTeamName, type MatchXgResolver } from "@/lib/v4-predictor";
+import {
+  DEFAULT_TIER_SOURCE,
+  PRESEASON_TIERS,
+  buildDynamicTiers,
+  generateV2Predictions,
+  parseTierSource,
+  translateTeamName,
+  type DynamicTiers,
+  type MatchXgResolver,
+  type TierSource,
+} from "@/lib/v4-predictor";
 import { createMatchXgResolver } from "@/lib/v4-predictor-server";;
 import { NextResponse } from "next/server";
 
@@ -201,8 +211,42 @@ async function buildMatchXgResolver(cutoffIso: string): Promise<MatchXgResolver 
   return resolver;
 }
 
+/**
+ * Tiers for the slate. `"table"` reads them off the league standings built from
+ * results that finished before the first kickoff; with no usable table (before
+ * MW1, or the results feed is down) it falls back to the fixed lists and says
+ * so in `source`.
+ */
+async function resolveTiers(
+  requested: TierSource,
+  cutoffIso: string,
+): Promise<{ source: TierSource; tiers: DynamicTiers }> {
+  if (requested === "table") {
+    const played = csvHistoryBefore(await loadCompletedEplResults(), cutoffIso);
+    const tiers = buildDynamicTiers(
+      played.map((match) => ({
+        home: match.homeTeam,
+        away: match.awayTeam,
+        homeGoals: match.homeGoals,
+        awayGoals: match.awayGoals,
+      })),
+    );
+    if (tiers) return { source: "table", tiers };
+  }
+  return { source: "preseason", tiers: PRESEASON_TIERS };
+}
+
 export async function GET(request: Request) {
-  const rawWeek = new URL(request.url).searchParams.get("week");
+  const params = new URL(request.url).searchParams;
+  const rawWeek = params.get("week");
+  const rawTiers = params.get("tiers");
+  const tierSource = rawTiers === null ? DEFAULT_TIER_SOURCE : parseTierSource(rawTiers);
+  if (tierSource === null) {
+    return NextResponse.json(
+      { error: "Invalid tiers parameter. Expected \"preseason\" or \"table\"." },
+      { status: 400 },
+    );
+  }
   const requestedWeek = parseWeekParam(rawWeek);
   if (Number.isNaN(requestedWeek)) {
     return NextResponse.json(
@@ -239,8 +283,10 @@ export async function GET(request: Request) {
       home: translateTeamName(fx.home.name),
       away: translateTeamName(fx.away.name),
     }));
-    const xg = await buildMatchXgResolver(sorted[0]?.date ?? new Date().toISOString());
-    const v2Predictions = generateV2Predictions(v2Fixtures, xg);
+    const cutoffIso = sorted[0]?.date ?? new Date().toISOString();
+    const xg = await buildMatchXgResolver(cutoffIso);
+    const { source: tiersSource, tiers } = await resolveTiers(tierSource, cutoffIso);
+    const v2Predictions = generateV2Predictions(v2Fixtures, xg, tiers);
 
     const result = sorted.map((fx, index) => {
       const { home: homeName, away: awayName } = v2Fixtures[index];
@@ -272,7 +318,7 @@ export async function GET(request: Request) {
       };
     });
 
-    return NextResponse.json({ week, fixtures: result });
+    return NextResponse.json({ week, fixtures: result, tiers: { source: tiersSource, ...tiers } });
   } catch (error) {
     console.error("V4 auto predictor failed", error);
     return NextResponse.json({ error: "Failed to fetch" }, { status: 500 });

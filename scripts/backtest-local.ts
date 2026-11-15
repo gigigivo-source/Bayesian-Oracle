@@ -30,7 +30,20 @@ import {
   type HistoricalMatch,
 } from "../src/lib/data/historical";
 import { parseCsv } from "../src/lib/data/sources/githubDatasets";
-import { calculateScore, generateV2Predictions, translateTeamName, type Actual, type MatchXgResolver, type Prediction } from "../src/lib/v4-predictor";
+import {
+  DEFAULT_TIER_SOURCE,
+  PRESEASON_TIERS,
+  buildDynamicTiers,
+  calculateScore,
+  generateV2Predictions,
+  parseTierSource,
+  translateTeamName,
+  type Actual,
+  type DynamicTiers,
+  type MatchXgResolver,
+  type Prediction,
+  type TierSource,
+} from "../src/lib/v4-predictor";
 import { createMatchXgResolver } from "../src/lib/v4-predictor-server";;
 
 try {
@@ -64,6 +77,8 @@ interface Config {
   detail: boolean;
   help: boolean;
   selfTest: boolean;
+  /** `preseason` = the fixed tier lists, `table` = the standings before each matchweek. */
+  tiers: TierSource;
 }
 
 interface CompletedMatchResult {
@@ -294,6 +309,31 @@ async function buildXgResolver(cutoffIso: string, cfg: Config): Promise<MatchXgR
   return createMatchXgResolver({ history, leagueSlug: cfg.league, onlyRelevant: false });
 }
 
+/**
+ * Tiers for one matchweek. `table` rebuilds the league standings from results
+ * that finished before the first kickoff — never from the week being scored —
+ * and falls back to the fixed lists when there is no table yet (MW1) or no
+ * results feed for the league/season.
+ */
+async function buildTiers(
+  cutoffIso: string,
+  cfg: Config,
+): Promise<{ source: TierSource; tiers: DynamicTiers }> {
+  if (cfg.tiers === "table" && cfg.league === "eng.1" && cfg.season === 2026) {
+    const played = seasonalCsvHistory(await loadCompletedEplResults(), cutoffIso);
+    const tiers = buildDynamicTiers(
+      played.map((match) => ({
+        home: match.homeTeam,
+        away: match.awayTeam,
+        homeGoals: match.homeGoals,
+        awayGoals: match.awayGoals,
+      })),
+    );
+    if (tiers) return { source: "table", tiers };
+  }
+  return { source: "preseason", tiers: PRESEASON_TIERS };
+}
+
 async function backtestWeek(week: number, cfg: Config): Promise<WeekResult> {
   log(`\n── Matchweek ${week} ──────────────────────────────────────────────`);
 
@@ -330,8 +370,17 @@ async function backtestWeek(week: number, cfg: Config): Promise<WeekResult> {
 
   // Rebuild the Engine's attack/defence model from matches that finished before
   // this matchweek's first kickoff, then let the xG-aware Locks read it.
-  const xg = await buildXgResolver(sorted[0]?.date ?? "", cfg);
-  const predictions = generateV2Predictions(v2Inputs, xg);
+  const cutoffIso = sorted[0]?.date ?? "";
+  const xg = await buildXgResolver(cutoffIso, cfg);
+  const { source: tierSource, tiers } = await buildTiers(cutoffIso, cfg);
+  if (cfg.tiers === "table") {
+    log(
+      tierSource === "table"
+        ? `   Tiers from the table — Top 4: ${tiers.top4.join(", ")} · Bottom 5: ${tiers.bottom5.join(", ")}`
+        : "   No league table before this matchweek — using the fixed tier lists.",
+    );
+  }
+  const predictions = generateV2Predictions(v2Inputs, xg, tiers);
   const snipes = predictions.filter((p) => p.Category.startsWith("SNIPE:")).length;
 
   const finishedIndices: number[] = [];
@@ -445,6 +494,11 @@ function renderMarkdown(weeks: WeekResult[], cfg: Config, leagueName: string): s
   lines.push(`- **Season:** ${seasonLabel(cfg.season)}`);
   lines.push(
     `- **System:** True V2 Strict 3-Snipe System (pure rules; xG only gates the Chaos, Top 4 Derby and Standard Locks)`,
+  );
+  lines.push(
+    cfg.tiers === "table"
+      ? "- **Tiers:** league table before each matchweek's first kickoff (1–4 Top 4, last five Bottom 5, the rest Mid-Table; Chaos fixed; fixed lists when there is no table yet)"
+      : "- **Tiers:** fixed lists (`--tiers table` reads them off the league table instead)",
   );
   lines.push(`- **Scoring:** exact = ${PTS_EXACT} · correct outcome = ${PTS_OUTCOME} · miss = ${PTS_MISS}`);
   lines.push("");
@@ -616,6 +670,7 @@ function parseArgs(argv: readonly string[]): Config {
     detail: false,
     help: false,
     selfTest: false,
+    tiers: DEFAULT_TIER_SOURCE,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -667,6 +722,12 @@ function parseArgs(argv: readonly string[]): Config {
         cfg.weeks = weeks;
         break;
       }
+      case "--tiers": {
+        const source = parseTierSource(value());
+        if (!source) throw new Error(`invalid --tiers value: ${value()} (expected preseason or table)`);
+        cfg.tiers = source;
+        break;
+      }
       default:
         throw new Error(`unknown option: ${flag} (try --help)`);
     }
@@ -688,6 +749,7 @@ function printHelp(): void {
       `  --season <year>   Season start year (default: ${currentSeasonYear()} = ${seasonLabel(currentSeasonYear())})`,
       `  --weeks <list>    Matchweeks, e.g. 1-10 or 1,2,3 (default: ${DEFAULT_WEEKS[0]}-${DEFAULT_WEEKS[DEFAULT_WEEKS.length - 1]})`,
       "  --detail          Also print a per-fixture table",
+      `  --tiers <source>  preseason = fixed tier lists, table = league standings before each matchweek (default: ${DEFAULT_TIER_SOURCE})`,
       "  --self-test       Run the V2 rule self-test (no network)",
       "  --help            Show this help",
     ].join("\n"),
