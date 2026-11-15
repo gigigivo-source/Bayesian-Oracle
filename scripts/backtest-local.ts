@@ -11,9 +11,11 @@
  *   1. Fetch the matchweek slate with `fetchScoreboard` (backfilling completed
  *      `openfootball:` fixtures from the real 2026-27 Football-Data EPL CSV on
  *      GitHub when `site.api.espn.com` is blocked).
- *   2. Sort fixtures chronologically and pass them directly into
- *      `generateV2Predictions(fixtures)` — zero Engine calls, zero xG, zero
- *      Poisson grids, zero fake tier ladders.
+ *   2. Sort fixtures chronologically, rebuild the Engine's attack/defence model
+ *      from matches that finished before the matchweek's first kickoff, and
+ *      pass both into `generateV2Predictions(fixtures, xg)`. The xG resolver is
+ *      only consulted by the three xG-aware Locks (Chaos, Top 4 Derby, Standard
+ *      blowout) — the Snipes and every other Lock stay pure rules.
  *   3. Score the V2 predictions against the real final scores with
  *      `calculateScore` (20 exact / 10 outcome / 0 miss).
  *   4. Print a clean Markdown table: MW1 … MW10 + Average + Floor.
@@ -22,13 +24,19 @@
 import dns from "node:dns";
 import tls from "node:tls";
 import * as espn from "../src/lib/espn";
-import { parseHistoricalDate } from "../src/lib/data/historical";
+import {
+  loadMatchesFromOpenfootball,
+  parseHistoricalDate,
+  type HistoricalMatch,
+} from "../src/lib/data/historical";
 import { parseCsv } from "../src/lib/data/sources/githubDatasets";
 import {
   calculateScore,
+  createMatchXgResolver,
   generateV2Predictions,
   translateTeamName,
   type Actual,
+  type MatchXgResolver,
   type Prediction,
 } from "../src/lib/v4-predictor";
 
@@ -186,6 +194,57 @@ async function loadCompletedEplResults(): Promise<Map<string, CompletedMatchResu
   }
 }
 
+/**
+ * Completed matches used by the Engine's attack/defence model.
+ *
+ * The local runner has no database, so the model is rebuilt from openfootball's
+ * per-season JSON (the same public dataset the app's historical aggregator uses
+ * in layer 3). Seasons strictly before `firstWeek` are loaded once and cached;
+ * anything inside the season comes from the CSV results map, filtered to
+ * fixtures that kicked off before the matchweek being replayed so no result
+ * leaks into its own prediction.
+ */
+let cachedXgHistory: HistoricalMatch[] | null | undefined;
+
+async function loadXgHistory(season: number, csvHistory: HistoricalMatch[]): Promise<HistoricalMatch[]> {
+  if (cachedXgHistory === undefined) {
+    const seasons = [1, 2, 3, 4].map((back) => seasonLabel(season - back));
+    try {
+      const { matches } = await loadMatchesFromOpenfootball("eng.1", seasons);
+      cachedXgHistory = matches.length > 0 ? matches : null;
+      if (cachedXgHistory) log(`   xG history: ${matches.length} openfootball matches (${seasons[0]}–${seasons[seasons.length - 1]})`);
+    } catch {
+      cachedXgHistory = null;
+    }
+    if (cachedXgHistory === null) log("   xG history: openfootball unavailable — V2 falls back to flat rules");
+  }
+  return [...(cachedXgHistory ?? []), ...csvHistory];
+}
+
+function seasonalCsvHistory(results: Map<string, { homeGoals: number; awayGoals: number; isoDate: string | null }> | null, cutoffIso: string): HistoricalMatch[] {
+  if (!results) return [];
+  const cutoff = Date.parse(cutoffIso);
+  const out: HistoricalMatch[] = [];
+  for (const [key, result] of results) {
+    if (!result.isoDate) continue;
+    if (!Number.isFinite(cutoff) || Date.parse(result.isoDate) >= cutoff) continue;
+    const [home, away] = key.split("|");
+    if (!home || !away) continue;
+    out.push({
+      id: `csv|${key}|${result.isoDate}`,
+      homeTeam: home,
+      awayTeam: away,
+      leagueSlug: "eng.1",
+      matchDate: result.isoDate,
+      homeGoals: result.homeGoals,
+      awayGoals: result.awayGoals,
+      competitionName: null,
+      source: "github-datasets" as HistoricalMatch["source"],
+    });
+  }
+  return out;
+}
+
 async function backfillOpenfootballResults(
   fixtures: espn.FixtureLite[],
 ): Promise<espn.FixtureLite[]> {
@@ -231,6 +290,17 @@ function emptyWeek(week: number, note: string): WeekResult {
   };
 }
 
+async function buildXgResolver(cutoffIso: string, cfg: Config): Promise<MatchXgResolver | null> {
+  if (cfg.league !== "eng.1") return null;
+  const results = cfg.season === 2026 ? await loadCompletedEplResults() : null;
+  const csvHistory = seasonalCsvHistory(results, cutoffIso);
+  const history = await loadXgHistory(cfg.season, csvHistory);
+  // `onlyRelevant: false` keeps xG flowing for every fixture: the Top 4 Derby
+  // rule needs it even when the match would otherwise be a Lock, and the
+  // guardrail check must see the same numbers regardless of rule order.
+  return createMatchXgResolver({ history, leagueSlug: cfg.league, onlyRelevant: false });
+}
+
 async function backtestWeek(week: number, cfg: Config): Promise<WeekResult> {
   log(`\n── Matchweek ${week} ──────────────────────────────────────────────`);
 
@@ -264,7 +334,11 @@ async function backtestWeek(week: number, cfg: Config): Promise<WeekResult> {
     home: translateTeamName(fx.home.name),
     away: translateTeamName(fx.away.name),
   }));
-  const predictions = generateV2Predictions(v2Inputs);
+
+  // Rebuild the Engine's attack/defence model from matches that finished before
+  // this matchweek's first kickoff, then let the xG-aware Locks read it.
+  const xg = await buildXgResolver(sorted[0]?.date ?? "", cfg);
+  const predictions = generateV2Predictions(v2Inputs, xg);
   const snipes = predictions.filter((p) => p.Category.startsWith("SNIPE:")).length;
 
   const finishedIndices: number[] = [];
@@ -376,7 +450,9 @@ function renderMarkdown(weeks: WeekResult[], cfg: Config, leagueName: string): s
   );
   lines.push(`- **League:** ${leagueName} (\`${cfg.league}\`)`);
   lines.push(`- **Season:** ${seasonLabel(cfg.season)}`);
-  lines.push(`- **System:** True V2 Strict 3-Snipe System (zero Engine, zero xG, zero Poisson)`);
+  lines.push(
+    `- **System:** True V2 Strict 3-Snipe System (pure rules; xG only gates the Chaos, Top 4 Derby and Standard Locks)`,
+  );
   lines.push(`- **Scoring:** exact = ${PTS_EXACT} · correct outcome = ${PTS_OUTCOME} · miss = ${PTS_MISS}`);
   lines.push("");
 
