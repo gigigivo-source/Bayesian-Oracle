@@ -174,7 +174,7 @@ describe("generateV2Predictions — V2 Strict 3-Snipe System", () => {
     expect(at(CHAOS_XG_EDGE + 0.02)).toBe("2-1");
   });
 
-  it("Top 4 Derby — 2-0 is kept even when the away Top 4 side is out-rated (Step 2 fix reverted)", () => {
+  it("Top 4 Derby — Home winner lock is kept (no xG derby flip); exact score from the Correct Score grid", () => {
     const slate: Array<[string, string]> = [
       ["Brighton", "Arsenal"],   // MW5: model prefers Arsenal, actual 3-0 Brighton
       ["Liverpool", "Arsenal"],  // MW9: away side marginally ahead
@@ -192,9 +192,10 @@ describe("generateV2Predictions — V2 Strict 3-Snipe System", () => {
 
     const predictions = generateV2Predictions(slate, (_i, home, away) => xg[`${home}|${away}`] ?? null);
 
-    // Every Top 4 home fixture keeps the Smart Top 4 Home 2-0: flipping on this
-    // xG would break the MW5 guardrail (100) without fixing MW9. Arsenal vs
-    // Coventry is a Top 4 vs Bottom 5 fixture, so it is the Fortress Snipe.
+    // The Top 4 Home winner lock is kept: the xG derby flip stays reverted.
+    // Under the conservative hybrid the flat V2 2-0 is a top-3 grid cell for
+    // every Top 4 Home lock here, so the flat line is kept throughout (the xG
+    // derby flip stays reverted).
     expect(predictions.map((p) => p.Category)).toEqual([
       "LOCK: Smart Top 4 Home",
       "LOCK: Smart Top 4 Home",
@@ -210,11 +211,11 @@ describe("generateV2Predictions — V2 Strict 3-Snipe System", () => {
 
   it("Standard Lock — blowouts and the 2-2 draw only fire when xG clears the thresholds", () => {
     const slate: Array<[string, string]> = [
-      ["Bournemouth", "Nott'm Forest"], // big home gap -> 4-0 (rounds up from 3.6)
-      ["Coventry", "Bournemouth"],      // Bottom 5 is out of scope -> unchanged 0-1
-      ["Bournemouth", "Nott'm Forest"], // away blowout -> 0-3
-      ["Bournemouth", "Nott'm Forest"], // both sides >= 1.8 -> 2-2
-      ["Bournemouth", "Nott'm Forest"], // tight -> flat 1-0
+      ["Bournemouth", "Nott'm Forest"], // big home gap -> grid #1 3-0 (flat 1-0 not top-3)
+      ["Coventry", "Bournemouth"],      // away win -> flat 0-1 kept (top-3 grid cell)
+      ["Bournemouth", "Nott'm Forest"], // tight home xG -> flat 1-0 kept (top-3 grid cell)
+      ["Bournemouth", "Nott'm Forest"], // moderate gap -> flat 2-1 kept (top-3 grid cell)
+      ["Bournemouth", "Nott'm Forest"], // very tight -> flat 1-0 kept (top-3 grid cell)
     ];
     const pairs: XgPair[] = [
       [3.6, 1.0],
@@ -227,22 +228,22 @@ describe("generateV2Predictions — V2 Strict 3-Snipe System", () => {
     const predictions = generateV2Predictions(slate, (i) => pairs[i]);
 
     expect(predictions.map((p) => p.Category)).toEqual([
-      "LOCK: Standard Blowout",
+      "LOCK: Standard Home",
       "LOCK: Standard Away",
-      "LOCK: Standard Blowout",
-      "LOCK: Standard Draw",
+      "LOCK: Standard Home",
+      "LOCK: Standard Home",
       "LOCK: Standard Home",
     ]);
-    expect(predictions.map((p) => p.Prediction)).toEqual(["4-0", "0-1", "0-3", "2-2", "1-0"]);
+    expect(predictions.map((p) => p.Prediction)).toEqual(["3-0", "0-1", "1-0", "2-1", "1-0"]);
   });
 
   it("Standard Lock — thresholds are exclusive, and no xG restores the flat 1-0 / 0-1", () => {
     const standard = (homeXg: number, awayXg: number) =>
       generateV2Predictions([["Bournemouth", "Nott'm Forest"]], () => [homeXg, awayXg] as XgPair)[0];
-    expect(standard(1.2 + STANDARD_BLOWOUT_GAP, 1.2).Prediction).toBe("3-0");
-    expect(standard(1.1 + STANDARD_BLOWOUT_GAP, 1.1).Prediction).toBe("1-0");
-    expect(standard(STANDARD_DRAW_XG, STANDARD_DRAW_XG).Prediction).toBe("2-2");
-    expect(standard(STANDARD_DRAW_XG - 0.01, 2.0).Prediction).toBe("1-0");
+    expect(standard(1.2 + STANDARD_BLOWOUT_GAP, 1.2).Prediction).toBe("2-1");
+    expect(standard(1.1 + STANDARD_BLOWOUT_GAP, 1.1).Prediction).toBe("2-1");
+    expect(standard(STANDARD_DRAW_XG, STANDARD_DRAW_XG).Prediction).toBe("2-1");
+    expect(standard(STANDARD_DRAW_XG - 0.01, 2.0).Prediction).toBe("2-1");
     expect(generateV2Predictions([["Bournemouth", "Nott'm Forest"]])[0].Prediction).toBe("1-0");
     expect([2.9, 3.5, 4.9, 9].map(blowoutGoals)).toEqual([3, 4, 4, 4]);
   });
