@@ -210,68 +210,105 @@ describe("predictTennisMatch", () => {
     expect(clay.matchWinner.probA).toBe(hard.matchWinner.probA);
   });
 
-  it("computes eloGap and classifies LOCK, GRAND_SLAM_LOCK, and NONE tiers", () => {
-    const base = matchup();
+  it("computes eloGap and classifies PLATINUM_LOCK, GOLD_LOCK, LOCK, AVOID, and NONE tiers", () => {
+    const base = matchup({ surface: "hard", date: "2026-07-12T12:00:00Z" });
+    const strongA = { ...base.playerA, elo: 1950, matchesPlayed: 60, lastPlayed: "2026-07-05T00:00:00Z", acesPerMatch: 7.5 };
+    const weakB = { ...base.playerB, elo: 1600, matchesPlayed: 40, lastPlayed: "2026-07-08T00:00:00Z", acesPerMatch: 5.0 };
 
-    // Gap = 100 in Bo3 → NONE
+    // Gap < 350 → NONE
     const noneBo3 = predictTennisMatch(base);
     expect(noneBo3.eloGap).toBe(100);
     expect(noneBo3.lockTier).toBe("NONE");
+    expect(noneBo3.lockReasons).toEqual([]);
 
-    // Gap = 200 in Bo3 → NONE (below 350 and not Bo5)
-    const midBo3 = predictTennisMatch(
+    const belowLockBo5 = predictTennisMatch(
       matchup({
+        surface: "hard",
+        bestOf: 5,
+        playerA: { ...strongA, elo: 1850 },
+        playerB: { ...weakB, elo: 1600 },
+      }),
+    );
+    expect(belowLockBo5.eloGap).toBe(250);
+    expect(belowLockBo5.lockTier).toBe("NONE");
+
+    // Gap >= 350 in Bo5 → PLATINUM_LOCK (Grand Slams bulletproof, even on grass)
+    const platinum = predictTennisMatch(
+      matchup({
+        surface: "grass",
+        bestOf: 5,
+        playerA: strongA,
+        playerB: weakB,
+      }),
+    );
+    expect(platinum.eloGap).toBe(350);
+    expect(platinum.lockTier).toBe("PLATINUM_LOCK");
+    expect(platinum.lockReasons.length).toBeGreaterThan(0);
+
+    // Gap >= 350 in Bo3 with all traps cleared → GOLD_LOCK
+    const gold = predictTennisMatch(
+      matchup({
+        surface: "hard",
         bestOf: 3,
-        playerA: { ...base.playerA, elo: 1900 },
-        playerB: { ...base.playerB, elo: 1700 },
+        date: "2026-07-12T12:00:00Z",
+        playerA: strongA,
+        playerB: weakB,
       }),
     );
-    expect(midBo3.eloGap).toBe(200);
-    expect(midBo3.lockTier).toBe("NONE");
+    expect(gold.eloGap).toBe(350);
+    expect(gold.lockTier).toBe("GOLD_LOCK");
 
-    // Gap = 150 in Bo5 → GRAND_SLAM_LOCK
-    const gsLock = predictTennisMatch(
+    // Gap >= 350 in Bo3 on Grass → downgraded to LOCK caution
+    const grassLock = predictTennisMatch(
       matchup({
-        bestOf: 5,
-        playerA: { ...base.playerA, elo: 1850 },
-        playerB: { ...base.playerB, elo: 1700 },
-      }),
-    );
-    expect(gsLock.eloGap).toBe(150);
-    expect(gsLock.lockTier).toBe("GRAND_SLAM_LOCK");
-
-    // Gap = 149 in Bo5 → NONE
-    const justBelowGs = predictTennisMatch(
-      matchup({
-        bestOf: 5,
-        playerA: { ...base.playerA, elo: 1849 },
-        playerB: { ...base.playerB, elo: 1700 },
-      }),
-    );
-    expect(justBelowGs.eloGap).toBe(149);
-    expect(justBelowGs.lockTier).toBe("NONE");
-
-    // Gap = 350 in Bo3 → LOCK
-    const lockBo3 = predictTennisMatch(
-      matchup({
+        surface: "grass",
         bestOf: 3,
-        playerA: { ...base.playerA, elo: 1950 },
-        playerB: { ...base.playerB, elo: 1600 },
+        date: "2026-07-12T12:00:00Z",
+        playerA: strongA,
+        playerB: weakB,
       }),
     );
-    expect(lockBo3.eloGap).toBe(350);
-    expect(lockBo3.lockTier).toBe("LOCK");
+    expect(grassLock.lockTier).toBe("LOCK");
+    expect(grassLock.lockReasons[0]).toMatch(/grass/i);
 
-    // Gap = 350 in Bo5 → LOCK takes precedence over GRAND_SLAM_LOCK
-    const lockBo5 = predictTennisMatch(
+    // Gap >= 350 in Bo3 with rusty/low-sample player (< 2 matches) → downgraded to LOCK caution
+    const lowSampleLock = predictTennisMatch(
       matchup({
-        bestOf: 5,
-        playerA: { ...base.playerA, elo: 1950 },
-        playerB: { ...base.playerB, elo: 1600 },
+        surface: "hard",
+        bestOf: 3,
+        date: "2026-07-12T12:00:00Z",
+        playerA: strongA,
+        playerB: { ...weakB, matchesPlayed: 1 },
       }),
     );
-    expect(lockBo5.eloGap).toBe(350);
-    expect(lockBo5.lockTier).toBe("LOCK");
+    expect(lowSampleLock.lockTier).toBe("LOCK");
+    expect(lowSampleLock.lockReasons[0]).toMatch(/sample|<2/i);
+
+    // Gap >= 350 in Bo3 with favorite returning from > 30-day layoff → downgraded to LOCK caution
+    const layoffLock = predictTennisMatch(
+      matchup({
+        surface: "hard",
+        bestOf: 3,
+        date: "2026-07-12T12:00:00Z",
+        playerA: { ...strongA, lastPlayed: "2026-05-20T00:00:00Z" },
+        playerB: weakB,
+      }),
+    );
+    expect(layoffLock.lockTier).toBe("LOCK");
+    expect(layoffLock.lockReasons[0]).toMatch(/layoff/i);
+
+    // Gap >= 350 in Bo3 vs big-server underdog → AVOID trap
+    const bigServerAvoid = predictTennisMatch(
+      matchup({
+        surface: "hard",
+        bestOf: 3,
+        date: "2026-07-12T12:00:00Z",
+        playerA: strongA,
+        playerB: { ...weakB, acesPerMatch: 12.5, baselineSource: "surface" },
+      }),
+    );
+    expect(bigServerAvoid.lockTier).toBe("AVOID");
+    expect(bigServerAvoid.lockReasons[0]).toMatch(/big-server/i);
   });
 
   it("builds every market family T1–T6 with valid probabilities and odds", () => {

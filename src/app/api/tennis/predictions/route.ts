@@ -150,6 +150,7 @@ export interface TennisPredictedPlayer {
   rating: number;
   ratingSource: "elo" | "rank-prior" | "default";
   matchesPlayed: number | null;
+  lastPlayed: string | null;
   rank: number | null;
   acesPerMatch: number | null;
   doubleFaultsPerMatch: number | null;
@@ -169,6 +170,7 @@ export interface TennisPredictedMatch {
   bestOf: 3 | 5;
   eloGap: number;
   lockTier: TennisLockTier;
+  lockReasons: string[];
   players: [TennisPredictedPlayer, TennisPredictedPlayer];
   prediction: TennisPrediction;
 }
@@ -199,6 +201,7 @@ function toModelPlayer(
     rating: Math.round(rating),
     ratingSource,
     matchesPlayed: entry?.matchesPlayed ?? profile?.matchesPlayed ?? null,
+    lastPlayed: entry?.lastPlayed ?? profile?.lastPlayed ?? null,
     rank: profile?.rank ?? null,
     acesPerMatch: baseline?.acesPerMatch ?? null,
     doubleFaultsPerMatch: baseline?.doubleFaultsPerMatch ?? null,
@@ -314,6 +317,7 @@ export async function GET(request: Request) {
               elo: playerA.ratingSource === "elo" ? playerA.rating : null,
               ratingSource: playerA.ratingSource,
               matchesPlayed: playerA.matchesPlayed,
+              lastPlayed: playerA.lastPlayed,
               rank: playerA.rank,
               acesPerMatch: playerA.acesPerMatch,
               doubleFaultsPerMatch: playerA.doubleFaultsPerMatch,
@@ -325,6 +329,7 @@ export async function GET(request: Request) {
               elo: playerB.ratingSource === "elo" ? playerB.rating : null,
               ratingSource: playerB.ratingSource,
               matchesPlayed: playerB.matchesPlayed,
+              lastPlayed: playerB.lastPlayed,
               rank: playerB.rank,
               acesPerMatch: playerB.acesPerMatch,
               doubleFaultsPerMatch: playerB.doubleFaultsPerMatch,
@@ -340,7 +345,11 @@ export async function GET(request: Request) {
               : null,
           });
 
-          if (locksOnly && prediction.lockTier === "NONE") continue;
+          const isPlayableLock =
+            prediction.lockTier === "PLATINUM_LOCK" ||
+            prediction.lockTier === "GOLD_LOCK" ||
+            prediction.lockTier === "LOCK";
+          if (locksOnly && !isPlayableLock) continue;
 
           matches.push({
             id: `${tour}-${fixture.id}`,
@@ -354,6 +363,7 @@ export async function GET(request: Request) {
             bestOf: fixture.bestOf,
             eloGap: prediction.eloGap,
             lockTier: prediction.lockTier,
+            lockReasons: prediction.lockReasons,
             players: [playerA, playerB],
             prediction,
           });
@@ -364,8 +374,13 @@ export async function GET(request: Request) {
     }),
   );
 
-  const lockRank = (tier: TennisLockTier): number =>
-    tier === "LOCK" ? 0 : tier === "GRAND_SLAM_LOCK" ? 1 : 2;
+  const lockRank = (tier: TennisLockTier): number => {
+    if (tier === "PLATINUM_LOCK") return 0;
+    if (tier === "GOLD_LOCK") return 1;
+    if (tier === "LOCK") return 2;
+    if (tier === "AVOID") return 3;
+    return 4;
+  };
 
   matches.sort((a, b) =>
     locksOnly
@@ -377,9 +392,16 @@ export async function GET(request: Request) {
   );
 
   const locksSummary = {
+    platinum: matches.filter((m) => m.lockTier === "PLATINUM_LOCK").length,
+    gold: matches.filter((m) => m.lockTier === "GOLD_LOCK").length,
     lock: matches.filter((m) => m.lockTier === "LOCK").length,
-    grandSlamLock: matches.filter((m) => m.lockTier === "GRAND_SLAM_LOCK").length,
-    total: matches.filter((m) => m.lockTier !== "NONE").length,
+    avoid: matches.filter((m) => m.lockTier === "AVOID").length,
+    total: matches.filter(
+      (m) =>
+        m.lockTier === "PLATINUM_LOCK" ||
+        m.lockTier === "GOLD_LOCK" ||
+        m.lockTier === "LOCK",
+    ).length,
   };
 
   const ratings: Record<string, unknown> = {};
