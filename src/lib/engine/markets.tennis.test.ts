@@ -198,13 +198,80 @@ describe("predictTennisMatch", () => {
     expect(prediction.matchWinner.effectiveEloA).toBeGreaterThan(prediction.matchWinner.effectiveEloB);
   });
 
-  it("applies the surface modifier: grass widens the gap, hard is the baseline", () => {
+  it("uses raw Elo (not surface-modified) for Match Winner probability across surfaces", () => {
     const grass = predictTennisMatch(matchup({ surface: "grass" }));
     const hard = predictTennisMatch(matchup({ surface: "hard" }));
     const clay = predictTennisMatch(matchup({ surface: "clay" }));
-    expect(grass.matchWinner.probA).toBeGreaterThan(hard.matchWinner.probA);
-    expect(clay.matchWinner.probA).toBeGreaterThan(hard.matchWinner.probA);
-    expect(grass.matchWinner.probA).toBeGreaterThan(clay.matchWinner.probA);
+    const expectedRawProb = 1 / (1 + 10 ** ((1750 - 1850) / 400));
+    expect(grass.matchWinner.probA).toBeCloseTo(expectedRawProb, 3);
+    expect(hard.matchWinner.probA).toBeCloseTo(expectedRawProb, 3);
+    expect(clay.matchWinner.probA).toBeCloseTo(expectedRawProb, 3);
+    expect(grass.matchWinner.probA).toBe(hard.matchWinner.probA);
+    expect(clay.matchWinner.probA).toBe(hard.matchWinner.probA);
+  });
+
+  it("computes eloGap and classifies LOCK, GRAND_SLAM_LOCK, and NONE tiers", () => {
+    const base = matchup();
+
+    // Gap = 100 in Bo3 → NONE
+    const noneBo3 = predictTennisMatch(base);
+    expect(noneBo3.eloGap).toBe(100);
+    expect(noneBo3.lockTier).toBe("NONE");
+
+    // Gap = 200 in Bo3 → NONE (below 350 and not Bo5)
+    const midBo3 = predictTennisMatch(
+      matchup({
+        bestOf: 3,
+        playerA: { ...base.playerA, elo: 1900 },
+        playerB: { ...base.playerB, elo: 1700 },
+      }),
+    );
+    expect(midBo3.eloGap).toBe(200);
+    expect(midBo3.lockTier).toBe("NONE");
+
+    // Gap = 150 in Bo5 → GRAND_SLAM_LOCK
+    const gsLock = predictTennisMatch(
+      matchup({
+        bestOf: 5,
+        playerA: { ...base.playerA, elo: 1850 },
+        playerB: { ...base.playerB, elo: 1700 },
+      }),
+    );
+    expect(gsLock.eloGap).toBe(150);
+    expect(gsLock.lockTier).toBe("GRAND_SLAM_LOCK");
+
+    // Gap = 149 in Bo5 → NONE
+    const justBelowGs = predictTennisMatch(
+      matchup({
+        bestOf: 5,
+        playerA: { ...base.playerA, elo: 1849 },
+        playerB: { ...base.playerB, elo: 1700 },
+      }),
+    );
+    expect(justBelowGs.eloGap).toBe(149);
+    expect(justBelowGs.lockTier).toBe("NONE");
+
+    // Gap = 350 in Bo3 → LOCK
+    const lockBo3 = predictTennisMatch(
+      matchup({
+        bestOf: 3,
+        playerA: { ...base.playerA, elo: 1950 },
+        playerB: { ...base.playerB, elo: 1600 },
+      }),
+    );
+    expect(lockBo3.eloGap).toBe(350);
+    expect(lockBo3.lockTier).toBe("LOCK");
+
+    // Gap = 350 in Bo5 → LOCK takes precedence over GRAND_SLAM_LOCK
+    const lockBo5 = predictTennisMatch(
+      matchup({
+        bestOf: 5,
+        playerA: { ...base.playerA, elo: 1950 },
+        playerB: { ...base.playerB, elo: 1600 },
+      }),
+    );
+    expect(lockBo5.eloGap).toBe(350);
+    expect(lockBo5.lockTier).toBe("LOCK");
   });
 
   it("builds every market family T1–T6 with valid probabilities and odds", () => {

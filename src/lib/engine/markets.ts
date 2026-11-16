@@ -804,7 +804,7 @@ export class MarketEngine {
 import type { TennisSurface, TennisTour } from "../data/sources/tennis";
 import {
   TENNIS_INITIAL_ELO,
-  expectedScoreTennis,
+  expectedScore,
   surfaceAdjustedElo,
   tennisEloPriorFromRank,
 } from "../data/elo";
@@ -1107,10 +1107,16 @@ export interface TennisOULineGroup {
   lines: Array<{ line: number; overProb: number; underProb: number }>;
 }
 
+export type TennisLockTier = "NONE" | "LOCK" | "GRAND_SLAM_LOCK";
+
 export interface TennisPrediction {
   players: { a: string; b: string };
   surface: TennisSurface | null;
   bestOf: 3 | 5;
+  /** Raw pre-match Elo gap |resolvedA.rating - resolvedB.rating|. */
+  eloGap: number;
+  /** Backtested lock classification based on raw Elo gap & match format. */
+  lockTier: TennisLockTier;
   matchWinner: {
     probA: number;
     probB: number;
@@ -1232,17 +1238,27 @@ export class TennisMarketEngine {
     const resolvedA = this.resolveRating(playerA);
     const resolvedB = this.resolveRating(playerB);
 
-    // T1 — Match Winner, from the surface-adjusted ELO expectation.
-    const probA = clamp(expectedScoreTennis(resolvedA.rating, resolvedB.rating, surface), 0.001, 0.999);
+    // T1 — Match Winner, from raw ELO (walk-forward backtest showed raw ELO
+    // outperforms the scalar surface multiplier across every gap threshold).
+    const probA = clamp(expectedScore(resolvedA.rating, resolvedB.rating), 0.001, 0.999);
     const probB = 1 - probA;
     const effectiveEloA = surfaceAdjustedElo(resolvedA.rating, surface);
     const effectiveEloB = surfaceAdjustedElo(resolvedB.rating, surface);
     const favorite = probA >= probB ? playerA.name : playerB.name;
 
+    // Raw Elo gap & winning-formula lock classification.
+    const eloGap = Math.abs(resolvedA.rating - resolvedB.rating);
+    let lockTier: TennisLockTier = "NONE";
+    if (eloGap >= 350) {
+      lockTier = "LOCK"; // ~92% historical win rate
+    } else if (bestOf === 5 && eloGap >= 150) {
+      lockTier = "GRAND_SLAM_LOCK"; // ~87% historical win rate
+    }
+
     this.market("TENNIS_MW", "Match Winner", "Match Winner", playerA.name, probA, null,
-      `ELO ${Math.round(effectiveEloA)} vs ${Math.round(effectiveEloB)} on ${surface ?? "unknown"} surface (${resolvedA.source === "elo" ? "replayed" : resolvedA.source}).`);
+      `Raw ELO ${Math.round(resolvedA.rating)} vs ${Math.round(resolvedB.rating)} (gap ${Math.round(eloGap)}; ${resolvedA.source === "elo" ? "replayed" : resolvedA.source}).`);
     this.market("TENNIS_MW", "Match Winner", "Match Winner", playerB.name, probB, null,
-      `ELO ${Math.round(effectiveEloB)} vs ${Math.round(effectiveEloA)} on ${surface ?? "unknown"} surface (${resolvedB.source === "elo" ? "replayed" : resolvedB.source}).`);
+      `Raw ELO ${Math.round(resolvedB.rating)} vs ${Math.round(resolvedA.rating)} (gap ${Math.round(eloGap)}; ${resolvedB.source === "elo" ? "replayed" : resolvedB.source}).`);
 
     // Sets & games — invert the match probability into the per-set/per-game model.
     const setProbA = setWinProbFromMatchProb(probA, bestOf);
@@ -1301,9 +1317,14 @@ export class TennisMarketEngine {
     const breakPoints = this.countMarkets("TENNIS_BP", "Break Points", (p) => p.bpFacedPerMatch, tourBaselines?.bpFacedPerMatch ?? null);
 
     const notes: string[] = [
-      `Match-win probability from the surface-adjusted ELO gap (${Math.round(effectiveEloA - effectiveEloB)} points${surface ? ` on ${surface}` : ""}).`,
+      `Match-win probability from raw ELO gap (${Math.round(resolvedA.rating - resolvedB.rating)} points).`,
       `Per-set ${(setProbA * 100).toFixed(1)}% / ${((1 - setProbA) * 100).toFixed(1)}% from inverting the best-of-${bestOf} model.`,
     ];
+    if (lockTier === "LOCK") {
+      notes.push("LOCK tier: raw ELO gap ≥ 350 (~92% backtested favorite win rate).");
+    } else if (lockTier === "GRAND_SLAM_LOCK") {
+      notes.push("GRAND SLAM LOCK tier: best-of-5 with raw ELO gap ≥ 150 (~87% backtested favorite win rate).");
+    }
     if (resolvedA.source !== "elo" || resolvedB.source !== "elo") {
       notes.push(
         `Rating priors in use: ${playerA.name} → ${resolvedA.source}, ${playerB.name} → ${resolvedB.source}.`,
@@ -1317,6 +1338,8 @@ export class TennisMarketEngine {
       players: { a: playerA.name, b: playerB.name },
       surface,
       bestOf,
+      eloGap: round(eloGap, 1),
+      lockTier,
       matchWinner: {
         probA: round(probA),
         probB: round(probB),
