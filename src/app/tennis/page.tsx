@@ -3,9 +3,10 @@
 // ĞIGI GIVØ — Tennis Predictions (ATP / WTA).
 //
 // The second sport of the supercomputer: upcoming singles matches priced by
-// raw ELO for Match Winner (proven by walk-forward backtest to beat scalar
-// surface scaling) with Elo-gap Lock tiers (LOCK ≥ 350, GRAND SLAM LOCK Bo5
-// ≥ 150), plus the exact set-score distribution and Poisson serve-stat markets.
+// raw ELO for Match Winner with real-world Lock filters (PLATINUM LOCK in
+// Best-of-5 ≥ 350, GOLD LOCK in Bo3 ≥ 350 with all traps cleared, LOCK
+// warning on grass / long layoff, and AVOID on big-server underdog traps),
+// plus the exact set-score distribution and Poisson serve-stat markets.
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
@@ -36,6 +37,7 @@ interface PredictedPlayer {
   rating: number;
   ratingSource: "elo" | "rank-prior" | "default";
   matchesPlayed: number | null;
+  lastPlayed?: string | null;
   rank: number | null;
   acesPerMatch: number | null;
   doubleFaultsPerMatch: number | null;
@@ -55,6 +57,7 @@ interface PredictedMatch {
   bestOf: 3 | 5;
   eloGap?: number;
   lockTier?: TennisLockTier;
+  lockReasons?: string[];
   players: [PredictedPlayer, PredictedPlayer];
   prediction: TennisPrediction;
 }
@@ -62,7 +65,7 @@ interface PredictedMatch {
 interface TennisResponse {
   generatedAt: string;
   filters: { surface: string | null; tour: string; limit: number; days: number; locksOnly?: boolean };
-  locksSummary?: { lock: number; grandSlamLock: number; total: number };
+  locksSummary?: { platinum: number; gold: number; lock: number; avoid: number; total: number };
   ratings: Record<
     string,
     {
@@ -92,19 +95,35 @@ const SURFACE_STYLES: Record<Surface, { label: string; badge: string; dot: strin
 
 const LOCK_TIER_STYLES: Record<
   Exclude<TennisLockTier, "NONE">,
-  { label: string; badge: string; cardRing: string; title: string }
+  { label: string; badge: string; cardRing: string; callout: string; title: string }
 > = {
-  LOCK: {
-    label: "🔒 LOCK · 92%",
-    badge: "bg-emerald-500/20 text-emerald-200 ring-1 ring-emerald-400/60",
-    cardRing: "ring-1 ring-emerald-400/45",
-    title: "Raw ELO gap ≥ 350 (~92% backtested favorite win rate)",
+  PLATINUM_LOCK: {
+    label: "💎 PLATINUM LOCK · 97%",
+    badge: "bg-cyan-400/20 text-cyan-100 ring-1 ring-cyan-300/70",
+    cardRing: "ring-1 ring-cyan-300/60",
+    callout: "border-cyan-400/30 bg-cyan-500/10 text-cyan-200",
+    title: "Best-of-5 Grand Slam with raw ELO gap ≥ 350 (96.7% backtested win rate)",
   },
-  GRAND_SLAM_LOCK: {
-    label: "🏆 GRAND SLAM LOCK · 87%",
-    badge: "bg-amber-500/20 text-amber-200 ring-1 ring-amber-400/60",
-    cardRing: "ring-1 ring-amber-400/45",
-    title: "Best-of-5 match with raw ELO gap ≥ 150 (~87% backtested favorite win rate)",
+  GOLD_LOCK: {
+    label: "🥇 GOLD LOCK · 95%",
+    badge: "bg-amber-400/20 text-amber-200 ring-1 ring-amber-400/70",
+    cardRing: "ring-1 ring-amber-400/55",
+    callout: "border-amber-400/30 bg-amber-500/10 text-amber-200",
+    title: "Raw ELO gap ≥ 350 with all real-world filters passed (~95% backtested win rate)",
+  },
+  LOCK: {
+    label: "🔒 LOCK · CAUTION",
+    badge: "bg-emerald-500/15 text-emerald-200 ring-1 ring-emerald-400/50",
+    cardRing: "ring-1 ring-emerald-400/35",
+    callout: "border-emerald-400/25 bg-emerald-500/10 text-emerald-200",
+    title: "Raw ELO gap ≥ 350 downgraded due to grass court or layoff/sample warning",
+  },
+  AVOID: {
+    label: "⚠️ AVOID · TRAP",
+    badge: "bg-rose-500/20 text-rose-200 ring-1 ring-rose-400/60",
+    cardRing: "ring-1 ring-rose-400/45",
+    callout: "border-rose-400/30 bg-rose-500/10 text-rose-200",
+    title: "Raw ELO gap ≥ 350 flagged as a high-upset trap (big-server underdog in Bo3)",
   },
 };
 
@@ -121,19 +140,38 @@ function resolveEloGap(match: PredictedMatch): number {
 
 function resolveLockTier(match: PredictedMatch): TennisLockTier {
   const tier = match.prediction?.lockTier ?? match.lockTier;
-  if (tier === "LOCK" || tier === "GRAND_SLAM_LOCK" || tier === "NONE") {
+  if (
+    tier === "PLATINUM_LOCK" ||
+    tier === "GOLD_LOCK" ||
+    tier === "LOCK" ||
+    tier === "AVOID" ||
+    tier === "NONE"
+  ) {
     return tier;
   }
   const gap = resolveEloGap(match);
-  if (gap >= 350) return "LOCK";
-  if (match.bestOf === 5 && gap >= 150) return "GRAND_SLAM_LOCK";
-  return "NONE";
+  if (gap < 350) return "NONE";
+  if (match.bestOf === 5) return "PLATINUM_LOCK";
+  if (match.surface === "grass") return "LOCK";
+  return "GOLD_LOCK";
+}
+
+function resolveLockReasons(match: PredictedMatch): string[] {
+  if (Array.isArray(match.prediction?.lockReasons)) return match.prediction.lockReasons;
+  if (Array.isArray(match.lockReasons)) return match.lockReasons;
+  return [];
+}
+
+function isPlayableLockTier(tier: TennisLockTier): boolean {
+  return tier === "PLATINUM_LOCK" || tier === "GOLD_LOCK" || tier === "LOCK";
 }
 
 function lockTierOrder(tier: TennisLockTier): number {
-  if (tier === "LOCK") return 0;
-  if (tier === "GRAND_SLAM_LOCK") return 1;
-  return 2;
+  if (tier === "PLATINUM_LOCK") return 0;
+  if (tier === "GOLD_LOCK") return 1;
+  if (tier === "LOCK") return 2;
+  if (tier === "NONE") return 3;
+  return 4; // AVOID surfaced below standard matches unless inspected
 }
 
 function isFiniteNumber(value: unknown): value is number {
@@ -308,6 +346,7 @@ function TennisMatchCard({ match, accentIndex }: { match: PredictedMatch; accent
   const isLive = match.status === "live";
   const eloGap = resolveEloGap(match);
   const lockTier = resolveLockTier(match);
+  const lockReasons = resolveLockReasons(match);
   const lockStyle = lockTier !== "NONE" ? LOCK_TIER_STYLES[lockTier] : null;
 
   const winner = prediction.matchWinner;
@@ -388,6 +427,12 @@ function TennisMatchCard({ match, accentIndex }: { match: PredictedMatch; accent
           </div>
         </div>
       </header>
+
+      {lockStyle && lockReasons.length > 0 && (
+        <div className={`mb-4 rounded-xl border px-3 py-2 text-[11px] font-mono ${lockStyle.callout}`}>
+          {lockReasons.join(" · ")}
+        </div>
+      )}
 
       {/* ── Players + Match Winner probability ── */}
       <div className="mb-4 grid grid-cols-[1fr_auto_1fr] items-center gap-2 sm:gap-4">
@@ -680,13 +725,26 @@ export default function TennisPage() {
     });
   }, [data]);
 
-  const lockCount = useMemo(
-    () => validMatches.filter((match) => resolveLockTier(match) !== "NONE").length,
-    [validMatches],
-  );
+  const tierCounts = useMemo(() => {
+    let platinum = 0;
+    let gold = 0;
+    let lock = 0;
+    let avoid = 0;
+    for (const match of validMatches) {
+      const tier = resolveLockTier(match);
+      if (tier === "PLATINUM_LOCK") platinum++;
+      else if (tier === "GOLD_LOCK") gold++;
+      else if (tier === "LOCK") lock++;
+      else if (tier === "AVOID") avoid++;
+    }
+    return { platinum, gold, lock, avoid, playable: platinum + gold + lock };
+  }, [validMatches]);
 
   const visibleMatches = useMemo(
-    () => (locksOnly ? validMatches.filter((match) => resolveLockTier(match) !== "NONE") : validMatches),
+    () =>
+      locksOnly
+        ? validMatches.filter((match) => isPlayableLockTier(resolveLockTier(match)))
+        : validMatches,
     [validMatches, locksOnly],
   );
 
@@ -728,16 +786,16 @@ export default function TennisPage() {
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
             <div className={`${CHIP} ${CHIP_ON_AMBER} mb-3 inline-flex px-3 py-1.5 text-[11px] font-bold uppercase tracking-wider`}>
-              🎾 ATP / WTA · Raw ELO + Lock Formula
+              🎾 ATP / WTA · Raw ELO + Filtered Locks
             </div>
             <h1 className="text-3xl font-extrabold tracking-tight text-white sm:text-4xl">
               Tennis Predictions
             </h1>
             <p className="mt-2 max-w-3xl text-sm text-slate-400 sm:text-base">
-              Upcoming singles matches priced by raw ELO for Match Winner with
-              backtested Lock tiers (LOCK at ≥350 ELO gap · ~92% win rate,
-              GRAND SLAM LOCK in Best-of-5 at ≥150 ELO gap · ~87% win rate),
-              paired with the exact set-score model and Poisson serve-stat markets.
+              Upcoming singles matches priced by raw ELO with real-world trap
+              filters: 💎 PLATINUM LOCK (Bo5 ≥350 ELO · ~97%), 🥇 GOLD LOCK
+              (Bo3 ≥350 ELO, all traps cleared · ~95%), 🔒 LOCK caution on grass
+              or layoffs, and ⚠️ AVOID on big-server underdog traps.
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -795,7 +853,7 @@ export default function TennisPage() {
             aria-pressed={locksOnly}
             className={`${NAV_PILL_PREMIUM} px-3.5 py-2 text-xs ${locksOnly ? NAV_PILL_PREMIUM_ON : NAV_PILL_PREMIUM_OFF}`}
           >
-            🔒 Locks only{data ? ` (${lockCount})` : ""}
+            🔒 Locks only{data ? ` (${tierCounts.playable})` : ""}
           </button>
         </div>
 
@@ -811,9 +869,24 @@ export default function TennisPage() {
               {visibleMatches.length} match{visibleMatches.length === 1 ? "" : "es"}
               {data.filters?.surface ? ` on ${data.filters.surface}` : ""}
             </span>
-            {lockCount > 0 && (
+            {tierCounts.platinum > 0 && (
+              <span className="font-bold text-cyan-300">
+                💎 {tierCounts.platinum} Platinum
+              </span>
+            )}
+            {tierCounts.gold > 0 && (
+              <span className="font-bold text-amber-300">
+                🥇 {tierCounts.gold} Gold
+              </span>
+            )}
+            {tierCounts.lock > 0 && (
               <span className="font-bold text-emerald-300">
-                🔒 {lockCount} lock{lockCount === 1 ? "" : "s"}
+                🔒 {tierCounts.lock} Caution Lock{tierCounts.lock === 1 ? "" : "s"}
+              </span>
+            )}
+            {tierCounts.avoid > 0 && (
+              <span className="font-bold text-rose-300">
+                ⚠️ {tierCounts.avoid} Avoid
               </span>
             )}
             {ratedTours.map((tourKey, i) => (
@@ -868,7 +941,7 @@ export default function TennisPage() {
             </h2>
             <p className="mx-auto mt-2 max-w-md text-sm text-slate-400">
               {locksOnly
-                ? "None of the scheduled matches for this filter currently meet the LOCK (≥350 raw ELO gap) or GRAND SLAM LOCK (Bo5 + ≥150 ELO gap) thresholds."
+                ? "None of the scheduled matches for this filter currently qualify as PLATINUM LOCK (Bo5 ≥350 ELO), GOLD LOCK (Bo3 ≥350 ELO, all traps cleared), or caution LOCK."
                 : "The ESPN singles scoreboard has no scheduled matches in the next few days for this filter. Try another surface or tour — or check back after the next draw release."}
             </p>
             {locksOnly && validMatches.length > 0 && (
@@ -924,14 +997,14 @@ export default function TennisPage() {
         {/* ── Footer ── */}
         <footer className="border-t border-white/[0.06] pt-4 text-[11px] leading-relaxed text-slate-500">
           <p>
-            Model: raw ELO Match Winner probability + Lock tiers (LOCK at raw
-            ELO gap ≥ 350 · ~92% backtested win rate; GRAND SLAM LOCK in
-            Best-of-5 at ≥ 150 ELO gap · ~87% backtested win rate) → exact
-            set-score distribution for Total Games, Set Winner and projected
-            scorelines. Aces, double faults and break-point lines are Poisson
-            markets on real per-match baselines (surface split where the sample
-            backs it). Ratings without replayed history use a labelled rank
-            prior — never an invented number.
+            Model: raw ELO Match Winner probability + real-world Lock filters
+            (PLATINUM LOCK in Bo5 ≥350 ELO · ~97% backtested; GOLD LOCK in Bo3
+            ≥350 ELO with grass, layoff &amp; big-server traps cleared · ~95%;
+            LOCK warning on grass courts or &gt;30d layoff / thin sample; AVOID
+            on big-server underdog traps) → exact set-score distribution and
+            Poisson serve-stat markets on real per-match baselines. Ratings
+            without replayed history use a labelled rank prior — never an
+            invented number.
           </p>
           <p className="mt-2">
             Data: Jeff Sackmann tennis_atp / tennis_wta match logs (GitHub

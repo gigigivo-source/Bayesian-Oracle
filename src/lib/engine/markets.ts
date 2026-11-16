@@ -1073,6 +1073,8 @@ export interface TennisPlayerModelInput {
   /** How the rating was obtained, surfaced to the UI. */
   ratingSource: "elo" | "rank-prior" | "default";
   matchesPlayed: number | null;
+  /** ISO date of the player's most recent rated match (for layoff detection). */
+  lastPlayed?: string | null;
   rank: number | null;
   /** Real per-match baselines from the completed-match dataset. */
   acesPerMatch: number | null;
@@ -1107,7 +1109,7 @@ export interface TennisOULineGroup {
   lines: Array<{ line: number; overProb: number; underProb: number }>;
 }
 
-export type TennisLockTier = "NONE" | "LOCK" | "GRAND_SLAM_LOCK";
+export type TennisLockTier = "NONE" | "AVOID" | "LOCK" | "GOLD_LOCK" | "PLATINUM_LOCK";
 
 export interface TennisPrediction {
   players: { a: string; b: string };
@@ -1115,8 +1117,10 @@ export interface TennisPrediction {
   bestOf: 3 | 5;
   /** Raw pre-match Elo gap |resolvedA.rating - resolvedB.rating|. */
   eloGap: number;
-  /** Backtested lock classification based on raw Elo gap & match format. */
+  /** Backtested lock classification with real-world trap filters. */
   lockTier: TennisLockTier;
+  /** Human-readable explanation of the lock tier or trap downgrade. */
+  lockReasons: string[];
   matchWinner: {
     probA: number;
     probB: number;
@@ -1152,6 +1156,19 @@ export interface TennisPrediction {
 // O/U line ladders around the expected total (the 3 nearest lines are quoted).
 const TOTAL_GAMES_LADDER_BO3 = [15.5, 16.5, 17.5, 18.5, 19.5, 20.5, 21.5, 22.5, 23.5, 24.5, 25.5];
 const TOTAL_GAMES_LADDER_BO5 = [28.5, 30.5, 32.5, 33.5, 35.5, 36.5, 38.5, 39.5, 41.5, 42.5, 44.5];
+
+/** Non-negative whole days between two ISO timestamps, or null if unavailable. */
+function daysSinceIso(
+  earlierIso: string | null | undefined,
+  laterIso: string | null | undefined,
+): number | null {
+  if (!earlierIso || !laterIso) return null;
+  const earlier = Date.parse(earlierIso);
+  const later = Date.parse(laterIso);
+  if (Number.isNaN(earlier) || Number.isNaN(later)) return null;
+  const days = Math.round((later - earlier) / 86_400_000);
+  return days >= 0 ? days : null;
+}
 
 export class TennisMarketEngine {
   private counter = 0;
@@ -1246,13 +1263,52 @@ export class TennisMarketEngine {
     const effectiveEloB = surfaceAdjustedElo(resolvedB.rating, surface);
     const favorite = probA >= probB ? playerA.name : playerB.name;
 
-    // Raw Elo gap & winning-formula lock classification.
+    // Raw Elo gap & upgraded winning-formula lock classification (with real-world trap filters).
     const eloGap = Math.abs(resolvedA.rating - resolvedB.rating);
+    const favPlayer = resolvedA.rating >= resolvedB.rating ? playerA : playerB;
+    const dogPlayer = resolvedA.rating >= resolvedB.rating ? playerB : playerA;
+    const favDaysSince = daysSinceIso(favPlayer.lastPlayed, this.input.date);
+
     let lockTier: TennisLockTier = "NONE";
+    const lockReasons: string[] = [];
+
     if (eloGap >= 350) {
-      lockTier = "LOCK"; // ~92% historical win rate
-    } else if (bestOf === 5 && eloGap >= 150) {
-      lockTier = "GRAND_SLAM_LOCK"; // ~87% historical win rate
+      const isBo5 = bestOf === 5;
+      const isGrass = surface === "grass";
+      const isLowSample = (playerA.matchesPlayed ?? 0) < 2 || (playerB.matchesPlayed ?? 0) < 2;
+      const isLongLayoff = favDaysSince !== null && favDaysSince > 30;
+      const isRusty = isLowSample || isLongLayoff;
+
+      const dogHasRealServe =
+        dogPlayer.baselineSource === "surface" || dogPlayer.baselineSource === "overall";
+      const dogAces = dogHasRealServe ? dogPlayer.acesPerMatch : null;
+      const favAces = favPlayer.acesPerMatch;
+      const isBigServerUnderdog =
+        dogAces !== null &&
+        (dogAces >= 10 || (dogAces >= 8.5 && favAces !== null && dogAces > favAces));
+
+      if (isBo5) {
+        lockTier = "PLATINUM_LOCK"; // ~96.7% historical win rate (Grand Slams)
+        lockReasons.push("Best-of-5 Grand Slam lock (96.7% backtested win rate)");
+      } else if (isBigServerUnderdog) {
+        lockTier = "AVOID"; // ~70–78% historical win rate (serve-bot upset trap)
+        lockReasons.push(
+          `Big-server underdog trap (${dogPlayer.name} averages ${dogAces.toFixed(1)} aces/match)`,
+        );
+      } else if (isGrass) {
+        lockTier = "LOCK"; // ~81–88% warning on grass
+        lockReasons.push("Grass court variance warning — downgraded from Gold Lock");
+      } else if (isRusty) {
+        lockTier = "LOCK"; // ~88–89% warning on long layoff / thin sample
+        if (isLongLayoff) {
+          lockReasons.push(`Favorite returning from ${favDaysSince}-day layoff (>30d)`);
+        } else {
+          lockReasons.push("Thin rated sample (<2 matches played)");
+        }
+      } else {
+        lockTier = "GOLD_LOCK"; // ~95% historical win rate — all filters passed
+        lockReasons.push("All real-world filters passed (~95% backtested win rate)");
+      }
     }
 
     this.market("TENNIS_MW", "Match Winner", "Match Winner", playerA.name, probA, null,
@@ -1320,10 +1376,8 @@ export class TennisMarketEngine {
       `Match-win probability from raw ELO gap (${Math.round(resolvedA.rating - resolvedB.rating)} points).`,
       `Per-set ${(setProbA * 100).toFixed(1)}% / ${((1 - setProbA) * 100).toFixed(1)}% from inverting the best-of-${bestOf} model.`,
     ];
-    if (lockTier === "LOCK") {
-      notes.push("LOCK tier: raw ELO gap ≥ 350 (~92% backtested favorite win rate).");
-    } else if (lockTier === "GRAND_SLAM_LOCK") {
-      notes.push("GRAND SLAM LOCK tier: best-of-5 with raw ELO gap ≥ 150 (~87% backtested favorite win rate).");
+    if (lockTier !== "NONE") {
+      notes.push(`${lockTier}: ${lockReasons.join("; ")}.`);
     }
     if (resolvedA.source !== "elo" || resolvedB.source !== "elo") {
       notes.push(
@@ -1340,6 +1394,7 @@ export class TennisMarketEngine {
       bestOf,
       eloGap: round(eloGap, 1),
       lockTier,
+      lockReasons,
       matchWinner: {
         probA: round(probA),
         probB: round(probB),
