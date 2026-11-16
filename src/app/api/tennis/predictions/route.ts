@@ -36,7 +36,11 @@ import {
   tennisEloPriorFromRank,
   type TennisEloTable,
 } from "@/lib/data/elo";
-import { predictTennisMatch, type TennisPrediction } from "@/lib/engine/markets";
+import {
+  predictTennisMatch,
+  type TennisLockTier,
+  type TennisPrediction,
+} from "@/lib/engine/markets";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -142,7 +146,7 @@ function findProfile(model: TennisTourModel, player: string) {
 export interface TennisPredictedPlayer {
   name: string;
   country: string | null;
-  /** Surface-adjusted effective ELO used by the model. */
+  /** Raw replayed/prior ELO rating used by the model. */
   rating: number;
   ratingSource: "elo" | "rank-prior" | "default";
   matchesPlayed: number | null;
@@ -163,6 +167,8 @@ export interface TennisPredictedMatch {
   venue: string | null;
   status: "scheduled" | "live" | "complete";
   bestOf: 3 | 5;
+  eloGap: number;
+  lockTier: TennisLockTier;
   players: [TennisPredictedPlayer, TennisPredictedPlayer];
   prediction: TennisPrediction;
 }
@@ -223,6 +229,9 @@ export async function GET(request: Request) {
   const days = Math.max(1, Math.min(7, Number(url.searchParams.get("days") ?? 3) || 3));
   const includeLive = ["1", "true", "yes"].includes(
     (url.searchParams.get("includeLive") ?? "").toLowerCase(),
+  );
+  const locksOnly = ["1", "true", "yes"].includes(
+    (url.searchParams.get("locksOnly") ?? "").toLowerCase(),
   );
 
   if (surfaceRequested) {
@@ -331,6 +340,8 @@ export async function GET(request: Request) {
               : null,
           });
 
+          if (locksOnly && prediction.lockTier === "NONE") continue;
+
           matches.push({
             id: `${tour}-${fixture.id}`,
             tour,
@@ -341,6 +352,8 @@ export async function GET(request: Request) {
             venue: fixture.venue,
             status: fixture.status,
             bestOf: fixture.bestOf,
+            eloGap: prediction.eloGap,
+            lockTier: prediction.lockTier,
             players: [playerA, playerB],
             prediction,
           });
@@ -351,7 +364,23 @@ export async function GET(request: Request) {
     }),
   );
 
-  matches.sort((a, b) => a.date.localeCompare(b.date) || a.id.localeCompare(b.id));
+  const lockRank = (tier: TennisLockTier): number =>
+    tier === "LOCK" ? 0 : tier === "GRAND_SLAM_LOCK" ? 1 : 2;
+
+  matches.sort((a, b) =>
+    locksOnly
+      ? lockRank(a.lockTier) - lockRank(b.lockTier) ||
+        b.eloGap - a.eloGap ||
+        a.date.localeCompare(b.date) ||
+        a.id.localeCompare(b.id)
+      : a.date.localeCompare(b.date) || a.id.localeCompare(b.id),
+  );
+
+  const locksSummary = {
+    lock: matches.filter((m) => m.lockTier === "LOCK").length,
+    grandSlamLock: matches.filter((m) => m.lockTier === "GRAND_SLAM_LOCK").length,
+    total: matches.filter((m) => m.lockTier !== "NONE").length,
+  };
 
   const ratings: Record<string, unknown> = {};
   for (const tour of tours) {
@@ -368,7 +397,8 @@ export async function GET(request: Request) {
 
   return Response.json({
     generatedAt: new Date().toISOString(),
-    filters: { surface, tour: tourParam, limit, days, includeLive },
+    filters: { surface, tour: tourParam, limit, days, includeLive, locksOnly },
+    locksSummary,
     ratings,
     sources,
     count: matches.length,
