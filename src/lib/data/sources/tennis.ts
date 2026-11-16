@@ -875,14 +875,29 @@ export function computeTourBaselines(matches: TennisMatch[]): TennisTourBaseline
 
 // ─── Network: historical layers ───────────────────────────────────────────────
 
+interface SackmannMirror {
+  repo: string;
+  branch: string;
+  /** Optional subdirectory path (with trailing slash) inside the repo. */
+  dir?: string;
+}
+
 /**
- * Candidate repos for the Sackmann season files, in priority order. The
- * canonical JeffSackmann repos disappeared from GitHub mid-2026; the forks
- * below are actively maintained mirrors of the same CSVs.
+ * Candidate mirrors for the Sackmann season files, in priority order. The
+ * canonical JeffSackmann repos disappeared from GitHub mid-2026; each mirror
+ * below hosts plain Sackmann-format CSVs (`{tour}_matches_{year}.csv`).
  */
-const SACKMANN_REPOS: Record<TennisTour, string[]> = {
-  atp: ["JeffSackmann/tennis_atp", "Kadantte/tennis_atp", "jasonmauss/tennis_atp"],
-  wta: ["JeffSackmann/tennis_wta", "Kadantte/tennis_wta", "jasonmauss/tennis_wta"],
+const SACKMANN_MIRRORS: Record<TennisTour, SackmannMirror[]> = {
+  atp: [
+    { repo: "Kadantte/tennis_atp", branch: "master" },
+    { repo: "Aneeshers/tennis-sackmann-archive", branch: "main", dir: "atp/" },
+    { repo: "nachotropico-maker/tennis-sackmann-archive", branch: "main", dir: "atp/" },
+    { repo: "zvonimir-rezo/tennis_atp", branch: "main" },
+  ],
+  wta: [
+    { repo: "Aneeshers/tennis-sackmann-archive", branch: "main", dir: "wta/" },
+    { repo: "nachotropico-maker/tennis-sackmann-archive", branch: "main", dir: "wta/" },
+  ],
 };
 
 const SACKMANN_TIMEOUT_MS = 90_000;
@@ -937,40 +952,43 @@ export async function loadTennisMatches(
     return added;
   };
 
-  console.info(`[tennis] Loading ${tour} matches from Jeff Sackmann/Kadantte...`);
+  console.info(`[tennis] Loading ${tour} matches from Sackmann mirrors...`);
   // Layer 1 — Sackmann season files (results + aces/DFs/BPs). Every mirror of
   // every season is fetched in parallel; per season the highest-priority
-  // mirror that responds wins, so a slow mirror cannot stall the whole load.
+  // mirror that responds with parseable matches wins, so a slow or empty mirror
+  // cannot stall the whole load.
   const sackmannAttempts = await Promise.all(
     years.map(async (year) => ({
       year,
       attempts: await Promise.all(
-        SACKMANN_REPOS[tour].map(async (repo) => {
-          const url = `https://raw.githubusercontent.com/${repo}/master/${tour}_matches_${year}.csv`;
+        SACKMANN_MIRRORS[tour].map(async (mirror) => {
+          const url = `https://raw.githubusercontent.com/${mirror.repo}/${mirror.branch}/${mirror.dir ?? ""}${tour}_matches_${year}.csv`;
           const res = await fetchWithTimeout(url, { text: true, timeoutMs: SACKMANN_TIMEOUT_MS });
-          return { repo, res };
+          return { repo: mirror.repo, res };
         }),
       ),
     })),
   );
   for (const { year, attempts } of sackmannAttempts) {
     let winnerRepo: string | null = null;
-    let winnerCsv: string | null = null;
+    let winnerMatches: TennisMatch[] | null = null;
     for (const { repo, res } of attempts) {
       if (res.status === "ok" && typeof res.data === "string" && res.data.length > 100) {
-        winnerRepo = repo;
-        winnerCsv = res.data;
-        break;
+        const parsed = parseSackmannTennisCsv(res.data, tour);
+        if (parsed.length > 0) {
+          winnerRepo = repo;
+          winnerMatches = parsed;
+          break;
+        }
       }
     }
-    if (winnerRepo !== null && winnerCsv !== null) {
-      const matches = parseSackmannTennisCsv(winnerCsv, tour);
-      const added = addMatches(matches);
+    if (winnerRepo !== null && winnerMatches !== null) {
+      const added = addMatches(winnerMatches);
       sources.push({
         source: `sackmann:${winnerRepo}`,
         attempted: true,
         added,
-        note: `${year} season: ${matches.length} parsed, ${added} new (${attempts.length - 1} lower-priority mirror(s) skipped)`,
+        note: `${year} season: ${winnerMatches.length} parsed, ${added} new (${attempts.length - 1} lower-priority mirror(s) skipped)`,
       });
     } else {
       sources.push({
@@ -1016,7 +1034,7 @@ export async function loadTennisMatches(
 
   const matches = [...byId.values()].sort((a, b) => a.matchDate.localeCompare(b.matchDate));
   if (matches.length === 0) {
-    throw new Error("[tennis] CRITICAL: No data source reachable. Tennis predictions are unavailable.");
+    console.warn(`[tennis] No historical ${tour} data source reachable.`);
   }
   return { matches, sources };
 }

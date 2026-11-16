@@ -21,6 +21,7 @@ import {
   computeTourBaselines,
   fetchUpcomingTennisMatches,
   loadTennisMatches,
+  playerNamesMatch,
   surfaceServeBaseline,
   tennisPlayerKey,
   type TennisPlayerProfile,
@@ -28,8 +29,11 @@ import {
   type TennisTour,
 } from "@/lib/data/sources/tennis";
 import {
+  TENNIS_INITIAL_ELO,
   buildTennisEloTable,
+  createTennisEloTable,
   findTennisEloEntry,
+  tennisEloPriorFromRank,
   type TennisEloTable,
 } from "@/lib/data/elo";
 import { predictTennisMatch, type TennisPrediction } from "@/lib/engine/markets";
@@ -75,27 +79,45 @@ async function getTennisModel(seasons: number): Promise<TennisModelCache> {
   loading = (async (): Promise<TennisModelCache> => {
     const tours = await Promise.all(
       (["atp", "wta"] as const).map(async (tour): Promise<TennisTourModel> => {
-        const dataset = await loadTennisMatches(tour, { seasons });
-        const elo = buildTennisEloTable(dataset.matches);
-        return {
-          tour,
-          elo,
-          baselines: computeTourBaselines(dataset.matches),
-          profiles: buildTennisPlayerProfiles(dataset.matches, tour),
-          matchesProcessed: dataset.matches.length,
-          matches: dataset.matches,
-          sources: dataset.sources,
-          generatedAt: new Date().toISOString(),
-        };
+        try {
+          const dataset = await loadTennisMatches(tour, { seasons });
+          const elo = buildTennisEloTable(dataset.matches);
+          return {
+            tour,
+            elo,
+            baselines: computeTourBaselines(dataset.matches),
+            profiles: buildTennisPlayerProfiles(dataset.matches, tour),
+            matchesProcessed: dataset.matches.length,
+            matches: dataset.matches,
+            sources: dataset.sources,
+            generatedAt: new Date().toISOString(),
+          };
+        } catch (error) {
+          const note = error instanceof Error ? error.message : String(error);
+          console.warn(`[tennis] Failed to load ${tour} historical dataset: ${note}`);
+          return {
+            tour,
+            elo: createTennisEloTable(),
+            baselines: null,
+            profiles: new Map(),
+            matchesProcessed: 0,
+            matches: [],
+            sources: [{ source: `historical:${tour}`, attempted: true, added: 0, note }],
+            generatedAt: new Date().toISOString(),
+          };
+        }
       }),
     );
 
-    cache = {
+    const built: TennisModelCache = {
       at: Date.now(),
       seasons,
       tours: { atp: tours[0], wta: tours[1] },
     };
-    return cache;
+    if (tours.some((t) => t.matchesProcessed > 0)) {
+      cache = built;
+    }
+    return built;
   })();
 
   try {
@@ -110,13 +132,7 @@ function findProfile(model: TennisTourModel, player: string) {
   const exact = model.profiles.get(tennisPlayerKey(player));
   if (exact) return exact;
   for (const profile of model.profiles.values()) {
-    if (profile.key !== tennisPlayerKey(profile.player)) continue;
-    // Cheap fuzzy pass: same first initial + surname.
-    const surname = (name: string): string => name.trim().toLowerCase().split(" ").pop() ?? "";
-    const initial = (name: string): string => (name.trim()[0] ?? "").toLowerCase();
-    if (surname(profile.player) === surname(player) && initial(profile.player) === initial(player)) {
-      return profile;
-    }
+    if (playerNamesMatch(profile.player, player)) return profile;
   }
   return null;
 }
@@ -160,11 +176,13 @@ function toModelPlayer(
   const entry = findTennisEloEntry(model.elo, name, model.tour);
   const profile = findProfile(model, name);
 
-  if (!entry || !surface || entry.surfaceMatches[surface] === 0) {
-    throw new Error(`Tennis data unavailable — missing Elo or historical data. Players: ${name} (null)`);
-  }
-  const rating = entry.rating;
-  const ratingSource: TennisPredictedPlayer["ratingSource"] = "elo";
+  const rankPrior = entry ? null : tennisEloPriorFromRank(profile?.rank ?? null);
+  const rating = entry?.rating ?? rankPrior ?? TENNIS_INITIAL_ELO;
+  const ratingSource: TennisPredictedPlayer["ratingSource"] = entry
+    ? "elo"
+    : rankPrior !== null
+      ? "rank-prior"
+      : "default";
 
   const baseline = surfaceServeBaseline(profile ?? null, surface);
   const tour = model.baselines;
@@ -226,6 +244,20 @@ export async function GET(request: Request) {
       { status: 503 },
     );
   }
+
+  if (tours.every((tour) => (model.tours[tour]?.matchesProcessed ?? 0) === 0)) {
+    const failedSources = tours.flatMap((tour) =>
+      (model.tours[tour]?.sources ?? []).map((s) => ({ tour, ...s })),
+    );
+    return Response.json(
+      {
+        error: "Tennis data unavailable — missing Elo or historical data.",
+        sources: failedSources,
+      },
+      { status: 503 },
+    );
+  }
+
   const matches: TennisPredictedMatch[] = [];
   const sources: Array<Record<string, unknown>> = [];
 
@@ -256,61 +288,65 @@ export async function GET(request: Request) {
         if (fixture.status === "live" && !includeLive) continue;
         if (surface && fixture.surface !== surface) continue;
 
-        const playerA = toModelPlayer(tourModel, fixture.players[0].name, fixture.players[0].country, fixture.surface);
-        const playerB = toModelPlayer(tourModel, fixture.players[1].name, fixture.players[1].country, fixture.surface);
-        const tourBaselines = tourModel.baselines;
+        try {
+          const playerA = toModelPlayer(tourModel, fixture.players[0].name, fixture.players[0].country, fixture.surface);
+          const playerB = toModelPlayer(tourModel, fixture.players[1].name, fixture.players[1].country, fixture.surface);
+          const tourBaselines = tourModel.baselines;
 
-        const prediction = predictTennisMatch({
-          tour,
-          tournament: fixture.tournament,
-          surface: fixture.surface,
-          round: fixture.round,
-          date: fixture.date,
-          bestOf: fixture.bestOf,
-          playerA: {
-            name: playerA.name,
-            elo: playerA.ratingSource === "elo" ? playerA.rating : null,
-            ratingSource: playerA.ratingSource,
-            matchesPlayed: playerA.matchesPlayed,
-            rank: playerA.rank,
-            acesPerMatch: playerA.acesPerMatch,
-            doubleFaultsPerMatch: playerA.doubleFaultsPerMatch,
-            bpFacedPerMatch: playerA.bpFacedPerMatch,
-            baselineSource: playerA.baselineSource,
-          },
-          playerB: {
-            name: playerB.name,
-            elo: playerB.ratingSource === "elo" ? playerB.rating : null,
-            ratingSource: playerB.ratingSource,
-            matchesPlayed: playerB.matchesPlayed,
-            rank: playerB.rank,
-            acesPerMatch: playerB.acesPerMatch,
-            doubleFaultsPerMatch: playerB.doubleFaultsPerMatch,
-            bpFacedPerMatch: playerB.bpFacedPerMatch,
-            baselineSource: playerB.baselineSource,
-          },
-          tourBaselines: tourBaselines
-            ? {
-                acesPerMatch: tourBaselines.acesPerMatch,
-                doubleFaultsPerMatch: tourBaselines.doubleFaultsPerMatch,
-                bpFacedPerMatch: tourBaselines.bpFacedPerMatch,
-              }
-            : null,
-        });
+          const prediction = predictTennisMatch({
+            tour,
+            tournament: fixture.tournament,
+            surface: fixture.surface,
+            round: fixture.round,
+            date: fixture.date,
+            bestOf: fixture.bestOf,
+            playerA: {
+              name: playerA.name,
+              elo: playerA.ratingSource === "elo" ? playerA.rating : null,
+              ratingSource: playerA.ratingSource,
+              matchesPlayed: playerA.matchesPlayed,
+              rank: playerA.rank,
+              acesPerMatch: playerA.acesPerMatch,
+              doubleFaultsPerMatch: playerA.doubleFaultsPerMatch,
+              bpFacedPerMatch: playerA.bpFacedPerMatch,
+              baselineSource: playerA.baselineSource,
+            },
+            playerB: {
+              name: playerB.name,
+              elo: playerB.ratingSource === "elo" ? playerB.rating : null,
+              ratingSource: playerB.ratingSource,
+              matchesPlayed: playerB.matchesPlayed,
+              rank: playerB.rank,
+              acesPerMatch: playerB.acesPerMatch,
+              doubleFaultsPerMatch: playerB.doubleFaultsPerMatch,
+              bpFacedPerMatch: playerB.bpFacedPerMatch,
+              baselineSource: playerB.baselineSource,
+            },
+            tourBaselines: tourBaselines
+              ? {
+                  acesPerMatch: tourBaselines.acesPerMatch,
+                  doubleFaultsPerMatch: tourBaselines.doubleFaultsPerMatch,
+                  bpFacedPerMatch: tourBaselines.bpFacedPerMatch,
+                }
+              : null,
+          });
 
-        matches.push({
-          id: `${tour}-${fixture.id}`,
-          tour,
-          tournament: fixture.tournament,
-          surface: fixture.surface,
-          round: fixture.round,
-          date: fixture.date,
-          venue: fixture.venue,
-          status: fixture.status,
-          bestOf: fixture.bestOf,
-          players: [playerA, playerB],
-          prediction,
-        });
+          matches.push({
+            id: `${tour}-${fixture.id}`,
+            tour,
+            tournament: fixture.tournament,
+            surface: fixture.surface,
+            round: fixture.round,
+            date: fixture.date,
+            venue: fixture.venue,
+            status: fixture.status,
+            bestOf: fixture.bestOf,
+            players: [playerA, playerB],
+            prediction,
+          });
+        } catch (err) {
+          console.warn(`[tennis] Skipping fixture ${tour}-${fixture.id}:`, err);
+        }
       }
     }),
   );
