@@ -1109,7 +1109,13 @@ export interface TennisOULineGroup {
   lines: Array<{ line: number; overProb: number; underProb: number }>;
 }
 
-export type TennisLockTier = "NONE" | "AVOID" | "LOCK" | "GOLD_LOCK" | "PLATINUM_LOCK";
+export type TennisLockTier =
+  | "NONE"
+  | "AVOID"
+  | "BRONZE_LOCK"
+  | "SILVER_LOCK"
+  | "GOLD_LOCK"
+  | "PLATINUM_LOCK";
 
 export interface TennisPrediction {
   players: { a: string; b: string };
@@ -1263,51 +1269,69 @@ export class TennisMarketEngine {
     const effectiveEloB = surfaceAdjustedElo(resolvedB.rating, surface);
     const favorite = probA >= probB ? playerA.name : playerB.name;
 
-    // Raw Elo gap & upgraded winning-formula lock classification (with real-world trap filters).
+    // Raw Elo gap & calibrated lock tiers with sequential real-world trap filters.
     const eloGap = Math.abs(resolvedA.rating - resolvedB.rating);
     const favPlayer = resolvedA.rating >= resolvedB.rating ? playerA : playerB;
     const dogPlayer = resolvedA.rating >= resolvedB.rating ? playerB : playerA;
     const favDaysSince = daysSinceIso(favPlayer.lastPlayed, this.input.date);
 
     let lockTier: TennisLockTier = "NONE";
+    if (eloGap >= 280) lockTier = "PLATINUM_LOCK";
+    else if (eloGap >= 220) lockTier = "GOLD_LOCK";
+    else if (eloGap >= 180) lockTier = "SILVER_LOCK";
+    else if (eloGap >= 140) lockTier = "BRONZE_LOCK";
+
     const lockReasons: string[] = [];
 
-    if (eloGap >= 350) {
-      const isBo5 = bestOf === 5;
-      const isGrass = surface === "grass";
-      const isLowSample = (playerA.matchesPlayed ?? 0) < 2 || (playerB.matchesPlayed ?? 0) < 2;
-      const isLongLayoff = favDaysSince !== null && favDaysSince > 30;
-      const isRusty = isLowSample || isLongLayoff;
+    if (lockTier !== "NONE") {
+      const downgradeOneTier = (tier: TennisLockTier): TennisLockTier => {
+        if (tier === "PLATINUM_LOCK") return "GOLD_LOCK";
+        if (tier === "GOLD_LOCK") return "SILVER_LOCK";
+        if (tier === "SILVER_LOCK") return "BRONZE_LOCK";
+        return tier; // BRONZE_LOCK floor (warning added below)
+      };
 
+      // Trap 1 (Grass): downgrade by one level; if already BRONZE, keep BRONZE with warning.
+      if (surface === "grass") {
+        if (lockTier === "BRONZE_LOCK") {
+          lockReasons.push("Grass court variance warning (Bronze floor)");
+        } else {
+          lockTier = downgradeOneTier(lockTier);
+          lockReasons.push("Grass court variance — downgraded 1 tier");
+        }
+      }
+
+      // Trap 2 (Rusty): favorite hasn't played in 30+ days → downgrade by one level.
+      if (favDaysSince !== null && favDaysSince >= 30) {
+        if (lockTier === "BRONZE_LOCK") {
+          lockReasons.push(`Favorite returning from ${favDaysSince}-day layoff (30+d warning)`);
+        } else {
+          lockTier = downgradeOneTier(lockTier);
+          lockReasons.push(`Favorite returning from ${favDaysSince}-day layoff (30+d) — downgraded 1 tier`);
+        }
+      }
+
+      // Trap 3 (Big Server): underdog averages >= 8.5 aces/match → downgrade to AVOID.
       const dogHasRealServe =
         dogPlayer.baselineSource === "surface" || dogPlayer.baselineSource === "overall";
       const dogAces = dogHasRealServe ? dogPlayer.acesPerMatch : null;
-      const favAces = favPlayer.acesPerMatch;
-      const isBigServerUnderdog =
-        dogAces !== null &&
-        (dogAces >= 10 || (dogAces >= 8.5 && favAces !== null && dogAces > favAces));
-
-      if (isBo5) {
-        lockTier = "PLATINUM_LOCK"; // ~96.7% historical win rate (Grand Slams)
-        lockReasons.push("Best-of-5 Grand Slam lock (96.7% backtested win rate)");
-      } else if (isBigServerUnderdog) {
-        lockTier = "AVOID"; // ~70–78% historical win rate (serve-bot upset trap)
+      if (dogAces !== null && dogAces >= 8.5) {
+        lockTier = "AVOID";
         lockReasons.push(
           `Big-server underdog trap (${dogPlayer.name} averages ${dogAces.toFixed(1)} aces/match)`,
         );
-      } else if (isGrass) {
-        lockTier = "LOCK"; // ~81–88% warning on grass
-        lockReasons.push("Grass court variance warning — downgraded from Gold Lock");
-      } else if (isRusty) {
-        lockTier = "LOCK"; // ~88–89% warning on long layoff / thin sample
-        if (isLongLayoff) {
-          lockReasons.push(`Favorite returning from ${favDaysSince}-day layoff (>30d)`);
-        } else {
-          lockReasons.push("Thin rated sample (<2 matches played)");
-        }
-      } else {
-        lockTier = "GOLD_LOCK"; // ~95% historical win rate — all filters passed
-        lockReasons.push("All real-world filters passed (~95% backtested win rate)");
+      }
+
+      if (lockReasons.length === 0) {
+        const tierLabel =
+          lockTier === "PLATINUM_LOCK"
+            ? "280+ ELO edge"
+            : lockTier === "GOLD_LOCK"
+              ? "220+ ELO edge"
+              : lockTier === "SILVER_LOCK"
+                ? "180+ ELO edge"
+                : "140+ ELO edge";
+        lockReasons.push(`Calibrated ${tierLabel} — all trap filters cleared`);
       }
     }
 

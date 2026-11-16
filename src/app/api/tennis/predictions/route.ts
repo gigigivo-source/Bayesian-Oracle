@@ -348,7 +348,8 @@ export async function GET(request: Request) {
           const isPlayableLock =
             prediction.lockTier === "PLATINUM_LOCK" ||
             prediction.lockTier === "GOLD_LOCK" ||
-            prediction.lockTier === "LOCK";
+            prediction.lockTier === "SILVER_LOCK" ||
+            prediction.lockTier === "BRONZE_LOCK";
           if (locksOnly && !isPlayableLock) continue;
 
           matches.push({
@@ -377,9 +378,10 @@ export async function GET(request: Request) {
   const lockRank = (tier: TennisLockTier): number => {
     if (tier === "PLATINUM_LOCK") return 0;
     if (tier === "GOLD_LOCK") return 1;
-    if (tier === "LOCK") return 2;
-    if (tier === "AVOID") return 3;
-    return 4;
+    if (tier === "SILVER_LOCK") return 2;
+    if (tier === "BRONZE_LOCK") return 3;
+    if (tier === "NONE") return 4;
+    return 5;
   };
 
   matches.sort((a, b) =>
@@ -394,13 +396,15 @@ export async function GET(request: Request) {
   const locksSummary = {
     platinum: matches.filter((m) => m.lockTier === "PLATINUM_LOCK").length,
     gold: matches.filter((m) => m.lockTier === "GOLD_LOCK").length,
-    lock: matches.filter((m) => m.lockTier === "LOCK").length,
+    silver: matches.filter((m) => m.lockTier === "SILVER_LOCK").length,
+    bronze: matches.filter((m) => m.lockTier === "BRONZE_LOCK").length,
     avoid: matches.filter((m) => m.lockTier === "AVOID").length,
     total: matches.filter(
       (m) =>
         m.lockTier === "PLATINUM_LOCK" ||
         m.lockTier === "GOLD_LOCK" ||
-        m.lockTier === "LOCK",
+        m.lockTier === "SILVER_LOCK" ||
+        m.lockTier === "BRONZE_LOCK",
     ).length,
   };
 
