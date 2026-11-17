@@ -240,4 +240,165 @@ describe("GET /api/tennis/predictions", () => {
     const body = (await response.json()) as { error: string };
     expect(body.error).toContain("quick carpet");
   });
+
+  it("exposes bestValueMarket on playable Locks and builds a > 1.50 valueAccumulator", async () => {
+    vi.resetModules();
+
+    // Build a synthetic Sackmann history giving two dominant favorites huge raw ELO edges
+    // (>= 250 pts) over two weak qualifiers with low ace averages (< 8.5, so AVOID doesn't trigger).
+    const header = SACKMANN_CSV.trim().split("\n")[0];
+    const rows: string[] = [header];
+    let matchNum = 1;
+    for (let i = 0; i < 20; i++) {
+      const day = String(1 + (i % 28)).padStart(2, "0");
+      rows.push(
+        `2026-0100,Madrid,Hard,64,M,202607${day},${matchNum++},100001,1,,Dominant Alpha,R,190,ESP,23.0,200001,,,Qualifier One,R,180,FRA,25.0,6-2 6-3,3,R32,75,7,1,60,42,34,12,9,1,2,3,2,58,34,20,6,9,2,6,1,9000,180,250`,
+      );
+      rows.push(
+        `2026-0101,Madrid,Hard,64,M,202607${day},${matchNum++},100002,2,,Dominant Beta,R,192,ITA,24.0,200002,,,Qualifier Two,R,178,ARG,26.0,6-3 6-2,3,R32,78,6,1,62,43,35,11,9,1,2,3,2,56,33,19,6,9,2,6,2,8500,190,220`,
+      );
+    }
+    const lockCsv = `${rows.join("\n")}\n`;
+
+    const lockBoard = {
+      events: [
+        {
+          name: "Cincinnati Open",
+          groupings: [
+            {
+              grouping: { displayName: "Men's Singles", slug: "mens-singles" },
+              competitions: [
+                {
+                  id: "900001",
+                  date: "2026-07-25T16:00Z",
+                  status: { type: { state: "pre" } },
+                  round: { displayName: "Round of 32" },
+                  competitors: [
+                    { type: "athlete", athlete: { displayName: "Dominant Alpha" } },
+                    { type: "athlete", athlete: { displayName: "Qualifier One" } },
+                  ],
+                },
+                {
+                  id: "900002",
+                  date: "2026-07-25T18:00Z",
+                  status: { type: { state: "pre" } },
+                  round: { displayName: "Round of 32" },
+                  competitors: [
+                    { type: "athlete", athlete: { displayName: "Qualifier Two" } },
+                    { type: "athlete", athlete: { displayName: "Dominant Beta" } },
+                  ],
+                },
+                {
+                  id: "900003",
+                  date: "2026-07-25T20:00Z",
+                  status: { type: { state: "pre" } },
+                  round: { displayName: "Round of 32" },
+                  competitors: [
+                    { type: "athlete", athlete: { displayName: "Dominant Alpha" } },
+                    { type: "athlete", athlete: { displayName: "Dominant Beta" } },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL): Promise<Response> => {
+        const url = String(input);
+        if (url.includes("site.api.espn.com/apis/site/v2/sports/tennis/atp/scoreboard")) {
+          return { ok: true, status: 200, json: async () => lockBoard } as Response;
+        }
+        if (url.includes("site.api.espn.com/apis/site/v2/sports/tennis/wta/scoreboard")) {
+          return { ok: true, status: 200, json: async () => ({ events: [] }) } as Response;
+        }
+        if (url.startsWith("https://raw.githubusercontent.com/")) {
+          return { ok: true, status: 200, text: async () => lockCsv } as Response;
+        }
+        if (url.includes("tennis-data.co.uk")) {
+          return { ok: true, status: 200, text: async () => "" } as Response;
+        }
+        return { ok: true, status: 200, json: async () => ({}) } as Response;
+      }),
+    );
+
+    const freshRoute = await import("./route");
+    const response = await freshRoute.GET(request("?tour=atp&limit=10"));
+    const body = (await response.json()) as {
+      count: number;
+      locksSummary: { total: number; valueMarketsCount: number };
+      valueAccumulator: {
+        targetOdds: number;
+        meetsTarget: boolean;
+        legCount: number;
+        combinedOdds: number;
+        combinedProbability: number;
+        matchWinnerCombinedOdds: number;
+        legs: Array<{
+          matchId: string;
+          market: string;
+          selection: string;
+          probability: number;
+          fairOdds: number;
+        }>;
+      } | null;
+      matches: Array<{
+        id: string;
+        lockTier: string;
+        bestValueMarket?: {
+          market: string;
+          selection: string;
+          probability: number;
+          fairOdds: number;
+        };
+        prediction: {
+          bestValueMarket?: {
+            market: string;
+            selection: string;
+            probability: number;
+            fairOdds: number;
+          };
+        };
+      }>;
+    };
+
+    expect(body.count).toBe(3);
+    expect(body.locksSummary.total).toBe(2);
+    expect(body.locksSummary.valueMarketsCount).toBe(2);
+
+    const lockA = body.matches.find((m) => m.id === "atp-900001");
+    const lockB = body.matches.find((m) => m.id === "atp-900002");
+    const evenMatch = body.matches.find((m) => m.id === "atp-900003");
+
+    expect(lockA?.bestValueMarket).toBeDefined();
+    expect(lockA?.bestValueMarket).toEqual(lockA?.prediction.bestValueMarket);
+    expect(["Set Betting", "Total Games"]).toContain(lockA?.bestValueMarket?.market);
+    expect(lockA?.bestValueMarket?.fairOdds).toBeGreaterThanOrEqual(1.25);
+
+    expect(lockB?.bestValueMarket).toBeDefined();
+    expect(lockB?.bestValueMarket).toEqual(lockB?.prediction.bestValueMarket);
+
+    // Even matchup (Alpha vs Beta, 0 ELO gap) is NOT a Lock → omits bestValueMarket.
+    expect(evenMatch?.lockTier).toBe("NONE");
+    expect(evenMatch?.bestValueMarket).toBeUndefined();
+    expect(evenMatch?.prediction.bestValueMarket).toBeUndefined();
+
+    // Suggested accumulator combines both Lock Value Markets and clears > 1.50.
+    expect(body.valueAccumulator).not.toBeNull();
+    expect(body.valueAccumulator?.legCount).toBe(2);
+    expect(body.valueAccumulator?.meetsTarget).toBe(true);
+    expect(body.valueAccumulator?.combinedOdds).toBeGreaterThan(1.5);
+    expect(body.valueAccumulator?.combinedOdds).toBeGreaterThan(
+      body.valueAccumulator?.matchWinnerCombinedOdds ?? 0,
+    );
+
+    // locksOnly=1 returns only the 2 playable Locks.
+    const locksOnlyRes = await freshRoute.GET(request("?tour=atp&locksOnly=1"));
+    const locksOnlyBody = (await locksOnlyRes.json()) as { count: number; matches: Array<{ id: string }> };
+    expect(locksOnlyBody.count).toBe(2);
+    expect(locksOnlyBody.matches.map((m) => m.id).sort()).toEqual(["atp-900001", "atp-900002"]);
+  });
 });

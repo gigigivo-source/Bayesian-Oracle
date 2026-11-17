@@ -1117,6 +1117,107 @@ export type TennisLockTier =
   | "GOLD_LOCK"
   | "PLATINUM_LOCK";
 
+/**
+ * Highest-probability alternative "Value Market" (Set Betting or Total Games)
+ * extracted for playable Tennis Locks whose Match Winner fair odds are too low
+ * to build > 1.50 accumulators.
+ */
+export interface TennisBestValueMarket {
+  market: string;      // e.g., "Set Betting", "Total Games"
+  selection: string;   // e.g., "Carlos Alcaraz 2-0", "Under 21.5"
+  probability: number; // e.g., 0.72
+  fairOdds: number;    // e.g., 1.38
+}
+
+/** True for actionable Lock tiers (excludes NONE and trap-flagged AVOID). */
+export function isTennisPlayableLock(tier: TennisLockTier): boolean {
+  return (
+    tier === "PLATINUM_LOCK" ||
+    tier === "GOLD_LOCK" ||
+    tier === "SILVER_LOCK" ||
+    tier === "BRONZE_LOCK"
+  );
+}
+
+/**
+ * Minimum single-leg fair odds for a Lock's Value Market so that any 2-leg
+ * Lock accumulator clears > 1.50 combined fair odds (1.25 × 1.25 = 1.5625).
+ */
+export const TENNIS_VALUE_MARKET_MIN_FAIR_ODDS = 1.25;
+
+/**
+ * Extract the highest-probability "Value Market" (Set Betting or Total Games)
+ * for a playable Tennis Lock. Evaluates the favorite's Set Betting outcomes
+ * and the quoted Total Games O/U lines, picking the highest-probability option
+ * with fairOdds >= minFairOdds (default 1.25; falls back to the highest-prob
+ * candidate if none meets the floor).
+ *
+ * Returns undefined for non-Locks (`NONE`) and trap-flagged matches (`AVOID`).
+ */
+export function extractBestValueMarket(params: {
+  lockTier: TennisLockTier;
+  favorite: string;
+  favoriteIsA: boolean;
+  setBetting: Array<{ setsA: number; setsB: number; prob: number }>;
+  totalLines: Array<{ line: number; overProb: number; underProb: number }>;
+  minFairOdds?: number;
+}): TennisBestValueMarket | undefined {
+  const {
+    lockTier,
+    favorite,
+    favoriteIsA,
+    setBetting,
+    totalLines,
+    minFairOdds = TENNIS_VALUE_MARKET_MIN_FAIR_ODDS,
+  } = params;
+
+  if (!isTennisPlayableLock(lockTier)) return undefined;
+
+  const candidates: TennisBestValueMarket[] = [];
+
+  for (const entry of setBetting) {
+    const favWon = favoriteIsA ? entry.setsA > entry.setsB : entry.setsB > entry.setsA;
+    if (!favWon) continue;
+    const favSets = favoriteIsA ? entry.setsA : entry.setsB;
+    const oppSets = favoriteIsA ? entry.setsB : entry.setsA;
+    const p = clamp(entry.prob, 0.001, 0.999);
+    candidates.push({
+      market: "Set Betting",
+      selection: `${favorite} ${favSets}-${oppSets}`,
+      probability: round(p),
+      fairOdds: round(1 / p, 2),
+    });
+  }
+
+  for (const line of totalLines) {
+    const overP = clamp(line.overProb, 0.001, 0.999);
+    const underP = clamp(line.underProb, 0.001, 0.999);
+    const isOver = overP >= underP;
+    const p = isOver ? overP : underP;
+    candidates.push({
+      market: "Total Games",
+      selection: isOver ? `Over ${line.line.toFixed(1)}` : `Under ${line.line.toFixed(1)}`,
+      probability: round(p),
+      fairOdds: round(1 / p, 2),
+    });
+  }
+
+  if (candidates.length === 0) return undefined;
+
+  // Prefer high-probability (>= 50%) candidates that clear the accumulator odds floor.
+  const eligible = candidates.filter((c) => c.probability >= 0.5 && c.fairOdds >= minFairOdds);
+  const pool = eligible.length > 0 ? eligible : candidates;
+
+  pool.sort((a, b) => {
+    if (b.probability !== a.probability) return b.probability - a.probability;
+    if (b.fairOdds !== a.fairOdds) return b.fairOdds - a.fairOdds;
+    if (a.market !== b.market) return a.market === "Set Betting" ? -1 : 1;
+    return a.selection.localeCompare(b.selection);
+  });
+
+  return pool[0];
+}
+
 export interface TennisPrediction {
   players: { a: string; b: string };
   surface: TennisSurface | null;
@@ -1127,6 +1228,8 @@ export interface TennisPrediction {
   lockTier: TennisLockTier;
   /** Human-readable explanation of the lock tier or trap downgrade. */
   lockReasons: string[];
+  /** Highest-probability Set Betting or Total Games alternative for playable Locks. */
+  bestValueMarket?: TennisBestValueMarket;
   matchWinner: {
     probA: number;
     probB: number;
@@ -1346,7 +1449,7 @@ export class TennisMarketEngine {
 
     // T2 — Total Games O/U.
     const ladder = bestOf === 5 ? TOTAL_GAMES_LADDER_BO5 : TOTAL_GAMES_LADDER_BO3;
-    const totalLines = this.ouLinesFor(distribution.expectedTotalGames, ladder).map((line) => {
+    const rawTotalLines = this.ouLinesFor(distribution.expectedTotalGames, ladder).map((line) => {
       const overProb = clamp(
         distribution.totalGames
           .filter((entry) => entry.games > line)
@@ -1364,8 +1467,13 @@ export class TennisMarketEngine {
         line,
         `Exact set-score model expects ${distribution.expectedTotalGames.toFixed(1)} games (${bestOf === 5 ? "best-of-5" : "best-of-3"}).`,
       );
-      return { line, overProb: round(overProb), underProb: round(1 - overProb) };
+      return { line, overProb, underProb: 1 - overProb };
     });
+    const totalLines = rawTotalLines.map(({ line, overProb, underProb }) => ({
+      line,
+      overProb: round(overProb),
+      underProb: round(underProb),
+    }));
 
     // T3 — Set Winner: set 1 + set betting.
     this.market("TENNIS_SW", "Set Winner", "Set 1 Winner", playerA.name, setProbA, null,
@@ -1387,6 +1495,15 @@ export class TennisMarketEngine {
         return { score: `${entry.setsA}-${entry.setsB}`, prob: round(entry.prob) };
       });
 
+    // Best Value Market for playable Locks (Set Betting vs Total Games).
+    const bestValueMarket = extractBestValueMarket({
+      lockTier,
+      favorite,
+      favoriteIsA: probA >= probB,
+      setBetting: distribution.setBetting,
+      totalLines: rawTotalLines,
+    });
+
     // Projected scoreline — the modal full path, written winner-first.
     const modal = distribution.scorelines[0];
     const projectedWinner = modal && modal.setsA > modal.setsB ? playerA.name : playerB.name;
@@ -1402,6 +1519,11 @@ export class TennisMarketEngine {
     ];
     if (lockTier !== "NONE") {
       notes.push(`${lockTier}: ${lockReasons.join("; ")}.`);
+    }
+    if (bestValueMarket) {
+      notes.push(
+        `Value market: ${bestValueMarket.market} — ${bestValueMarket.selection} (${(bestValueMarket.probability * 100).toFixed(1)}%, fair odds ${bestValueMarket.fairOdds.toFixed(2)}).`,
+      );
     }
     if (resolvedA.source !== "elo" || resolvedB.source !== "elo") {
       notes.push(
@@ -1419,6 +1541,7 @@ export class TennisMarketEngine {
       eloGap: round(eloGap, 1),
       lockTier,
       lockReasons,
+      ...(bestValueMarket ? { bestValueMarket } : {}),
       matchWinner: {
         probA: round(probA),
         probB: round(probB),

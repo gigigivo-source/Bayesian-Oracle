@@ -37,7 +37,9 @@ import {
   type TennisEloTable,
 } from "@/lib/data/elo";
 import {
+  isTennisPlayableLock,
   predictTennisMatch,
+  type TennisBestValueMarket,
   type TennisLockTier,
   type TennisPrediction,
 } from "@/lib/engine/markets";
@@ -171,8 +173,34 @@ export interface TennisPredictedMatch {
   eloGap: number;
   lockTier: TennisLockTier;
   lockReasons: string[];
+  bestValueMarket?: TennisBestValueMarket;
   players: [TennisPredictedPlayer, TennisPredictedPlayer];
   prediction: TennisPrediction;
+}
+
+export interface TennisValueAccumulatorLeg {
+  matchId: string;
+  tour: TennisTour;
+  tournament: string;
+  date: string;
+  lockTier: TennisLockTier;
+  matchup: string;
+  favorite: string;
+  matchWinnerOdds: number;
+  market: string;
+  selection: string;
+  probability: number;
+  fairOdds: number;
+}
+
+export interface TennisValueAccumulator {
+  targetOdds: number;
+  meetsTarget: boolean;
+  legCount: number;
+  combinedOdds: number;
+  combinedProbability: number;
+  matchWinnerCombinedOdds: number;
+  legs: TennisValueAccumulatorLeg[];
 }
 
 function toModelPlayer(
@@ -345,11 +373,7 @@ export async function GET(request: Request) {
               : null,
           });
 
-          const isPlayableLock =
-            prediction.lockTier === "PLATINUM_LOCK" ||
-            prediction.lockTier === "GOLD_LOCK" ||
-            prediction.lockTier === "SILVER_LOCK" ||
-            prediction.lockTier === "BRONZE_LOCK";
+          const isPlayableLock = isTennisPlayableLock(prediction.lockTier);
           if (locksOnly && !isPlayableLock) continue;
 
           matches.push({
@@ -365,6 +389,7 @@ export async function GET(request: Request) {
             eloGap: prediction.eloGap,
             lockTier: prediction.lockTier,
             lockReasons: prediction.lockReasons,
+            ...(prediction.bestValueMarket ? { bestValueMarket: prediction.bestValueMarket } : {}),
             players: [playerA, playerB],
             prediction,
           });
@@ -399,14 +424,12 @@ export async function GET(request: Request) {
     silver: matches.filter((m) => m.lockTier === "SILVER_LOCK").length,
     bronze: matches.filter((m) => m.lockTier === "BRONZE_LOCK").length,
     avoid: matches.filter((m) => m.lockTier === "AVOID").length,
-    total: matches.filter(
-      (m) =>
-        m.lockTier === "PLATINUM_LOCK" ||
-        m.lockTier === "GOLD_LOCK" ||
-        m.lockTier === "SILVER_LOCK" ||
-        m.lockTier === "BRONZE_LOCK",
-    ).length,
+    total: matches.filter((m) => isTennisPlayableLock(m.lockTier)).length,
+    valueMarketsCount: matches.filter((m) => m.bestValueMarket !== undefined).length,
   };
+
+  const slicedMatches = matches.slice(0, limit);
+  const valueAccumulator = buildValueAccumulator(slicedMatches, lockRank);
 
   const ratings: Record<string, unknown> = {};
   for (const tour of tours) {
@@ -425,9 +448,87 @@ export async function GET(request: Request) {
     generatedAt: new Date().toISOString(),
     filters: { surface, tour: tourParam, limit, days, includeLive, locksOnly },
     locksSummary,
+    valueAccumulator,
     ratings,
     sources,
     count: matches.length,
-    matches: matches.slice(0, limit),
+    matches: slicedMatches,
   });
+}
+
+const VALUE_ACCUMULATOR_TARGET_ODDS = 1.5;
+const VALUE_ACCUMULATOR_MAX_LEGS = 4;
+
+/**
+ * Build a suggested > 1.50 accumulator from the top playable Lock Value
+ * Markets in the returned match slice (ordered by lock tier, value market
+ * probability, and ELO edge). Picks at least 2 legs when 2+ locks exist so
+ * it forms a true accumulator, and adds legs up to 4 until combined odds
+ * clear > 1.50.
+ */
+function buildValueAccumulator(
+  matches: TennisPredictedMatch[],
+  lockRank: (tier: TennisLockTier) => number,
+): TennisValueAccumulator | null {
+  const candidates = matches
+    .filter(
+      (m): m is TennisPredictedMatch & { bestValueMarket: TennisBestValueMarket } =>
+        isTennisPlayableLock(m.lockTier) && m.bestValueMarket !== undefined,
+    )
+    .sort(
+      (a, b) =>
+        lockRank(a.lockTier) - lockRank(b.lockTier) ||
+        b.bestValueMarket.probability - a.bestValueMarket.probability ||
+        b.eloGap - a.eloGap ||
+        a.date.localeCompare(b.date) ||
+        a.id.localeCompare(b.id),
+    );
+
+  if (candidates.length === 0) return null;
+
+  const minLegs = Math.min(2, candidates.length);
+  const maxLegs = Math.min(VALUE_ACCUMULATOR_MAX_LEGS, candidates.length);
+  const legs: TennisValueAccumulatorLeg[] = [];
+  let combinedOdds = 1;
+  let combinedProbability = 1;
+  let matchWinnerCombinedOdds = 1;
+
+  for (const match of candidates) {
+    if (legs.length >= maxLegs) break;
+    if (legs.length >= minLegs && combinedOdds > VALUE_ACCUMULATOR_TARGET_ODDS) break;
+
+    const winner = match.prediction.matchWinner;
+    const matchWinnerOdds =
+      winner.probA >= winner.probB ? winner.fairOddsA : winner.fairOddsB;
+
+    legs.push({
+      matchId: match.id,
+      tour: match.tour,
+      tournament: match.tournament,
+      date: match.date,
+      lockTier: match.lockTier,
+      matchup: `${match.players[0].name} vs ${match.players[1].name}`,
+      favorite: winner.favorite,
+      matchWinnerOdds,
+      market: match.bestValueMarket.market,
+      selection: match.bestValueMarket.selection,
+      probability: match.bestValueMarket.probability,
+      fairOdds: match.bestValueMarket.fairOdds,
+    });
+
+    combinedOdds *= match.bestValueMarket.fairOdds;
+    combinedProbability *= match.bestValueMarket.probability;
+    matchWinnerCombinedOdds *= matchWinnerOdds;
+  }
+
+  const roundedOdds = Math.round(combinedOdds * 100) / 100;
+  return {
+    targetOdds: VALUE_ACCUMULATOR_TARGET_ODDS,
+    meetsTarget: roundedOdds > VALUE_ACCUMULATOR_TARGET_ODDS,
+    legCount: legs.length,
+    combinedOdds: roundedOdds,
+    combinedProbability: Math.round(combinedProbability * 10000) / 10000,
+    matchWinnerCombinedOdds: Math.round(matchWinnerCombinedOdds * 100) / 100,
+    legs,
+  };
 }

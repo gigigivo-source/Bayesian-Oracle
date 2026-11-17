@@ -4,8 +4,11 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  TENNIS_VALUE_MARKET_MIN_FAIR_ODDS,
+  extractBestValueMarket,
   formatScoreline,
   gameWinProbFromSetProb,
+  isTennisPlayableLock,
   matchProbFromSetProb,
   matchSetDistribution,
   predictTennisMatch,
@@ -405,5 +408,105 @@ describe("predictTennisMatch", () => {
     // #20 maps to ~1870 raw; the surface-adjusted effective rating is exposed.
     expect(prior.matchWinner.ratingSourceB).toBe("rank-prior");
     expect(prior.matchWinner.effectiveEloB).toBeGreaterThan(1700);
+  });
+
+  it("extracts bestValueMarket for every playable Lock tier and omits it for NONE and AVOID", () => {
+    const base = matchup({ surface: "hard", date: "2026-07-12T12:00:00Z" });
+    const buildWithGap = (gap: number, opts: { acesB?: number; bestOf?: 3 | 5; swapFav?: boolean } = {}) => {
+      const fav = {
+        ...base.playerA,
+        name: "Carlos Alcaraz",
+        elo: 1500 + gap,
+        lastPlayed: "2026-07-08T00:00:00Z",
+        acesPerMatch: 7.0,
+        baselineSource: "surface" as const,
+      };
+      const dog = {
+        ...base.playerB,
+        name: "Qualifier",
+        elo: 1500,
+        lastPlayed: "2026-07-08T00:00:00Z",
+        acesPerMatch: opts.acesB ?? 4.5,
+        baselineSource: "surface" as const,
+      };
+      return predictTennisMatch(
+        matchup({
+          surface: "hard",
+          date: "2026-07-12T12:00:00Z",
+          bestOf: opts.bestOf ?? 3,
+          playerA: opts.swapFav ? dog : fav,
+          playerB: opts.swapFav ? fav : dog,
+        }),
+      );
+    };
+
+    // NONE (gap < 140) and AVOID (big-server underdog) never receive bestValueMarket.
+    const nonLock = buildWithGap(120);
+    expect(nonLock.lockTier).toBe("NONE");
+    expect(nonLock.bestValueMarket).toBeUndefined();
+
+    const avoid = buildWithGap(300, { acesB: 9.2 });
+    expect(avoid.lockTier).toBe("AVOID");
+    expect(avoid.bestValueMarket).toBeUndefined();
+
+    // Every playable Lock tier (BRONZE → PLATINUM) gets a Value Market with fairOdds >= 1.25
+    // and strictly higher odds than the favorite's Match Winner price.
+    for (const gap of [140, 180, 220, 280, 360, 480]) {
+      const pred = buildWithGap(gap);
+      expect(isTennisPlayableLock(pred.lockTier)).toBe(true);
+      expect(pred.bestValueMarket).toBeDefined();
+      const bvm = pred.bestValueMarket!;
+      expect(["Set Betting", "Total Games"]).toContain(bvm.market);
+      expect(bvm.probability).toBeGreaterThan(0.5);
+      expect(bvm.fairOdds).toBeGreaterThanOrEqual(TENNIS_VALUE_MARKET_MIN_FAIR_ODDS);
+      expect(bvm.fairOdds).toBeGreaterThan(pred.matchWinner.fairOddsA);
+      expect(bvm.fairOdds).toBeCloseTo(1 / bvm.probability, 1);
+      expect(pred.notes.some((n) => n.includes("Value market:"))).toBe(true);
+    }
+
+    // Moderate Platinum Lock (gap 280 Bo3): Total Games Under has higher probability than 2-0.
+    const plat280 = buildWithGap(280);
+    expect(plat280.bestValueMarket?.market).toBe("Total Games");
+    expect(plat280.bestValueMarket?.selection).toMatch(/^Under \d+\.5$/);
+
+    // Heavy Platinum Lock (gap 480 Bo3): Set Betting 2-0 wins (~72.6%, @1.38).
+    const plat480 = buildWithGap(480);
+    expect(plat480.bestValueMarket?.market).toBe("Set Betting");
+    expect(plat480.bestValueMarket?.selection).toBe("Carlos Alcaraz 2-0");
+    expect(plat480.bestValueMarket?.probability).toBeCloseTo(0.726, 2);
+    expect(plat480.bestValueMarket?.fairOdds).toBeCloseTo(1.38, 1);
+
+    // When Player B is the favorite, Set Betting selection still names the favorite winner-first ("2-0").
+    const plat480B = buildWithGap(480, { swapFav: true });
+    expect(plat480B.bestValueMarket?.market).toBe("Set Betting");
+    expect(plat480B.bestValueMarket?.selection).toBe("Carlos Alcaraz 2-0");
+    expect(plat480B.bestValueMarket?.probability).toBeCloseTo(plat480.bestValueMarket!.probability, 4);
+
+    // Extreme mismatch (gap 700 Bo3): 2-0 dips below 1.25 fair odds, so Total Games >= 1.25 is chosen.
+    const extreme = buildWithGap(700);
+    expect(extreme.bestValueMarket?.market).toBe("Total Games");
+    expect(extreme.bestValueMarket?.fairOdds).toBeGreaterThanOrEqual(TENNIS_VALUE_MARKET_MIN_FAIR_ODDS);
+
+    // Best-of-5 Gold Lock picks Total Games (higher prob than 3-0 straight sets).
+    const bo5Gold = buildWithGap(260, { bestOf: 5 });
+    expect(bo5Gold.bestValueMarket?.market).toBe("Total Games");
+    expect(bo5Gold.bestValueMarket?.fairOdds).toBeGreaterThan(1.5);
+  });
+
+  it("extractBestValueMarket falls back to highest probability if no candidate clears minFairOdds", () => {
+    const picked = extractBestValueMarket({
+      lockTier: "PLATINUM_LOCK",
+      favorite: "Novak Djokovic",
+      favoriteIsA: true,
+      setBetting: [{ setsA: 2, setsB: 0, prob: 0.88 }],
+      totalLines: [{ line: 17.5, overProb: 0.15, underProb: 0.85 }],
+      minFairOdds: 1.25,
+    });
+    expect(picked).toEqual({
+      market: "Set Betting",
+      selection: "Novak Djokovic 2-0",
+      probability: 0.88,
+      fairOdds: 1.14,
+    });
   });
 });
