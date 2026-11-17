@@ -10,13 +10,18 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import type { TennisLockTier, TennisPrediction } from "@/lib/engine/markets";
+import type {
+  TennisBestValueMarket,
+  TennisLockTier,
+  TennisPrediction,
+} from "@/lib/engine/markets";
 import {
   CARD_ACCENT_ORDER,
   CARD_GLASS,
   CARD_GLASS_SKIN,
   CHIP,
   CHIP_ON_AMBER,
+  GLASS_PANEL,
   GLASS_TEXT_SHADOW,
   NAV_PILL,
   NAV_PILL_OFF,
@@ -58,8 +63,34 @@ interface PredictedMatch {
   eloGap?: number;
   lockTier?: TennisLockTier;
   lockReasons?: string[];
+  bestValueMarket?: TennisBestValueMarket;
   players: [PredictedPlayer, PredictedPlayer];
   prediction: TennisPrediction;
+}
+
+interface ValueAccumulatorLeg {
+  matchId: string;
+  tour: Tour;
+  tournament: string;
+  date: string;
+  lockTier: TennisLockTier;
+  matchup: string;
+  favorite: string;
+  matchWinnerOdds: number;
+  market: string;
+  selection: string;
+  probability: number;
+  fairOdds: number;
+}
+
+interface ValueAccumulator {
+  targetOdds: number;
+  meetsTarget: boolean;
+  legCount: number;
+  combinedOdds: number;
+  combinedProbability: number;
+  matchWinnerCombinedOdds: number;
+  legs: ValueAccumulatorLeg[];
 }
 
 interface TennisResponse {
@@ -72,7 +103,9 @@ interface TennisResponse {
     bronze: number;
     avoid: number;
     total: number;
+    valueMarketsCount?: number;
   };
+  valueAccumulator?: ValueAccumulator | null;
   ratings: Record<
     string,
     {
@@ -200,6 +233,57 @@ function lockTierOrder(tier: TennisLockTier): number {
   if (tier === "BRONZE_LOCK") return 3;
   if (tier === "NONE") return 4;
   return 5; // AVOID surfaced below standard matches unless inspected
+}
+
+function resolveBestValueMarket(match: PredictedMatch): TennisBestValueMarket | null {
+  if (!isPlayableLockTier(resolveLockTier(match))) return null;
+  const candidate = match.prediction?.bestValueMarket ?? match.bestValueMarket;
+  if (!candidate) return null;
+  if (
+    typeof candidate.market !== "string" ||
+    candidate.market.trim() === "" ||
+    typeof candidate.selection !== "string" ||
+    candidate.selection.trim() === "" ||
+    !isFiniteNumber(candidate.probability) ||
+    !isFiniteNumber(candidate.fairOdds)
+  ) {
+    return null;
+  }
+  return candidate;
+}
+
+function getFavoriteMatchWinnerOdds(match: PredictedMatch): number | null {
+  const winner = match.prediction?.matchWinner;
+  if (!winner) return null;
+  const probA = isFiniteNumber(winner.probA) ? winner.probA : 0.5;
+  const probB = isFiniteNumber(winner.probB) ? winner.probB : 0.5;
+  const odds = probA >= probB ? winner.fairOddsA : winner.fairOddsB;
+  return isFiniteNumber(odds) ? odds : null;
+}
+
+function matchesBestValueTotalGamesLine(
+  bestValue: TennisBestValueMarket | null,
+  line: number | null | undefined,
+): "over" | "under" | null {
+  if (!bestValue || bestValue.market !== "Total Games" || !isFiniteNumber(line)) return null;
+  const formatted = line.toFixed(1);
+  if (bestValue.selection === `Over ${formatted}`) return "over";
+  if (bestValue.selection === `Under ${formatted}`) return "under";
+  return null;
+}
+
+function matchesBestValueSetBettingScore(
+  bestValue: TennisBestValueMarket | null,
+  score: string | null | undefined,
+  favoriteIsA: boolean,
+): boolean {
+  if (!bestValue || bestValue.market !== "Set Betting" || typeof score !== "string") return false;
+  const match = /(\d+)-(\d+)$/.exec(bestValue.selection.trim());
+  if (!match) return false;
+  const favSets = match[1];
+  const oppSets = match[2];
+  const expectedScore = favoriteIsA ? `${favSets}-${oppSets}` : `${oppSets}-${favSets}`;
+  return score === expectedScore;
 }
 
 function isFiniteNumber(value: unknown): value is number {
@@ -360,7 +444,17 @@ function MarketSection({
 }
 
 /** One upcoming match with every market family of the tennis engine. */
-function TennisMatchCard({ match, accentIndex }: { match: PredictedMatch; accentIndex: number }) {
+function TennisMatchCard({
+  match,
+  accentIndex,
+  inAcca,
+  onToggleAcca,
+}: {
+  match: PredictedMatch;
+  accentIndex: number;
+  inAcca: boolean;
+  onToggleAcca: (matchId: string) => void;
+}) {
   if (!match || !Array.isArray(match.players) || match.players.length < 2 || !match.prediction) {
     return null;
   }
@@ -376,6 +470,8 @@ function TennisMatchCard({ match, accentIndex }: { match: PredictedMatch; accent
   const lockTier = resolveLockTier(match);
   const lockReasons = resolveLockReasons(match);
   const lockStyle = lockTier !== "NONE" ? LOCK_TIER_STYLES[lockTier] : null;
+  const bestValueMarket = resolveBestValueMarket(match);
+  const favMwOdds = getFavoriteMatchWinnerOdds(match);
 
   const winner = prediction.matchWinner;
   const probA = isFiniteNumber(winner?.probA) ? winner.probA : 0.5;
@@ -462,6 +558,66 @@ function TennisMatchCard({ match, accentIndex }: { match: PredictedMatch; accent
         </div>
       )}
 
+      {/* ── Best Value Market callout for playable Locks ── */}
+      {bestValueMarket && (
+        <div
+          data-testid="best-value-market"
+          className="mb-4 rounded-xl border border-emerald-400/35 bg-gradient-to-r from-emerald-500/[0.14] via-amber-500/[0.08] to-slate-950/60 p-3 shadow-inner"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2.5">
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="text-[10px] font-mono font-extrabold uppercase tracking-widest text-emerald-300">
+                  ⚡ Best Value Market
+                </span>
+                <span className="rounded-full bg-emerald-400/15 px-2 py-0.5 font-mono text-[10px] font-bold uppercase tracking-wider text-emerald-200 ring-1 ring-emerald-400/40">
+                  {bestValueMarket.market}
+                </span>
+                {bestValueMarket.fairOdds > 1.5 && (
+                  <span className="rounded-full bg-amber-400/15 px-2 py-0.5 font-mono text-[10px] font-bold text-amber-200 ring-1 ring-amber-400/40">
+                    &gt; 1.50 Solo
+                  </span>
+                )}
+              </div>
+              <div className="mt-1 truncate text-base font-extrabold text-white">
+                {bestValueMarket.selection}
+              </div>
+              <div className="mt-0.5 text-[11px] font-mono text-slate-300">
+                {pct(bestValueMarket.probability)} win prob
+                {favMwOdds !== null && bestValueMarket.fairOdds > favMwOdds && (
+                  <span className="text-emerald-300/90">
+                    {" "}· vs Match Winner @{fmtFixed(favMwOdds, 2)} (+{fmtFixed(bestValueMarket.fairOdds - favMwOdds, 2)})
+                  </span>
+                )}
+              </div>
+            </div>
+
+            <div className="flex shrink-0 items-center gap-2">
+              <div className="rounded-lg border border-emerald-400/30 bg-slate-950/70 px-3 py-1.5 text-center">
+                <div className="text-[9px] font-mono font-bold uppercase tracking-widest text-emerald-300/80">
+                  Fair Odds
+                </div>
+                <div className="font-mono text-lg font-extrabold leading-tight text-emerald-200">
+                  {fmtFixed(bestValueMarket.fairOdds, 2)}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => onToggleAcca(match.id)}
+                aria-pressed={inAcca}
+                className={
+                  inAcca
+                    ? "cursor-pointer select-none rounded-lg border border-emerald-300/60 bg-emerald-500/25 px-3 py-2 font-mono text-[11px] font-bold text-emerald-100 transition-all hover:bg-emerald-500/35 active:scale-95 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300/70"
+                    : "cursor-pointer select-none rounded-lg border border-amber-400/50 bg-gradient-to-r from-[#F59E0B] to-[#FF8C00] px-3 py-2 font-mono text-[11px] font-bold text-white shadow-md shadow-amber-500/20 transition-all hover:brightness-110 active:scale-95 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/70"
+                }
+              >
+                {inAcca ? "✓ In Acca" : "+ Add to Acca"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ── Players + Match Winner probability ── */}
       <div className="mb-4 grid grid-cols-[1fr_auto_1fr] items-center gap-2 sm:gap-4">
         <div className="min-w-0 text-right">
@@ -534,15 +690,27 @@ function TennisMatchCard({ match, accentIndex }: { match: PredictedMatch; accent
           <div className="text-[11px] font-mono text-slate-400">
             Expected total: <span className="font-bold text-white">{fmtFixed(prediction.totalGames?.expected, 1)}</span> games
           </div>
-          {totalGamesLines.map((line, lineIdx) => (
-            <SplitBar
-              key={`${matchKey}-tg-${line?.line ?? "x"}-${lineIdx}`}
-              leftLabel={`Over ${fmtFixed(line?.line, 1)}`}
-              leftProb={line?.overProb}
-              rightLabel={`Under ${fmtFixed(line?.line, 1)}`}
-              rightProb={line?.underProb}
-            />
-          ))}
+          {totalGamesLines.map((line, lineIdx) => {
+            const matchedSide = matchesBestValueTotalGamesLine(bestValueMarket, line?.line);
+            const bar = (
+              <SplitBar
+                leftLabel={`${matchedSide === "over" ? "⚡ " : ""}Over ${fmtFixed(line?.line, 1)}`}
+                leftProb={line?.overProb}
+                rightLabel={`Under ${fmtFixed(line?.line, 1)}${matchedSide === "under" ? " ⚡" : ""}`}
+                rightProb={line?.underProb}
+              />
+            );
+            return matchedSide ? (
+              <div
+                key={`${matchKey}-tg-${line?.line ?? "x"}-${lineIdx}`}
+                className="rounded-lg border border-emerald-400/35 bg-emerald-500/[0.08] p-2"
+              >
+                {bar}
+              </div>
+            ) : (
+              <div key={`${matchKey}-tg-${line?.line ?? "x"}-${lineIdx}`}>{bar}</div>
+            );
+          })}
         </MarketSection>
 
         <MarketSection title="Set Winner" accent="text-violet-300">
@@ -554,16 +722,28 @@ function TennisMatchCard({ match, accentIndex }: { match: PredictedMatch; accent
             rightProb={prediction.setWinner?.set1ProbB}
           />
           <div className="flex flex-wrap gap-1.5 pt-1">
-            {setBetting.map((betting, betIdx) => (
-              <span
-                key={`${matchKey}-sb-${betting?.score ?? "x"}-${betIdx}`}
-                className="rounded-md bg-slate-800/80 px-2 py-1 font-mono text-[10px] text-slate-300"
-                title={`${prediction.players?.a ?? nameA}–${prediction.players?.b ?? nameB} set betting`}
-              >
-                <span className="font-bold text-white">{betting?.score ?? "—"}</span>{" "}
-                {pct(betting?.prob)}
-              </span>
-            ))}
+            {setBetting.map((betting, betIdx) => {
+              const isValuePick = matchesBestValueSetBettingScore(
+                bestValueMarket,
+                betting?.score,
+                favoriteIsA,
+              );
+              return (
+                <span
+                  key={`${matchKey}-sb-${betting?.score ?? "x"}-${betIdx}`}
+                  className={
+                    isValuePick
+                      ? "rounded-md bg-emerald-500/20 px-2 py-1 font-mono text-[10px] text-emerald-100 ring-1 ring-emerald-400/70"
+                      : "rounded-md bg-slate-800/80 px-2 py-1 font-mono text-[10px] text-slate-300"
+                  }
+                  title={`${prediction.players?.a ?? nameA}–${prediction.players?.b ?? nameB} set betting${isValuePick ? " (Best Value Market)" : ""}`}
+                >
+                  {isValuePick && <span className="mr-1 text-emerald-300">⚡</span>}
+                  <span className="font-bold text-white">{betting?.score ?? "—"}</span>{" "}
+                  {pct(betting?.prob)}
+                </span>
+              );
+            })}
           </div>
         </MarketSection>
 
@@ -672,6 +852,7 @@ export default function TennisPage() {
   const [tour, setTour] = useState<"both" | Tour>("both");
   const [surface, setSurface] = useState<"" | Surface>("");
   const [locksOnly, setLocksOnly] = useState(false);
+  const [selectedAccaIds, setSelectedAccaIds] = useState<string[]>([]);
   const [data, setData] = useState<TennisResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -809,6 +990,102 @@ export default function TennisPage() {
       ]);
   }, [visibleMatches]);
 
+  // Playable Locks that carry a Best Value Market, ranked best-first for the Accumulator Builder.
+  const valueLockEntries = useMemo(() => {
+    const entries: Array<{
+      match: PredictedMatch;
+      lockTier: TennisLockTier;
+      valueMarket: TennisBestValueMarket;
+      mwOdds: number | null;
+    }> = [];
+    for (const match of validMatches) {
+      const valueMarket = resolveBestValueMarket(match);
+      if (!valueMarket) continue;
+      entries.push({
+        match,
+        lockTier: resolveLockTier(match),
+        valueMarket,
+        mwOdds: getFavoriteMatchWinnerOdds(match),
+      });
+    }
+    entries.sort(
+      (a, b) =>
+        lockTierOrder(a.lockTier) - lockTierOrder(b.lockTier) ||
+        b.valueMarket.probability - a.valueMarket.probability ||
+        resolveEloGap(b.match) - resolveEloGap(a.match) ||
+        (a.match.date ?? "").localeCompare(b.match.date ?? ""),
+    );
+    return entries;
+  }, [validMatches]);
+
+  const selectedAccaSet = useMemo(() => new Set(selectedAccaIds), [selectedAccaIds]);
+
+  const selectedAccaEntries = useMemo(() => {
+    const byId = new Map(valueLockEntries.map((entry) => [entry.match.id, entry]));
+    const resolved: typeof valueLockEntries = [];
+    for (const id of selectedAccaIds) {
+      const entry = byId.get(id);
+      if (entry) resolved.push(entry);
+    }
+    return resolved;
+  }, [valueLockEntries, selectedAccaIds]);
+
+  const accaMetrics = useMemo(() => {
+    if (selectedAccaEntries.length === 0) {
+      return {
+        combinedOdds: 0,
+        combinedProb: 0,
+        mwCombinedOdds: 0,
+        meetsTarget: false,
+      };
+    }
+    let combinedOdds = 1;
+    let combinedProb = 1;
+    let mwCombinedOdds = 1;
+    let hasAllMw = true;
+    for (const entry of selectedAccaEntries) {
+      combinedOdds *= entry.valueMarket.fairOdds;
+      combinedProb *= entry.valueMarket.probability;
+      if (entry.mwOdds !== null) {
+        mwCombinedOdds *= entry.mwOdds;
+      } else {
+        hasAllMw = false;
+      }
+    }
+    const roundedOdds = Math.round(combinedOdds * 100) / 100;
+    return {
+      combinedOdds: roundedOdds,
+      combinedProb,
+      mwCombinedOdds: hasAllMw ? Math.round(mwCombinedOdds * 100) / 100 : 0,
+      meetsTarget: roundedOdds > 1.5,
+    };
+  }, [selectedAccaEntries]);
+
+  const toggleAccaLeg = useCallback((matchId: string) => {
+    setSelectedAccaIds((prev) =>
+      prev.includes(matchId) ? prev.filter((id) => id !== matchId) : [...prev, matchId],
+    );
+  }, []);
+
+  const autoPickAcca = useCallback(() => {
+    if (valueLockEntries.length === 0) return;
+    const minLegs = Math.min(2, valueLockEntries.length);
+    const maxLegs = Math.min(4, valueLockEntries.length);
+    const picked: string[] = [];
+    let odds = 1;
+    for (const entry of valueLockEntries) {
+      if (picked.length >= maxLegs) break;
+      if (picked.length >= minLegs && odds > 1.5) break;
+      picked.push(entry.match.id);
+      odds *= entry.valueMarket.fairOdds;
+    }
+    setSelectedAccaIds(picked);
+  }, [valueLockEntries]);
+
+  const clearAcca = useCallback(() => {
+    setSelectedAccaIds([]);
+  }, []);
+
   const ratedTours = data?.ratings ? Object.keys(data.ratings) : [];
   const sources = Array.isArray(data?.sources) ? data.sources : [];
   const updatedLabel = mounted ? formatUpdatedAt(data?.generatedAt) : null;
@@ -823,7 +1100,7 @@ export default function TennisPage() {
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
             <div className={`${CHIP} ${CHIP_ON_AMBER} mb-3 inline-flex px-3 py-1.5 text-[11px] font-bold uppercase tracking-wider`}>
-              🎾 ATP / WTA · Raw ELO + Filtered Locks
+              🎾 ATP / WTA · Raw ELO + Lock Value Markets
             </div>
             <h1 className="text-3xl font-extrabold tracking-tight text-white sm:text-4xl">
               Tennis Predictions
@@ -831,9 +1108,10 @@ export default function TennisPage() {
             <p className="mt-2 max-w-3xl text-sm text-slate-400 sm:text-base">
               Upcoming singles matches priced by raw ELO across a 7-day window
               with calibrated Lock tiers — 💎 PLATINUM (280+), 🥇 GOLD (220+),
-              🥈 SILVER (180+), 🥉 BRONZE (140+) — and real-world trap filters
-              (Grass &amp; 30+d Layoff downgrade 1 tier; Big-Server underdogs
-              ≥8.5 aces/match flagged ⚠️ AVOID).
+              🥈 SILVER (180+), 🥉 BRONZE (140+) — trap filters, and each
+              Lock&apos;s highest-probability{" "}
+              <span className="font-semibold text-emerald-300">Value Market</span>{" "}
+              (Set Betting or Total Games) to build &gt; 1.50 accumulators.
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -943,6 +1221,115 @@ export default function TennisPage() {
           </div>
         )}
 
+        {/* ── Lock Value Accumulator Builder ── */}
+        {!loading && !error && valueLockEntries.length > 0 && (
+          <section
+            aria-label="Lock Value Accumulator Builder"
+            data-testid="lock-value-acca-builder"
+            className={`${GLASS_PANEL} rounded-2xl p-4 sm:p-5`}
+          >
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-[11px] font-mono font-extrabold uppercase tracking-widest text-emerald-300">
+                    🎯 Lock Value Accumulator
+                  </span>
+                  <span className="rounded-full bg-white/[0.06] px-2 py-0.5 font-mono text-[10px] font-semibold text-slate-300">
+                    Target &gt; 1.50 combined odds
+                  </span>
+                </div>
+                <p className="mt-1 text-xs text-slate-400">
+                  {selectedAccaEntries.length === 0
+                    ? `${valueLockEntries.length} Lock Value Market${valueLockEntries.length === 1 ? "" : "s"} ready — click "+ Add to Acca" on any Lock card or use Auto-Pick to build a > 1.50 slip.`
+                    : `${selectedAccaEntries.length} Lock Value leg${selectedAccaEntries.length === 1 ? "" : "s"} selected (Set Betting / Total Games instead of low Match Winner odds).`}
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={autoPickAcca}
+                  className="cursor-pointer select-none rounded-full border border-emerald-400/50 bg-emerald-500/20 px-3.5 py-1.5 font-mono text-xs font-bold text-emerald-100 transition-all hover:bg-emerald-500/30 active:scale-95 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300/70"
+                >
+                  ⚡ Auto-Pick &gt; 1.50 Acca
+                </button>
+                {selectedAccaEntries.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={clearAcca}
+                    className="cursor-pointer select-none rounded-full border border-white/15 bg-white/[0.04] px-3 py-1.5 font-mono text-xs font-semibold text-slate-300 transition-all hover:bg-white/10 hover:text-white active:scale-95"
+                  >
+                    Clear
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {selectedAccaEntries.length > 0 && (
+              <div className="mt-4 space-y-3 border-t border-white/[0.08] pt-3">
+                <div className="flex flex-wrap items-center gap-3 font-mono">
+                  <div className="rounded-xl border border-emerald-400/35 bg-emerald-500/10 px-3 py-2">
+                    <div className="text-[9px] font-bold uppercase tracking-widest text-emerald-300/80">
+                      Combined Fair Odds
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span
+                        data-testid="acca-combined-odds"
+                        className="text-xl font-extrabold text-white"
+                      >
+                        {fmtFixed(accaMetrics.combinedOdds, 2)}
+                      </span>
+                      <span
+                        className={
+                          accaMetrics.meetsTarget
+                            ? "rounded-full bg-emerald-400/20 px-2 py-0.5 text-[10px] font-bold text-emerald-200 ring-1 ring-emerald-400/50"
+                            : "rounded-full bg-amber-400/20 px-2 py-0.5 text-[10px] font-bold text-amber-200 ring-1 ring-amber-400/50"
+                        }
+                      >
+                        {accaMetrics.meetsTarget ? "✓ > 1.50 Target Met" : "Add 1 more Lock"}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="rounded-xl border border-white/[0.08] bg-slate-950/50 px-3 py-2">
+                    <div className="text-[9px] font-bold uppercase tracking-widest text-slate-400">
+                      Combined Win Prob
+                    </div>
+                    <div className="text-base font-bold text-white">
+                      {pct(accaMetrics.combinedProb)}
+                    </div>
+                  </div>
+                  {accaMetrics.mwCombinedOdds > 0 && (
+                    <div className="rounded-xl border border-white/[0.08] bg-slate-950/50 px-3 py-2">
+                      <div className="text-[9px] font-bold uppercase tracking-widest text-slate-400">
+                        vs Match Winner Acca
+                      </div>
+                      <div className="text-base font-bold text-slate-300">
+                        @{fmtFixed(accaMetrics.mwCombinedOdds, 2)}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex flex-wrap gap-2">
+                  {selectedAccaEntries.map((entry) => (
+                    <button
+                      key={`acca-chip-${entry.match.id}`}
+                      type="button"
+                      onClick={() => toggleAccaLeg(entry.match.id)}
+                      title="Click to remove leg from accumulator"
+                      className="cursor-pointer inline-flex items-center gap-1.5 rounded-full border border-emerald-400/35 bg-slate-900/80 px-3 py-1 font-mono text-[11px] text-slate-100 transition-all hover:border-rose-400/50 hover:bg-rose-500/15"
+                    >
+                      <span className="text-emerald-300">{entry.valueMarket.market}:</span>
+                      <span className="font-bold text-white">{entry.valueMarket.selection}</span>
+                      <span className="text-emerald-200">@{fmtFixed(entry.valueMarket.fairOdds, 2)}</span>
+                      <span className="ml-0.5 text-slate-400" aria-hidden="true">×</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </section>
+        )}
+
         {/* ── Error ── */}
         {error && (
           <div className="rounded-2xl border border-rose-500/30 bg-rose-500/10 p-4 text-sm text-rose-200" role="alert">
@@ -1030,6 +1417,8 @@ export default function TennisPage() {
                     key={`${match.id || "match"}-${matchIdx}`}
                     match={match}
                     accentIndex={matchIdx}
+                    inAcca={selectedAccaSet.has(match.id)}
+                    onToggleAcca={toggleAccaLeg}
                   />
                 ))}
               </div>
@@ -1044,9 +1433,11 @@ export default function TennisPage() {
             (💎 PLATINUM 280+, 🥇 GOLD 220+, 🥈 SILVER 180+, 🥉 BRONZE 140+)
             with sequential real-world trap filters (Grass court −1 tier, 30+d
             favorite layoff −1 tier, Big-Server underdog ≥8.5 aces/match → ⚠️
-            AVOID) → exact set-score distribution and Poisson serve-stat markets
-            on real per-match baselines. Ratings without replayed history use a
-            labelled rank prior — never an invented number.
+            AVOID) → Value Market Extractor (highest-probability Set Betting or
+            Total Games option ≥ 1.25 fair odds for &gt; 1.50 accumulators),
+            exact set-score distribution, and Poisson serve-stat markets on real
+            per-match baselines. Ratings without replayed history use a labelled
+            rank prior — never an invented number.
           </p>
           <p className="mt-2">
             Data: Jeff Sackmann tennis_atp / tennis_wta match logs (GitHub
