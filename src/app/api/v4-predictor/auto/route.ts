@@ -1,15 +1,23 @@
 import dns from "node:dns";
 import tls from "node:tls";
 import * as espn from "@/lib/espn";
-import { loadMatchesFromOpenfootball, parseHistoricalDate } from "@/lib/data/historical";
+import {
+  loadMatchesFromOpenfootball,
+  matchesBefore,
+  parseHistoricalDate,
+  seasonCodes,
+  seasonOf,
+  type HistoricalMatch,
+} from "@/lib/data/historical";
 import { parseCsv } from "@/lib/data/sources/githubDatasets";
 import { generateV2Predictions, translateTeamName, type MatchXgResolver } from "@/lib/v4-predictor";
-import { createMatchXgResolver } from "@/lib/v4-predictor-server";;
+import { createMatchXgResolver } from "@/lib/v4-predictor-server";
 import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
 
 const DEFAULT_WEEK = 11;
+const RESULTS_CSV_SEASON = "2026-27";
 const RESULTS_CSV_API_URL =
   "https://api.github.com/repos/brysonhen/football_matchup_predictor/contents/data/raw/pl/E0_2627.csv";
 const RESULTS_TTL_MS = 30 * 60_000;
@@ -108,19 +116,18 @@ async function backfillOpenfootballResults(
   fixtures: espn.FixtureLite[],
 ): Promise<espn.FixtureLite[]> {
   const now = Date.now();
-  const needsBackfill = fixtures.some(
-    (fx) =>
-      fx.id.startsWith("openfootball:") &&
-      fx.state !== "post" &&
-      Date.parse(fx.date) < now,
-  );
-  if (!needsBackfill) return fixtures;
+  const needsBackfill = (fx: espn.FixtureLite) =>
+    fx.id.startsWith("openfootball:") &&
+    fx.state !== "post" &&
+    Date.parse(fx.date) < now &&
+    seasonOf(fx.date) === RESULTS_CSV_SEASON;
+  if (!fixtures.some(needsBackfill)) return fixtures;
 
   const results = await loadCompletedEplResults();
   if (!results) return fixtures;
 
   return fixtures.map((fx) => {
-    if (!fx.id.startsWith("openfootball:") || fx.state === "post") return fx;
+    if (!needsBackfill(fx)) return fx;
     const key = `${translateTeamName(fx.home.name)}|${translateTeamName(fx.away.name)}`;
     const settled = results.get(key);
     if (!settled) return fx;
@@ -136,8 +143,27 @@ async function backfillOpenfootballResults(
 }
 
 const SEASONS_BACK = 4;
+const EPL_SEASON_FIXTURES = 20 * 19; // Each club hosts the other 19 once.
 const XG_HISTORY_TTL_MS = 60 * 60_000;
-let cachedXgHistory: { at: number; matches: Awaited<ReturnType<typeof loadMatchesFromOpenfootball>>["matches"] } | null = null;
+const priorSeasonCache = new Map<string, { at: number; matches: HistoricalMatch[] }>();
+
+async function loadPriorSeason(season: string): Promise<HistoricalMatch[]> {
+  const cached = priorSeasonCache.get(season);
+  if (cached && Date.now() - cached.at < XG_HISTORY_TTL_MS) return cached.matches;
+
+  try {
+    const { matches, notes } = await loadMatchesFromOpenfootball("eng.1", [season]);
+    if (!notes.length && matches.length === EPL_SEASON_FIXTURES) {
+      priorSeasonCache.set(season, { at: Date.now(), matches });
+      return matches;
+    }
+    // A readable season file may still be incomplete. Prefer the last full
+    // season; otherwise use the available rows once, without caching them.
+    return cached?.matches ?? matches;
+  } catch {
+    return cached?.matches ?? [];
+  }
+}
 
 /** Completed matches strictly before `cutoffIso`, from the CSV results map. */
 function csvHistoryBefore(
@@ -178,27 +204,23 @@ function csvHistoryBefore(
  * xG-aware Locks back to their flat V2 lines — never to fabricated odds.
  */
 async function buildMatchXgResolver(cutoffIso: string): Promise<MatchXgResolver | null> {
-  const now = Date.now();
-  if (!cachedXgHistory || now - cachedXgHistory.at > XG_HISTORY_TTL_MS) {
-    const season = new Date(cutoffIso).getUTCMonth() >= 6
-      ? new Date(cutoffIso).getUTCFullYear()
-      : new Date(cutoffIso).getUTCFullYear() - 1;
-    const seasons = Array.from({ length: SEASONS_BACK }, (_, back) => {
-      const start = season - back;
-      return `${start}-${String((start + 1) % 100).padStart(2, "0")}`;
-    });
-    try {
-      const { matches } = await loadMatchesFromOpenfootball("eng.1", seasons);
-      cachedXgHistory = { at: now, matches };
-    } catch {
-      cachedXgHistory = { at: now, matches: [] };
-    }
-  }
+  const kickoff = new Date(cutoffIso);
+  if (!Number.isFinite(kickoff.getTime())) return null;
 
-  const results = await loadCompletedEplResults();
-  const history = [...cachedXgHistory.matches, ...csvHistoryBefore(results, cutoffIso)];
-  const resolver = createMatchXgResolver({ history, leagueSlug: "eng.1", onlyRelevant: false });
-  return resolver;
+  // seasonCodes ends with the slate's season. Skip it and replay the four
+  // previous seasons newest first, in the same order as backtest-local.ts.
+  const [season, ...priorSeasons] = seasonCodes(kickoff, SEASONS_BACK + 1).reverse();
+  const priorHistory = await Promise.all(priorSeasons.map(loadPriorSeason));
+  // If a prior season is missing, use flat V2 for this request rather than
+  // fitting xG to an incomplete window (or to the current-season CSV alone).
+  if (priorHistory.some((matches) => matches.length === 0)) return null;
+
+  const results = season === RESULTS_CSV_SEASON ? await loadCompletedEplResults() : null;
+  const history = [
+    ...matchesBefore(priorHistory.flat(), cutoffIso),
+    ...csvHistoryBefore(results, cutoffIso),
+  ];
+  return createMatchXgResolver({ history, leagueSlug: "eng.1", onlyRelevant: false });
 }
 
 export async function GET(request: Request) {
@@ -239,7 +261,7 @@ export async function GET(request: Request) {
       home: translateTeamName(fx.home.name),
       away: translateTeamName(fx.away.name),
     }));
-    const xg = await buildMatchXgResolver(sorted[0]?.date ?? new Date().toISOString());
+    const xg = sorted.length ? await buildMatchXgResolver(sorted[0].date) : null;
     const v2Predictions = generateV2Predictions(v2Fixtures, xg);
 
     const result = sorted.map((fx, index) => {
