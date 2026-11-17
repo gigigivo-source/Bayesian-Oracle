@@ -836,22 +836,91 @@ export interface TennisMarket {
 
 // ─── Pure model: sets & games ─────────────────────────────────────────────────
 
-/** P(win a best-of-3/5 match) given the per-set win probability. */
-export function matchProbFromSetProb(setProb: number, bestOf: 3 | 5): number {
+/**
+ * Empirically calibrated within-match intraclass set correlation (Beta-Binomial ρ).
+ * Corrects the i.i.d. set-independence bias where straight-set outcomes (2-0 / 3-0)
+ * were underpriced (48.8% vs 59.1% actual in Bo3 Locks; 31.1% vs 51.3% in Bo5).
+ */
+export const TENNIS_SET_CORRELATION = 0.25;
+
+/**
+ * Tour- and format-specific expected total-games shifts applied to the base
+ * set-score distribution so expected totals match empirical ATP/WTA baselines
+ * (ATP Bo3 ~22.8, WTA Bo3 ~20.9 — a -2.0 game WTA offset relative to ATP —
+ * and ATP Bo5 ~34.7).
+ */
+export const TENNIS_TOTAL_GAMES_SHIFT_ATP_BO3 = 1.5;
+export const TENNIS_TOTAL_GAMES_SHIFT_WTA_BO3 = -0.5;
+export const TENNIS_TOTAL_GAMES_SHIFT_ATP_BO5 = 1.3;
+
+/** Tour- and format-specific games shift applied to the total-games PMF. */
+export function tennisTotalGamesShift(tour: TennisTour, bestOf: 3 | 5): number {
+  if (bestOf === 5) return TENNIS_TOTAL_GAMES_SHIFT_ATP_BO5;
+  return tour === "wta" ? TENNIS_TOTAL_GAMES_SHIFT_WTA_BO3 : TENNIS_TOTAL_GAMES_SHIFT_ATP_BO3;
+}
+
+/**
+ * Beta-Binomial conditional set-win probability for player A given prior set
+ * wins (setsA, setsB) and intraclass correlation ρ ∈ [0, 0.95].
+ * Reduces identically to `baseSetProb` when `setCorrelation === 0`.
+ */
+function conditionalSetWinProb(
+  baseSetProb: number,
+  setsA: number,
+  setsB: number,
+  setCorrelation: number,
+): number {
+  const s = clamp(baseSetProb, 0.001, 0.999);
+  const rho = clamp(setCorrelation, 0, 0.95);
+  if (rho <= 0) return s;
+  const kappa = (1 - rho) / rho;
+  return clamp((kappa * s + setsA) / (kappa + setsA + setsB), 0.005, 0.995);
+}
+
+/**
+ * P(win a best-of-3/5 match) given the marginal Set 1 win probability and an
+ * optional Beta-Binomial intraclass set correlation (default 0 = i.i.d. sets).
+ */
+export function matchProbFromSetProb(
+  setProb: number,
+  bestOf: 3 | 5,
+  setCorrelation = 0,
+): number {
   const p = clamp(setProb, 0, 1);
-  const q = 1 - p;
-  if (bestOf === 5) return p ** 3 * (1 + 3 * q + 6 * q * q);
-  return p * p * (3 - 2 * p);
+  const rho = clamp(setCorrelation, 0, 0.95);
+  if (rho <= 0) {
+    const q = 1 - p;
+    if (bestOf === 5) return p ** 3 * (1 + 3 * q + 6 * q * q);
+    return p * p * (3 - 2 * p);
+  }
+  const setsToWin = bestOf === 5 ? 3 : 2;
+  const memo = new Map<string, number>();
+  const dp = (a: number, b: number): number => {
+    if (a === setsToWin) return 1;
+    if (b === setsToWin) return 0;
+    const k = `${a}|${b}`;
+    const cached = memo.get(k);
+    if (cached !== undefined) return cached;
+    const condP = conditionalSetWinProb(p, a, b, rho);
+    const val = condP * dp(a + 1, b) + (1 - condP) * dp(a, b + 1);
+    memo.set(k, val);
+    return val;
+  };
+  return dp(0, 0);
 }
 
 /** Invert `matchProbFromSetProb` by bisection (monotone in the set prob). */
-export function setWinProbFromMatchProb(matchProb: number, bestOf: 3 | 5): number {
+export function setWinProbFromMatchProb(
+  matchProb: number,
+  bestOf: 3 | 5,
+  setCorrelation = 0,
+): number {
   const target = clamp(matchProb, 0.0005, 0.9995);
   let lo = 0.001;
   let hi = 0.999;
   for (let i = 0; i < 80; i++) {
     const mid = (lo + hi) / 2;
-    if (matchProbFromSetProb(mid, bestOf) < target) lo = mid;
+    if (matchProbFromSetProb(mid, bestOf, setCorrelation) < target) lo = mid;
     else hi = mid;
   }
   return (lo + hi) / 2;
@@ -964,18 +1033,39 @@ export interface TennisMatchDistribution {
  * outcomes. States are (setsA, setsB, totalGames); each state carries its
  * exact probability mass (for the O/U and set-betting markets) plus the
  * single most likely path through it (for the projected scoreline).
+ *
+ * Supports optional Beta-Binomial intraclass set correlation (`setCorrelation`,
+ * default 0 for i.i.d. sets) and a tour/format total-games calibration shift
+ * (`totalGamesShift`, default 0) applied via probability-conserving linear
+ * interpolation to the terminal total-games PMF.
  */
-export function matchSetDistribution(setProb: number, bestOf: 3 | 5): TennisMatchDistribution {
-  const gameProb = gameWinProbFromSetProb(setProb);
-  const setOutcomes = setScoreDistribution(gameProb);
+export function matchSetDistribution(
+  setProb: number,
+  bestOf: 3 | 5,
+  options?: { setCorrelation?: number; totalGamesShift?: number },
+): TennisMatchDistribution {
+  const setCorrelation = clamp(options?.setCorrelation ?? 0, 0, 0.95);
+  const totalGamesShift = options?.totalGamesShift ?? 0;
   const setsToWin = bestOf === 5 ? 3 : 2;
 
-  const key = (s: TennisDpState) => `${s.setsA}|${s.setsB}|${s.games}`;
+  const outcomeCache = new Map<string, TennisSetOutcome[]>();
+  const setOutcomesForState = (setsA: number, setsB: number): TennisSetOutcome[] => {
+    const cacheKey = setCorrelation <= 0 ? "iid" : `${setsA}|${setsB}`;
+    let cached = outcomeCache.get(cacheKey);
+    if (!cached) {
+      const condSetProb = conditionalSetWinProb(setProb, setsA, setsB, setCorrelation);
+      const gameProb = gameWinProbFromSetProb(condSetProb);
+      cached = setScoreDistribution(gameProb);
+      outcomeCache.set(cacheKey, cached);
+    }
+    return cached;
+  };
+
   let current = new Map<string, TennisDpState>();
   current.set("0|0|0", { setsA: 0, setsB: 0, games: 0, prob: 1, bestPath: [], bestPathProb: 1 });
 
   const setBetting = new Map<string, number>();
-  const totalGames = new Map<number, number>();
+  const rawTotalGames = new Map<number, number>();
   const scorelines: TennisScorelinePath[] = [];
   let matchProbA = 0;
 
@@ -987,7 +1077,7 @@ export function matchSetDistribution(setProb: number, bestOf: 3 | 5): TennisMatc
         matchProbA += state.setsA > state.setsB ? state.prob : 0;
         const bettingKey = `${state.setsA}|${state.setsB}`;
         setBetting.set(bettingKey, (setBetting.get(bettingKey) ?? 0) + state.prob);
-        totalGames.set(state.games, (totalGames.get(state.games) ?? 0) + state.prob);
+        rawTotalGames.set(state.games, (rawTotalGames.get(state.games) ?? 0) + state.prob);
         scorelines.push({
           setScores: state.bestPath.map(formatSetFromA),
           setsA: state.setsA,
@@ -997,6 +1087,7 @@ export function matchSetDistribution(setProb: number, bestOf: 3 | 5): TennisMatc
         });
         continue;
       }
+      const setOutcomes = setOutcomesForState(state.setsA, state.setsB);
       for (const outcome of setOutcomes) {
         const setsA = state.setsA + (outcome.aGames > outcome.bGames ? 1 : 0);
         const setsB = state.setsB + (outcome.aGames < outcome.bGames ? 1 : 0);
@@ -1023,6 +1114,24 @@ export function matchSetDistribution(setProb: number, bestOf: 3 | 5): TennisMatc
       }
     }
     current = next;
+  }
+
+  // Apply tour/format total-games calibration shift (exact mass-conserving interpolation).
+  const totalGames = new Map<number, number>();
+  const minLegalGames = bestOf === 5 ? 18 : 12;
+  if (totalGamesShift === 0) {
+    for (const [games, prob] of rawTotalGames) totalGames.set(games, prob);
+  } else {
+    const loShift = Math.floor(totalGamesShift);
+    const frac = totalGamesShift - loShift;
+    for (const [games, prob] of rawTotalGames) {
+      const gLo = Math.max(minLegalGames, games + loShift);
+      const gHi = Math.max(minLegalGames, games + loShift + 1);
+      totalGames.set(gLo, (totalGames.get(gLo) ?? 0) + prob * (1 - frac));
+      if (frac > 0) {
+        totalGames.set(gHi, (totalGames.get(gHi) ?? 0) + prob * frac);
+      }
+    }
   }
 
   let expectedTotalGames = 0;
@@ -1146,11 +1255,17 @@ export function isTennisPlayableLock(tier: TennisLockTier): boolean {
 export const TENNIS_VALUE_MARKET_MIN_FAIR_ODDS = 1.25;
 
 /**
- * Extract the highest-probability "Value Market" (Set Betting or Total Games)
- * for a playable Tennis Lock. Evaluates the favorite's Set Betting outcomes
- * and the quoted Total Games O/U lines, picking the highest-probability option
- * with fairOdds >= minFairOdds (default 1.25; falls back to the highest-prob
- * candidate if none meets the floor).
+ * Extract the highest-probability "Value Market" (Set Betting or Total Games Under)
+ * for a playable Tennis Lock.
+ *
+ * Calibrated rules (backed by historical ATP/WTA walk-forward backtests):
+ * - Total Games Over is disabled (historically lost 55%+ in Locks due to straight-set
+ *   dominance); only Total Games Under lines are considered.
+ * - Set Betting (e.g. 2-0 / 3-0) is restricted to `PLATINUM_LOCK` and `GOLD_LOCK`
+ *   tiers (on Silver/Bronze Locks, 2-0 drops to a ~50–60% coin flip).
+ * - Picks the highest-probability candidate clearing `probability >= 0.5` and
+ *   `fairOdds >= minFairOdds` (default 1.25; falls back to the highest-probability
+ *   candidate if none clears the floor).
  *
  * Returns undefined for non-Locks (`NONE`) and trap-flagged matches (`AVOID`).
  */
@@ -1175,30 +1290,32 @@ export function extractBestValueMarket(params: {
 
   const candidates: TennisBestValueMarket[] = [];
 
-  for (const entry of setBetting) {
-    const favWon = favoriteIsA ? entry.setsA > entry.setsB : entry.setsB > entry.setsA;
-    if (!favWon) continue;
-    const favSets = favoriteIsA ? entry.setsA : entry.setsB;
-    const oppSets = favoriteIsA ? entry.setsB : entry.setsA;
-    const p = clamp(entry.prob, 0.001, 0.999);
-    candidates.push({
-      market: "Set Betting",
-      selection: `${favorite} ${favSets}-${oppSets}`,
-      probability: round(p),
-      fairOdds: round(1 / p, 2),
-    });
+  // Restrict Set Betting (2-0 / 3-0) strictly to Platinum & Gold Locks.
+  const allowSetBetting = lockTier === "PLATINUM_LOCK" || lockTier === "GOLD_LOCK";
+  if (allowSetBetting) {
+    for (const entry of setBetting) {
+      const favWon = favoriteIsA ? entry.setsA > entry.setsB : entry.setsB > entry.setsA;
+      if (!favWon) continue;
+      const favSets = favoriteIsA ? entry.setsA : entry.setsB;
+      const oppSets = favoriteIsA ? entry.setsB : entry.setsA;
+      const p = clamp(entry.prob, 0.001, 0.999);
+      candidates.push({
+        market: "Set Betting",
+        selection: `${favorite} ${favSets}-${oppSets}`,
+        probability: round(p),
+        fairOdds: round(1 / p, 2),
+      });
+    }
   }
 
+  // Only consider Total Games Under lines (Total Games Over is disabled).
   for (const line of totalLines) {
-    const overP = clamp(line.overProb, 0.001, 0.999);
     const underP = clamp(line.underProb, 0.001, 0.999);
-    const isOver = overP >= underP;
-    const p = isOver ? overP : underP;
     candidates.push({
       market: "Total Games",
-      selection: isOver ? `Over ${line.line.toFixed(1)}` : `Under ${line.line.toFixed(1)}`,
-      probability: round(p),
-      fairOdds: round(1 / p, 2),
+      selection: `Under ${line.line.toFixed(1)}`,
+      probability: round(underP),
+      fairOdds: round(1 / underP, 2),
     });
   }
 
@@ -1360,7 +1477,7 @@ export class TennisMarketEngine {
 
   /** Build every market family (T1–T6) and the headline prediction. */
   predict(): TennisPrediction {
-    const { playerA, playerB, surface, bestOf, tourBaselines } = this.input;
+    const { tour, playerA, playerB, surface, bestOf, tourBaselines } = this.input;
     const resolvedA = this.resolveRating(playerA);
     const resolvedB = this.resolveRating(playerB);
 
@@ -1443,13 +1560,18 @@ export class TennisMarketEngine {
     this.market("TENNIS_MW", "Match Winner", "Match Winner", playerB.name, probB, null,
       `Raw ELO ${Math.round(resolvedB.rating)} vs ${Math.round(resolvedA.rating)} (gap ${Math.round(eloGap)}; ${resolvedB.source === "elo" ? "replayed" : resolvedB.source}).`);
 
-    // Sets & games — invert the match probability into the per-set/per-game model.
-    const setProbA = setWinProbFromMatchProb(probA, bestOf);
-    const distribution = matchSetDistribution(setProbA, bestOf);
+    // Sets & games — invert the match probability into the correlated per-set
+    // model and apply the tour/format total-games baseline calibration.
+    const setProbA = setWinProbFromMatchProb(probA, bestOf, TENNIS_SET_CORRELATION);
+    const totalGamesShift = tennisTotalGamesShift(tour, bestOf);
+    const distribution = matchSetDistribution(setProbA, bestOf, {
+      setCorrelation: TENNIS_SET_CORRELATION,
+      totalGamesShift,
+    });
 
     // T2 — Total Games O/U.
     const ladder = bestOf === 5 ? TOTAL_GAMES_LADDER_BO5 : TOTAL_GAMES_LADDER_BO3;
-    const rawTotalLines = this.ouLinesFor(distribution.expectedTotalGames, ladder).map((line) => {
+    const totalGamesProbForLine = (line: number) => {
       const overProb = clamp(
         distribution.totalGames
           .filter((entry) => entry.games > line)
@@ -1457,17 +1579,21 @@ export class TennisMarketEngine {
         0.001,
         0.999,
       );
+      return { line, overProb, underProb: 1 - overProb };
+    };
+    const rawTotalLines = this.ouLinesFor(distribution.expectedTotalGames, ladder).map((line) => {
+      const { overProb, underProb } = totalGamesProbForLine(line);
       const isOver = overProb >= 0.5;
       this.market(
         "TENNIS_TG",
         "Total Games",
         `Total Games O/U ${line.toFixed(1)}`,
         isOver ? `Over ${line.toFixed(1)}` : `Under ${line.toFixed(1)}`,
-        Math.max(overProb, 1 - overProb),
+        Math.max(overProb, underProb),
         line,
-        `Exact set-score model expects ${distribution.expectedTotalGames.toFixed(1)} games (${bestOf === 5 ? "best-of-5" : "best-of-3"}).`,
+        `Calibrated ${tour.toUpperCase()} set-score model expects ${distribution.expectedTotalGames.toFixed(1)} games (${bestOf === 5 ? "best-of-5" : "best-of-3"}).`,
       );
-      return { line, overProb, underProb: 1 - overProb };
+      return { line, overProb, underProb };
     });
     const totalLines = rawTotalLines.map(({ line, overProb, underProb }) => ({
       line,
@@ -1490,18 +1616,20 @@ export class TennisMarketEngine {
           `${entry.setsA}-${entry.setsB}`,
           entry.prob,
           null,
-          `P(${playerA.name} wins ${entry.setsA}-${entry.setsB}) from the exact set-score distribution.`,
+          `P(${playerA.name} wins ${entry.setsA}-${entry.setsB}) from the calibrated set-score distribution.`,
         );
         return { score: `${entry.setsA}-${entry.setsB}`, prob: round(entry.prob) };
       });
 
-    // Best Value Market for playable Locks (Set Betting vs Total Games).
+    // Best Value Market for playable Locks: evaluates Platinum/Gold Set Betting
+    // against Total Games Under across the calibrated tour/format ladder.
+    const ladderTotalLines = ladder.map(totalGamesProbForLine);
     const bestValueMarket = extractBestValueMarket({
       lockTier,
       favorite,
       favoriteIsA: probA >= probB,
       setBetting: distribution.setBetting,
-      totalLines: rawTotalLines,
+      totalLines: ladderTotalLines,
     });
 
     // Projected scoreline — the modal full path, written winner-first.

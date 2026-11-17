@@ -127,20 +127,20 @@ async function flush() {
 
 describe("TennisPage Value Market Extractor & Accumulator Builder", () => {
   it("highlights Best Value Market only on playable Locks and builds a > 1.50 accumulator", async () => {
-    // 1. Heavy Platinum Lock (gap 480) → Set Betting ("Carlos Alcaraz 2-0", @1.38)
+    // 1. Heavy Platinum Lock (gap 400) → Set Betting ("Carlos Alcaraz 2-0", @1.27)
     const platSetBetting = buildFixture({
       id: "atp-plat-1",
       tournament: "ATP Finals",
       date: "2026-11-17T14:00:00Z",
       nameA: "Carlos Alcaraz",
-      eloA: 1980,
+      eloA: 1900,
       acesA: 7.0,
       nameB: "Qualifier One",
       eloB: 1500,
       acesB: 4.0,
     });
 
-    // 2. Gold Lock (gap 240, Player B favorite) → Total Games ("Under 23.5", @1.71)
+    // 2. Gold Lock (gap 240, Player B favorite) → Total Games Under
     const goldTotalGames = buildFixture({
       id: "atp-gold-2",
       tournament: "ATP Finals",
