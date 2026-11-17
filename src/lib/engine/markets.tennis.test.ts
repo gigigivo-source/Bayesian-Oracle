@@ -4,6 +4,9 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  TENNIS_SET_CORRELATION,
+  TENNIS_TOTAL_GAMES_SHIFT_ATP_BO3,
+  TENNIS_TOTAL_GAMES_SHIFT_WTA_BO3,
   TENNIS_VALUE_MARKET_MIN_FAIR_ODDS,
   extractBestValueMarket,
   formatScoreline,
@@ -469,28 +472,30 @@ describe("predictTennisMatch", () => {
     expect(plat280.bestValueMarket?.market).toBe("Total Games");
     expect(plat280.bestValueMarket?.selection).toMatch(/^Under \d+\.5$/);
 
-    // Heavy Platinum Lock (gap 480 Bo3): Set Betting 2-0 wins (~72.6%, @1.38).
-    const plat480 = buildWithGap(480);
-    expect(plat480.bestValueMarket?.market).toBe("Set Betting");
-    expect(plat480.bestValueMarket?.selection).toBe("Carlos Alcaraz 2-0");
-    expect(plat480.bestValueMarket?.probability).toBeCloseTo(0.726, 2);
-    expect(plat480.bestValueMarket?.fairOdds).toBeCloseTo(1.38, 1);
+    // Heavy Platinum Lock (gap 400 Bo3): calibrated Set Betting 2-0 wins (~78.8%, @1.27).
+    const plat400 = buildWithGap(400);
+    expect(plat400.bestValueMarket?.market).toBe("Set Betting");
+    expect(plat400.bestValueMarket?.selection).toBe("Carlos Alcaraz 2-0");
+    expect(plat400.bestValueMarket?.probability).toBeCloseTo(0.788, 2);
+    expect(plat400.bestValueMarket?.fairOdds).toBeCloseTo(1.27, 2);
 
     // When Player B is the favorite, Set Betting selection still names the favorite winner-first ("2-0").
-    const plat480B = buildWithGap(480, { swapFav: true });
-    expect(plat480B.bestValueMarket?.market).toBe("Set Betting");
-    expect(plat480B.bestValueMarket?.selection).toBe("Carlos Alcaraz 2-0");
-    expect(plat480B.bestValueMarket?.probability).toBeCloseTo(plat480.bestValueMarket!.probability, 4);
+    const plat400B = buildWithGap(400, { swapFav: true });
+    expect(plat400B.bestValueMarket?.market).toBe("Set Betting");
+    expect(plat400B.bestValueMarket?.selection).toBe("Carlos Alcaraz 2-0");
+    expect(plat400B.bestValueMarket?.probability).toBeCloseTo(plat400.bestValueMarket!.probability, 4);
 
-    // Extreme mismatch (gap 700 Bo3): 2-0 dips below 1.25 fair odds, so Total Games >= 1.25 is chosen.
+    // Extreme mismatch (gap 700 Bo3): 2-0 dips below 1.25 fair odds, so Total Games Under >= 1.25 is chosen.
     const extreme = buildWithGap(700);
     expect(extreme.bestValueMarket?.market).toBe("Total Games");
+    expect(extreme.bestValueMarket?.selection).toMatch(/^Under \d+\.5$/);
     expect(extreme.bestValueMarket?.fairOdds).toBeGreaterThanOrEqual(TENNIS_VALUE_MARKET_MIN_FAIR_ODDS);
 
-    // Best-of-5 Gold Lock picks Total Games (higher prob than 3-0 straight sets).
+    // Best-of-5 Gold Lock picks Total Games Under (never Over) clearing the 1.25 floor.
     const bo5Gold = buildWithGap(260, { bestOf: 5 });
     expect(bo5Gold.bestValueMarket?.market).toBe("Total Games");
-    expect(bo5Gold.bestValueMarket?.fairOdds).toBeGreaterThan(1.5);
+    expect(bo5Gold.bestValueMarket?.selection).toMatch(/^Under \d+\.5$/);
+    expect(bo5Gold.bestValueMarket?.fairOdds).toBeGreaterThanOrEqual(TENNIS_VALUE_MARKET_MIN_FAIR_ODDS);
   });
 
   it("extractBestValueMarket falls back to highest probability if no candidate clears minFairOdds", () => {
@@ -507,6 +512,110 @@ describe("predictTennisMatch", () => {
       selection: "Novak Djokovic 2-0",
       probability: 0.88,
       fairOdds: 1.14,
+    });
+  });
+
+  it("Fix 1: extractBestValueMarket disables Total Games Over even when Over probability dominates", () => {
+    const picked = extractBestValueMarket({
+      lockTier: "SILVER_LOCK",
+      favorite: "Player A",
+      favoriteIsA: true,
+      setBetting: [{ setsA: 2, setsB: 0, prob: 0.62 }],
+      totalLines: [
+        { line: 35.5, overProb: 0.72, underProb: 0.28 },
+        { line: 38.5, overProb: 0.42, underProb: 0.58 },
+      ],
+    });
+    expect(picked).toEqual({
+      market: "Total Games",
+      selection: "Under 38.5",
+      probability: 0.58,
+      fairOdds: 1.72,
+    });
+  });
+
+  it("Fix 2: correlated set model preserves match probability and raises straight-set probabilities to empirical levels", () => {
+    for (const bestOf of [3, 5] as const) {
+      const targetMatchProb = 0.78;
+      const iidSet = setWinProbFromMatchProb(targetMatchProb, bestOf, 0);
+      const corrSet = setWinProbFromMatchProb(targetMatchProb, bestOf, TENNIS_SET_CORRELATION);
+
+      const iidDist = matchSetDistribution(iidSet, bestOf, { setCorrelation: 0 });
+      const corrDist = matchSetDistribution(corrSet, bestOf, { setCorrelation: TENNIS_SET_CORRELATION });
+
+      // Match Winner probability and probability conservation remain exact.
+      expect(corrDist.matchProbA).toBeCloseTo(targetMatchProb, 4);
+      expect(corrDist.setBetting.reduce((s, e) => s + e.prob, 0)).toBeCloseTo(1, 6);
+      expect(corrDist.totalGames.reduce((s, e) => s + e.prob, 0)).toBeCloseTo(1, 6);
+
+      const setsToWin = bestOf === 5 ? 3 : 2;
+      const iidStraight = iidDist.setBetting.find((e) => e.setsA === setsToWin && e.setsB === 0)?.prob ?? 0;
+      const corrStraight = corrDist.setBetting.find((e) => e.setsA === setsToWin && e.setsB === 0)?.prob ?? 0;
+
+      // Correlated straight-set probability matches empirical Lock rates (~59% Bo3, ~48% at 78% Bo5 vs ~29% i.i.d.).
+      expect(corrStraight).toBeGreaterThan(iidStraight + 0.08);
+      if (bestOf === 3) expect(corrStraight).toBeCloseTo(0.594, 2);
+      else expect(corrStraight).toBeCloseTo(0.478, 2);
+    }
+
+    // Exact 50/50 symmetry preserved under positive set correlation.
+    const sym = matchSetDistribution(0.5, 3, { setCorrelation: TENNIS_SET_CORRELATION });
+    expect(sym.matchProbA).toBeCloseTo(0.5, 6);
+    const p20 = sym.setBetting.find((e) => e.setsA === 2 && e.setsB === 0)?.prob ?? 0;
+    const p02 = sym.setBetting.find((e) => e.setsA === 0 && e.setsB === 2)?.prob ?? 0;
+    expect(p20).toBeCloseTo(p02, 6);
+  });
+
+  it("Fix 3: WTA Bo3 total games baseline sits ~2.0 games below ATP and centers WTA Locks around 20.5–21.5", () => {
+    expect(TENNIS_TOTAL_GAMES_SHIFT_ATP_BO3 - TENNIS_TOTAL_GAMES_SHIFT_WTA_BO3).toBeCloseTo(2.0, 6);
+
+    const commonPlayers = {
+      surface: "hard" as const,
+      date: "2026-07-12T12:00:00Z",
+      bestOf: 3 as const,
+      playerA: {
+        ...matchup().playerA,
+        elo: 1700,
+        lastPlayed: "2026-07-08T00:00:00Z",
+        acesPerMatch: 6.0,
+      },
+      playerB: {
+        ...matchup().playerB,
+        elo: 1500,
+        lastPlayed: "2026-07-08T00:00:00Z",
+        acesPerMatch: 4.0,
+      },
+    };
+    const atp = predictTennisMatch(matchup({ tour: "atp", ...commonPlayers }));
+    const wta = predictTennisMatch(matchup({ tour: "wta", ...commonPlayers }));
+
+    expect(atp.totalGames.expected - wta.totalGames.expected).toBeCloseTo(2.0, 1);
+    const wtaCenterLine = wta.totalGames.lines[1]?.line;
+    expect(wtaCenterLine).toBeGreaterThanOrEqual(20.5);
+    expect(wtaCenterLine).toBeLessThanOrEqual(21.5);
+  });
+
+  it("Fix 4: extractBestValueMarket restricts Set Betting strictly to PLATINUM_LOCK and GOLD_LOCK", () => {
+    const shared = {
+      favorite: "Player A",
+      favoriteIsA: true,
+      setBetting: [{ setsA: 2, setsB: 0, prob: 0.76 }],
+      totalLines: [{ line: 22.5, overProb: 0.36, underProb: 0.64 }],
+    };
+
+    expect(extractBestValueMarket({ lockTier: "PLATINUM_LOCK", ...shared })?.market).toBe("Set Betting");
+    expect(extractBestValueMarket({ lockTier: "GOLD_LOCK", ...shared })?.market).toBe("Set Betting");
+    expect(extractBestValueMarket({ lockTier: "SILVER_LOCK", ...shared })).toEqual({
+      market: "Total Games",
+      selection: "Under 22.5",
+      probability: 0.64,
+      fairOdds: 1.56,
+    });
+    expect(extractBestValueMarket({ lockTier: "BRONZE_LOCK", ...shared })).toEqual({
+      market: "Total Games",
+      selection: "Under 22.5",
+      probability: 0.64,
+      fairOdds: 1.56,
     });
   });
 });
