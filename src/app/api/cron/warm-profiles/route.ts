@@ -3,6 +3,7 @@
 // Run every 6 hours. This ensures realLambdas uses real ESPN boxscore data
 // for 90%+ of matches instead of falling back to league priors.
 
+import { apiError, errorMessage } from "@/lib/apiErrors";
 import { fetchScoreboard } from "@/lib/espn";
 import { getCachedMeshProfile } from "@/lib/engine/dataMesh";
 import { TOP_FEED_SLUGS } from "@/lib/leagues";
@@ -11,6 +12,7 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
 export async function GET() {
+  try {
   const now  = new Date();
   const from = new Date(now); from.setDate(now.getDate() - 1);
   const to   = new Date(now); to.setDate(now.getDate() + 3);
@@ -18,7 +20,8 @@ export async function GET() {
   const range = `${fmt(from)}-${fmt(to)}`;
 
   const slugs = TOP_FEED_SLUGS.slice(0, 12); // top 12 leagues
-  let warmed = 0; let skipped = 0; let errors = 0;
+  let warmed = 0; let skipped = 0;
+  const failures: string[] = [];
 
   for (const slug of slugs) {
     try {
@@ -39,23 +42,37 @@ export async function GET() {
               await getCachedMeshProfile(name, ls);
               warmed++;
             }
-          } catch {
-            errors++;
+          } catch (err) {
+            failures.push(errorMessage(err));
           }
           // Rate limit — be polite to ESPN
           await new Promise((r) => setTimeout(r, 200));
         }
       }
-    } catch {
-      errors++;
+    } catch (err) {
+      failures.push(errorMessage(err));
     }
+  }
+
+  if (failures.length > 0) {
+    return apiError("Profile warming failed", new Error(failures.join("; ")), 500, {
+      ok: false,
+      warmed,
+      skipped,
+      errors: failures.length,
+      ranAt: new Date().toISOString(),
+    });
   }
 
   return Response.json({
     ok: true,
     warmed,
     skipped,
-    errors,
+    errors: 0,
     ranAt: new Date().toISOString(),
   });
+
+  } catch (__routeError) {
+    return apiError("GET /api/cron/warm-profiles failed", __routeError);
+  }
 }

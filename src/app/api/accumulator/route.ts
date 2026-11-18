@@ -1,3 +1,4 @@
+import { apiError, errorMessage } from "@/lib/apiErrors";
 import { fetchScoreboard, fetchSummary, type FixtureLite } from "@/lib/espn";
 import { runEngineFromRealWithProfiles } from "@/lib/engine";
 import { findValueBets, type BookmakerOdds } from "@/lib/engine/value";
@@ -54,6 +55,7 @@ interface Accumulator {
 }
 
 export async function GET(req: Request) {
+  try {
   const { searchParams } = new URL(req.url);
   const save = searchParams.get("save") === "true";
 
@@ -64,12 +66,22 @@ export async function GET(req: Request) {
     ? (qMode as RankingMode)
     : "B";
 
-  // Fetch from leagues in parallel, cap at 15 for speed
-  const results = await Promise.all(
-    ALL_SLUGS.slice(0, 15).map((s) => fetchScoreboard(s).catch(() => [] as FixtureLite[]))
+  // Fetch from leagues in parallel, cap at 15 for speed. Keep rejected feeds
+  // visible: an all-provider outage must not look like "no upcoming matches".
+  const feedResults = await Promise.allSettled(
+    ALL_SLUGS.slice(0, 15).map((s) => fetchScoreboard(s)),
   );
-  const upcoming = results
-    .flat()
+  const feedFailures = feedResults
+    .filter((r): r is PromiseRejectedResult => r.status === "rejected")
+    .map((r) => errorMessage(r.reason));
+  const successfulFeeds = feedResults.filter(
+    (r): r is PromiseFulfilledResult<FixtureLite[]> => r.status === "fulfilled",
+  );
+  if (successfulFeeds.length === 0) {
+    return apiError("Fixture feed unavailable", new Error(feedFailures.join("; ")), 502);
+  }
+  const upcoming = successfulFeeds
+    .flatMap((r) => r.value)
     .filter((f) => f.state === "pre")
     .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
     .slice(0, 30);
@@ -79,6 +91,7 @@ export async function GET(req: Request) {
   }
 
   const matchPicks: Array<{ fixture: FixtureLite; picks: AccaPick[] }> = [];
+  const fixtureFailures: string[] = [];
 
   for (const fx of upcoming.slice(0, 12)) {
     try {
@@ -129,9 +142,13 @@ export async function GET(req: Request) {
         });
 
       if (eligible.length > 0) matchPicks.push({ fixture: fx, picks: eligible });
-    } catch {
-      /* skip fixture on error */
+    } catch (err) {
+      fixtureFailures.push(errorMessage(err));
     }
+  }
+
+  if (matchPicks.length < 2 && fixtureFailures.length > 0) {
+    return apiError("Prediction feed failed", new Error(fixtureFailures.join("; ")), 502);
   }
 
   if (matchPicks.length < 2) {
@@ -204,8 +221,8 @@ export async function GET(req: Request) {
           status: "pending",
           rankingMode,
         });
-      } catch {
-        /* skip DB write on error */
+      } catch (err) {
+        return apiError("Database query failed", err);
       }
     }
   }
@@ -216,6 +233,10 @@ export async function GET(req: Request) {
     highHitCount: accumulators.filter((a) => a.type === "highhit").length,
     valueCount: accumulators.filter((a) => a.type === "value").length,
   });
+
+  } catch (__routeError) {
+    return apiError("GET /api/accumulator failed", __routeError);
+  }
 }
 
 // ─── Accumulator builders ─────────────────────────────────────────────────────

@@ -1,3 +1,4 @@
+import { apiError } from "@/lib/apiErrors";
 import { getCachedMeshProfile } from "@/lib/engine/dataMesh";
 
 export const dynamic = "force-dynamic";
@@ -9,6 +10,7 @@ export const dynamic = "force-dynamic";
  * Cached in DB for 6 hours. Fail-soft — returns 404 if no data available.
  */
 export async function GET(req: Request) {
+  try {
   const { searchParams } = new URL(req.url);
   const team   = searchParams.get("team")   ?? "";
   const league = searchParams.get("league") ?? "eng.1";
@@ -34,4 +36,8 @@ export async function GET(req: Request) {
     providerCount: profile.providerCount,
     samples:       profile.samples,
   });
+
+  } catch (__routeError) {
+    return apiError("GET /api/team-profile failed", __routeError);
+  }
 }

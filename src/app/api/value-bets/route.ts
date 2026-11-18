@@ -1,6 +1,7 @@
 // ĞIGI GIVØ — Value Bet Tracking & Post-Match Verification
 // Logs value bets and verifies them against real match outcomes.
 
+import { apiError } from "@/lib/apiErrors";
 import { db } from "@/db";
 import { valueBetLog } from "@/db/schema";
 import { desc } from "drizzle-orm";
@@ -12,9 +13,9 @@ function badRequest(error: string): Response {
   return Response.json({ error }, { status: 400 });
 }
 
-function serverError(label: string, err: unknown, message: string): Response {
+function serverError(label: string, err: unknown): Response {
   console.error(label, err);
-  return Response.json({ error: message }, { status: 500 });
+  return apiError("Database query failed", err);
 }
 
 function requiredString(value: unknown): string | null {
@@ -27,6 +28,7 @@ function safeNumber(value: unknown, fallback = 0): number {
 
 // ─── GET: fetch all value bets with performance stats ─────────────────────────
 export async function GET() {
+  try {
   try {
     const bets = await db.select().from(valueBetLog).orderBy(desc(valueBetLog.createdAt)).limit(200);
 
@@ -83,16 +85,22 @@ export async function GET() {
       },
     });
   } catch (err) {
-    return serverError("Value bet GET error:", err, "Failed");
+    return serverError("Value bet GET error:", err);
+  }
+
+  } catch (__routeError) {
+    return apiError("GET /api/value-bets failed", __routeError);
   }
 }
 
 // ─── POST: log a new value bet ────────────────────────────────────────────────
 export async function POST(req: Request) {
+  try {
   let body: unknown;
   try {
     body = await req.json();
-  } catch {
+  } catch (__caughtError) {
+    console.error("[API] Swallowed upstream error at src/app/api/value-bets/route.ts:101", __caughtError);
     return badRequest("Invalid JSON body");
   }
 
@@ -156,6 +164,10 @@ export async function POST(req: Request) {
     });
     return Response.json({ ok: true });
   } catch (err) {
-    return serverError("Value bet POST error:", err, "Failed to log bet");
+    return serverError("Value bet POST error:", err);
+  }
+
+  } catch (__routeError) {
+    return apiError("POST /api/value-bets failed", __routeError);
   }
 }

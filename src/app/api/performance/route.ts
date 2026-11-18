@@ -1,3 +1,4 @@
+import { apiError } from "@/lib/apiErrors";
 import { db } from "@/db";
 import { performanceLog, savedSlips, dailyPicks } from "@/db/schema";
 import { desc } from "drizzle-orm";
@@ -6,6 +7,7 @@ import { dedupeMatchRows } from "@/lib/performance/modeAnalytics";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
+  try {
   try {
     // Every finished match can carry up to one row PER RANKING MODE (A/B/C/D).
     // Fetch enough rows to recover 100 distinct matches, then keep one row per
@@ -163,18 +165,12 @@ export async function GET() {
         createdAt:   r.createdAt,
       })),
     });
-  } catch {
-    return Response.json({
-      totalMatches:   0,
-      totalHits:      0,
-      totalMisses:    0,
-      overallAccuracy: 0,
-      recentMatches:  [],
-      leagueBreakdown: [],
-      accumulatorPerformance: {
-        total: 0, won: 0, lost: 0, pending: 0, roi: 0, winRate: 0, slips: [],
-      },
-    });
+  } catch (err) {
+    return apiError("Database query failed", err);
+  }
+
+  } catch (__routeError) {
+    return apiError("GET /api/performance failed", __routeError);
   }
 }
 
@@ -227,12 +223,9 @@ async function getAccaPerformance() {
       highHit: calcStats(slips.filter((s) => s.slipType === "highhit")),
       value:   calcStats(slips.filter((s) => s.slipType === "value")),
     };
-  } catch {
-    const empty = {
-      total: 0, won: 0, lost: 0, pending: 0, settled: 0,
-      roi: 0, winRate: 0, totalStaked: 0, totalReturns: 0, slips: [],
-    };
-    return { all: empty, highHit: empty, value: empty };
+  } catch (err) {
+    console.error("[Performance] accumulator performance query failed", err);
+    throw err;
   }
 }
 
@@ -278,10 +271,8 @@ async function getDailyPicksPerformance() {
         picks:   r.picks,
       })),
     };
-  } catch {
-    return {
-      totalMatches: 0, settledMatches: 0, perfectMatches: 0,
-      hits: 0, misses: 0, pending: 0, accuracy: 0, recent: [],
-    };
+  } catch (err) {
+    console.error("[Performance] daily picks performance query failed", err);
+    throw err;
   }
 }

@@ -1,3 +1,4 @@
+import { apiError } from "@/lib/apiErrors";
 import { analyseMatchXg, getStatsBombMatches } from "@/lib/engine/xg";
 
 export const dynamic = "force-dynamic";
@@ -12,6 +13,7 @@ const COMPETITIONS: Record<string, { id: number; seasonId: number; name: string 
 };
 
 export async function GET(req: Request) {
+  try {
   const { searchParams } = new URL(req.url);
   const matchId     = searchParams.get("match");
   const competition = searchParams.get("competition");
@@ -36,4 +38,8 @@ export async function GET(req: Request) {
   return Response.json({
     competitions: Object.entries(COMPETITIONS).map(([key, comp]) => ({ key, ...comp })),
   });
+
+  } catch (__routeError) {
+    return apiError("GET /api/xg failed", __routeError);
+  }
 }

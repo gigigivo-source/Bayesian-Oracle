@@ -20,6 +20,7 @@
 // Per-competition fixture lists are cached for 1 hour. Empty catalogue
 // entries are logged and retried against fallback sources.
 
+import { apiError, errorMessage } from "@/lib/apiErrors";
 import { fetchAllScoreboard, fetchScoreboard, type FixtureLite } from "@/lib/espn";
 import { LEAGUE_MAP, type LeagueDef } from "@/lib/leagues";
 import {
@@ -38,6 +39,17 @@ import { resilientJson } from "@/lib/httpClient";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
+
+// Provider failures are recorded for the duration of one request so an
+// all-provider outage can be distinguished from a legitimately empty feed.
+let feedFailureDetails: string[] = [];
+
+function recordFeedFailure<T>(error: unknown, fallback: T): T {
+  const detail = errorMessage(error);
+  feedFailureDetails.push(detail);
+  console.warn("[Fixtures] provider request failed:", detail);
+  return fallback;
+}
 
 // ─── Public types ────────────────────────────────────────────────────────────
 
@@ -286,7 +298,8 @@ function slugFromEspnRef(ref: string): string | null {
     const idx = parts.lastIndexOf("leagues");
     const raw = idx >= 0 ? parts[idx + 1] : parts[parts.length - 1];
     return raw?.split("?")[0] || null;
-  } catch {
+  } catch (__caughtError) {
+    console.error("[API] Swallowed upstream error at src/app/api/fixtures/core.ts:300", __caughtError);
     return null;
   }
 }
@@ -474,7 +487,7 @@ async function fetchEspnCompetition(
 
   let fixtures: FixtureLite[] = [];
   for (const candidate of espnSlugCandidates(slug)) {
-    fixtures = await fetchScoreboard(candidate, window).catch(() => [] as FixtureLite[]);
+    fixtures = await fetchScoreboard(candidate, window).catch((error) => recordFeedFailure(error, [] as FixtureLite[]));
     if (fixtures.length > 0) {
       const canonical = canonicalLeagueSlug(slug);
       if (canonical !== candidate) {
@@ -505,9 +518,7 @@ async function fetchRequiredUefaFixtures(
 
   return Promise.all(
     requested.map(async (competition) => {
-      const fixtures = await fetchEspnCompetition(competition.slug, window).catch(
-        () => [] as FixtureLite[],
-      );
+      const fixtures = await fetchEspnCompetition(competition.slug, window).catch((error) => recordFeedFailure(error, [] as FixtureLite[]));
       console.log(`[Fixtures] Fetched ${fixtures.length} matches for ${competition.name}.`);
       return { competition, fixtures };
     }),
@@ -972,6 +983,7 @@ async function collectAllCompetitionFixtures(opts?: {
   leagueSlugs?: string[];
   attachStats?: boolean;
 }): Promise<CollectedFeed> {
+  feedFailureDetails = [];
   const days = Math.min(Math.max(opts?.days ?? 14, 1), 60);
   const now = opts?.now ?? new Date();
   const attach = opts?.attachStats !== false;
@@ -994,9 +1006,7 @@ async function collectAllCompetitionFixtures(opts?: {
   const deadline = Date.now() + SWEEP_BUDGET_MS;
 
   const catalogue = await fetchCompetitionCatalogue();
-  const discovered = await discoverSlugsFromGlobalBoard(isoDays, catalogue).catch(
-    () => [] as CatalogueCompetition[],
-  );
+  const discovered = await discoverSlugsFromGlobalBoard(isoDays, catalogue).catch((error) => recordFeedFailure(error, [] as CatalogueCompetition[]));
 
   const catalogueBySlug = new Map<string, string>();
   for (const c of [...catalogue, ...discovered]) {
@@ -1050,7 +1060,7 @@ async function collectAllCompetitionFixtures(opts?: {
     // so Conference / cups / Libertadores land on their real identities.
     for (const day of isoDays) {
       if (Date.now() >= deadline) break;
-      const board = await fetchAllScoreboard(day.replace(/-/g, "")).catch(() => null);
+      const board = await fetchAllScoreboard(day.replace(/-/g, "")).catch((error) => recordFeedFailure(error, null));
       for (const fx of board ?? []) {
         const slug = resolveSlugFromName(fx.leagueName, targets);
         add({ ...fx, leagueSlug: slug, leagueName: fx.leagueName }, "ESPN", fx.leagueName);
@@ -1088,10 +1098,10 @@ async function collectAllCompetitionFixtures(opts?: {
 
   // Fallbacks: SportScore → API-Football → TheSportsDB → OpenLigaDB.
   const [tsdb, oligadb, sportscore, apif] = await Promise.all([
-    fetchTheSportsDbFixtures(isoDays, targets).catch(() => [] as SourcedFixture[]),
-    fetchOpenLigaDbFixtures(from, to).catch(() => [] as SourcedFixture[]),
-    fetchSportScoreFixtures(targets).catch(() => [] as SourcedFixture[]),
-    fetchApiFootballFixtures(isoDays, targets).catch(() => [] as SourcedFixture[]),
+    fetchTheSportsDbFixtures(isoDays, targets).catch((error) => recordFeedFailure(error, [] as SourcedFixture[])),
+    fetchOpenLigaDbFixtures(from, to).catch((error) => recordFeedFailure(error, [] as SourcedFixture[])),
+    fetchSportScoreFixtures(targets).catch((error) => recordFeedFailure(error, [] as SourcedFixture[])),
+    fetchApiFootballFixtures(isoDays, targets).catch((error) => recordFeedFailure(error, [] as SourcedFixture[])),
   ]);
 
   for (const { fixture, source } of [...sportscore, ...apif, ...tsdb, ...oligadb]) {
@@ -1121,7 +1131,7 @@ async function collectAllCompetitionFixtures(opts?: {
     const season = seasonCodes(now, 1)[0];
     const ghPages = await Promise.all(
       ghSlugs.map((slug) =>
-        fetchOpenfootballFixtures(slug, season, from, to).catch(() => [] as SourcedFixture[]),
+        fetchOpenfootballFixtures(slug, season, from, to).catch((error) => recordFeedFailure(error, [] as SourcedFixture[])),
       ),
     );
     let ghAdded = 0;
@@ -1168,6 +1178,9 @@ async function collectAllCompetitionFixtures(opts?: {
   };
   if (flat.length > 0 || espnUp) {
     feedCache().set(cacheKey, { at: Date.now(), feed });
+  }
+  if (flat.length === 0 && feedFailureDetails.length > 0) {
+    throw new Error(`All fixture providers failed: ${feedFailureDetails.slice(0, 5).join("; ")}`);
   }
   console.log(
     `[Fixtures] Assembled ${flat.length} fixtures across ${competitions.length} competitions (catalogue ${targets.length}, window ${window})`,
@@ -1328,7 +1341,7 @@ async function attachStatsToFixtures(
     let canonical = peeked;
     if (!canonical && fetches < maxFetches && Date.now() < deadline) {
       fetches++;
-      canonical = await statsAggregator.fetch(query).catch(() => null);
+      canonical = await statsAggregator.fetch(query).catch((error) => recordFeedFailure(error, null));
     }
     const stats = extractFixtureStats(fx, canonical);
     logStatsLine(fx, stats);
@@ -1456,6 +1469,8 @@ function jsonResponse(body: unknown, sMaxAge = 60) {
 // ─── Route ───────────────────────────────────────────────────────────────────
 
 export async function GET(req: Request) {
+  try {
+  feedFailureDetails = [];
   const { searchParams } = new URL(req.url);
   const leagueParam = searchParams.get("league");
   const dates = searchParams.get("dates") ?? undefined;
@@ -1490,7 +1505,7 @@ export async function GET(req: Request) {
   if (dates) windows.push(dates);
 
   const pages = await Promise.all(
-    windows.map((w) => fetchEspnCompetition(league, w).catch(() => [] as FixtureLite[])),
+    windows.map((w) => fetchEspnCompetition(league, w).catch((error) => recordFeedFailure(error, [] as FixtureLite[]))),
   );
 
   const seen = new Set<string>();
@@ -1508,10 +1523,10 @@ export async function GET(req: Request) {
     const to = addDays(now, days);
     const catalogue = [{ slug: league, name: leagueDefFor(league).name }];
     const [tsdb, oligadb, sportscore, apif] = await Promise.all([
-      fetchTheSportsDbFixtures(eachIsoDay(from, to), catalogue).catch(() => [] as SourcedFixture[]),
-      fetchOpenLigaDbFixtures(from, to).catch(() => [] as SourcedFixture[]),
-      fetchSportScoreFixtures(catalogue).catch(() => [] as SourcedFixture[]),
-      fetchApiFootballFixtures(eachIsoDay(from, to), catalogue).catch(() => [] as SourcedFixture[]),
+      fetchTheSportsDbFixtures(eachIsoDay(from, to), catalogue).catch((error) => recordFeedFailure(error, [] as SourcedFixture[])),
+      fetchOpenLigaDbFixtures(from, to).catch((error) => recordFeedFailure(error, [] as SourcedFixture[])),
+      fetchSportScoreFixtures(catalogue).catch((error) => recordFeedFailure(error, [] as SourcedFixture[])),
+      fetchApiFootballFixtures(eachIsoDay(from, to), catalogue).catch((error) => recordFeedFailure(error, [] as SourcedFixture[])),
     ]);
     const want = new Set(espnSlugCandidates(league));
     const name = norm(leagueDefFor(league).name);
@@ -1528,9 +1543,7 @@ export async function GET(req: Request) {
     // above (docs/NETWORK_ALLOWLIST.md).
     if (all.length === 0 && OPENFOOTBALL_CODES[league]) {
       const season = seasonCodes(now, 1)[0];
-      const ghFixtures = await fetchOpenfootballFixtures(league, season, from, to).catch(
-        () => [] as SourcedFixture[],
-      );
+      const ghFixtures = await fetchOpenfootballFixtures(league, season, from, to).catch((error) => recordFeedFailure(error, [] as SourcedFixture[]));
       for (const { fixture } of ghFixtures) {
         if (seen.has(fixture.id) || hasLooseFixtureDuplicate(all, fixture)) continue;
         seen.add(fixture.id);
@@ -1542,6 +1555,10 @@ export async function GET(req: Request) {
     }
   }
 
+  if (all.length === 0 && feedFailureDetails.length > 0) {
+    throw new Error(`All fixture providers failed: ${feedFailureDetails.slice(0, 5).join("; ")}`);
+  }
+
   const withStats = await attachStatsToFixtures(all, { budgetMs: 20_000, maxFetches: 40 });
   const split = partitionAndSort(withStats);
 
@@ -1550,4 +1567,8 @@ export async function GET(req: Request) {
     ...split,
     statsDiagnostics: buildStatsDiagnostics(withStats, { attached: true }),
   });
+
+  } catch (__routeError) {
+    return apiError("GET /api/fixtures failed", __routeError);
+  }
 }

@@ -8,6 +8,7 @@
 // rejects every market, and the VA scanner itself iterates engine markets
 // without a rejected check — so the table measures every Goals claim the
 // model actually emits on that path.
+import { apiError } from "@/lib/apiErrors";
 import { fetchScoreboard, type FixtureLite, type TeamLite } from "@/lib/espn";
 import { runEngineFromReal } from "@/lib/engine";
 
@@ -61,6 +62,7 @@ function toBlindFixture(fx: FixtureLite): FixtureLite {
 }
 
 export async function POST(req: Request) {
+  try {
   const started = Date.now();
   const { searchParams } = new URL(req.url);
   const daysRaw = parseInt(searchParams.get("days") ?? "21", 10);
@@ -78,7 +80,8 @@ export async function POST(req: Request) {
       leagues.map(async (slug) => {
         try {
           return await fetchScoreboard(slug, date);
-        } catch {
+        } catch (__caughtError) {
+    console.error("[API] Swallowed upstream error at src/app/api/backtest/route.ts:82", __caughtError);
           return [];
         }
       }),
@@ -107,7 +110,8 @@ export async function POST(req: Request) {
     let result;
     try {
       result = runEngineFromReal(toBlindFixture(ev), null);
-    } catch {
+    } catch (__caughtError) {
+    console.error("[API] Swallowed upstream error at src/app/api/backtest/route.ts:111", __caughtError);
       continue; // skip match on engine error
     }
     matchesProcessed++;
@@ -161,4 +165,8 @@ export async function POST(req: Request) {
     totalPredictions,
     buckets: table,
   });
+
+  } catch (__routeError) {
+    return apiError("POST /api/backtest failed", __routeError);
+  }
 }

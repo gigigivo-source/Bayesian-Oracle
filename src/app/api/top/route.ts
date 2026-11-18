@@ -1,3 +1,4 @@
+import { apiError, errorMessage } from "@/lib/apiErrors";
 import { fetchScoreboard, type FixtureLite } from "@/lib/espn";
 import {
   compareLeagueBlockPriority,
@@ -120,6 +121,8 @@ const MAX_AGE_MS = Number(process.env.TOP_FEED_MAX_AGE_MS ?? 5 * 60_000);
 
 interface Snapshot { at: number; payload: TopPayload }
 
+let topFeedFailures: string[] = [];
+
 const globalForTop = globalThis as typeof globalThis & {
   __gigiTopSnapshot?: Snapshot | null;
   __gigiTopInFlight?: Promise<TopPayload> | null;
@@ -139,8 +142,7 @@ function getSnapshot(): Promise<TopPayload> {
         return payload;
       })
       .catch((err) => {
-        // Keep serving the last good snapshot if a rebuild fails.
-        if (snap) return snap.payload;
+        // A failed rebuild is an upstream failure, not a successful stale 200.
         throw err;
       })
       .finally(() => { globalForTop.__gigiTopInFlight = null; });
@@ -158,6 +160,7 @@ function getSnapshot(): Promise<TopPayload> {
 // ─── Feed builder ─────────────────────────────────────────────────────────────
 
 async function buildTopFeed(): Promise<TopPayload> {
+  topFeedFailures = [];
   const now = new Date();
 
   // TOP FEED: professional sportsbook window = yesterday, today, tomorrow only.
@@ -187,7 +190,7 @@ async function buildTopFeed(): Promise<TopPayload> {
 
   const featuredSettled = await Promise.allSettled(
     FEATURED.map(async (l): Promise<LeagueBlock> => {
-      const all = await fetchScoreboard(l.slug, fullRange).catch(() => [] as FixtureLite[]);
+      const all = await fetchScoreboard(l.slug, fullRange).catch((error) => { topFeedFailures.push(errorMessage(error)); return [] as FixtureLite[]; });
 
       const todayFx  = all.filter((f) => inWindow(f, yKey, tKey));
       const recentFx = all.filter((f) => inWindow(f, rKey, nKey));
@@ -221,7 +224,7 @@ async function buildTopFeed(): Promise<TopPayload> {
   // sequential batching only added dead time between batches.
   const extraSettled = await Promise.allSettled(
     EXTRA.map(async (l): Promise<LeagueBlock> => {
-      const fixtures = await fetchScoreboard(l.slug, todayWindow).catch(() => [] as FixtureLite[]);
+      const fixtures = await fetchScoreboard(l.slug, todayWindow).catch((error) => { topFeedFailures.push(errorMessage(error)); return [] as FixtureLite[]; });
       return {
         slug:     l.slug,
         label:    l.label,
@@ -236,6 +239,15 @@ async function buildTopFeed(): Promise<TopPayload> {
     .filter((r): r is PromiseFulfilledResult<LeagueBlock> => r.status === "fulfilled")
     .map((r) => r.value)
     .filter((r) => r.fixtures.length > 0);
+
+  const settledFailures = [...featuredSettled, ...extraSettled]
+    .filter((r): r is PromiseRejectedResult => r.status === "rejected")
+    .map((r) => errorMessage(r.reason));
+  const hasFixtures = results.some((r) => r.fixtures.length > 0) || extraResults.length > 0;
+  const allFailures = [...topFeedFailures, ...settledFailures];
+  if (!hasFixtures && allFailures.length > 0) {
+    throw new Error(`Top feed providers failed: ${allFailures.slice(0, 5).join("; ")}`);
+  }
 
   // Live matches across everything
   const seen = new Set<string>();
@@ -270,6 +282,7 @@ async function buildTopFeed(): Promise<TopPayload> {
 }
 
 export async function GET() {
+  try {
   const payload = await getSnapshot();
   return Response.json(payload, {
     headers: {
@@ -277,4 +290,8 @@ export async function GET() {
       "Cache-Control": "public, max-age=0, s-maxage=30, stale-while-revalidate=300",
     },
   });
+
+  } catch (__routeError) {
+    return apiError("GET /api/top failed", __routeError);
+  }
 }

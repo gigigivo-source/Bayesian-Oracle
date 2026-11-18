@@ -1,3 +1,4 @@
+import { apiError, errorMessage } from "@/lib/apiErrors";
 import { LEAGUE_MAP } from "@/lib/leagues";
 import { searchFixture, getMultiBookOdds } from "@/lib/apiFootball";
 
@@ -50,6 +51,7 @@ interface OddsLine {
 // ─── Route ────────────────────────────────────────────────────────────────────
 
 export async function GET(req: Request) {
+  try {
   const { searchParams } = new URL(req.url);
   const league  = searchParams.get("league");
   const eventId = searchParams.get("event");
@@ -63,6 +65,7 @@ export async function GET(req: Request) {
   }
 
   const lines: OddsLine[] = [];
+  const failures: string[] = [];
 
   // ── Layer 1: ESPN pickcenter (DraftKings / partner book) ─────────────────────
   if (league && eventId) {
@@ -86,8 +89,12 @@ export async function GET(req: Request) {
             underOdds: total?.under?.close?.odds ? mlToDecimal(Number(total.under.close.odds)) : undefined,
           });
         }
+      } else {
+        failures.push(`ESPN responded ${res.status} ${res.statusText}`);
       }
-    } catch { /* skip — not all fixtures have pickcenter */ }
+    } catch (err) {
+      failures.push(errorMessage(err));
+    }
   }
 
   // ── Layer 2: API-Football — up to 11 bookmakers incl. Pinnacle, Betfair ──────
@@ -123,7 +130,13 @@ export async function GET(req: Request) {
           }
         }
       }
-    } catch { /* API-Football is optional — never fail */ }
+    } catch (err) {
+      failures.push(errorMessage(err));
+    }
+  }
+
+  if (lines.length === 0 && failures.length > 0) {
+    return apiError("Odds feed unavailable", new Error(failures.join("; ")), 502);
   }
 
   // ── Best available odds ───────────────────────────────────────────────────────
@@ -144,4 +157,8 @@ export async function GET(req: Request) {
     count:                lines.length,
     hasMultipleProviders: providers.length > 1,
   });
+
+  } catch (__routeError) {
+    return apiError("GET /api/odds failed", __routeError);
+  }
 }

@@ -1,3 +1,4 @@
+import { apiError, errorMessage } from "@/lib/apiErrors";
 import { db } from "@/db";
 import { savedSlips } from "@/db/schema";
 import { eq } from "drizzle-orm";
@@ -8,6 +9,7 @@ export const dynamic = "force-dynamic";
 
 /** Auto-verify pending accumulator slips by checking if all legs have finished */
 export async function POST() {
+  try {
   try {
     const pending = await db
       .select()
@@ -76,7 +78,12 @@ export async function POST() {
     }
 
     return Response.json({ verified, totalPending: pending.length });
-  } catch {
-    return Response.json({ error: "Slip verification failed", verified: 0 }, { status: 500 });
+  } catch (__caughtError) {
+    return Response.json({
+      details: errorMessage(__caughtError), error: "Slip verification failed", verified: 0 }, { status: 500 });
+  }
+
+  } catch (__routeError) {
+    return apiError("POST /api/verify-slips failed", __routeError);
   }
 }

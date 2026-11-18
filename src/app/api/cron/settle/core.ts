@@ -26,6 +26,7 @@
 // POST /api/cron/settle?force=true manually runs an immediate uncapped sweep.
 // Fail-soft: a broken league or provider never aborts the whole job.
 
+import { apiError, errorMessage } from "@/lib/apiErrors";
 import { db } from "@/db";
 import { dailyPicks, performanceLog, savedSlips, valueBetLog, vaTickets } from "@/db/schema";
 import { and, count, eq, isNull, isNotNull, gt } from "drizzle-orm";
@@ -208,7 +209,8 @@ export async function backfillStalePerformanceOutcomes(
         .where(and(eq(performanceLog.id, row.id), eq(performanceLog.outcome, "pending")));
       tallies.stamped++;
       tallies[outcome]++;
-    } catch {
+    } catch (__caughtError) {
+    console.error("[API] Swallowed upstream error at src/app/api/cron/settle/core.ts:211", __caughtError);
       // best-effort per row
     }
   }
@@ -415,7 +417,8 @@ export async function refreshPendingPerformanceRows(force = false): Promise<Perf
         const label = LEAGUE_MAP[row.leagueSlug ?? ""]?.name ?? row.competitionName ?? row.league;
         resolvedByLeague[label] = (resolvedByLeague[label] ?? 0) + resolved;
       }
-    } catch {
+    } catch (__caughtError) {
+    console.error("[API] Swallowed upstream error at src/app/api/cron/settle/core.ts:418", __caughtError);
       // best-effort per row
     }
   }
@@ -611,7 +614,8 @@ async function settlePendingAcrossAllSources(force = false): Promise<SettlePass>
         if (voids > 0) pass.void++;
         if (pushes > 0) pass.push++;
       }
-    } catch {
+    } catch (__caughtError) {
+    console.error("[API] Swallowed upstream error at src/app/api/cron/settle/core.ts:614", __caughtError);
       pass.failed++;
     }
   }
@@ -641,7 +645,8 @@ async function settlePendingAcrossAllSources(force = false): Promise<SettlePass>
         else if (evaluation.push) pass.push++;
         else pass.void++;
       }
-    } catch {
+    } catch (__caughtError) {
+    console.error("[API] Swallowed upstream error at src/app/api/cron/settle/core.ts:644", __caughtError);
       pass.failed++;
     }
   }
@@ -691,7 +696,8 @@ async function settlePendingAcrossAllSources(force = false): Promise<SettlePass>
         recordResolved(slip.leagueSlug);
         if (status === "won") pass.won++; else pass.lost++;
       }
-    } catch {
+    } catch (__caughtError) {
+    console.error("[API] Swallowed upstream error at src/app/api/cron/settle/core.ts:694", __caughtError);
       pass.failed++;
     }
   }
@@ -951,7 +957,8 @@ export async function settleFeaturePicks(force = false): Promise<FeatureSettlePa
         isNotNull(performanceLog.market),
       ));
     pass.backfilledCorners = backfill.rowCount ?? 0;
-  } catch {
+  } catch (__caughtError) {
+    console.error("[API] Swallowed upstream error at src/app/api/cron/settle/core.ts:954", __caughtError);
     // best-effort — retried on the next sweep
   }
 
@@ -1119,11 +1126,13 @@ export async function settleFeaturePicks(force = false): Promise<FeatureSettlePa
           console.log(
             `[Settle] Feature ${pick.feature} · ${pick.matchLabel}: ${market} → ${selection} ${outcome}`,
           );
-        } catch {
+        } catch (__caughtError) {
+    console.error("[API] Swallowed upstream error at src/app/api/cron/settle/core.ts:1122", __caughtError);
           pass.failed++;
         }
       }
-    } catch {
+    } catch (__caughtError) {
+    console.error("[API] Swallowed upstream error at src/app/api/cron/settle/core.ts:1126", __caughtError);
       pass.failed += picks.length;
     }
   }
@@ -1373,13 +1382,19 @@ function authorized(req: Request): boolean {
 }
 
 export async function GET(req: Request) {
+  try {
   if (!authorized(req)) return Response.json({ error: "Unauthorized" }, { status: 401 });
   try {
     const force = new URL(req.url).searchParams.get("force") === "true";
     return Response.json(await runAllLeagueSettlement(force));
   } catch (error) {
     console.error("[Cron][settle] failed:", error);
-    return Response.json({ error: "Settlement failed" }, { status: 500 });
+    return Response.json({
+      details: errorMessage(error), error: "Settlement failed" }, { status: 500 });
+  }
+
+  } catch (__routeError) {
+    return apiError("GET /api/cron/settle failed", __routeError);
   }
 }
 

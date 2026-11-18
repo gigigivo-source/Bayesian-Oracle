@@ -18,10 +18,11 @@
 //         vs the 8-14-days-ago week — always relative to now.
 //
 // Responses are cached in an in-memory Map keyed by windowDays for 5 minutes
-// (settled data changes at most hourly), and the route fails soft by
-// contract: a database error is logged once and answered with a zeroed
-// payload, never a 5xx, so the sheet can always render something.
+// (settled data changes at most hourly). A database error is logged and
+// answered with a descriptive 500 instead of a successful-looking zeroed
+// payload, so the sheet never renders fabricated analytics.
 
+import { apiError } from "@/lib/apiErrors";
 import { performanceLog } from "@/db/schema";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
 
@@ -494,29 +495,10 @@ async function computeAnalytics(days: number): Promise<First5AnalyticsResponse> 
   };
 }
 
-/** The fail-soft payload: everything zeroed, nothing null. */
-function emptyBody(days: number): First5AnalyticsResponse {
-  return {
-    ok: true,
-    generatedAt: new Date().toISOString(),
-    windowDays: days,
-    totals: {
-      settled: 0, won: 0, lost: 0, push: 0, void: 0,
-      realisedRate: 0, claimedAverage: 0, edge: 0,
-    },
-    byMarket: [],
-    bySelection: [],
-    byConfidence: [],
-    byLeague: [],
-    byBucket: [],
-    trend: { last7d: { ...ZERO_SPLIT }, previous: { ...ZERO_SPLIT } },
-    trust: { best: [], worst: [] },
-  };
-}
-
 // ─── Route ────────────────────────────────────────────────────────────────────
 
 export async function GET(req: Request): Promise<Response> {
+  try {
   const url = new URL(req.url);
   const raw = url.searchParams.get("days");
   const days = boundedInt(raw, DEFAULT_DAYS, 1, MAX_DAYS);
@@ -533,11 +515,11 @@ export async function GET(req: Request): Promise<Response> {
     responseCache.set(days, { expiresAt: Date.now() + CACHE_TTL_MS, body });
     return Response.json(body, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
-    console.warn(
-      `[First5][analytics] analytics read failed (returning a zeroed payload): ` +
-      `${error instanceof Error ? error.message : String(error)}`,
-    );
-    return Response.json(emptyBody(days), { headers: { "Cache-Control": "no-store" } });
+    return apiError("Database query failed", error);
+  }
+
+  } catch (__routeError) {
+    return apiError("GET /api/first-5-minutes/analytics failed", __routeError);
   }
 }
 

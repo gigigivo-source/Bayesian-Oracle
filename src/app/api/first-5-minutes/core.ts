@@ -45,6 +45,7 @@
 //   Card baseline   — mesh card distributions (both teams, n > 0).
 //   Aggression      — mesh foul distributions (optional; defaults to 1.0).
 
+import { apiError, errorMessage } from "@/lib/apiErrors";
 import {
   assessMarketConfidence,
   toConfidenceBreakdown,
@@ -396,7 +397,8 @@ async function bzGet<T>(path: string): Promise<T | null> {
       return null;
     }
     return (await res.json()) as T;
-  } catch {
+  } catch (__caughtError) {
+    console.error("[API] Swallowed upstream error at src/app/api/first-5-minutes/core.ts:399", __caughtError);
     return null;
   } finally {
     clearTimeout(timer);
@@ -611,7 +613,8 @@ async function clearInvalidTeamXgCache(): Promise<void> {
         .returning();
       const count = Array.isArray(deleted) ? deleted.length : 0;
       console.info(`[First5] xG cache: cleared ${count} rows with invalid next_match_at`);
-    } catch {
+    } catch (__caughtError) {
+    console.error("[API] Swallowed upstream error at src/app/api/first-5-minutes/core.ts:614", __caughtError);
       try {
         await db
           .delete(teamXgCache)
@@ -920,7 +923,8 @@ async function fetchGoalBaseline(fx: FixtureLite, allFixtures: FixtureLite[]): P
         }
       }
     }
-  } catch {
+  } catch (__caughtError) {
+    console.error("[API] Swallowed upstream error at src/app/api/first-5-minutes/core.ts:923", __caughtError);
     // fail-soft → ESPN form fallback below
   }
 
@@ -946,7 +950,8 @@ async function fetchGoalBaseline(fx: FixtureLite, allFixtures: FixtureLite[]): P
         awaySamples: awayGames,
       };
     }
-  } catch {
+  } catch (__caughtError) {
+    console.error("[API] Swallowed upstream error at src/app/api/first-5-minutes/core.ts:949", __caughtError);
     // fail-soft → goal market omitted for this fixture
   }
 
@@ -1442,6 +1447,7 @@ function triggerFeatureSettlePass(): void {
 // ─── Route ────────────────────────────────────────────────────────────────────
 
 export async function GET(req: Request): Promise<Response> {
+  try {
   const url = new URL(req.url);
   const isRefresh = url.searchParams.get("refresh") === "true";
   const cacheKey = getCacheKey(url);
@@ -1552,8 +1558,15 @@ export async function GET(req: Request): Promise<Response> {
     // performance_log and must not wait for the next cron tick to settle.
     triggerFeatureSettlePass();
     return Response.json(
-      emptyResponse({ error: "First 5 Minutes Markets are temporarily unavailable." }),
+      {
+        ...emptyResponse({ error: "First 5 Minutes Markets are temporarily unavailable." }),
+        details: errorMessage(error),
+      },
       { status: 503, headers: { "Cache-Control": "no-store" } },
     );
+  }
+
+  } catch (__routeError) {
+    return apiError("GET /api/first-5-minutes failed", __routeError);
   }
 }

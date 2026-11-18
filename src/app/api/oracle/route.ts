@@ -1,3 +1,4 @@
+import { apiError } from "@/lib/apiErrors";
 import { db } from "@/db";
 import { predictions } from "@/db/schema";
 import { runEngine } from "@/lib/engine";
@@ -19,10 +20,12 @@ function validate(body: Partial<PredictInput>): string | null {
 }
 
 export async function POST(req: Request) {
+  try {
   let body: Partial<PredictInput>;
   try {
     body = await req.json() as Partial<PredictInput>;
-  } catch {
+  } catch (__caughtError) {
+    console.error("[API] Swallowed upstream error at src/app/api/oracle/route.ts:26", __caughtError);
     return Response.json({ error: "Invalid JSON body." }, { status: 400 });
   }
 
@@ -38,7 +41,7 @@ export async function POST(req: Request) {
 
   const result = runEngine(input);
 
-  // Persist run — best-effort, never block the response on DB errors
+  // Persist run — a failed write is a server error, not a silent 200.
   try {
     await db.insert(predictions).values({
       matchLabel:       input.match,
@@ -58,7 +61,12 @@ export async function POST(req: Request) {
     });
   } catch (e) {
     console.error("Failed to persist prediction:", e);
+    throw e;
   }
 
   return Response.json(result);
+
+  } catch (__routeError) {
+    return apiError("POST /api/oracle failed", __routeError);
+  }
 }

@@ -1,3 +1,4 @@
+import { apiError, errorMessage } from "@/lib/apiErrors";
 import { fetchScoreboard, type FixtureLite } from "@/lib/espn";
 import { LEAGUES } from "@/lib/leagues";
 
@@ -36,17 +37,28 @@ async function getFixtureCache(): Promise<FixtureLite[]> {
     "eng.1","esp.1","ger.1","ita.1","fra.1","ned.1","por.1",
   ];
 
-  // Fetch active leagues with range
-  const activeResults = await Promise.all(
-    activeLeagues.map((s) => fetchScoreboard(s, range).catch(() => [] as FixtureLite[]))
-  );
-  all.push(...activeResults.flat());
+  // Fetch active leagues with range. A provider rejection is recorded rather
+  // than silently replaced with an empty scoreboard; an empty array from a
+  // successful request remains a valid "no fixtures" result.
+  const failures: string[] = [];
 
-  // Also fetch current 3-day window for all
-  const currentResults = await Promise.all(
-    activeLeagues.slice(0, 20).map((s) => fetchScoreboard(s).catch(() => [] as FixtureLite[]))
+  const activeSettled = await Promise.allSettled(
+    activeLeagues.map((s) => fetchScoreboard(s, range)),
   );
-  all.push(...currentResults.flat());
+  const currentSettled = await Promise.allSettled(
+    activeLeagues.slice(0, 20).map((s) => fetchScoreboard(s)),
+  );
+  const settled = [...activeSettled, ...currentSettled];
+  const successful = settled.filter(
+    (r): r is PromiseFulfilledResult<FixtureLite[]> => r.status === "fulfilled",
+  );
+  for (const r of settled) {
+    if (r.status === "rejected") failures.push(errorMessage(r.reason));
+  }
+  if (successful.length === 0) {
+    throw new Error(`All fixture feeds failed: ${failures.join("; ")}`);
+  }
+  all.push(...successful.flatMap((r) => r.value));
 
   // Deduplicate by fixture ID
   const seen = new Set<string>();
@@ -64,6 +76,7 @@ async function getFixtureCache(): Promise<FixtureLite[]> {
 // ─── Route ────────────────────────────────────────────────────────────────────
 
 export async function GET(req: Request) {
+  try {
   const { searchParams } = new URL(req.url);
   const q = (searchParams.get("q") ?? "").toLowerCase().trim();
 
@@ -71,7 +84,12 @@ export async function GET(req: Request) {
     return Response.json({ results: [] });
   }
 
-  const fixtures = await getFixtureCache();
+  let fixtures: FixtureLite[];
+  try {
+    fixtures = await getFixtureCache();
+  } catch (err) {
+    return apiError("Fixture feed unavailable", err, 502);
+  }
 
   const matches = fixtures.filter((f) => {
     const text = `${f.home.name} ${f.away.name} ${f.home.shortName} ${f.away.shortName} ${f.leagueName}`.toLowerCase();
@@ -90,4 +108,8 @@ export async function GET(req: Request) {
     cached:  true,
     total:   fixtures.length,
   });
+
+  } catch (__routeError) {
+    return apiError("GET /api/search failed", __routeError);
+  }
 }

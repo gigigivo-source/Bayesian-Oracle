@@ -95,7 +95,8 @@ async function fetchBoxscore(
       homeRedCards:      home.redCards              ?? 0, awayRedCards:      away.redCards              ?? 0,
       homePenaltyGoals:  home.penaltyKickGoals      ?? 0, awayPenaltyGoals:  away.penaltyKickGoals      ?? 0,
     };
-  } catch {
+  } catch (__caughtError) {
+    console.error("[API] Swallowed upstream error at src/app/api/match/route.ts:98", __caughtError);
     return null;
   }
 }
@@ -119,7 +120,8 @@ function parseRankingMode(req: Request): RankingRequest {
       if (upper === 'A' || upper === 'B' || upper === 'C' || upper === 'D') return upper as RankingMode;
       if (upper === 'ALL') return 'all';
     }
-  } catch {
+  } catch (__caughtError) {
+    console.error("[API] Swallowed upstream error at src/app/api/match/route.ts:122", __caughtError);
     /* fall through */
   }
   return resolveRankingMode(undefined);
@@ -212,6 +214,7 @@ async function persistAndEvaluate(
       });
     } catch (e) {
       console.error("performance log failed", e);
+      throw e;
     }
   }
 
@@ -258,6 +261,7 @@ async function persistAndEvaluate(
         });
       } catch (e) {
         console.error("value bet log failed", e);
+        throw e;
       }
     }
   }
@@ -282,6 +286,7 @@ async function persistAndEvaluate(
     });
   } catch (e) {
     console.error("persist match prediction failed", e);
+    throw e;
   }
 
   return boxscore;
@@ -341,7 +346,8 @@ async function enrichBookmakerOdds(
         };
       }
     }
-  } catch {
+  } catch (__caughtError) {
+    console.error("[API] Swallowed upstream error at src/app/api/match/route.ts:347", __caughtError);
     // keep whatever odds we already have
   }
 
@@ -374,7 +380,8 @@ async function enrichBookmakerOdds(
           }
         }
       }
-    } catch {
+    } catch (__caughtError) {
+    console.error("[API] Swallowed upstream error at src/app/api/match/route.ts:380", __caughtError);
       // API-Football is optional enrichment — never fail the request
     }
   }
@@ -878,7 +885,8 @@ function enrichPredictionWithMonteCarlo(
       },
     };
     return { ...prediction, ...extras };
-  } catch {
+  } catch (__caughtError) {
+    console.error("[API] Swallowed upstream error at src/app/api/match/route.ts:884", __caughtError);
     const fallback = fallbackExtrasFromMarkets(prediction, fixture, dataQuality);
     return {
       ...prediction,
@@ -906,7 +914,8 @@ async function handlePost(req: Request): Promise<Response> {
   try {
     const body = await req.json() as { fixture?: FixtureLite };
     fixture = body.fixture as FixtureLite;
-  } catch {
+  } catch (__caughtError) {
+    console.error("[API] Swallowed upstream error at src/app/api/match/route.ts:912", __caughtError);
     return Response.json({ error: "Invalid JSON body." }, { status: 400 });
   }
 

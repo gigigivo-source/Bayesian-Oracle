@@ -1,3 +1,4 @@
+import { apiError, errorMessage } from "@/lib/apiErrors";
 export const dynamic = "force-dynamic";
 
 interface Source {
@@ -27,12 +28,15 @@ interface WikiSearchResponse {
 }
 
 export async function POST(req: Request) {
+  try {
   const body = await req.json() as { message?: string };
   const message = body.message?.trim();
   if (!message) return Response.json({ error: "Empty message" }, { status: 400 });
 
   const sources: Source[] = [];
   const answers: string[] = [];
+  const failures: string[] = [];
+  let successes = 0;
 
   // 1. DuckDuckGo instant answer
   try {
@@ -40,7 +44,9 @@ export async function POST(req: Request) {
       `https://api.duckduckgo.com/?q=${encodeURIComponent(message)}&format=json&no_html=1&skip_disambig=1`,
       { headers: { "User-Agent": "GigiGivo/1.0" } },
     );
+    if (!r.ok) failures.push(`Source responded ${r.status} ${r.statusText}`);
     if (r.ok) {
+      successes++;
       const d = await r.json() as DdgResponse;
       if (d.Abstract) {
         answers.push(d.Abstract);
@@ -68,7 +74,9 @@ export async function POST(req: Request) {
           });
       });
     }
-  } catch { /* skip */ }
+  } catch (err) {
+    failures.push(errorMessage(err));
+  }
 
   // 2. Wikipedia page summary
   try {
@@ -76,7 +84,9 @@ export async function POST(req: Request) {
       `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(message.replace(/ /g, "_"))}`,
       { headers: { "User-Agent": "GigiGivo/1.0" } },
     );
+    if (!r.ok) failures.push(`Source responded ${r.status} ${r.statusText}`);
     if (r.ok) {
+      successes++;
       const d = await r.json() as WikiSummaryResponse;
       if (d.extract && d.extract.length > 30) {
         answers.push(d.extract);
@@ -87,7 +97,9 @@ export async function POST(req: Request) {
         });
       }
     }
-  } catch { /* skip */ }
+  } catch (err) {
+    failures.push(errorMessage(err));
+  }
 
   // 3. DuckDuckGo HTML search for broader results
   try {
@@ -95,7 +107,9 @@ export async function POST(req: Request) {
       `https://html.duckduckgo.com/html/?q=${encodeURIComponent(message + " football soccer")}`,
       { headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" } },
     );
+    if (!r.ok) failures.push(`Source responded ${r.status} ${r.statusText}`);
     if (r.ok) {
+      successes++;
       const html = await r.text();
       const snippetRe = /class="result__snippet">([^<]+)/g;
       let m: RegExpExecArray | null;
@@ -114,7 +128,9 @@ export async function POST(req: Request) {
           sources.push({ title: m[2].trim(), url, snippet: "" });
       }
     }
-  } catch { /* skip */ }
+  } catch (err) {
+    failures.push(errorMessage(err));
+  }
 
   // 4. Wikipedia search as final fallback
   if (answers.length === 0) {
@@ -123,7 +139,9 @@ export async function POST(req: Request) {
         `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(message)}&format=json&srlimit=3`,
         { headers: { "User-Agent": "GigiGivo/1.0" } },
       );
+      if (!r.ok) failures.push(`Source responded ${r.status} ${r.statusText}`);
       if (r.ok) {
+        successes++;
         const d = await r.json() as WikiSearchResponse;
         (d.query?.search ?? []).forEach((sr) => {
           const snippet = sr.snippet?.replace(/<[^>]*>/g, "").trim();
@@ -135,7 +153,13 @@ export async function POST(req: Request) {
           });
         });
       }
-    } catch { /* skip */ }
+    } catch (err) {
+      failures.push(errorMessage(err));
+    }
+  }
+
+  if (successes === 0 && failures.length > 0) {
+    return apiError("Chat data sources unavailable", new Error(failures.join("; ")), 502);
   }
 
   // Synthesise final answer
@@ -165,4 +189,8 @@ export async function POST(req: Request) {
     .slice(0, 6);
 
   return Response.json({ answer, sources: uniqueSources, query: message });
+
+  } catch (__routeError) {
+    return apiError("POST /api/chat failed", __routeError);
+  }
 }

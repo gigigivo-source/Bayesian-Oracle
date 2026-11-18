@@ -1,3 +1,4 @@
+import { apiError, errorMessage } from "@/lib/apiErrors";
 import dns from "node:dns";
 import tls from "node:tls";
 import * as espn from "@/lib/espn";
@@ -34,7 +35,8 @@ try {
       ...tlsExt.getCACertificates("system"),
     ]);
   }
-} catch {
+} catch (__caughtError) {
+    console.error("[API] Swallowed upstream error at src/app/api/v4-predictor/auto/route.ts:37", __caughtError);
   // Ignore on runtimes without custom CA hooks.
 }
 
@@ -107,7 +109,8 @@ async function loadCompletedEplResults(): Promise<Map<string, CompletedMatchResu
     }
     cachedResults = { at: Date.now(), map };
     return map;
-  } catch {
+  } catch (__caughtError) {
+    console.error("[API] Swallowed upstream error at src/app/api/v4-predictor/auto/route.ts:110", __caughtError);
     return null;
   }
 }
@@ -160,7 +163,8 @@ async function loadPriorSeason(season: string): Promise<HistoricalMatch[]> {
     // A readable season file may still be incomplete. Prefer the last full
     // season; otherwise use the available rows once, without caching them.
     return cached?.matches ?? matches;
-  } catch {
+  } catch (__caughtError) {
+    console.error("[API] Swallowed upstream error at src/app/api/v4-predictor/auto/route.ts:163", __caughtError);
     return cached?.matches ?? [];
   }
 }
@@ -224,6 +228,7 @@ async function buildMatchXgResolver(cutoffIso: string): Promise<MatchXgResolver 
 }
 
 export async function GET(request: Request) {
+  try {
   const rawWeek = new URL(request.url).searchParams.get("week");
   const requestedWeek = parseWeekParam(rawWeek);
   if (Number.isNaN(requestedWeek)) {
@@ -241,7 +246,8 @@ export async function GET(request: Request) {
           typeof espn.getCurrentMatchweek === "function"
             ? await espn.getCurrentMatchweek("eng.1")
             : DEFAULT_WEEK;
-      } catch {
+      } catch (__caughtError) {
+    console.error("[API] Swallowed upstream error at src/app/api/v4-predictor/auto/route.ts:245", __caughtError);
         week = DEFAULT_WEEK;
       }
     }
@@ -297,6 +303,11 @@ export async function GET(request: Request) {
     return NextResponse.json({ week, fixtures: result });
   } catch (error) {
     console.error("V4 auto predictor failed", error);
-    return NextResponse.json({ error: "Failed to fetch" }, { status: 500 });
+    return NextResponse.json({
+      details: errorMessage(error), error: "Failed to fetch" }, { status: 500 });
+  }
+
+  } catch (__routeError) {
+    return apiError("GET /api/v4-predictor/auto failed", __routeError);
   }
 }

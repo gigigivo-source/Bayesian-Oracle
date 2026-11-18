@@ -1,3 +1,4 @@
+import { apiError } from "@/lib/apiErrors";
 import { LEAGUE_MAP } from "@/lib/leagues";
 
 export const dynamic = "force-dynamic";
@@ -46,6 +47,7 @@ const STAT_NAMES: Array<{ key: string; label: string }> = [
 ];
 
 export async function GET(req: Request) {
+  try {
   const { searchParams } = new URL(req.url);
   const league  = searchParams.get("league");
   const eventId = searchParams.get("event");
@@ -58,11 +60,19 @@ export async function GET(req: Request) {
     const res = await fetch(`${BASE}/${league}/summary?event=${eventId}`, {
       next: { revalidate: 120 },
     });
-    if (!res.ok) return Response.json({ stats: [], error: "Feed unavailable" });
+    if (!res.ok) {
+      return apiError(
+        "ESPN boxscore feed unavailable",
+        new Error(`Upstream responded ${res.status} ${res.statusText}`),
+        502,
+      );
+    }
 
     const data = await res.json() as EspnSummaryResponse;
     const teams = data.boxscore?.teams ?? [];
-    if (teams.length < 2) return Response.json({ stats: [], error: "No boxscore data" });
+    if (teams.length < 2) {
+      return apiError("No boxscore data available", undefined, 404);
+    }
 
     const toMap = (entries: EspnStatEntry[] = {}  as unknown as EspnStatEntry[]): Record<string, string> => {
       const m: Record<string, string> = {};
@@ -85,7 +95,11 @@ export async function GET(req: Request) {
     const awayTeam = teams[1]?.team?.displayName ?? "Away";
 
     return Response.json({ homeTeam, awayTeam, stats });
-  } catch {
-    return Response.json({ stats: [], error: "Failed to fetch boxscore" });
+  } catch (err) {
+    return apiError("Boxscore fetch failed", err, 502);
+  }
+
+  } catch (__routeError) {
+    return apiError("GET /api/boxscore failed", __routeError);
   }
 }

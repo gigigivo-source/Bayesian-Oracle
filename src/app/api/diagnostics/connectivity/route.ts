@@ -11,6 +11,7 @@
 // Read-only: performs lightweight GETs and reports status only. It never
 // writes, caches, or mutates aggregator state.
 
+import { apiError } from "@/lib/apiErrors";
 import { fetchWithTimeout } from "@/lib/data/http";
 
 export const dynamic = "force-dynamic";
@@ -98,6 +99,7 @@ const REACHED = new Set([
 ]);
 
 export async function GET(req: Request) {
+  try {
   const url = new URL(req.url);
   const timeoutMs = Math.min(
     Math.max(Number(url.searchParams.get("timeout")) || 8000, 1000),
@@ -157,4 +159,8 @@ export async function GET(req: Request) {
     },
     { headers: { "cache-control": "no-store" } },
   );
+
+  } catch (__routeError) {
+    return apiError("GET /api/diagnostics/connectivity failed", __routeError);
+  }
 }

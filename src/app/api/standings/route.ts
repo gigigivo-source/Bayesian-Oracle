@@ -1,3 +1,4 @@
+import { apiError, errorMessage } from "@/lib/apiErrors";
 import { LEAGUE_MAP } from "@/lib/leagues";
 
 export const dynamic = "force-dynamic";
@@ -81,6 +82,7 @@ function parseEntries(groups: EspnGroup[]): StandingsEntry[] {
 }
 
 export async function GET(req: Request) {
+  try {
   const { searchParams } = new URL(req.url);
   const league = searchParams.get("league");
 
@@ -100,6 +102,9 @@ export async function GET(req: Request) {
     });
   }
 
+  const failures: string[] = [];
+  let responded = 0;
+
   // Try ESPN v2 first, fall back to v1
   try {
     const res = await fetch(`${ESPN_V2}/${league}/standings`, {
@@ -108,14 +113,19 @@ export async function GET(req: Request) {
     });
 
     if (res.ok) {
+      responded++;
       const data = await res.json() as EspnStandings;
       const groups = data.children ?? (data.standings ? [{ standings: data.standings }] : []);
       const entries = parseEntries(groups);
       if (entries.length > 0) {
         return Response.json({ league: leagueDef, entries, knockoutFormat: false });
       }
+    } else {
+      failures.push(`ESPN v2 responded ${res.status} ${res.statusText}`);
     }
-  } catch { /* try v1 */ }
+  } catch (err) {
+    failures.push(errorMessage(err));
+  }
 
   // Fall back to ESPN v1 scoreboard-derived standings
   try {
@@ -124,20 +134,33 @@ export async function GET(req: Request) {
       next: { revalidate: 600 },
     });
     if (res.ok) {
+      responded++;
       const data = await res.json() as EspnStandings;
       const groups = data.children ?? (data.standings ? [{ standings: data.standings }] : []);
       const entries = parseEntries(groups);
       if (entries.length > 0) {
         return Response.json({ league: leagueDef, entries, knockoutFormat: false });
       }
+    } else {
+      failures.push(`ESPN v1 responded ${res.status} ${res.statusText}`);
     }
-  } catch { /* no standings available */ }
+  } catch (err) {
+    failures.push(errorMessage(err));
+  }
 
-  // No standings found — return graceful empty response
+  if (responded === 0 && failures.length > 0) {
+    return apiError("Standings feed unavailable", new Error(failures.join("; ")), 502);
+  }
+
+  // Both sources answered but published no table — this is a real empty result.
   return Response.json({
     league: leagueDef,
     entries: [],
     knockoutFormat: false,
     message: `No standings data available for ${leagueDef.name}. The season may not have started or standings are not published for this competition.`,
   });
+
+  } catch (__routeError) {
+    return apiError("GET /api/standings failed", __routeError);
+  }
 }

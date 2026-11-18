@@ -1,3 +1,4 @@
+import { apiError } from "@/lib/apiErrors";
 import { db } from "@/db";
 import { bankroll } from "@/db/schema";
 import { desc } from "drizzle-orm";
@@ -6,6 +7,7 @@ export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
 export async function GET() {
+  try {
   try {
     const rows = await db
       .select()
@@ -40,15 +42,17 @@ export async function GET() {
         createdAt:   r.createdAt.toISOString(),
       })),
     });
-  } catch {
-    return Response.json({
-      balance: 0, deposits: 0, totalStaked: 0, totalReturns: 0,
-      roi: 0, profitLoss: 0, totalBets: 0, wonBets: 0, entries: [],
-    });
+  } catch (err) {
+    return apiError("Database query failed", err);
+  }
+
+  } catch (__routeError) {
+    return apiError("GET /api/bankroll failed", __routeError);
   }
 }
 
 export async function POST(req: Request) {
+  try {
   try {
     const body = await req.json() as { type?: string; amount?: number | string; description?: string };
     const { type, amount, description } = body;
@@ -72,7 +76,11 @@ export async function POST(req: Request) {
     });
 
     return Response.json({ ok: true, balance: newBalance });
-  } catch {
-    return Response.json({ error: "server error" }, { status: 500 });
+  } catch (err) {
+    return apiError("Database request failed", err);
+  }
+
+  } catch (__routeError) {
+    return apiError("POST /api/bankroll failed", __routeError);
   }
 }

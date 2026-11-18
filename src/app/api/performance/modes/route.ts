@@ -21,6 +21,7 @@
 // All aggregation lives in `@/lib/performance/modeAnalytics` (pure + unit
 // tested); this route only loads rows, normalises them and applies filters.
 
+import { apiError, errorMessage } from "@/lib/apiErrors";
 import { db } from "@/db";
 import { performanceLog, savedSlips, valueBetLog } from "@/db/schema";
 import { gte, sql } from "drizzle-orm";
@@ -90,12 +91,14 @@ async function loadSlipModes(since: Date): Promise<Map<number, string>> {
     );
     const rows = (res as unknown as { rows?: Array<{ id: number; ranking_mode: string | null }> }).rows ?? [];
     return new Map(rows.filter((r) => r.ranking_mode).map((r) => [Number(r.id), String(r.ranking_mode)]));
-  } catch {
+  } catch (__caughtError) {
+    console.error("[API] Swallowed upstream error at src/app/api/performance/modes/route.ts:93", __caughtError);
     return new Map();
   }
 }
 
 export async function GET(req: Request) {
+  try {
   try {
     const url = new URL(req.url);
     const isRefresh = url.searchParams.get("refresh") === "true";
@@ -223,8 +226,13 @@ export async function GET(req: Request) {
   } catch (error) {
     console.error("Ranking mode performance API error", error);
     return Response.json(
-      { ok: false, error: "Unable to load ranking mode performance." },
+      {
+      details: errorMessage(error), ok: false, error: "Unable to load ranking mode performance." },
       { status: 500 },
     );
+  }
+
+  } catch (__routeError) {
+    return apiError("GET /api/performance/modes failed", __routeError);
   }
 }

@@ -1,3 +1,4 @@
+import { apiError } from "@/lib/apiErrors";
 import { fetchAllScoreboard } from "@/lib/espn";
 import { liveScoreboardDates, selectLiveFixtures } from "@/lib/liveFixtures";
 
@@ -12,6 +13,7 @@ export const dynamic = "force-dynamic";
  * schedule feeds and could return a stale snapshot.
  */
 export async function GET() {
+  try {
   const fixtures = await fetchAllScoreboard(liveScoreboardDates());
 
   // Treat an upstream outage differently from a valid no-live-games response.
@@ -38,4 +40,8 @@ export async function GET() {
       headers: { "Cache-Control": "no-store" },
     },
   );
+
+  } catch (__routeError) {
+    return apiError("GET /api/live failed", __routeError);
+  }
 }

@@ -19,6 +19,7 @@
 // limit scope with CRON_DAILY_PICKS_LEAGUES (comma-separated slugs) and bound
 // wall-time with CRON_DAILY_PICKS_TIME_BUDGET_MS.
 
+import { apiError, errorMessage } from "@/lib/apiErrors";
 import { db } from "@/db";
 import {
   dailyPicks,
@@ -172,7 +173,8 @@ export async function fetchEspnFixtures(
   try {
     const fixtures = await fetchScoreboard(slug, dates);
     return fixtures.map((fixture) => ({ fixture, source: "ESPN" as const }));
-  } catch {
+  } catch (__caughtError) {
+    console.error("[API] Swallowed upstream error at src/app/api/cron/daily-picks/core.ts:175", __caughtError);
     return [];
   }
 }
@@ -986,7 +988,8 @@ export async function processCompetition(
     try {
       // Legs come from the canonical (mode B) run — stamp B explicitly.
       await saveAutoSlip(comp.competitionName, comp.leagueSlug, slipLegs.slice(0, 8), "B");
-    } catch {
+    } catch (__caughtError) {
+    console.error("[API] Swallowed upstream error at src/app/api/cron/daily-picks/core.ts:989", __caughtError);
       // slip saving is best-effort
     }
   }
@@ -1096,15 +1099,26 @@ function authorized(req: Request): boolean {
 // ─── Route handlers ───────────────────────────────────────────────────────────
 
 export async function GET(req: Request) {
+  try {
   if (!authorized(req)) return Response.json({ error: "Unauthorized" }, { status: 401 });
   try {
     return Response.json({ ...(await runDailyPicksSweep()) });
   } catch (err) {
     console.error("[Cron] daily-picks failed:", err);
-    return Response.json({ ok: false, error: "Daily picks sweep failed" }, { status: 500 });
+    return Response.json({
+      details: errorMessage(err), ok: false, error: "Daily picks sweep failed" }, { status: 500 });
+  }
+
+  } catch (__routeError) {
+    return apiError("GET /api/cron/daily-picks failed", __routeError);
   }
 }
 
 export async function POST(req: Request) {
+  try {
   return GET(req);
+
+  } catch (__routeError) {
+    return apiError("POST /api/cron/daily-picks failed", __routeError);
+  }
 }

@@ -32,6 +32,7 @@
 //   profitMargin   = guaranteedReturn / totalStake − 1
 //   A combination qualifies only when profitMargin ≥ MIN_PROFIT (default 1%).
 
+import { apiError, errorMessage } from "@/lib/apiErrors";
 import { searchFixture, getMultiBookOdds } from "@/lib/apiFootball";
 import { assessMarketConfidence, type MarketDataQuality } from "@/lib/data/confidence";
 import { getAnchors } from "@/lib/engine/statisticalAnchors";
@@ -547,6 +548,7 @@ async function fetchUpcomingFixtures(reqUrl: string): Promise<FixtureLite[] | nu
 // ─── Route ────────────────────────────────────────────────────────────────────
 
 export async function GET(req: Request): Promise<Response> {
+  try {
   const url = new URL(req.url);
   const isRefresh = url.searchParams.get("refresh") === "true";
   const cacheKey = getCacheKey(url);
@@ -694,11 +696,16 @@ export async function GET(req: Request): Promise<Response> {
     console.error(`[Arbitrage] Route failed: ${message}`);
     return Response.json(
       {
+      details: errorMessage(error),
         ...body,
         generatedAt: new Date().toISOString(),
         error: "Multi-Match Arbitrage is temporarily unavailable.",
       },
       { status: 503, headers: { "Cache-Control": "no-store" } },
     );
+  }
+
+  } catch (__routeError) {
+    return apiError("GET /api/arbitrage failed", __routeError);
   }
 }

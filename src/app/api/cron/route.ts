@@ -1,3 +1,4 @@
+import { apiError, errorMessage } from "@/lib/apiErrors";
 import { db } from "@/db";
 import { performanceLog, savedSlips, dailyPicks } from "@/db/schema";
 import { eq } from "drizzle-orm";
@@ -55,7 +56,8 @@ async function fetchBoxscore(slug: string, eventId: string): Promise<Record<stri
     const teams = data.boxscore?.teams;
     if (!teams || teams.length < 2) return null;
     return parseBoxTeams(teams);
-  } catch {
+  } catch (__caughtError) {
+    console.error("[API] Swallowed upstream error at src/app/api/cron/route.ts:58", __caughtError);
     return null;
   }
 }
@@ -98,7 +100,8 @@ async function fetchMatchById(slug: string, eventId: string): Promise<MatchResul
       awayScore: Number(away?.score) || 0,
       box,
     };
-  } catch {
+  } catch (__caughtError) {
+    console.error("[API] Swallowed upstream error at src/app/api/cron/route.ts:101", __caughtError);
     return null;
   }
 }
@@ -187,7 +190,8 @@ async function runVerification() {
         });
         matchesLogged++;
       }
-    } catch {
+    } catch (__caughtError) {
+    console.error("[API] Swallowed upstream error at src/app/api/cron/route.ts:190", __caughtError);
       // skip individual failed match — keep the job running
     }
   }
@@ -248,7 +252,8 @@ async function runVerification() {
         slipsSettled++;
       }
     }
-  } catch {
+  } catch (__caughtError) {
+    console.error("[API] Swallowed upstream error at src/app/api/cron/route.ts:251", __caughtError);
     // slip settlement is best-effort; don't abort the whole job
   }
 
@@ -298,7 +303,8 @@ async function runVerification() {
 
       if (pending === 0) dailyPicksSettled++;
     }
-  } catch {
+  } catch (__caughtError) {
+    console.error("[API] Swallowed upstream error at src/app/api/cron/route.ts:301", __caughtError);
     // best-effort
   }
 
@@ -372,15 +378,26 @@ function authorized(req: Request): boolean {
 
 // ─── Route handlers ───────────────────────────────────────────────────────────
 export async function GET(req: Request) {
+  try {
   if (!authorized(req)) return Response.json({ error: "Unauthorized" }, { status: 401 });
   try {
     const result = await runVerification();
     return Response.json({ ok: true, ...result, ranAt: new Date().toISOString() });
-  } catch {
-    return Response.json({ ok: false, error: "Verification job failed" }, { status: 500 });
+  } catch (__caughtError) {
+    return Response.json({
+      details: errorMessage(__caughtError), ok: false, error: "Verification job failed" }, { status: 500 });
+  }
+
+  } catch (__routeError) {
+    return apiError("GET /api/cron failed", __routeError);
   }
 }
 
 export async function POST(req: Request) {
+  try {
   return GET(req);
+
+  } catch (__routeError) {
+    return apiError("POST /api/cron failed", __routeError);
+  }
 }

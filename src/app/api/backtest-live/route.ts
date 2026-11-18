@@ -3,6 +3,7 @@
 // real ESPN boxscore data, and reports tier accuracy (Top-1/3/5/10).
 // This is the ground-truth accuracy measurement for the engine.
 
+import { apiError } from "@/lib/apiErrors";
 import { fetchScoreboard, fetchSummary } from "@/lib/espn";
 import { runEngineFromReal, evaluateFinishedMatch } from "@/lib/engine";
 import type { FixtureLite } from "@/lib/espn";
@@ -61,7 +62,8 @@ async function fetchBoxscore(slug: string, eventId: string): Promise<Record<stri
       homeFouls: h.foulsCommitted ?? 0, awayFouls: a.foulsCommitted ?? 0,
       homeRedCards: h.redCards ?? 0, awayRedCards: a.redCards ?? 0,
     };
-  } catch { return null; }
+  } catch (__caughtError) {
+    console.error("[API] Swallowed upstream error at src/app/api/backtest-live/route.ts:64", __caughtError); return null; }
 }
 
 function fmt(d: Date): string { return d.toISOString().slice(0, 10).replace(/-/g, ""); }
@@ -87,6 +89,7 @@ interface MatchBacktestResult {
 }
 
 export async function GET(req: Request) {
+  try {
   const { searchParams } = new URL(req.url);
   const league    = searchParams.get("league");    // optional: filter to one league
   const days      = Math.min(parseInt(searchParams.get("days") ?? "7"), 30);
@@ -180,7 +183,8 @@ export async function GET(req: Request) {
         boxscoreAvailable: !!boxscore,
         dataCompleteness:  result.match.dataCompletenessScore,
       });
-    } catch { /* skip */ }
+    } catch (__caughtError) {
+    console.error("[API] Swallowed upstream error at src/app/api/backtest-live/route.ts:184", __caughtError); /* skip */ }
   }
 
   // Aggregate stats
@@ -237,4 +241,8 @@ export async function GET(req: Request) {
   };
 
   return Response.json({ aggregate, matches: matchResults });
+
+  } catch (__routeError) {
+    return apiError("GET /api/backtest-live failed", __routeError);
+  }
 }

@@ -1,3 +1,4 @@
+import { apiError } from "@/lib/apiErrors";
 import { db } from "@/db";
 import { savedSlips } from "@/db/schema";
 import { desc, eq } from "drizzle-orm";
@@ -14,10 +15,11 @@ function badRequest(error: string): Response {
 
 function serverError(label: string, err: unknown): Response {
   console.error(label, err);
-  return Response.json({ error: "Database request failed" }, { status: 500 });
+  return apiError("Database query failed", err);
 }
 
 export async function GET() {
+  try {
   try {
     const slips = await db
       .select()
@@ -28,13 +30,19 @@ export async function GET() {
   } catch (err) {
     return serverError("Slips GET error:", err);
   }
+
+  } catch (__routeError) {
+    return apiError("GET /api/slips failed", __routeError);
+  }
 }
 
 export async function POST(req: Request) {
+  try {
   let body: unknown;
   try {
     body = await req.json();
-  } catch {
+  } catch (__caughtError) {
+    console.error("[API] Swallowed upstream error at src/app/api/slips/route.ts:43", __caughtError);
     return badRequest("Invalid JSON body");
   }
 
@@ -127,13 +135,19 @@ export async function POST(req: Request) {
   } catch (err) {
     return serverError("Slips POST error:", err);
   }
+
+  } catch (__routeError) {
+    return apiError("POST /api/slips failed", __routeError);
+  }
 }
 
 export async function PUT(req: Request) {
+  try {
   let body: unknown;
   try {
     body = await req.json();
-  } catch {
+  } catch (__caughtError) {
+    console.error("[API] Swallowed upstream error at src/app/api/slips/route.ts:147", __caughtError);
     return badRequest("Invalid JSON body");
   }
 
@@ -173,5 +187,9 @@ export async function PUT(req: Request) {
     return Response.json({ success: true });
   } catch (err) {
     return serverError("Slips PUT error:", err);
+  }
+
+  } catch (__routeError) {
+    return apiError("PUT /api/slips failed", __routeError);
   }
 }

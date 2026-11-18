@@ -4,6 +4,7 @@
 // These are displayed in the Performance tab and can be used to update
 // calibration.ts coefficients continuously.
 
+import { apiError, errorMessage } from "@/lib/apiErrors";
 import { db } from "@/db";
 import { performanceLog } from "@/db/schema";
 import { gte } from "drizzle-orm";
@@ -18,6 +19,7 @@ interface PickRecord {
 }
 
 export async function GET() {
+  try {
   try {
     const cutoff = new Date();
     cutoff.setDate(cutoff.getDate() - 90);
@@ -113,7 +115,12 @@ export async function GET() {
     });
   } catch (err) {
     console.error("Calibrate error:", err);
-    return Response.json({ error: "Failed to compute calibration" }, { status: 500 });
+    return Response.json({
+      details: errorMessage(err), error: "Failed to compute calibration" }, { status: 500 });
+  }
+
+  } catch (__routeError) {
+    return apiError("GET /api/calibrate failed", __routeError);
   }
 }
 
