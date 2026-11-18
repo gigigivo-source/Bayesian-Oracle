@@ -1,3 +1,4 @@
+import { apiError } from "@/lib/apiErrors";
 import { db } from "@/db";
 import { performanceLog } from "@/db/schema";
 import { and, eq } from "drizzle-orm";
@@ -158,10 +159,12 @@ function parsePayload(body: unknown): ParseResult {
 }
 
 export async function POST(req: Request) {
+  try {
   let body: unknown;
   try {
     body = await req.json();
-  } catch {
+  } catch (__caughtError) {
+    console.error("[API] Swallowed upstream error at src/app/api/performance/save/route.ts:165", __caughtError);
     return badRequest("Invalid JSON body");
   }
 
@@ -228,7 +231,10 @@ export async function POST(req: Request) {
 
     return Response.json({ success: true, id: row.id, rankingMode });
   } catch (err) {
-    console.error("Performance save error:", err);
-    return Response.json({ error: "Failed to save" }, { status: 500 });
+    return apiError("Database query failed", err);
+  }
+
+  } catch (__routeError) {
+    return apiError("POST /api/performance/save failed", __routeError);
   }
 }

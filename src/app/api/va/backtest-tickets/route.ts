@@ -1,3 +1,4 @@
+import { apiError } from "@/lib/apiErrors";
 import { db } from "@/db";
 import { vaBacktestRuns, vaBacktestTickets } from "@/db/schema";
 import { and, desc, eq } from "drizzle-orm";
@@ -5,6 +6,7 @@ import { and, desc, eq } from "drizzle-orm";
 export const dynamic = "force-dynamic";
 
 export async function GET(req: Request) {
+  try {
   const url = new URL(req.url);
   const runId = url.searchParams.get("runId")?.trim() || null;
   const status = url.searchParams.get("status")?.trim() || null;
@@ -33,7 +35,10 @@ export async function GET(req: Request) {
 
     return Response.json({ ok: true, runs: runs ?? [], tickets: tickets ?? [] });
   } catch (err) {
-    console.error("[VA] backtest-tickets fetch failed", err);
-    return Response.json({ ok: true, runs: [], tickets: [] });
+    return apiError("Database query failed", err);
+  }
+
+  } catch (__routeError) {
+    return apiError("GET /api/va/backtest-tickets failed", __routeError);
   }
 }

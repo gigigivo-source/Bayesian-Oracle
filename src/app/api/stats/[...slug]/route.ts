@@ -15,6 +15,7 @@
 // A cache hit is returned instantly (fromCache: true). A cache miss without
 // home/away/date returns the capability matrix + a hint (no network).
 
+import { apiError } from "@/lib/apiErrors";
 import { statsAggregator } from "@/lib/data/aggregator";
 import { REGISTERED_SOURCES, SOURCE_CAPABILITIES, STAT_SOURCES } from "@/lib/data/aggregator";
 import type { CanonicalMatchStats } from "@/lib/data/types";
@@ -96,11 +97,21 @@ async function handle(params: StatsRouteParams, req: Request): Promise<Response>
 }
 
 export async function GET(req: Request, ctx: { params: Promise<StatsRouteParams> }) {
+  try {
   const params = await ctx.params;
   return handle(params, req);
+
+  } catch (__routeError) {
+    return apiError("GET /api/stats/[...slug] failed", __routeError);
+  }
 }
 
 export async function POST(req: Request, ctx: { params: Promise<StatsRouteParams> }) {
+  try {
   const params = await ctx.params;
   return handle(params, req);
+
+  } catch (__routeError) {
+    return apiError("POST /api/stats/[...slug] failed", __routeError);
+  }
 }

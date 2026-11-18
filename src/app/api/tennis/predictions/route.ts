@@ -16,6 +16,7 @@
 // a player with no replayed rating falls back to a clearly-labelled rank
 // prior — never to an invented number.
 
+import { apiError } from "@/lib/apiErrors";
 import {
   buildTennisPlayerProfiles,
   computeTourBaselines,
@@ -247,6 +248,7 @@ function toModelPlayer(
 const SURFACES = new Set(["clay", "grass", "hard", "carpet"]);
 
 export async function GET(request: Request) {
+  try {
   const url = new URL(request.url);
   const surfaceParam = (url.searchParams.get("surface") ?? "").toLowerCase();
   const surface = SURFACES.has(surfaceParam) ? (surfaceParam as TennisSurface) : null;
@@ -454,6 +456,10 @@ export async function GET(request: Request) {
     count: matches.length,
     matches: slicedMatches,
   });
+
+  } catch (__routeError) {
+    return apiError("GET /api/tennis/predictions failed", __routeError);
+  }
 }
 
 const VALUE_ACCUMULATOR_TARGET_ODDS = 1.5;

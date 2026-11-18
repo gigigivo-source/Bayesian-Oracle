@@ -1,3 +1,4 @@
+import { apiError } from "@/lib/apiErrors";
 import { db } from "@/db";
 import { predictions } from "@/db/schema";
 import { desc } from "drizzle-orm";
@@ -5,6 +6,7 @@ import { desc } from "drizzle-orm";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
+  try {
   try {
     const rows = await db
       .select({
@@ -25,7 +27,11 @@ export async function GET() {
       .limit(25);
 
     return Response.json({ predictions: rows });
-  } catch {
-    return Response.json({ predictions: [] });
+  } catch (err) {
+    return apiError("Database query failed", err);
+  }
+
+  } catch (__routeError) {
+    return apiError("GET /api/predictions failed", __routeError);
   }
 }

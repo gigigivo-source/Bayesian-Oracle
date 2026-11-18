@@ -1,3 +1,4 @@
+import { apiError, errorMessage } from "@/lib/apiErrors";
 import { db } from "@/db";
 import { performanceLog } from "@/db/schema";
 import { eq } from "drizzle-orm";
@@ -12,10 +13,12 @@ interface ResolveBody {
 
 /** User manually resolves a PENDING market as HIT or MISS */
 export async function POST(req: Request) {
+  try {
   let body: ResolveBody;
   try {
     body = await req.json() as ResolveBody;
-  } catch {
+  } catch (__caughtError) {
+    console.error("[API] Swallowed upstream error at src/app/api/performance/resolve/route.ts:19", __caughtError);
     return Response.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
@@ -77,6 +80,11 @@ export async function POST(req: Request) {
     return Response.json({ success: true, hits, misses, pending, accuracy });
   } catch (e) {
     console.error("resolve error", e);
-    return Response.json({ error: "Failed to update" }, { status: 500 });
+    return Response.json({
+      details: errorMessage(e), error: "Failed to update" }, { status: 500 });
+  }
+
+  } catch (__routeError) {
+    return apiError("POST /api/performance/resolve failed", __routeError);
   }
 }

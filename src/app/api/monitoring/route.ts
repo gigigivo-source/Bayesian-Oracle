@@ -1,3 +1,4 @@
+import { apiError, errorMessage } from "@/lib/apiErrors";
 import { db } from "@/db";
 import { errorLog } from "@/db/schema";
 import { sql, desc, gte } from "drizzle-orm";
@@ -12,15 +13,18 @@ export const dynamic = "force-dynamic";
  *  - active ALERTS (DB down, error spike) with severity
  */
 export async function GET() {
+  try {
   const nowIso = new Date().toISOString();
   const alerts: Array<{ severity: "critical" | "warning"; message: string }> = [];
 
   // ── DB health ────────────────────────────────────────────────────────────────
   let dbHealthy = true;
+  let dbFailure: unknown;
   try {
     await db.execute(sql`select 1`);
-  } catch {
+  } catch (err) {
     dbHealthy = false;
+    dbFailure = err;
     alerts.push({ severity: "critical", message: "Database is unreachable." });
   }
 
@@ -71,8 +75,16 @@ export async function GET() {
       // ── Alert rules ─────────────────────────────────────────────────────────
       if (last1h >= 20)      alerts.push({ severity: "critical", message: `Error spike: ${last1h} errors in the last hour.` });
       else if (last1h >= 8)  alerts.push({ severity: "warning",  message: `Elevated errors: ${last1h} in the last hour.` });
-    } catch {
+    } catch (err) {
       alerts.push({ severity: "warning", message: "Could not read error log." });
+      return apiError("Monitoring database query failed", err, 500, {
+        status: "degraded",
+        checkedAt: nowIso,
+        db: { healthy: true },
+        errors: { last1h, last24h, byLevel, bySource },
+        alerts,
+        recent,
+      });
     }
   }
 
@@ -82,14 +94,23 @@ export async function GET() {
     alerts.length > 0                                   ? "warning"  :
                                                           "healthy";
 
-  return Response.json({
+  const body = {
     status,
     checkedAt: nowIso,
     db:     { healthy: dbHealthy },
     errors: { last1h, last24h, byLevel, bySource },
     alerts,
     recent,
-  });
+  };
+
+  if (!dbHealthy) {
+    return apiError("Database query failed", dbFailure, 503, body);
+  }
+  return Response.json(body, { headers: { "Cache-Control": "no-store" } });
+
+  } catch (__routeError) {
+    return apiError("GET /api/monitoring failed", __routeError);
+  }
 }
 
 /**
@@ -97,6 +118,7 @@ export async function GET() {
  * Body: { source, message, stack?, context?, level? }
  */
 export async function POST(req: Request) {
+  try {
   try {
     const body = await req.json() as {
       source?:  string;
@@ -117,7 +139,12 @@ export async function POST(req: Request) {
       context: context ?? null,
     });
     return Response.json({ ok: true });
-  } catch {
-    return Response.json({ error: "capture failed" }, { status: 500 });
+  } catch (__caughtError) {
+    return Response.json({
+      details: errorMessage(__caughtError), error: "capture failed" }, { status: 500 });
+  }
+
+  } catch (__routeError) {
+    return apiError("POST /api/monitoring failed", __routeError);
   }
 }

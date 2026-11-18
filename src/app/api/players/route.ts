@@ -1,3 +1,4 @@
+import { apiError } from "@/lib/apiErrors";
 import { generatePlayerMarkets, type PlayerProfile } from "@/lib/engine/players";
 
 export const dynamic = "force-dynamic";
@@ -21,12 +22,13 @@ interface ApiFootballResponse {
 }
 
 export async function GET(req: Request) {
+  try {
   const { searchParams } = new URL(req.url);
   const league = searchParams.get("league") ?? "39"; // EPL default
   const season = searchParams.get("season") ?? "2024";
 
   if (!API_FOOTBALL_KEY) {
-    return Response.json({ players: [], error: "API-Football key not configured" });
+    return apiError("API-Football key not configured", undefined, 503);
   }
 
   try {
@@ -39,12 +41,16 @@ export async function GET(req: Request) {
     );
 
     if (!res.ok) {
-      return Response.json({ players: [], error: "API-Football unavailable" });
+      return apiError(
+        "API-Football unavailable",
+        new Error(`Upstream responded ${res.status} ${res.statusText}`),
+        502,
+      );
     }
 
     const data = await res.json() as ApiFootballResponse;
     if (data.errors?.plan) {
-      return Response.json({ players: [], error: data.errors.plan });
+      return apiError("API-Football plan error", new Error(data.errors.plan), 502);
     }
 
     const players: Array<PlayerProfile & { markets: ReturnType<typeof generatePlayerMarkets> }> = [];
@@ -77,7 +83,11 @@ export async function GET(req: Request) {
     }
 
     return Response.json({ players, league, season, count: players.length });
-  } catch {
-    return Response.json({ players: [], error: "Failed to fetch player data" });
+  } catch (err) {
+    return apiError("Player data fetch failed", err, 502);
+  }
+
+  } catch (__routeError) {
+    return apiError("GET /api/players failed", __routeError);
   }
 }

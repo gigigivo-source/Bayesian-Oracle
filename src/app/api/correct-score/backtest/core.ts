@@ -18,6 +18,7 @@
 // upgraded numbers) and `baseline` / `comparison` carry the old model and the
 // per-metric deltas.
 
+import { apiError, errorMessage } from "@/lib/apiErrors";
 import { fetchScoreboard, type FixtureLite, type TeamLite } from "@/lib/espn";
 import { getAnchors } from "@/lib/engine/statisticalAnchors";
 import {
@@ -801,17 +802,28 @@ async function respond(request: Request, force: boolean): Promise<Response> {
   } catch (error) {
     console.error("[CorrectScoreBacktest] failed", error);
     return Response.json(
-      { error: error instanceof Error ? error.message : "Unable to run correct-score backtest" },
+      {
+      details: errorMessage(error), error: error instanceof Error ? error.message : "Unable to run correct-score backtest" },
       { status: 503 },
     );
   }
 }
 
 export async function GET(request: Request): Promise<Response> {
+  try {
   return respond(request, false);
+
+  } catch (__routeError) {
+    return apiError("GET /api/correct-score/backtest failed", __routeError);
+  }
 }
 
 /** POST always runs a fresh replay; this is what the UI's Run Backtest uses. */
 export async function POST(request: Request): Promise<Response> {
+  try {
   return respond(request, true);
+
+  } catch (__routeError) {
+    return apiError("POST /api/correct-score/backtest failed", __routeError);
+  }
 }

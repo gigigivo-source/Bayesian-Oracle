@@ -16,6 +16,7 @@
 // Read-only: performs lightweight GET probes and reads aggregator state. It
 // never writes, caches, or mutates aggregator state.
 
+import { apiError } from "@/lib/apiErrors";
 import { statsAggregator } from "@/lib/data/aggregator";
 import { checkApiFootballKey } from "@/lib/data/sources/apiFootball";
 import { fetchWithTimeout } from "@/lib/data/http";
@@ -109,6 +110,7 @@ const REACHED = new Set([
 ]);
 
 export async function GET(req: Request) {
+  try {
   const url = new URL(req.url);
   const timeoutMs = Math.min(
     Math.max(Number(url.searchParams.get("timeout")) || 6000, 1000),
@@ -230,4 +232,8 @@ export async function GET(req: Request) {
     },
     { headers: { "cache-control": "no-store" } },
   );
+
+  } catch (__routeError) {
+    return apiError("GET /api/diagnostics/data-sources failed", __routeError);
+  }
 }

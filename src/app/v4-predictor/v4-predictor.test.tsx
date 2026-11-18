@@ -252,14 +252,17 @@ describe("GET /api/v4-predictor/auto — V2 Strict 3-Snipe System", () => {
     }
   });
 
-  it("returns 500 with { error: 'Failed to fetch' } when fetching throws", async () => {
+  it("returns 500 with descriptive JSON when fetching throws", async () => {
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     fetchScoreboardMock.mockRejectedValue(new Error("ESPN down"));
 
     const { GET } = await import("@/app/api/v4-predictor/auto/route");
     const response = await GET(new Request("http://localhost:3000/api/v4-predictor/auto"));
     expect(response.status).toBe(500);
-    expect(await response.json()).toEqual({ error: "Failed to fetch" });
+    expect(await response.json()).toEqual({
+      error: "Failed to fetch",
+      details: "ESPN down",
+    });
 
     errSpy.mockRestore();
   });

@@ -17,6 +17,7 @@
 // Auth: the same CRON_SECRET as the settlement cron, sent as
 // `Authorization: Bearer <secret>` (or `?key=<secret>` for cron-style calls).
 
+import { apiError, errorMessage } from "@/lib/apiErrors";
 import { db } from "@/db";
 import { performanceLog } from "@/db/schema";
 import { and, eq } from "drizzle-orm";
@@ -92,6 +93,7 @@ function detailOutcomeForUpdate(outcome: SureCornerOutcome): string {
 // ─── Route handlers ──────────────────────────────────────────────────────────
 
 export async function POST(req: Request): Promise<Response> {
+  try {
   if (!authorized(req)) {
     return Response.json({ error: "Unauthorized" }, { status: 401 });
   }
@@ -203,7 +205,12 @@ export async function POST(req: Request): Promise<Response> {
     return Response.json({ total: pending.length, updated, failed, details } satisfies VerifySummary);
   } catch (error) {
     console.error("[SureCorners] Verification failed:", error);
-    return Response.json({ error: "Verification failed" }, { status: 500 });
+    return Response.json({
+      details: errorMessage(error), error: "Verification failed" }, { status: 500 });
+  }
+
+  } catch (__routeError) {
+    return apiError("POST /api/sure-corners/verify failed", __routeError);
   }
 }
 

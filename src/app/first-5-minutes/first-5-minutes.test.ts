@@ -11,11 +11,11 @@
 // Both endpoints read performance_log through drizzle; the database module is
 // mocked with a small chainable query builder (the same "rows + read error"
 // shape the other route tests use) so the grouping, window, ordering and
-// fail-soft behaviour can be asserted without a database. The analytics route
-// issues one GROUP BY query per dimension; the mock keys each query's canned
-// rows off the first selected field (the dimension name), and pure helpers
-// exported by the route (action verdicts, bucket assignment, trend windows)
-// are pinned directly.
+// database-error propagation can be asserted without a database. The analytics
+// route issues one GROUP BY query per dimension; the mock keys each query's
+// canned rows off the first selected field (the dimension name), and pure
+// helpers exported by the route (action verdicts, bucket assignment, trend
+// windows) are pinned directly.
 
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -497,12 +497,21 @@ describe("GET /api/first-5-minutes/results", () => {
     expect(dbState.lastLimit).toBe(400);
   });
 
-  it("never 500s: a database error answers with an empty list", async () => {
-    dbState.readError = new Error("connection refused");
+  it("returns 500 with details when the database read fails", async () => {
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      dbState.readError = new Error("connection refused");
 
-    const { response, body } = await getResults();
-    expect(response.status).toBe(200);
-    expect(body).toEqual({ ok: true, matches: [] });
+      const { response, body } = await getResults();
+      expect(response.status).toBe(500);
+      expect(body).toMatchObject({
+        error: "Database query failed",
+        details: "connection refused",
+      });
+      expect(errorLog).toHaveBeenCalled();
+    } finally {
+      errorLog.mockRestore();
+    }
   });
 });
 
@@ -650,29 +659,20 @@ describe("GET /api/first-5-minutes/analytics", () => {
     });
   });
 
-  it("never 500s: a database error answers ok:true with a zeroed payload", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  it("returns 500 with details when the analytics database read fails", async () => {
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       dbState.readError = new Error("connection refused");
       const { response, body } = await getAnalyticsBody();
 
-      expect(response.status).toBe(200);
-      expect(body.ok).toBe(true);
-      expect(body.totals).toEqual({
-        settled: 0, won: 0, lost: 0, push: 0, void: 0,
-        realisedRate: 0, claimedAverage: 0, edge: 0,
+      expect(response.status).toBe(500);
+      expect(body).toMatchObject({
+        error: "Database query failed",
+        details: "connection refused",
       });
-      expect(body.byMarket).toEqual([]);
-      expect(body.bySelection).toEqual([]);
-      expect(body.byConfidence).toEqual([]);
-      expect(body.byLeague).toEqual([]);
-      expect(body.byBucket).toEqual([]);
-      expect(body.trust.best).toEqual([]);
-      expect(body.trust.worst).toEqual([]);
-      // The contract's log line.
-      expect(warn).toHaveBeenCalled();
+      expect(errorLog).toHaveBeenCalled();
     } finally {
-      warn.mockRestore();
+      errorLog.mockRestore();
     }
   });
 

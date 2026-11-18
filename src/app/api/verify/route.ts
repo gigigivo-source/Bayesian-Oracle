@@ -1,3 +1,4 @@
+import { apiError } from "@/lib/apiErrors";
 import { fetchSummary, fetchScoreboard, type FixtureLite } from "@/lib/espn";
 import { runEngineFromReal, evaluateFinishedMatch } from "@/lib/engine";
 import { TOP_FEED_SLUGS } from "@/lib/leagues";
@@ -45,7 +46,8 @@ async function fetchBoxscore(
       homeOffsides:home.offsides      ?? 0, awayOffsides:away.offsides      ?? 0,
       homeSaves:   home.saves         ?? 0, awaySaves:   away.saves         ?? 0,
     };
-  } catch {
+  } catch (__caughtError) {
+    console.error("[API] Swallowed upstream error at src/app/api/verify/route.ts:48", __caughtError);
     return null;
   }
 }
@@ -68,6 +70,7 @@ interface VerifiedMatch {
 // ─── Route ────────────────────────────────────────────────────────────────────
 
 export async function GET() {
+  try {
   const slugsToCheck = TOP_FEED_SLUGS.slice(0, 8);
   const boards = await Promise.all(slugsToCheck.map((s) => fetchScoreboard(s)));
 
@@ -101,10 +104,15 @@ export async function GET() {
           reason:    m.reason,
         })),
       });
-    } catch {
+    } catch (__caughtError) {
+    console.error("[API] Swallowed upstream error at src/app/api/verify/route.ts:105", __caughtError);
       // Skip individual failed matches — keep processing the rest
     }
   }
 
   return Response.json({ verified, count: verified.length });
+
+  } catch (__routeError) {
+    return apiError("GET /api/verify failed", __routeError);
+  }
 }

@@ -37,6 +37,7 @@
 //   ?minEv=0.10     edge floor (decimal). Default 0.05, clamped to [0, 0.5].
 //   ?refresh=true   bypass the one-hour cache and rebuild the scan.
 
+import { apiError, errorMessage } from "@/lib/apiErrors";
 import { GET as first5GET, type First5MinutesResponse } from "@/app/api/first-5-minutes/core";
 import { GET as sureCornersGET, type SureCornersResponse } from "@/app/api/sure-corners/route";
 import { statsAggregator } from "@/lib/data/aggregator";
@@ -486,7 +487,8 @@ function realPriceLookup(
         provider: bet.provider || "Bookmaker",
       });
     }
-  } catch {
+  } catch (__caughtError) {
+    console.error("[API] Swallowed upstream error at src/app/api/profit-maximizer/route.ts:489", __caughtError);
     // Price enrichment is optional — an unmatched market simply rides fair odds.
   }
   return out;
@@ -935,23 +937,18 @@ function getScan(forceRefresh: boolean): Promise<ProfitMaximizerScan> {
   if (forceRefresh) globalForProfit.__gigiProfitMaximizerScan = null;
   else if (fresh && cached) return Promise.resolve(cached.scan);
 
-  // Single-flight: concurrent requests share one rebuild, and a failed rebuild
-  // falls back to the last good scan (stale-while-revalidate semantics).
+  // Single-flight: concurrent requests share one rebuild. A failed rebuild is
+  // returned as an error rather than a stale successful-looking 200.
   if (!globalForProfit.__gigiProfitMaximizerInFlight) {
-    const previous = cached?.scan ?? null;
     globalForProfit.__gigiProfitMaximizerInFlight = buildScanPayload(forceRefresh)
       .then((scan) => {
         globalForProfit.__gigiProfitMaximizerScan = { scan, timestamp: Date.now() };
         return scan;
       })
       .catch((error) => {
-        if (previous) {
-          console.warn(
-            `[ProfitMax] Scan failed — serving the previous scan: ` +
-              `${error instanceof Error ? error.message : String(error)}`,
-          );
-          return previous;
-        }
+        console.error(
+          `[ProfitMax] Scan failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
         throw error;
       })
       .finally(() => {
@@ -1055,6 +1052,7 @@ function buildResponse(
 // ─── Route ────────────────────────────────────────────────────────────────────
 
 export async function GET(req: Request): Promise<Response> {
+  try {
   const url = new URL(req.url);
   const forceRefresh = url.searchParams.get("refresh") === "true";
   const minEv = parseMinEv(url.searchParams.get("minEv"));
@@ -1089,10 +1087,15 @@ export async function GET(req: Request): Promise<Response> {
     };
     return Response.json(
       {
+      details: errorMessage(error),
         ...buildResponse(empty, minEv, { hit: false, forcedRefresh: forceRefresh }),
         error: "Profit Maximizer is temporarily unavailable. No bet was shown without a positive edge.",
       },
       { status: 503, headers: { "Cache-Control": "no-store", "X-Cache": "MISS" } },
     );
+  }
+
+  } catch (__routeError) {
+    return apiError("GET /api/profit-maximizer failed", __routeError);
   }
 }

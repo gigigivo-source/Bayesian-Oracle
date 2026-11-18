@@ -1,3 +1,4 @@
+import { apiError } from "@/lib/apiErrors";
 import {
   getLatestHighlights,
   searchHighlights,
@@ -15,6 +16,7 @@ export const dynamic = "force-dynamic";
  *   (no params)           → latest highlights
  */
 export async function GET(req: Request) {
+  try {
   const { searchParams } = new URL(req.url);
   const q           = searchParams.get("q");
   const home        = searchParams.get("home");
@@ -23,7 +25,7 @@ export async function GET(req: Request) {
   const limit       = Math.min(parseInt(searchParams.get("limit") ?? "20"), 50);
 
   if (!process.env.HIGHLIGHTLY_KEY) {
-    return Response.json({ highlights: [], error: "Highlightly key not configured" });
+    return apiError("Highlightly key not configured", undefined, 503);
   }
 
   let highlights;
@@ -39,4 +41,8 @@ export async function GET(req: Request) {
   }
 
   return Response.json({ highlights, count: highlights.length });
+
+  } catch (__routeError) {
+    return apiError("GET /api/highlights failed", __routeError);
+  }
 }

@@ -2,6 +2,7 @@
 // Captures runtime errors into the DB error_log, always fail-soft (logging must
 // never throw and never break a request). Read/aggregate via /api/monitoring.
 
+import { apiError, errorMessage } from "@/lib/apiErrors";
 import { db } from "@/db";
 import { errorLog } from "@/db/schema";
 
@@ -33,8 +34,9 @@ export async function captureError(
       stack:   stack?.slice(0, 6000) ?? null,
       context: opts.context ?? null,
     });
-  } catch {
-    // Logging must never break anything.
+  } catch (err) {
+    // Logging must never break the request, but the failure is not silent.
+    console.warn("[Monitoring] Failed to persist error log:", errorMessage(err));
   }
 }
 
@@ -54,7 +56,7 @@ export function withMonitoring<T extends unknown[]>(
       await captureError(source, err, {
         context: url ? { url } : undefined,
       });
-      return Response.json({ error: "Internal error", monitored: true }, { status: 500 });
+      return apiError("Internal error", err, 500, { monitored: true });
     }
   };
 }

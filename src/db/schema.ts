@@ -7,6 +7,7 @@ import {
   integer,
   real,
   boolean,
+  index,
   uniqueIndex,
   date,
   numeric,
@@ -38,7 +39,11 @@ export const errorLog = pgTable("error_log", {
   stack:     text("stack"),
   context:   jsonb("context"),                         // arbitrary metadata
   createdAt: timestamp("created_at").defaultNow().notNull(),
-});
+}, (table) => [
+  index("error_log_created_at_idx").on(table.createdAt),
+  index("error_log_level_created_at_idx").on(table.level, table.createdAt),
+  index("error_log_source_created_at_idx").on(table.source, table.createdAt),
+]);
 
 // ─── Daily Picks ──────────────────────────────────────────────────────────────
 // Records each day's published picks so outcomes can be settled and reported.
@@ -55,7 +60,11 @@ export const dailyPicks = pgTable("daily_picks", {
   pending:    integer("pending").notNull().default(0),
   status:     text("status").notNull().default("pending"), // pending | settled
   createdAt:  timestamp("created_at").defaultNow().notNull(),
-});
+}, (table) => [
+  index("daily_picks_pick_date_event_id_idx").on(table.pickDate, table.eventId),
+  index("daily_picks_status_created_at_idx").on(table.status, table.createdAt),
+  index("daily_picks_created_at_idx").on(table.createdAt),
+]);
 
 // ─── Team Profiles ────────────────────────────────────────────────────────────
 // Cached real per-team stat profiles (multi-provider data mesh).
@@ -66,7 +75,10 @@ export const teamProfiles = pgTable("team_profiles", {
   profile:   jsonb("profile").notNull(),    // full MeshProfile
   providers: jsonb("providers").notNull(),  // string[] of contributing sources
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
-});
+}, (table) => [
+  index("team_profiles_team_key_idx").on(table.teamKey),
+  index("team_profiles_updated_at_idx").on(table.updatedAt),
+]);
 
 // ─── Predictions ──────────────────────────────────────────────────────────────
 // Stored ĞIGI GIVØ prediction runs (learning log).
@@ -87,7 +99,12 @@ export const predictions = pgTable("predictions", {
   dataCompleteness: integer("data_completeness").notNull(),
   result:           jsonb("result").notNull(),
   createdAt:        timestamp("created_at").defaultNow().notNull(),
-});
+}, (table) => [
+  index("predictions_created_at_idx").on(table.createdAt),
+  index("predictions_match_date_idx").on(table.matchDate),
+  index("predictions_event_id_idx").on(table.eventId),
+  index("predictions_league_slug_idx").on(table.leagueSlug),
+]);
 
 export type PredictionRow = typeof predictions.$inferSelect;
 export type NewPrediction  = typeof predictions.$inferInsert;
@@ -137,7 +154,16 @@ export const performanceLog = pgTable("performance_log", {
   confidence:      text("confidence"),                // "HIGH" for sure-bet picks
   settledAt:       timestamp("settled_at"),           // set when the pick is verified
   createdAt:       timestamp("created_at").defaultNow().notNull(),
-});
+}, (table) => [
+  index("performance_log_event_id_idx").on(table.eventId),
+  index("performance_log_feature_outcome_idx").on(table.feature, table.outcome),
+  index("performance_log_feature_outcome_match_date_idx").on(table.feature, table.outcome, table.matchDate),
+  index("performance_log_outcome_pending_idx").on(table.outcome, table.pending),
+  index("performance_log_match_date_idx").on(table.matchDate),
+  index("performance_log_created_at_idx").on(table.createdAt),
+  index("performance_log_ranking_mode_idx").on(table.rankingMode),
+  index("performance_log_league_slug_idx").on(table.leagueSlug),
+]);
 
 export type PerformanceRow = typeof performanceLog.$inferSelect;
 export type NewPerformance  = typeof performanceLog.$inferInsert;
@@ -162,7 +188,10 @@ export const bankroll = pgTable("bankroll", {
   stake:       real("stake"),
   profit:      real("profit"),
   createdAt:   timestamp("created_at").defaultNow().notNull(),
-});
+}, (table) => [
+  index("bankroll_created_at_idx").on(table.createdAt),
+  index("bankroll_type_created_at_idx").on(table.type, table.createdAt),
+]);
 
 export type BankrollRow = typeof bankroll.$inferSelect;
 
@@ -189,7 +218,15 @@ export const valueBetLog = pgTable("value_bet_log", {
   lowConfidence:   boolean("low_confidence").notNull().default(false), // confidence gate flag
   rankingMode:     text("ranking_mode").notNull().default("B"),
   createdAt:       timestamp("created_at").defaultNow().notNull(),
-});
+}, (table) => [
+  index("value_bet_log_event_id_idx").on(table.eventId),
+  index("value_bet_log_outcome_idx").on(table.outcome),
+  index("value_bet_log_match_date_idx").on(table.matchDate),
+  index("value_bet_log_created_at_idx").on(table.createdAt),
+  index("value_bet_log_ranking_mode_idx").on(table.rankingMode),
+  index("value_bet_log_league_slug_idx").on(table.leagueSlug),
+  index("value_bet_log_market_selection_idx").on(table.marketName, table.selection),
+]);
 
 export const savedSlips = pgTable("saved_slips", {
   id:              serial("id").primaryKey(),
@@ -206,7 +243,13 @@ export const savedSlips = pgTable("saved_slips", {
    *  the column existed — the modes API falls back to `picks[0].rankingMode`. */
   rankingMode:     text("ranking_mode"),
   createdAt:       timestamp("created_at").defaultNow().notNull(),
-});
+}, (table) => [
+  index("saved_slips_created_at_idx").on(table.createdAt),
+  index("saved_slips_status_created_at_idx").on(table.status, table.createdAt),
+  index("saved_slips_name_idx").on(table.name),
+  index("saved_slips_league_slug_idx").on(table.leagueSlug),
+  index("saved_slips_ranking_mode_idx").on(table.rankingMode),
+]);
 
 // ─── Settlement performance ──────────────────────────────────────────────────
 // Immutable, idempotent audit records written when each tracked product settles.
@@ -226,7 +269,10 @@ export const accumulatorPerformance = pgTable("accumulator_performance", {
   pnl:          real("pnl").notNull().default(0),
   legResults:   jsonb("leg_results").notNull(),
   settledAt:    timestamp("settled_at").defaultNow().notNull(),
-}, (table) => [uniqueIndex("accumulator_performance_slip_id_uidx").on(table.slipId)]);
+}, (table) => [
+  uniqueIndex("accumulator_performance_slip_id_uidx").on(table.slipId),
+  index("accumulator_performance_status_settled_at_idx").on(table.status, table.settledAt),
+]);
 
 export const dailyPickPerformance = pgTable("daily_pick_performance", {
   id:          serial("id").primaryKey(),
@@ -244,7 +290,12 @@ export const dailyPickPerformance = pgTable("daily_pick_performance", {
   awayScore:   integer("away_score").notNull(),
   pickResults: jsonb("pick_results").notNull(),
   settledAt:   timestamp("settled_at").defaultNow().notNull(),
-}, (table) => [uniqueIndex("daily_pick_performance_daily_pick_id_uidx").on(table.dailyPickId)]);
+}, (table) => [
+  uniqueIndex("daily_pick_performance_daily_pick_id_uidx").on(table.dailyPickId),
+  index("daily_pick_performance_pick_date_idx").on(table.pickDate),
+  index("daily_pick_performance_event_id_idx").on(table.eventId),
+  index("daily_pick_performance_settled_at_idx").on(table.settledAt),
+]);
 
 export const valueBetPerformance = pgTable("value_bet_performance", {
   id:           serial("id").primaryKey(),
@@ -261,7 +312,11 @@ export const valueBetPerformance = pgTable("value_bet_performance", {
   actualReturn: real("actual_return").notNull(),
   pnl:          real("pnl").notNull(),
   settledAt:    timestamp("settled_at").defaultNow().notNull(),
-}, (table) => [uniqueIndex("value_bet_performance_value_bet_id_uidx").on(table.valueBetId)]);
+}, (table) => [
+  uniqueIndex("value_bet_performance_value_bet_id_uidx").on(table.valueBetId),
+  index("value_bet_performance_event_id_idx").on(table.eventId),
+  index("value_bet_performance_settled_at_idx").on(table.settledAt),
+]);
 
 export type AccumulatorPerformanceRow = typeof accumulatorPerformance.$inferSelect;
 export type DailyPickPerformanceRow = typeof dailyPickPerformance.$inferSelect;
@@ -289,7 +344,12 @@ export const vaLegs = pgTable("va_legs", {
   scannedAt:          timestamp("scanned_at", { withTimezone: true }).defaultNow().notNull(),
   /** "real" = priced from The Odds API, "consensus" = Bzzoiro Consensus fallback. */
   oddsSource:         text("odds_source"),
-});
+}, (table) => [
+  index("va_legs_scan_id_idx").on(table.scanId),
+  index("va_legs_event_id_idx").on(table.eventId),
+  index("va_legs_kickoff_idx").on(table.kickoff),
+  index("va_legs_league_slug_idx").on(table.leagueSlug),
+]);
 
 export const vaTickets = pgTable("va_tickets", {
   id:                    serial("id").primaryKey(),
@@ -311,13 +371,21 @@ export const vaTickets = pgTable("va_tickets", {
   oddsSource:          text("odds_source"),
   /** How many of the ticket's legs are priced at real bookmaker odds. */
   realOddsCount:       integer("real_odds_count"),
-});
+}, (table) => [
+  index("va_tickets_scan_id_kelly_score_idx").on(table.scanId, table.kellyScore),
+  index("va_tickets_status_idx").on(table.status),
+  index("va_tickets_created_at_idx").on(table.createdAt),
+  index("va_tickets_week_start_idx").on(table.weekStart),
+]);
 
 export const vaScanLock = pgTable("va_scan_lock", {
   id:       serial("id").primaryKey(),
   lockedAt: timestamp("locked_at", { withTimezone: true }).defaultNow().notNull(),
   scanId:   text("scan_id").notNull(),
-});
+}, (table) => [
+  index("va_scan_lock_locked_at_idx").on(table.lockedAt),
+  index("va_scan_lock_scan_id_idx").on(table.scanId),
+]);
 
 // Backtest history — isolated from live va_tickets / va_scan_lock.
 export const vaBacktestRuns = pgTable("va_backtest_runs", {
@@ -336,7 +404,10 @@ export const vaBacktestRuns = pgTable("va_backtest_runs", {
   claimedAverage:    numeric("claimed_average"),
   edge:              numeric("edge"),
   error:             text("error"),
-});
+}, (table) => [
+  index("va_backtest_runs_started_at_idx").on(table.startedAt),
+  index("va_backtest_runs_status_idx").on(table.status),
+]);
 
 export const vaBacktestTickets = pgTable("va_backtest_tickets", {
   id:                     serial("id").primaryKey(),
@@ -354,7 +425,11 @@ export const vaBacktestTickets = pgTable("va_backtest_tickets", {
   status:                 text("status").notNull(),
   settledAt:              timestamp("settled_at"),
   createdAt:              timestamp("created_at").defaultNow().notNull(),
-});
+}, (table) => [
+  index("va_backtest_tickets_run_id_created_at_idx").on(table.runId, table.createdAt),
+  index("va_backtest_tickets_status_idx").on(table.status),
+  index("va_backtest_tickets_simulated_day_idx").on(table.simulatedDay),
+]);
 
 export const marketStats = pgTable("market_stats", {
   marketKey:   text("market_key").primaryKey(),
@@ -363,7 +438,9 @@ export const marketStats = pgTable("market_stats", {
   claimedSum:  numeric("claimed_sum").notNull(),
   realisedSum: numeric("realised_sum").notNull(),
   lastUpdated: timestamp("last_updated").defaultNow().notNull(),
-});
+}, (table) => [
+  index("market_stats_family_idx").on(table.family),
+]);
 
 export type MarketStatRow = typeof marketStats.$inferSelect;
 export type NewMarketStat = typeof marketStats.$inferInsert;
@@ -380,7 +457,9 @@ export const leagueOddsCache = pgTable("league_odds_cache", {
   responseJson: jsonb("response_json").notNull(),
   fetchedAt:    timestamp("fetched_at", { withTimezone: true }).defaultNow().notNull(),
   expiresAt:    timestamp("expires_at", { withTimezone: true }).notNull(),
-});
+}, (table) => [
+  index("league_odds_cache_expires_at_idx").on(table.expiresAt),
+]);
 
 export type LeagueOddsCacheRow = typeof leagueOddsCache.$inferSelect;
 export type NewLeagueOddsCache = typeof leagueOddsCache.$inferInsert;
@@ -397,7 +476,9 @@ export const first5Cache = pgTable("first5_cache", {
   responseJson: jsonb("response_json").notNull(),
   generatedAt:  timestamp("generated_at").defaultNow().notNull(),
   expiresAt:    timestamp("expires_at").notNull(),
-});
+}, (table) => [
+  index("first5_cache_expires_at_idx").on(table.expiresAt),
+]);
 
 export type First5CacheRow = typeof first5Cache.$inferSelect;
 export type NewFirst5Cache = typeof first5Cache.$inferInsert;
@@ -426,7 +507,9 @@ export const teamXgCache = pgTable("team_xg_cache", {
   basedOnThroughAt: timestamp("based_on_through_at").notNull(),
   nextMatchAt:      timestamp("next_match_at"),
   updatedAt:        timestamp("updated_at").defaultNow().notNull(),
-});
+}, (table) => [
+  index("team_xg_cache_next_match_at_idx").on(table.nextMatchAt),
+]);
 
 export type TeamXgCacheRow = typeof teamXgCache.$inferSelect;
 export type NewTeamXgCache = typeof teamXgCache.$inferInsert;
@@ -447,5 +530,8 @@ export const v4Predictions = pgTable("v4_predictions", {
   actuals:     jsonb("actuals"),
   totalScore:  integer("total_score"),
   createdAt:   timestamp("created_at").defaultNow().notNull(),
-});
+}, (table) => [
+  index("v4_predictions_created_at_idx").on(table.createdAt),
+  index("v4_predictions_matchweek_idx").on(table.matchweek),
+]);
 export type V4PredictionRow = typeof v4Predictions.$inferSelect;

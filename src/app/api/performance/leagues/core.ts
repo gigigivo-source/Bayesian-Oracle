@@ -13,6 +13,7 @@
 //
 // NOTE: hitRate / roi / trend values are PERCENT NUMBERS (e.g. 62.5 = 62.5%).
 
+import { apiError, errorMessage } from "@/lib/apiErrors";
 import { db } from "@/db";
 import { performanceLog, savedSlips, valueBetLog } from "@/db/schema";
 import { gte } from "drizzle-orm";
@@ -553,6 +554,7 @@ export function buildBets(a: Accumulator): BetRow[] {
 
 export async function GET(req: Request) {
   try {
+  try {
     const url = new URL(req.url);
     const leagueSlug = url.searchParams.get("leagueSlug")?.trim() || null;
     const daysRaw = Number(url.searchParams.get("days"));
@@ -688,6 +690,11 @@ export async function GET(req: Request) {
     });
   } catch (err) {
     console.error("League performance API error:", err);
-    return Response.json({ ok: false, error: "Failed to compute league performance" }, { status: 500 });
+    return Response.json({
+      details: errorMessage(err), ok: false, error: "Failed to compute league performance" }, { status: 500 });
+  }
+
+  } catch (__routeError) {
+    return apiError("GET /api/performance/leagues failed", __routeError);
   }
 }

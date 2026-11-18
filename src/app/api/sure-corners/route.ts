@@ -1,3 +1,4 @@
+import { apiError, errorMessage } from "@/lib/apiErrors";
 import { statsAggregator } from "@/lib/data/aggregator";
 import {
   assessMarketConfidence,
@@ -1873,6 +1874,7 @@ async function mapWithConcurrency<T, R>(
 }
 
 export async function GET(req: Request): Promise<Response> {
+  try {
   const url = new URL(req.url);
   const isRefresh = url.searchParams.get("refresh") === "true";
   const cacheKey = getCacheKey(url);
@@ -2024,6 +2026,7 @@ export async function GET(req: Request): Promise<Response> {
     console.error(`[SureCorners] Route failed: ${error instanceof Error ? error.message : String(error)}`);
     return Response.json(
       {
+      details: errorMessage(error),
         generatedAt: new Date().toISOString(),
         totalFixturesChecked: 0,
         rejectedMatches: rejections.length,
@@ -2034,5 +2037,9 @@ export async function GET(req: Request): Promise<Response> {
       },
       { status: 503, headers: { "Cache-Control": "no-store" } },
     );
+  }
+
+  } catch (__routeError) {
+    return apiError("GET /api/sure-corners failed", __routeError);
   }
 }

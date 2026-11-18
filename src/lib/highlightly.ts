@@ -10,18 +10,21 @@ const API_KEY = process.env.HIGHLIGHTLY_KEY ?? "";
 
 const HEADERS = { "x-api-key": API_KEY };
 
-async function hlFetch<T>(path: string, revalidate = 3600): Promise<T | null> {
-  if (!API_KEY) return null;
+async function hlFetch<T>(path: string, revalidate = 3600): Promise<T> {
+  if (!API_KEY) throw new Error("Highlightly key not configured");
+  let res: Response;
   try {
-    const res = await fetch(`${BASE}${path}`, {
+    res = await fetch(`${BASE}${path}`, {
       headers: HEADERS,
       next: { revalidate },
     });
-    if (!res.ok) return null;
-    return await res.json() as T;
-  } catch {
-    return null;
+  } catch (err) {
+    throw new Error(`Highlightly request failed: ${err instanceof Error ? err.message : String(err)}`);
   }
+  if (!res.ok) {
+    throw new Error(`Highlightly responded ${res.status} ${res.statusText}`);
+  }
+  return await res.json() as T;
 }
 
 // ─── Types ────────────────────────────────────────────────────────────────────

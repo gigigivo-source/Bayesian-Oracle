@@ -1,8 +1,10 @@
+import { apiError } from "@/lib/apiErrors";
 import { fetchScoreboard, fetchSummary } from "@/lib/espn";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(req: Request) {
+  try {
   const { searchParams } = new URL(req.url);
   const team1  = searchParams.get("team1")  ?? "";
   const team2  = searchParams.get("team2")  ?? "";
@@ -23,11 +25,7 @@ export async function GET(req: Request) {
   });
 
   if (!match) {
-    return Response.json({
-      error: "No fixture found between these teams",
-      team1,
-      team2,
-    });
+    return apiError("No fixture found between these teams", undefined, 404, { team1, team2 });
   }
 
   const summary = await fetchSummary(league, match.id);
@@ -44,4 +42,8 @@ export async function GET(req: Request) {
     awayLineup:  summary?.awayLineup  ?? [],
     venue:       match.venue          ?? null,
   });
+
+  } catch (__routeError) {
+    return apiError("GET /api/h2h failed", __routeError);
+  }
 }

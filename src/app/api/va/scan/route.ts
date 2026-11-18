@@ -1,3 +1,4 @@
+import { apiError } from "@/lib/apiErrors";
 import { performScan } from "@/lib/va/performScan";
 import type { VaScanMode } from "@/lib/va/scanner";
 
@@ -22,6 +23,7 @@ function getCronSecret(): string {
  * (`runLiveScan`) can share it without an HTTP hop or the bearer secret.
  */
 export async function POST(req: Request) {
+  try {
   const url = new URL(req.url);
   const finished = url.searchParams.get("finished") === "true";
   const forceRefresh = url.searchParams.get("freshOdds") === "true";
@@ -47,4 +49,8 @@ export async function POST(req: Request) {
 
   const result = await performScan(mode, finished, forceRefresh);
   return Response.json(result.body, { status: result.status });
+
+  } catch (__routeError) {
+    return apiError("POST /api/va/scan failed", __routeError);
+  }
 }

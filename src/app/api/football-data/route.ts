@@ -1,3 +1,4 @@
+import { apiError } from "@/lib/apiErrors";
 import { getFinishedMatches, getStandings } from "@/lib/footballData";
 
 export const dynamic = "force-dynamic";
@@ -9,6 +10,7 @@ export const dynamic = "force-dynamic";
  *   (default)                        → recent PL matches
  */
 export async function GET(req: Request) {
+  try {
   const { searchParams } = new URL(req.url);
   const action = searchParams.get("action") ?? "matches";
   const league = searchParams.get("league") ?? "eng.1";
@@ -26,4 +28,8 @@ export async function GET(req: Request) {
   // default: recent finished matches
   const matches = await getFinishedMatches(league, limit);
   return Response.json({ league, matches, count: matches.length });
+
+  } catch (__routeError) {
+    return apiError("GET /api/football-data failed", __routeError);
+  }
 }

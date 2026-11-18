@@ -1,3 +1,4 @@
+import { apiError, errorMessage } from "@/lib/apiErrors";
 import { desc } from "drizzle-orm";
 import { v4Predictions } from "@/db/schema";
 
@@ -5,15 +6,22 @@ export const dynamic = "force-dynamic";
 
 export async function GET() {
   try {
+  try {
     const { db } = await import("@/db");
     return Response.json(await db.select().from(v4Predictions).orderBy(desc(v4Predictions.createdAt)));
   } catch (error) {
     console.error("V4 history error", error);
-    return Response.json({ error: "Unable to load history" }, { status: 500 });
+    return Response.json({
+      details: errorMessage(error), error: "Unable to load history" }, { status: 500 });
+  }
+
+  } catch (__routeError) {
+    return apiError("GET /api/v4-predictor failed", __routeError);
   }
 }
 
 export async function POST(request: Request) {
+  try {
   try {
     const data = await request.json();
     if (!data || typeof data.matchweek !== "string" || !data.matchweek.trim() || data.matchweek.length > 200 ||
@@ -41,6 +49,11 @@ export async function POST(request: Request) {
   } catch (error) {
     if (error instanceof SyntaxError) return Response.json({ error: "Invalid JSON" }, { status: 400 });
     console.error("V4 save error", error);
-    return Response.json({ error: "Unable to save prediction" }, { status: 500 });
+    return Response.json({
+      details: errorMessage(error), error: "Unable to save prediction" }, { status: 500 });
+  }
+
+  } catch (__routeError) {
+    return apiError("POST /api/v4-predictor failed", __routeError);
   }
 }

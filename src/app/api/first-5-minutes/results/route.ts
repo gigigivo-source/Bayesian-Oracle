@@ -18,10 +18,11 @@
 //
 // Response: { ok: true, matches: [ First5ResultMatch, ... ] } — newest first.
 //
-// Fail-soft by contract: a database error is logged once and answered with an
-// empty list, never a 5xx, so the page's settled section falls back to its
-// placeholder while the upcoming-fixtures board keeps working.
+// A database error is logged and answered with a descriptive 500 instead of a
+// successful-looking empty list, so a failed history read is never mistaken
+// for a legitimate "no settled results yet" response.
 
+import { apiError } from "@/lib/apiErrors";
 import { performanceLog } from "@/db/schema";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
 
@@ -214,6 +215,7 @@ function groupRows(rows: SettledRow[], limit: number, windowStart: string): Firs
 // ─── Route ────────────────────────────────────────────────────────────────────
 
 export async function GET(req: Request): Promise<Response> {
+  try {
   const url = new URL(req.url);
   const limit = boundedInt(url.searchParams.get("limit"), DEFAULT_LIMIT, 1, MAX_LIMIT);
   const days = boundedInt(url.searchParams.get("days"), DEFAULT_DAYS, 1, MAX_DAYS);
@@ -265,13 +267,10 @@ export async function GET(req: Request): Promise<Response> {
       { headers: { "Cache-Control": "no-store" } },
     );
   } catch (error) {
-    console.warn(
-      `[First5][results] settled-results read failed (returning an empty list): ` +
-      `${error instanceof Error ? error.message : String(error)}`,
-    );
-    return Response.json(
-      { ok: true, matches: [] } satisfies First5ResultsResponse,
-      { headers: { "Cache-Control": "no-store" } },
-    );
+    return apiError("Database query failed", error);
+  }
+
+  } catch (__routeError) {
+    return apiError("GET /api/first-5-minutes/results failed", __routeError);
   }
 }

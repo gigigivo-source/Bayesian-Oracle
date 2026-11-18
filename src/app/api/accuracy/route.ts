@@ -2,6 +2,7 @@
 // Returns the app's real hit rates over time from performance_log.
 // Used by the Performance tab to show trend charts and current accuracy.
 
+import { apiError, errorMessage } from "@/lib/apiErrors";
 import { db } from "@/db";
 import { performanceLog } from "@/db/schema";
 import { desc, gte } from "drizzle-orm";
@@ -9,6 +10,7 @@ import { desc, gte } from "drizzle-orm";
 export const dynamic = "force-dynamic";
 
 export async function GET(req: Request) {
+  try {
   const { searchParams } = new URL(req.url);
   const days = Math.min(parseInt(searchParams.get("days") ?? "30"), 90);
 
@@ -103,6 +105,11 @@ export async function GET(req: Request) {
     });
   } catch (err) {
     console.error("Accuracy error:", err);
-    return Response.json({ error: "Failed to compute accuracy" }, { status: 500 });
+    return Response.json({
+      details: errorMessage(err), error: "Failed to compute accuracy" }, { status: 500 });
+  }
+
+  } catch (__routeError) {
+    return apiError("GET /api/accuracy failed", __routeError);
   }
 }

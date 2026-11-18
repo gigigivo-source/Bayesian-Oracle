@@ -1,6 +1,8 @@
+import { apiError } from "@/lib/apiErrors";
 export const dynamic = "force-dynamic";
 
 export async function GET(req: Request) {
+  try {
   const { searchParams } = new URL(req.url);
   const decimal     = parseFloat(searchParams.get("decimal")     ?? "0");
   const american    = parseFloat(searchParams.get("american")    ?? "0");
@@ -84,4 +86,8 @@ export async function GET(req: Request) {
     impliedProbability: Math.round(prob * 10000) / 100,
     dutching,
   });
+
+  } catch (__routeError) {
+    return apiError("GET /api/odds-calc failed", __routeError);
+  }
 }

@@ -1,3 +1,4 @@
+import { apiError } from "@/lib/apiErrors";
 import { fetchScoreboard, type FixtureLite } from "@/lib/espn";
 import { TOP_FEED_SLUGS } from "@/lib/leagues";
 
@@ -8,6 +9,7 @@ function fmt(d: Date): string {
 }
 
 export async function GET(req: Request) {
+  try {
   const { searchParams } = new URL(req.url);
   const league = searchParams.get("league");
 
@@ -45,4 +47,8 @@ export async function GET(req: Request) {
     .slice(0, 40);
 
   return Response.json({ results, count: results.length });
+
+  } catch (__routeError) {
+    return apiError("GET /api/results failed", __routeError);
+  }
 }

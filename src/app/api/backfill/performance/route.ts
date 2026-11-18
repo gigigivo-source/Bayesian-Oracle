@@ -23,6 +23,7 @@
 //
 // Response: { totalProcessed, totalSucceeded, totalFailed, ... }
 
+import { apiError, errorMessage } from "@/lib/apiErrors";
 import { db } from "@/db";
 import { performanceLog } from "@/db/schema";
 import { eq } from "drizzle-orm";
@@ -320,6 +321,7 @@ function authorized(req: Request): boolean {
 // ─── Handler ──────────────────────────────────────────────────────────────────
 
 export async function POST(req: Request) {
+  try {
   if (!authorized(req)) return Response.json({ error: "Unauthorized" }, { status: 401 });
   try {
     const body = await req.json().catch(() => ({})) as {
@@ -329,13 +331,19 @@ export async function POST(req: Request) {
   } catch (err) {
     console.error("[Backfill] failed:", err);
     return Response.json(
-      { ok: false, error: err instanceof Error ? err.message : "Backfill failed" },
+      {
+      details: errorMessage(err), ok: false, error: err instanceof Error ? err.message : "Backfill failed" },
       { status: 500 },
     );
+  }
+
+  } catch (__routeError) {
+    return apiError("POST /api/backfill/performance failed", __routeError);
   }
 }
 
 export async function GET(req: Request) {
+  try {
   // GET exposes a dry-run of the window only (no processing).
   if (!authorized(req)) return Response.json({ error: "Unauthorized" }, { status: 401 });
   const window = resolveWindow({});
@@ -344,4 +352,8 @@ export async function GET(req: Request) {
     hint: "POST to this endpoint to run the backfill (see route docs).",
     defaultWindow: { from: fmtDay(window.from), to: fmtDay(window.to), days: window.days.length },
   });
+
+  } catch (__routeError) {
+    return apiError("GET /api/backfill/performance failed", __routeError);
+  }
 }

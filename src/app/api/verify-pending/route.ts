@@ -1,3 +1,4 @@
+import { apiError, errorMessage } from "@/lib/apiErrors";
 import { db } from "@/db";
 import { performanceLog } from "@/db/schema";
 import { eq } from "drizzle-orm";
@@ -11,10 +12,12 @@ export const dynamic = "force-dynamic";
  * (Called by the Performance page with { performanceId }.)
  */
 export async function POST(req: Request) {
+  try {
   let body: { performanceId: number };
   try {
     body = await req.json() as { performanceId: number };
-  } catch {
+  } catch (__caughtError) {
+    console.error("[API] Swallowed upstream error at src/app/api/verify-pending/route.ts:18", __caughtError);
     return Response.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
@@ -90,7 +93,8 @@ export async function POST(req: Request) {
 
         // Rate-limit between searches — be polite to DuckDuckGo
         await new Promise((r) => setTimeout(r, 1000));
-      } catch {
+      } catch (__caughtError) {
+    console.error("[API] Swallowed upstream error at src/app/api/verify-pending/route.ts:94", __caughtError);
         results.push({ index: i, market: pick.name, searchQuery, found: null, outcome: "PENDING" });
       }
     }
@@ -111,8 +115,13 @@ export async function POST(req: Request) {
       .where(eq(performanceLog.id, performanceId));
 
     return Response.json({ results, hits, misses, pending, accuracy });
-  } catch {
-    return Response.json({ error: "Verification failed" }, { status: 500 });
+  } catch (__caughtError) {
+    return Response.json({
+      details: errorMessage(__caughtError), error: "Verification failed" }, { status: 500 });
+  }
+
+  } catch (__routeError) {
+    return apiError("POST /api/verify-pending failed", __routeError);
   }
 }
 

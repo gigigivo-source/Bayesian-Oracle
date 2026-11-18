@@ -1,3 +1,4 @@
+import { apiError, errorMessage } from "@/lib/apiErrors";
 import { LEAGUE_MAP } from "@/lib/leagues";
 
 export const dynamic = "force-dynamic";
@@ -81,6 +82,7 @@ const STAT_KEYS: Array<{ key: string; label: string }> = [
 // ─── Route ────────────────────────────────────────────────────────────────────
 
 export async function GET(req: Request) {
+  try {
   const { searchParams } = new URL(req.url);
   const league  = searchParams.get("league");
   const eventId = searchParams.get("event");
@@ -164,7 +166,12 @@ export async function GET(req: Request) {
       lineups,
       leagueName: LEAGUE_MAP[league]?.name ?? league,
     });
-  } catch {
-    return Response.json({ error: "Failed to fetch live data" }, { status: 502 });
+  } catch (__caughtError) {
+    return Response.json({
+      details: errorMessage(__caughtError), error: "Failed to fetch live data" }, { status: 502 });
+  }
+
+  } catch (__routeError) {
+    return apiError("GET /api/live-centre failed", __routeError);
   }
 }

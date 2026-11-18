@@ -25,6 +25,7 @@
 // available, and uses the observed league anchor only when no team signal is
 // available at all.
 
+import { apiError, errorMessage } from "@/lib/apiErrors";
 import { statsAggregator } from "@/lib/data/aggregator";
 import type { CanonicalMatchStats } from "@/lib/data/types";
 import { fetchSummary, type FixtureLite, type MatchSummary, type TeamForm } from "@/lib/espn";
@@ -1340,7 +1341,8 @@ async function fetchStandingAverages(leagueSlug: string): Promise<Map<string, St
       }
     }
     return output;
-  } catch {
+  } catch (__caughtError) {
+    console.error("[API] Swallowed upstream error at src/app/api/correct-score/core.ts:1343", __caughtError);
     return new Map();
   }
 }
@@ -1549,6 +1551,7 @@ async function collectInputs(
 }
 
 export async function GET(request: Request): Promise<Response> {
+  try {
   const url = new URL(request.url);
   const maxGoals = Math.round(clamp(Number(url.searchParams.get("maxGoals")) || DEFAULT_MAX_GOALS, 3, 10));
   const simulations = Math.round(
@@ -1610,7 +1613,8 @@ export async function GET(request: Request): Promise<Response> {
     } catch (error) {
       console.error("[CorrectScore] prediction feed failed", error);
       return Response.json(
-        { error: error instanceof Error ? error.message : "Unable to build correct-score predictions" },
+        {
+      details: errorMessage(error), error: error instanceof Error ? error.message : "Unable to build correct-score predictions" },
         { status: 503 },
       );
     }
@@ -1620,4 +1624,8 @@ export async function GET(request: Request): Promise<Response> {
   // current round regardless of the incoming match-week filter.
   const currentMatchweek = allMatches.length ? (allMatches[0].matchweek ?? null) : null;
   return feedResponse(allMatches, requestedWeek, currentMatchweek, force ? "MISS" : "HIT", diagnostics);
+
+  } catch (__routeError) {
+    return apiError("GET /api/correct-score failed", __routeError);
+  }
 }

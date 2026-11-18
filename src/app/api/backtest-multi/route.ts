@@ -1,3 +1,4 @@
+import { apiError } from "@/lib/apiErrors";
 import { fetchScoreboard, fetchSummary, type FixtureLite } from "@/lib/espn";
 import { runEngineFromReal, evaluateFinishedMatch } from "@/lib/engine";
 import { LEAGUE_MAP } from "@/lib/leagues";
@@ -84,7 +85,8 @@ async function fetchBoxscore(
       homeInterceptions: h.interceptions      ?? 0, awayInterceptions: a.interceptions      ?? 0,
       homeFouls:         h.foulsCommitted     ?? 0, awayFouls:         a.foulsCommitted     ?? 0,
     };
-  } catch {
+  } catch (__caughtError) {
+    console.error("[API] Swallowed upstream error at src/app/api/backtest-multi/route.ts:87", __caughtError);
     return null;
   }
 }
@@ -107,6 +109,7 @@ interface CompResult {
 }
 
 export async function GET(req: Request) {
+  try {
   const { searchParams } = new URL(req.url);
   const months         = Math.min(parseInt(searchParams.get("months")   ?? "3"), 12);
   const perComp        = Math.min(parseInt(searchParams.get("perComp")  ?? "6"),  12);
@@ -210,7 +213,8 @@ export async function GET(req: Request) {
                 if (mk.outcome === "HIT") dirStats[dir].hits++;
                 else dirStats[dir].misses++;
               }
-            } catch {
+            } catch (__caughtError) {
+    console.error("[API] Swallowed upstream error at src/app/api/backtest-multi/route.ts:214", __caughtError);
               /* skip individual match */
             }
           }
@@ -221,7 +225,8 @@ export async function GET(req: Request) {
             matches: processed, hits, misses, pending, perfect, nineOrTen,
             accuracy: verified > 0 ? hits / verified : 0,
           } satisfies CompResult;
-        } catch {
+        } catch (__caughtError) {
+    console.error("[API] Swallowed upstream error at src/app/api/backtest-multi/route.ts:225", __caughtError);
           return {
             slug, name, category,
             matches: 0, hits: 0, misses: 0, pending: 0, perfect: 0, nineOrTen: 0,
@@ -312,4 +317,8 @@ export async function GET(req: Request) {
       top10: totalMatches > 0 ? totalPerfect / totalMatches : 0,
     },
   });
+
+  } catch (__routeError) {
+    return apiError("GET /api/backtest-multi failed", __routeError);
+  }
 }

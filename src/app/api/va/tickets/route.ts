@@ -1,3 +1,4 @@
+import { apiError, errorMessage } from "@/lib/apiErrors";
 import { db } from "@/db";
 import { vaTickets } from "@/db/schema";
 import { desc, eq } from "drizzle-orm";
@@ -5,6 +6,7 @@ import { desc, eq } from "drizzle-orm";
 export const dynamic = "force-dynamic";
 
 export async function GET(req: Request) {
+  try {
   const url = new URL(req.url);
   const scanId = url.searchParams.get("scanId")?.trim() || null;
 
@@ -34,6 +36,12 @@ export async function GET(req: Request) {
     return Response.json({ ok: true, tickets, scanId });
   } catch (err) {
     console.error("[VA] tickets fetch failed", err);
-    return Response.json({ ok: false, reason: "failed to fetch tickets" }, { status: 500 });
+    return Response.json({
+      error: "Internal Server Error",
+      details: errorMessage(err), ok: false, reason: "failed to fetch tickets" }, { status: 500 });
+  }
+
+  } catch (__routeError) {
+    return apiError("GET /api/va/tickets failed", __routeError);
   }
 }

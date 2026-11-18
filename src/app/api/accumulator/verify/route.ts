@@ -2,6 +2,7 @@
 // Checks all pending accumulator slips against real finished match results
 // and settles them as WON or LOST.
 
+import { apiError, errorMessage } from "@/lib/apiErrors";
 import { db } from "@/db";
 import { savedSlips } from "@/db/schema";
 import { eq } from "drizzle-orm";
@@ -104,6 +105,7 @@ function evaluatePick(
 
 export async function POST() {
   try {
+  try {
     const pending = await db.select().from(savedSlips).where(eq(savedSlips.status, "pending")).limit(50);
     if (pending.length === 0) return Response.json({ message: "No pending slips", verified: 0, settled: 0 });
 
@@ -160,8 +162,18 @@ export async function POST() {
     });
   } catch (err) {
     console.error("Accumulator verify error:", err);
-    return Response.json({ error: "Verification failed" }, { status: 500 });
+    return Response.json({
+      details: errorMessage(err), error: "Verification failed" }, { status: 500 });
+  }
+
+  } catch (__routeError) {
+    return apiError("POST /api/accumulator/verify failed", __routeError);
   }
 }
 
-export async function GET() { return POST(); }
+export async function GET() {
+  try { return POST();
+  } catch (__routeError) {
+    return apiError("GET /api/accumulator/verify failed", __routeError);
+  }
+}
