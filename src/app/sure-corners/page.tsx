@@ -2,7 +2,14 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { TeamBadge } from "../_components/ui";
+import {
+  TeamBadge,
+  formatUtcDateGroup,
+  formatUtcDateTime,
+  useUtcClock,
+  utcDateKey,
+  utcFixtureStatus,
+} from "../_components/ui";
 import {
   CARD_ACCENT_ORDER,
   CARD_GLASS,
@@ -63,39 +70,6 @@ const MARKET_TONES: Record<SureCornerMarketType, string> = {
   "Corner Handicap": "border-rose-400/30 bg-rose-400/10 text-rose-200",
 };
 
-function formatDate(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat("en", {
-    weekday: "short",
-    day: "numeric",
-    month: "short",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    timeZoneName: "short",
-  }).format(date);
-}
-
-function formatDateGroup(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  const today = new Date();
-  const tomorrow = new Date();
-  tomorrow.setDate(today.getDate() + 1);
-  const isToday = date.toDateString() === today.toDateString();
-  const isTomorrow = date.toDateString() === tomorrow.toDateString();
-  const base = new Intl.DateTimeFormat("en", {
-    weekday: "long",
-    day: "numeric",
-    month: "long",
-    year: "numeric",
-  }).format(date);
-  if (isToday) return `Today · ${base}`;
-  if (isTomorrow) return `Tomorrow · ${base}`;
-  return base;
-}
-
 function percentage(value: number): string {
   return `${(value * 100).toFixed(1)}%`;
 }
@@ -105,15 +79,6 @@ function countOutcome(
   outcome: VerifyDetail["outcome"],
 ): number {
   return details.filter((detail) => detail.outcome === outcome).length;
-}
-
-/** Derives a fixture status from its date. */
-function fixtureStatus(dateStr: string): "LIVE" | "UPCOMING" | "FINISHED" {
-  const now = Date.now();
-  const start = new Date(dateStr).getTime();
-  if (start <= now && now - start < 120 * 60 * 1000) return "LIVE";
-  if (start < now) return "FINISHED";
-  return "UPCOMING";
 }
 
 const STATUS_BADGE_CLASS: Record<"LIVE" | "UPCOMING" | "FINISHED", string> = {
@@ -159,6 +124,7 @@ export default function SureCornersPage() {
 
   // ── Overlay state: null = closed, SureCornerMatch = open ──────────────────
   const [selectedMatch, setSelectedMatch] = useState<SureCornerMatch | null>(null);
+  const { now, todayUtc, tomorrowUtc } = useUtcClock();
 
   const load = useCallback(async (forceRefresh = false) => {
     if (forceRefresh || dataRef.current) {
@@ -239,7 +205,7 @@ export default function SureCornersPage() {
     if (!data?.matches) return [];
     const groups = new Map<string, SureCornerMatch[]>();
     for (const match of data.matches) {
-      const dateKey = new Date(match.date).toISOString().slice(0, 10);
+      const dateKey = utcDateKey(match.date);
       const existing = groups.get(dateKey) ?? [];
       existing.push(match);
       groups.set(dateKey, existing);
@@ -439,7 +405,7 @@ export default function SureCornersPage() {
                 {data.totalFixturesChecked} fixtures checked · 7-day window
               </span>
               <span className="font-mono">
-                Updated {formatDate(data.generatedAt)}
+                Updated {formatUtcDateTime(data.generatedAt)}
               </span>
             </div>
             {refreshing && (
@@ -455,7 +421,7 @@ export default function SureCornersPage() {
                   <div className="flex items-center gap-2">
                     <div className="h-px flex-1 bg-white/[0.06]" />
                     <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 font-mono text-[11px] uppercase tracking-wider text-slate-300">
-                      {formatDateGroup(group.matches[0].date)}
+                      {formatUtcDateGroup(group.matches[0].date, todayUtc, tomorrowUtc)}
                     </span>
                     <div className="h-px flex-1 bg-white/[0.06]" />
                   </div>
@@ -467,6 +433,7 @@ export default function SureCornersPage() {
                         key={match.fixtureId}
                         match={match}
                         accentIndex={idx}
+                        now={now}
                         onClick={() => setSelectedMatch(match)}
                       />
                     ))}
@@ -493,6 +460,7 @@ export default function SureCornersPage() {
       {selectedMatch && (
         <MatchOverlay
           match={selectedMatch}
+          now={now}
           onClose={() => setSelectedMatch(null)}
         />
       )}
@@ -505,16 +473,18 @@ export default function SureCornersPage() {
 interface PremiumFixtureCardProps {
   match: SureCornerMatch;
   accentIndex: number;
+  now: number | null;
   onClick: () => void;
 }
 
 function PremiumFixtureCard({
   match,
   accentIndex,
+  now,
   onClick,
 }: PremiumFixtureCardProps) {
   const accent = CARD_ACCENT_ORDER[accentIndex % CARD_ACCENT_ORDER.length];
-  const status = fixtureStatus(match.date);
+  const status = utcFixtureStatus(match.date, now);
 
   // Best market = highest hit rate
   const bestMarket = match.markets.length
@@ -571,7 +541,7 @@ function PremiumFixtureCard({
 
       {/* ── Date/time ── */}
       <div className="mb-3 font-mono text-[10px] text-slate-500 text-center">
-        {formatDate(match.date)}
+        {formatUtcDateTime(match.date)}
       </div>
 
       {/* ── Best market summary ── */}

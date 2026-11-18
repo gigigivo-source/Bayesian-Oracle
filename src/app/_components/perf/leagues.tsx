@@ -14,6 +14,7 @@ import {
   type SortDir,
 } from "./ui";
 import { CARD_CLICK, CHIP, CHIP_OFF, CHIP_ON_AMBER } from "../design";
+import { useUtcClock, utcPastDateKey } from "../ui";
 
 // ─── API shapes (mirror /api/performance/leagues) ─────────────────────────────
 
@@ -471,13 +472,15 @@ export function LeagueSummaryCards({ m }: { m: LeagueMetrics }) {
 
 export function usePnlWindow(points: TrendPoint[]) {
   const [windowDays, setWindowDays] = useState<7 | 30 | 0>(0); // 0 = all
+  const { now } = useUtcClock();
   const visible = useMemo(() => {
     if (windowDays === 0 || points.length === 0) return points;
-    const cutoff = new Date();
-    cutoff.setDate(cutoff.getDate() - windowDays);
-    const iso = cutoff.toISOString().slice(0, 10);
+    // The clock is null on SSR and the first client render, so both render the
+    // same full series. Filtering starts only after the UTC clock has mounted.
+    if (now === null) return points;
+    const iso = utcPastDateKey(now, windowDays);
     return points.filter((p) => p.label >= iso);
-  }, [points, windowDays]);
+  }, [points, windowDays, now]);
 
   const WindowSwitcher = (
     <div className="flex gap-1.5">

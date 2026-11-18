@@ -13,6 +13,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { GLASS_DROPDOWN, GLASS_PANEL } from "../_components/design";
+import { formatUtcDate, formatUtcTime } from "../_components/ui";
 
 // ─── Payload types (mirror src/app/api/arbitrage/route.ts) ───────────────────
 
@@ -80,18 +81,8 @@ const pound = (value: number) =>
     maximumFractionDigits: 2,
   });
 
-const formatDate = (iso: string) =>
-  new Date(iso).toLocaleDateString("en-GB", {
-    weekday: "short",
-    day: "numeric",
-    month: "short",
-  });
-
-const formatDateTime = (iso: string) =>
-  new Date(iso).toLocaleTimeString("en-GB", {
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+const formatDate = formatUtcDate;
+const formatDateTime = formatUtcTime;
 
 // ─── Page ─────────────────────────────────────────────────────────────────────
 

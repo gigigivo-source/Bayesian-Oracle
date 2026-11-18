@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { GLASS_PANEL } from "../../_components/design";
+import { formatUtcDate, formatUtcDateTime } from "../../_components/ui";
 
 type DataQuality = "Real" | "Mixed" | "Synthetic";
 
@@ -71,13 +72,7 @@ function percent(value: number): string {
   return `${(value * 100).toFixed(1)}%`;
 }
 
-function dateLabel(iso: string): string {
-  return new Date(iso).toLocaleDateString("en-GB", {
-    day: "2-digit",
-    month: "short",
-    year: "numeric",
-  });
-}
+const dateLabel = formatUtcDate;
 
 function MetricCard({
   label,
@@ -455,7 +450,7 @@ export default function CorrectScoreBacktestPage() {
 
             <footer className="flex flex-wrap items-center justify-between gap-2 pb-4 text-[10px] text-slate-600">
               <span>{data.dataSource}</span>
-              <span>Generated {new Date(data.generatedAt).toLocaleString("en-GB")}</span>
+              <span>Generated {formatUtcDateTime(data.generatedAt)}</span>
             </footer>
           </>
         ) : null}

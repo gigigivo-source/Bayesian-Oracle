@@ -9,7 +9,7 @@
 // exact set-score distribution, and Poisson serve-stat markets.
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   TennisBestValueMarket,
   TennisLockTier,
@@ -30,6 +30,7 @@ import {
   NAV_PILL_PREMIUM_ON,
   OUTLINE_NEUTRAL,
 } from "../_components/design";
+import { formatUtcDateGroup, formatUtcDateTimeShort, useUtcClock } from "../_components/ui";
 
 // ─── Types (page-local mirror of /api/tennis/predictions) ────────────────────
 
@@ -317,17 +318,7 @@ function isTbdPlayer(name: string | null | undefined): boolean {
 
 function formatDate(value: string | null | undefined): string {
   if (!value) return "";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat("en", {
-    weekday: "short",
-    day: "numeric",
-    month: "short",
-    hour: "2-digit",
-    minute: "2-digit",
-    timeZone: "UTC",
-    timeZoneName: "short",
-  }).format(date);
+  return formatUtcDateTimeShort(value);
 }
 
 function formatUpdatedAt(value: string | null | undefined): string | null {
@@ -337,47 +328,13 @@ function formatUpdatedAt(value: string | null | undefined): string | null {
   return date.toUTCString().slice(5, 22);
 }
 
-function computeUtcDayKeys(): RelativeDayKeys {
-  const now = new Date();
-  const todayKey = now.toISOString().slice(0, 10);
-  const tomorrow = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1));
-  const tomorrowKey = tomorrow.toISOString().slice(0, 10);
-  return { todayKey, tomorrowKey };
-}
-
-const emptySubscribe = () => () => {};
-const getServerDayKeys = (): RelativeDayKeys | null => null;
-let cachedDayKeys: RelativeDayKeys | null = null;
-function getClientDayKeys(): RelativeDayKeys {
-  const next = computeUtcDayKeys();
-  if (
-    cachedDayKeys &&
-    cachedDayKeys.todayKey === next.todayKey &&
-    cachedDayKeys.tomorrowKey === next.tomorrowKey
-  ) {
-    return cachedDayKeys;
-  }
-  cachedDayKeys = next;
-  return cachedDayKeys;
-}
-
 function formatDayLabel(value: string, relativeDayKeys: RelativeDayKeys | null): string {
   if (!value) return "Upcoming";
-  const iso = value.length === 10 ? `${value}T00:00:00Z` : value;
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return value;
-  const key = date.toISOString().slice(0, 10);
-  const base = new Intl.DateTimeFormat("en", {
-    weekday: "long",
-    day: "numeric",
-    month: "long",
-    timeZone: "UTC",
-  }).format(date);
-  if (relativeDayKeys) {
-    if (key === relativeDayKeys.todayKey) return `Today · ${base}`;
-    if (key === relativeDayKeys.tomorrowKey) return `Tomorrow · ${base}`;
-  }
-  return base;
+  return formatUtcDateGroup(
+    value,
+    relativeDayKeys?.todayKey ?? null,
+    relativeDayKeys?.tomorrowKey ?? null,
+  );
 }
 
 function ratingBadge(source: PredictedPlayer["ratingSource"] | undefined): string | null {
@@ -861,12 +818,11 @@ export default function TennisPage() {
 
   // Defer clock-dependent labels ("Today" / "Tomorrow" / updated timestamp)
   // until after hydration so server HTML and the initial client pass match.
-  const relativeDayKeys = useSyncExternalStore(
-    emptySubscribe,
-    getClientDayKeys,
-    getServerDayKeys,
-  );
-  const mounted = relativeDayKeys !== null;
+  const clock = useUtcClock();
+  const relativeDayKeys: RelativeDayKeys | null = clock.mounted && clock.todayUtc && clock.tomorrowUtc
+    ? { todayKey: clock.todayUtc, tomorrowKey: clock.tomorrowUtc }
+    : null;
+  const mounted = clock.mounted;
 
   useEffect(() => {
     isMountedRef.current = true;

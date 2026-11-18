@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { TeamBadge } from "../../_components/ui";
+import { TeamBadge, formatUtcDateTime, utcFixtureStatus } from "../../_components/ui";
 import {
   NAV_PILL_PREMIUM,
   GLASS_PANEL,
@@ -80,31 +80,10 @@ export interface SureCornerMatch {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function formatDateTime(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat("en", {
-    weekday: "short",
-    day: "numeric",
-    month: "short",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    timeZoneName: "short",
-  }).format(date);
-}
+const formatDateTime = formatUtcDateTime;
 
 function pct(value: number): string {
   return `${(value * 100).toFixed(1)}%`;
-}
-
-function matchStatus(match: SureCornerMatch): "LIVE" | "FINISHED" | "UPCOMING" {
-  const now = Date.now();
-  const start = new Date(match.date).getTime();
-  // Treat the match as live within a ±120-minute window around kick-off
-  if (start <= now && now - start < 120 * 60 * 1000) return "LIVE";
-  if (start < now) return "FINISHED";
-  return "UPCOMING";
 }
 
 const STATUS_BADGE: Record<"LIVE" | "FINISHED" | "UPCOMING", string> = {
@@ -202,10 +181,11 @@ function confidenceTooltip(market: SureCornerMarket): string | undefined {
 
 interface MatchOverlayProps {
   match: SureCornerMatch;
+  now?: number | null;
   onClose: () => void;
 }
 
-export default function MatchOverlay({ match, onClose }: MatchOverlayProps) {
+export default function MatchOverlay({ match, now = null, onClose }: MatchOverlayProps) {
   // Animation state: mount → animate-in → visible → animate-out → unmount
   const [visible, setVisible] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
@@ -247,7 +227,7 @@ export default function MatchOverlay({ match, onClose }: MatchOverlayProps) {
     if (panelRef.current) panelRef.current.focus();
   }, []);
 
-  const status = matchStatus(match);
+  const status = utcFixtureStatus(match.date, now);
 
   // Markets sorted by hitRate descending
   const sortedMarkets = [...match.markets].sort((a, b) => b.hitRate - a.hitRate);

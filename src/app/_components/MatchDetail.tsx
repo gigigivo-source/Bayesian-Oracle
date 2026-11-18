@@ -4,7 +4,15 @@ import { useEffect, useMemo, useState, useCallback } from "react";
 import type { EngineResult, Market, DeepStatsVector } from "@/lib/engine/types";
 import type { FixtureLite, MatchSummary, TeamForm } from "@/lib/espn";
 import type { BookmakerOdds } from "@/lib/engine/value";
-import { ConfidenceBar, GradeBadge, MarketTable, Section, TeamBadge } from "./ui";
+import {
+  ConfidenceBar,
+  formatUtcDateTime,
+  formatUtcTime,
+  GradeBadge,
+  MarketTable,
+  Section,
+  TeamBadge,
+} from "./ui";
 import { EventIcon, IconTrophy, OutcomeBadge } from "./Icons";
 import { CHIP, CHIP_OFF, CHIP_ON_AMBER, CHIP_ON_EMERALD, CHIP_ON_ROSE, OUTLINE_NEUTRAL } from "./design";
 
@@ -539,30 +547,41 @@ function setCachedRankings(entry: CachedRankings): void {
 
 export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClose: () => void }) {
   // Selected ranking mode — A = Classic 11-factor, B = 12-Factor, C = Hybrid, D = Consensus.
-  // Persisted in localStorage so the user's preference survives a refresh.
-  const [selectedMode, setSelectedMode] = useState<RankingMode>(() => {
-    if (typeof window !== 'undefined') {
-      const stored = localStorage.getItem('rankingMode');
-      if (stored === 'A' || stored === 'B' || stored === 'C' || stored === 'D') return stored as RankingMode;
-    }
-    return 'B';
-  });
+  // The default is deterministic for SSR/first paint; localStorage is read only
+  // after mount so it can never change the hydrating markup.
+  const [selectedMode, setSelectedMode] = useState<RankingMode>("B");
+  const [modeHydrated, setModeHydrated] = useState(false);
 
   useEffect(() => {
-    if (typeof window !== 'undefined') {
-      localStorage.setItem('rankingMode', selectedMode);
+    try {
+      const stored = window.localStorage.getItem("rankingMode");
+      if (stored === "A" || stored === "B" || stored === "C" || stored === "D") {
+        // eslint-disable-next-line react-hooks/set-state-in-effect
+        setSelectedMode(stored as RankingMode);
+      }
+    } catch {
+      // Ignore blocked or unavailable storage.
     }
-  }, [selectedMode]);
+    setModeHydrated(true);
+  }, []);
+
+  useEffect(() => {
+    if (!modeHydrated) return;
+    try {
+      window.localStorage.setItem("rankingMode", selectedMode);
+    } catch {
+      // Ignore blocked or unavailable storage.
+    }
+  }, [selectedMode, modeHydrated]);
 
   // The cache holds the FULL `?ranking=all` response per eventId (30-min TTL).
-  // Once hydrated, the four pill chips switch between modes INSTANTLY without
-  // any network call.
-  const [cached, setCached] = useState<CachedRankings | null>(() => getCachedRankings(fixture.id));
-  const [loading, setLoading] = useState<boolean>(() => !getCachedRankings(fixture.id));
+  // Cache reads (which use Date.now()) happen in the mount effect, never in a
+  // render-time lazy initializer. Once hydrated, the four pill chips switch
+  // between modes INSTANTLY without any network call.
+  const [cached, setCached] = useState<CachedRankings | null>(null);
+  const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
-  const [dataSource, setDataSource] = useState<"cache" | "api">(
-    getCachedRankings(fixture.id) ? "cache" : "api",
-  );
+  const [dataSource, setDataSource] = useState<"cache" | "api">("api");
 
   const [familyFilter, setFamilyFilter] = useState("ALL");
   const [showJson, setShowJson] = useState(false);
@@ -719,7 +738,7 @@ export function MatchDetail({ fixture, onClose }: { fixture: FixtureLite; onClos
         {/* Match Score & Teams Header */}
         <div className="mb-4 rounded-lg bg-slate-900 p-4">
           <div className="mb-2 text-center text-xs text-slate-400 font-mono">
-            {fixture.leagueName} · {new Date(fixture.date).toLocaleString()}
+            {fixture.leagueName} · {formatUtcDateTime(fixture.date)}
           </div>
           <div className="flex items-center justify-center gap-3 sm:gap-6">
             <div className="flex flex-1 min-w-0 items-center justify-end gap-3">
@@ -1255,9 +1274,7 @@ function RankingDebugPanel({
   dataSource: "cache" | "api";
 }) {
   const top1 = result.top1[0];
-  const cachedAt = cached
-    ? new Date(cached.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
-    : null;
+  const cachedAt = cached ? formatUtcTime(cached.timestamp) : null;
   const sourceLabel =
     dataSource === "cache" && cachedAt
       ? `Source: cache (cached at ${cachedAt})`

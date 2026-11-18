@@ -12,7 +12,7 @@ import {
   compareLeaguePriority,
 } from "@/lib/leaguePriority";
 
-import { FixtureCard } from "./_components/ui";
+import { FixtureCard, formatUtcDate, useUtcClock, utcDateKey } from "./_components/ui";
 import { BackgroundSlideshow } from "./_components/BackgroundSlideshow";
 import { ErrorBoundary } from "./_components/ErrorBoundary";
 
@@ -716,6 +716,7 @@ function TopFeed({
   // Fixtures loaded from /api/fixtures when a chip points to a league with no today matches.
   // Keyed by league slug so stale data is never shown for a different chip.
   const [chipData, setChipData] = useState<{ slug: string; upcoming: FixtureLite[]; results: FixtureLite[]; label: string } | null>(null);
+  const { todayUtc, mounted } = useUtcClock();
 
   useEffect(() => {
     let cancelled = false;
@@ -759,16 +760,16 @@ function TopFeed({
   }, [filterSlug, needsChipFixtures]);
 
   if (!data) return <LoadingGrid label="Connecting to Football Data Mesh…" />;
+  if (showTodayOnly && !mounted) return <LoadingGrid label="Loading today's fixtures…" />;
 
   const chipFixtures = needsChipFixtures && chipData && chipData.slug === filterSlug ? chipData : null;
   const chipLoading  = needsChipFixtures && !chipFixtures;
 
-  // Today's date string for filtering
-  const todayStr = new Date().toISOString().slice(0, 10);
+  // UTC day is computed in useUtcClock() after mount and refreshed every minute.
+  const todayStr = todayUtc ?? "";
 
-  // Filter fixtures to today only
-  const filterToday = (fx: FixtureLite) =>
-    fx.date.slice(0, 10) === todayStr;
+  // Filter fixtures to today only, using the same UTC calendar day everywhere.
+  const filterToday = (fx: FixtureLite) => utcDateKey(fx.date) === todayStr;
 
   // Sort league blocks by importance tier (biggest competitions first).
   // Sorting is applied AFTER date / league-chip filtering so it never changes
@@ -1387,7 +1388,7 @@ function ManualOracle() {
               {fx.home.logo && <Image src={fx.home.logo} alt="" width={20} height={20} className="object-contain" unoptimized />}
               <div className="flex-1 min-w-0">
                 <div className="text-sm text-white font-medium truncate">{fx.home.name} vs {fx.away.name}</div>
-                <div className="text-[10px] text-slate-400 font-mono">{fx.leagueName} | {new Date(fx.date).toLocaleDateString()}</div>
+                <div className="text-[10px] text-slate-400 font-mono">{fx.leagueName} | {formatUtcDate(fx.date)}</div>
               </div>
               {fx.state === "post" && fx.home.score !== null && (
                 <span className="text-sm font-mono font-bold text-amber-300">{fx.home.score}-{fx.away.score}</span>
@@ -2947,7 +2948,7 @@ function SavedSlipCard({
           <div>
             <div className="text-sm font-bold text-white">{slip.name}</div>
             <div className="text-[10px] text-slate-400 font-mono mt-0.5">
-              {picks.length} legs · odds {slip.combinedOdds?.toFixed(2)} · {new Date(slip.createdAt).toLocaleDateString()}
+              {picks.length} legs · odds {slip.combinedOdds?.toFixed(2)} · {formatUtcDate(slip.createdAt)}
             </div>
           </div>
           <div className="flex items-center gap-2">

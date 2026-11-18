@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { runLiveScan } from "./actions";
+import { formatUtcDate, formatUtcDateTimeShort } from "../_components/ui";
 
 interface VaTicketLeg {
   match: string;
@@ -747,7 +748,7 @@ export default function ValueAccumulatorPage() {
                     >
                       {ticket.status}
                     </span>
-                    <span>{new Date(ticket.createdAt).toLocaleDateString()}</span>
+                    <span>{formatUtcDate(ticket.createdAt)}</span>
                   </div>
                 </div>
 
@@ -833,12 +834,7 @@ export default function ValueAccumulatorPage() {
                             {(leg.ev * 100).toFixed(1)}%
                           </td>
                           <td style={{ padding: "10px 6px", color: "#94a3b8", fontSize: 12 }}>
-                            {new Date(leg.kickoff).toLocaleString(undefined, {
-                              month: "short",
-                              day: "numeric",
-                              hour: "2-digit",
-                              minute: "2-digit",
-                            })}
+                            {formatUtcDateTimeShort(leg.kickoff)}
                           </td>
                           <td style={{ padding: "10px 6px", color: "#94a3b8", fontSize: 12 }}>{leg.bookmaker}</td>
                         </tr>
