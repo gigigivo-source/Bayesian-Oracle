@@ -21,7 +21,7 @@ import {
   selectPremierLeagueFixtures,
   type CorrectScoreMatch,
   type FeedDiagnostics,
-} from "./route";
+} from "./core";
 import type { FixtureLite } from "@/lib/espn";
 import { loadHistoricalMatches, type HistoricalDataset } from "@/lib/data/historical";
 

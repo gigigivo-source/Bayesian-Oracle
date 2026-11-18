@@ -8,7 +8,7 @@ import {
   getTeamXgCached,
   round1xBetOdds,
   type First5MinutesResponse,
-} from "./route";
+} from "./core";
 import * as espn from "@/lib/espn";
 import { getCachedMeshProfile } from "@/lib/engine/dataMesh";
 import type { MeshProfile } from "@/lib/engine/dataMesh";

@@ -202,6 +202,12 @@ export async function getCachedMeshProfile(
   leagueSlug: string,
   beforeDate?: string,
 ): Promise<MeshProfile | null> {
+  // The persistent profile cache is optional. Without DATABASE_URL the old
+  // module-level connection throw made this whole module fail to load; keep the
+  // same fail-soft behaviour now that `@/db` is lazy, instead of starting a
+  // provider-network walk that has nowhere to cache its result.
+  if (!process.env.DATABASE_URL) return null;
+
   // Current cache entries are not point-in-time snapshots. Never read or
   // overwrite them for a cutoff request.
   if (beforeDate !== undefined) return buildMeshProfile(teamName, leagueSlug, beforeDate);

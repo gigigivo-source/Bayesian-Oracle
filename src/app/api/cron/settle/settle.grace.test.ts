@@ -58,14 +58,14 @@ vi.mock("@/lib/data/aggregator", () => ({
   statsAggregator: { peek: mocks.peek, fetch: mocks.fetch },
 }));
 
-vi.mock("../daily-picks/route", () => ({
+vi.mock("../daily-picks/core", () => ({
   fetchEspnBoxscore: vi.fn(async () => null),
   lookupMultiSourceResult: mocks.lookupResult,
   resultFromFixture: vi.fn(() => null),
   statsToBoxscore: vi.fn(() => null),
 }));
 
-vi.mock("@/app/api/fixtures/route", () => ({
+vi.mock("@/app/api/fixtures/core", () => ({
   GET: vi.fn(async () => Response.json({ fixtures: [] })),
 }));
 
@@ -79,7 +79,7 @@ vi.mock("@/lib/engine", () => ({
   evaluateFinishedMatch: mocks.evaluateFinished,
 }));
 
-const { settleFeaturePicks, refreshPendingPerformanceRows } = await import("./route");
+const { settleFeaturePicks, refreshPendingPerformanceRows } = await import("./core");
 const { clearSettlementBoxscoreCache } = await import("@/lib/settlement/results");
 
 const HOUR = 3_600_000;

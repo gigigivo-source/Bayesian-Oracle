@@ -3,12 +3,27 @@
 
 import { db } from "@/db";
 import { valueBetLog } from "@/db/schema";
-import { eq, desc } from "drizzle-orm";
-import { fetchScoreboard } from "@/lib/espn";
-import { TOP_FEED_SLUGS } from "@/lib/leagues";
-import type { FixtureLite } from "@/lib/espn";
+import { desc } from "drizzle-orm";
+import { asNumber, asRecord, roundTo } from "@/lib/data/sources/shared";
 
 export const dynamic = "force-dynamic";
+
+function badRequest(error: string): Response {
+  return Response.json({ error }, { status: 400 });
+}
+
+function serverError(label: string, err: unknown, message: string): Response {
+  console.error(label, err);
+  return Response.json({ error: message }, { status: 500 });
+}
+
+function requiredString(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+function safeNumber(value: unknown, fallback = 0): number {
+  return asNumber(value) ?? fallback;
+}
 
 // ─── GET: fetch all value bets with performance stats ─────────────────────────
 export async function GET() {
@@ -20,12 +35,19 @@ export async function GET() {
     const lost     = bets.filter((b) => b.outcome === "lost");
     const pending  = bets.filter((b) => b.outcome === "pending");
 
-    const totalStaked   = settled.reduce((s, b) => s + (b.stake ?? 10), 0);
-    const totalReturns  = won.reduce((s, b) => s + (b.actualReturn ?? (b.stake ?? 10) * (b.bookOdds ?? 1)), 0);
-    const totalPnl      = totalReturns - totalStaked;
-    const roi           = totalStaked > 0 ? (totalPnl / totalStaked) * 100 : 0;
-    const winRate       = settled.length > 0 ? (won.length / settled.length) * 100 : 0;
-    const avgEdge       = bets.length > 0 ? bets.reduce((s, b) => s + b.valueEdge, 0) / bets.length : 0;
+    const totalStaked = settled.reduce((s, b) => s + safeNumber(b.stake, 10), 0);
+    const totalReturns = won.reduce((s, b) => {
+      if (b.actualReturn !== null && b.actualReturn !== undefined) {
+        return s + safeNumber(b.actualReturn, 0);
+      }
+      return s + safeNumber(b.stake, 10) * safeNumber(b.bookOdds, 1);
+    }, 0);
+    const totalPnl = totalReturns - totalStaked;
+    const roi = totalStaked > 0 ? (totalPnl / totalStaked) * 100 : 0;
+    const winRate = settled.length > 0 ? (won.length / settled.length) * 100 : 0;
+    const avgEdge = bets.length > 0
+      ? bets.reduce((s, b) => s + safeNumber(b.valueEdge, 0), 0) / bets.length
+      : 0;
 
     return Response.json({
       bets: bets.map((b) => ({
@@ -35,15 +57,15 @@ export async function GET() {
         matchDate:      b.matchDate,
         marketName:     b.marketName,
         selection:      b.selection,
-        oracleProb:     b.oracleProb,
-        bookOdds:       b.bookOdds,
-        valueEdge:      b.valueEdge,
-        kellyStake:     b.kellyStake,
-        stake:          b.stake,
-        potentialReturn: b.potentialReturn,
+        oracleProb:     safeNumber(b.oracleProb),
+        bookOdds:       safeNumber(b.bookOdds, 1),
+        valueEdge:      safeNumber(b.valueEdge),
+        kellyStake:     safeNumber(b.kellyStake),
+        stake:          safeNumber(b.stake, 10),
+        potentialReturn: safeNumber(b.potentialReturn),
         outcome:        b.outcome,
-        actualReturn:   b.actualReturn,
-        pnl:            b.pnl,
+        actualReturn:   b.actualReturn === null ? null : safeNumber(b.actualReturn, 0),
+        pnl:            b.pnl === null ? null : safeNumber(b.pnl, 0),
         createdAt:      b.createdAt,
       })),
       stats: {
@@ -52,51 +74,88 @@ export async function GET() {
         lost:        lost.length,
         pending:     pending.length,
         settled:     settled.length,
-        winRate:     parseFloat(winRate.toFixed(1)),
-        roi:         parseFloat(roi.toFixed(1)),
-        totalStaked: parseFloat(totalStaked.toFixed(2)),
-        totalReturns: parseFloat(totalReturns.toFixed(2)),
-        totalPnl:    parseFloat(totalPnl.toFixed(2)),
-        avgEdge:     parseFloat((avgEdge * 100).toFixed(1)),
+        winRate:     roundTo(winRate, 1),
+        roi:         roundTo(roi, 1),
+        totalStaked: roundTo(totalStaked, 2),
+        totalReturns: roundTo(totalReturns, 2),
+        totalPnl:    roundTo(totalPnl, 2),
+        avgEdge:     roundTo(avgEdge * 100, 1),
       },
     });
   } catch (err) {
-    console.error("Value bet GET error:", err);
-    return Response.json({ error: "Failed" }, { status: 500 });
+    return serverError("Value bet GET error:", err, "Failed");
   }
 }
 
 // ─── POST: log a new value bet ────────────────────────────────────────────────
 export async function POST(req: Request) {
+  let body: unknown;
   try {
-    const body = await req.json() as {
-      eventId: string; leagueSlug: string; match: string; matchDate: string;
-      marketName: string; selection: string; oracleProb: number; bookOdds: number;
-      valueEdge: number; kellyStake?: number; stake?: number;
-    };
+    body = await req.json();
+  } catch {
+    return badRequest("Invalid JSON body");
+  }
 
-    const stake = body.stake ?? 10;
-    const potentialReturn = parseFloat((stake * body.bookOdds).toFixed(2));
+  const data = asRecord(body);
+  if (!data) return badRequest("Invalid request body");
 
+  const eventId = requiredString(data.eventId);
+  const leagueSlug = requiredString(data.leagueSlug);
+  const match = requiredString(data.match);
+  const matchDate = requiredString(data.matchDate);
+  const marketName = requiredString(data.marketName);
+  const selection = requiredString(data.selection);
+  const oracleProb = asNumber(data.oracleProb);
+  const bookOdds = asNumber(data.bookOdds);
+  const valueEdge = asNumber(data.valueEdge);
+  const kellyStake = data.kellyStake === undefined ? 0 : asNumber(data.kellyStake);
+  const stake = data.stake === undefined ? 10 : asNumber(data.stake);
+
+  if (!eventId || !leagueSlug || !match || !matchDate || !marketName || !selection) {
+    return badRequest("Missing required fields");
+  }
+  if (!/^\d{4}-\d{2}-\d{2}/.test(matchDate)) {
+    return badRequest("Invalid matchDate");
+  }
+  if (oracleProb === null || oracleProb < 0 || oracleProb > 1) {
+    return badRequest("Invalid oracleProb");
+  }
+  if (bookOdds === null || bookOdds <= 1) {
+    return badRequest("Invalid bookOdds");
+  }
+  if (valueEdge === null) {
+    return badRequest("Invalid valueEdge");
+  }
+  if (kellyStake === null || kellyStake < 0) {
+    return badRequest("Invalid kellyStake");
+  }
+  if (stake === null || stake < 0) {
+    return badRequest("Invalid stake");
+  }
+
+  const potentialReturn = roundTo(stake * bookOdds, 2);
+  if (!Number.isFinite(potentialReturn)) {
+    return badRequest("Invalid potentialReturn");
+  }
+
+  try {
     await db.insert(valueBetLog).values({
-      eventId:         body.eventId,
-      leagueSlug:      body.leagueSlug,
-      match:           body.match,
-      matchDate:       body.matchDate,
-      marketName:      body.marketName,
-      selection:       body.selection,
-      oracleProb:      body.oracleProb,
-      bookOdds:        body.bookOdds,
-      valueEdge:       body.valueEdge,
-      kellyStake:      body.kellyStake ?? 0,
+      eventId,
+      leagueSlug,
+      match,
+      matchDate,
+      marketName,
+      selection,
+      oracleProb,
+      bookOdds,
+      valueEdge,
+      kellyStake,
       stake,
       potentialReturn,
-      outcome:         "pending",
+      outcome: "pending",
     });
-
     return Response.json({ ok: true });
   } catch (err) {
-    console.error("Value bet POST error:", err);
-    return Response.json({ error: "Failed to log bet" }, { status: 500 });
+    return serverError("Value bet POST error:", err, "Failed to log bet");
   }
 }

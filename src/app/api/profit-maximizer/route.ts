@@ -37,7 +37,7 @@
 //   ?minEv=0.10     edge floor (decimal). Default 0.05, clamped to [0, 0.5].
 //   ?refresh=true   bypass the one-hour cache and rebuild the scan.
 
-import { GET as first5GET, type First5MinutesResponse } from "@/app/api/first-5-minutes/route";
+import { GET as first5GET, type First5MinutesResponse } from "@/app/api/first-5-minutes/core";
 import { GET as sureCornersGET, type SureCornersResponse } from "@/app/api/sure-corners/route";
 import { statsAggregator } from "@/lib/data/aggregator";
 import {

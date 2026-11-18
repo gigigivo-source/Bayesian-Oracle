@@ -28,7 +28,7 @@ import {
   trendPeriodFor,
   trendWindows,
   type First5AnalyticsResponse,
-} from "@/app/api/first-5-minutes/analytics/route";
+} from "@/app/api/first-5-minutes/analytics/core";
 import { GET as getSettledResults } from "@/app/api/first-5-minutes/results/route";
 import First5MinutesPage from "./page";
 import { AnalyticsSheet } from "./components/AnalyticsSheet";

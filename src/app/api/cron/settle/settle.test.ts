@@ -59,14 +59,14 @@ vi.mock("@/lib/data/aggregator", () => ({
   statsAggregator: { peek: mocks.peek, fetch: mocks.fetch },
 }));
 
-vi.mock("../daily-picks/route", () => ({
+vi.mock("../daily-picks/core", () => ({
   fetchEspnBoxscore: vi.fn(async () => null),
   lookupMultiSourceResult: mocks.lookupResult,
   resultFromFixture: vi.fn(() => null),
   statsToBoxscore: vi.fn(() => null),
 }));
 
-vi.mock("@/app/api/fixtures/route", () => ({
+vi.mock("@/app/api/fixtures/core", () => ({
   GET: vi.fn(async () => Response.json({ fixtures: [] })),
 }));
 
@@ -81,7 +81,7 @@ const {
   first5TotalFromStats,
   resolveFirst5Outcome,
   settleFeaturePicks,
-} = await import("./route");
+} = await import("./core");
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
 

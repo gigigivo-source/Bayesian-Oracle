@@ -43,7 +43,7 @@ import {
   statsToBoxscore,
   type AggregatedFixture,
   type CompetitionFixtures,
-} from "../../cron/daily-picks/route";
+} from "../../cron/daily-picks/core";
 import { statsAggregator } from "@/lib/data/aggregator";
 import type { FixtureLite } from "@/lib/espn";
 
