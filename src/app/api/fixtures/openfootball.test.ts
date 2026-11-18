@@ -11,7 +11,7 @@ import {
   hasLooseFixtureDuplicate,
   openfootballFixture,
   type OpenfootballRow,
-} from "./route";
+} from "./core";
 import { resilientJson } from "@/lib/httpClient";
 import type { FixtureLite } from "@/lib/espn";
 

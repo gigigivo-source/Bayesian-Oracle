@@ -27,7 +27,7 @@ import {
 } from "@/lib/settlement/sureCornerOutcomes";
 import { statsAggregator } from "@/lib/data/aggregator";
 import type { CanonicalMatchStats } from "@/lib/data/types";
-import { lookupMultiSourceResult } from "../../cron/daily-picks/route";
+import { lookupMultiSourceResult } from "../../cron/daily-picks/core";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;

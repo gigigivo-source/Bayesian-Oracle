@@ -44,17 +44,10 @@ describe("main menu navigation", () => {
   };
 
   const stubFetch = () => {
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
-      const url = String(input);
-      const body = url === "/api/auth"
-        ? { hasPin: false }
-        : { featured: [], extra: [], live: [], liveCount: 0 };
-
-      return {
-        ok: true,
-        json: async () => body,
-      } as Response;
-    }));
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ featured: [], extra: [], live: [], liveCount: 0 }),
+    } as Response)));
   };
 
   it("navigates to ranking mode performance when its menu item is clicked", async () => {

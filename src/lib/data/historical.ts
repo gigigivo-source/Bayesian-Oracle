@@ -644,24 +644,28 @@ const FIXTURE_COLUMNS: Record<string, string[]> = {
 const FIXTURE_REQUIRED = ["homeTeam", "awayTeam", "homeGoals", "awayGoals", "matchDate"];
 
 /**
- * Read completed matches from Postgres. `src/db` throws at import time when
- * `DATABASE_URL` is unset, so the module is imported dynamically and every
- * failure is reported rather than thrown — a missing database must degrade the
- * model to the next source, never break the route.
+ * Read completed matches from Postgres. `@/db` is lazy: importing it never
+ * throws, and a missing DATABASE_URL is reported by the first query rather than
+ * breaking the route. Every failure is contained so a missing database degrades
+ * the model to the next source.
  */
 export async function loadMatchesFromDatabase(
   leagueSlug: string | null,
   sinceIso: string | null,
   limit: number,
 ): Promise<{ matches: HistoricalMatch[]; notes: string[] }> {
-  let pool: { query: (sql: string, params?: unknown[]) => Promise<{ rows: unknown[] }> };
+  if (!process.env.DATABASE_URL) {
+    return { matches: [], notes: ["DATABASE_URL is not configured"] };
+  }
+
+  let pool: import("pg").Pool;
   try {
     ({ pool } = await import("@/db"));
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return {
       matches: [],
-      notes: [message.includes("DATABASE_URL") ? "DATABASE_URL is not configured" : `database unavailable (${message})`],
+      notes: [`database unavailable (${message})`],
     };
   }
 

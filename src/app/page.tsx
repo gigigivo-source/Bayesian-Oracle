@@ -156,21 +156,6 @@ export default function Home() {
   const [selected, setSelected] = useState<FixtureLite | null>(null);
   const [selectedLeagueSlug, setSelectedLeagueSlug] = useState<string | null>(null);
   const [showTodayOnly, setShowTodayOnly] = useState(false);
-  const [authed, setAuthed] = useState(false);
-  const [hasPin, setHasPin] = useState<boolean | null>(null);
-  const [pinInput, setPinInput] = useState("");
-  const [pinName, setPinName] = useState("");
-  const [pinError, setPinError] = useState("");
-
-  useEffect(() => {
-    fetch("/api/auth").then(r => {
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      return r.json();
-    }).then((d: { hasPin: boolean }) => {
-      setHasPin(d.hasPin);
-      if (!d.hasPin) setAuthed(true); // No PIN set = open access
-    }).catch(() => { setHasPin(false); setAuthed(true); });
-  }, []);
 
   // Support in-app navigation events (e.g. Standings "View Fixtures →" button)
   useEffect(() => {
@@ -183,50 +168,6 @@ export default function Home() {
     window.addEventListener("gigi-tab", onTabEvent);
     return () => window.removeEventListener("gigi-tab", onTabEvent);
   }, []);
-
-  async function handlePin() {
-    try {
-      if (!hasPin) {
-        // Setup new PIN
-        if (pinInput.length < 4) { setPinError("PIN must be at least 4 digits"); return; }
-        await fetch("/api/auth", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "setup", pin: pinInput, name: pinName || "User" }) });
-        setAuthed(true);
-      } else {
-        // Verify PIN
-        const r = await fetch("/api/auth", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "verify", pin: pinInput }) });
-        const d = await r.json() as { valid: boolean };
-        if (d.valid) { setAuthed(true); setPinError(""); }
-        else setPinError("Incorrect PIN");
-      }
-    } catch {
-      setPinError("Something went wrong. Please try again.");
-    }
-  }
-
-  if (hasPin === null) return <div className="min-h-screen bg-[#0F1117] flex items-center justify-center"><div className="text-amber-300 font-mono animate-pulse">Loading...</div></div>;
-
-  if (!authed) return (
-    <div className="min-h-screen bg-[#0F1117] flex items-center justify-center">
-      <div className="bg-slate-900 rounded-xl p-8 w-full max-w-sm text-center">
-        <div className="w-[60px] h-[60px] rounded-lg mx-auto mb-4 bg-[#F59E0B] border border-[#FF8C00] flex items-center justify-center">
-          <span className="text-2xl">⚽</span>
-        </div>
-        <h1 className="text-xl font-bold text-amber-300 font-mono mb-1">GIGI GIVO</h1>
-        <p className="text-xs text-slate-400 mb-6">{hasPin ? "Enter your PIN to continue" : "Set a PIN to secure your app"}</p>
-        {!hasPin && (
-          <input value={pinName} onChange={e => setPinName(e.target.value)} placeholder="Your name"
-            className="w-full rounded-lg border border-slate-700 bg-slate-800 px-4 py-2.5 text-sm text-white outline-none focus:border-amber-400 mb-3" />
-        )}
-        <input value={pinInput} onChange={e => setPinInput(e.target.value)} placeholder={hasPin ? "Enter PIN" : "Create PIN (4+ digits)"}
-          type="password" onKeyDown={e => { if (e.key === "Enter") handlePin(); }}
-          className="w-full rounded-lg border border-slate-700 bg-slate-800 px-4 py-3 text-center text-2xl tracking-[0.5em] text-white outline-none focus:border-amber-400 font-mono" />
-        {pinError && <p className="text-rose-400 text-xs mt-2">{pinError}</p>}
-        <button onClick={handlePin} className={`w-full mt-4 px-4 py-3 text-sm ${ACTION_AMBER}`}>
-          {hasPin ? "Unlock" : "Set PIN & Start"}
-        </button>
-      </div>
-    </div>
-  );
 
   return (
     <div className={`min-h-screen text-slate-100 ${tab !== "top" ? "bg-[#0F1117]" : ""}`}>
