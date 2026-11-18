@@ -23,6 +23,14 @@ import {
   NAV_PILL,
   NAV_PILL_OFF,
 } from "../_components/design";
+import {
+  formatUtcDateGroup,
+  formatUtcDateTimeShort,
+  formatUtcTime,
+  useUtcClock,
+  utcDateKey,
+  utcTimeValue,
+} from "../_components/ui";
 
 // ─── Payload types (mirrors src/app/api/profit-maximizer/route.ts) ────────────
 
@@ -186,35 +194,6 @@ function formatOdds(value: number | null): string {
   return value.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
 }
 
-function formatDateTime(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat("en", {
-    weekday: "short",
-    day: "numeric",
-    month: "short",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(date);
-}
-
-function formatDateGroup(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  const today = new Date();
-  const tomorrow = new Date();
-  tomorrow.setDate(today.getDate() + 1);
-  const base = new Intl.DateTimeFormat("en", {
-    weekday: "long",
-    day: "numeric",
-    month: "long",
-    year: "numeric",
-  }).format(date);
-  if (date.toDateString() === today.toDateString()) return `Today · ${base}`;
-  if (date.toDateString() === tomorrow.toDateString()) return `Tomorrow · ${base}`;
-  return base;
-}
-
 /** EV colour language: emerald ≥ 15%, amber 5–14%, rose below 5%. */
 function evTone(ev: number): string {
   if (ev >= 0.15) return "bg-emerald-500/20 text-emerald-300 ring-1 ring-emerald-400/40";
@@ -269,6 +248,7 @@ export default function ProfitMaximizerPage() {
   const dataRef = useRef<ProfitMaximizerData | null>(null);
   const initialFetchDone = useRef(false);
   const requestSeq = useRef(0);
+  const { todayUtc, tomorrowUtc } = useUtcClock();
 
   const load = useCallback(async (threshold: number, forceRefresh = false) => {
     const seq = ++requestSeq.current;
@@ -347,7 +327,7 @@ export default function ProfitMaximizerPage() {
     if (markets.length === 0) return [];
     const byDay = new Map<string, Map<string, ProfitMarket[]>>();
     for (const market of markets) {
-      const day = new Date(market.matchDate).toISOString().slice(0, 10);
+      const day = utcDateKey(market.matchDate);
       const matches = byDay.get(day) ?? new Map<string, ProfitMarket[]>();
       const picks = matches.get(market.eventId) ?? [];
       picks.push(market);
@@ -362,7 +342,7 @@ export default function ProfitMaximizerPage() {
           .map(([eventId, picks]) => ({ eventId, match: picks[0], markets: picks }))
           .sort(
             (left, right) =>
-              new Date(left.match.matchDate).getTime() - new Date(right.match.matchDate).getTime() ||
+              utcTimeValue(left.match.matchDate) - utcTimeValue(right.match.matchDate) ||
               Math.max(...right.markets.map((m) => m.ev)) - Math.max(...left.markets.map((m) => m.ev)),
           ),
       }));
@@ -476,7 +456,7 @@ export default function ProfitMaximizerPage() {
           <div className="flex flex-wrap items-center gap-2 font-mono text-[10px] uppercase tracking-wider text-slate-500">
             {data?.cache.hit && (
               <span className="rounded-full border border-white/[0.08] bg-white/[0.04] px-2 py-1 text-slate-400">
-                ⏱ cached · {new Date(data.generatedAt).toLocaleTimeString()}
+                ⏱ cached · {formatUtcTime(data.generatedAt)}
               </span>
             )}
             {data?.partial && (
@@ -623,7 +603,7 @@ export default function ProfitMaximizerPage() {
               <section key={group.day} className="space-y-3">
                 <div className="flex items-center gap-3">
                   <h2 className="font-mono text-[11px] font-bold uppercase tracking-[0.2em] text-emerald-300/80">
-                    {formatDateGroup(group.matches[0]!.match.matchDate)}
+                    {formatUtcDateGroup(group.matches[0]!.match.matchDate, todayUtc, tomorrowUtc)}
                   </h2>
                   <span className="h-px flex-1 bg-gradient-to-r from-emerald-400/30 via-white/10 to-transparent" />
                   <span className="font-mono text-[10px] uppercase tracking-wider text-slate-500">
@@ -734,7 +714,7 @@ function MatchCard({
           <span className="max-w-[200px] truncate">{match.league}</span>
         </div>
         <div className="flex items-center gap-2">
-          <span className="font-mono text-[10px] text-slate-400">{formatDateTime(match.matchDate)}</span>
+          <span className="font-mono text-[10px] text-slate-400">{formatUtcDateTimeShort(match.matchDate)}</span>
           <span
             className={`rounded-full px-2 py-0.5 font-mono text-[10px] font-bold ${evTone(best)}`}
             title={`Best EV on this match vs the ${(minEv * 100).toFixed(0)}% floor`}

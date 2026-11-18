@@ -1,7 +1,7 @@
 "use client";
 
 import Image from "next/image";
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import type { Market } from "@/lib/engine/types";
 import type { FixtureLite } from "@/lib/espn";
 import { OutcomeBadge, IconLive } from "./Icons";
@@ -26,6 +26,138 @@ const TIER_BADGE_CLASS: Record<number, string> = {
 
 export function pct(x: number): string {
   return `${(x * 100).toFixed(1)}%`;
+}
+
+// ─── Deterministic, hydration-safe date helpers ───────────────────────────────
+// Every rendered date uses UTC getters and fixed English labels, so the server
+// prerender and browser hydration produce byte-identical strings. "Today" /
+// "Tomorrow" and live-status checks are driven by a clock started after mount.
+
+type DateInput = string | number | Date;
+
+const DAY_MS = 86_400_000;
+const MONTHS_SHORT = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const MONTHS_LONG = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+const WEEKDAYS_SHORT = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const WEEKDAYS_LONG = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+
+const pad2 = (value: number): string => String(value).padStart(2, "0");
+
+function parseUtcDate(value: DateInput): Date | null {
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value;
+  }
+  if (typeof value === "number") {
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+  const raw = value.trim().replace(" ", "T");
+  if (!raw) return null;
+  const hasTimezone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(raw);
+  const hasTime = /T\d{2}:\d{2}/.test(raw);
+  const normalized = hasTimezone ? raw : hasTime ? `${raw}Z` : `${raw}T00:00:00Z`;
+  const date = new Date(normalized);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function fallbackLabel(value: DateInput): string {
+  return typeof value === "string" ? value : String(value);
+}
+
+export function formatUtcDate(value: DateInput): string {
+  const date = parseUtcDate(value);
+  if (!date) return fallbackLabel(value);
+  return `${pad2(date.getUTCDate())} ${MONTHS_SHORT[date.getUTCMonth()]} ${date.getUTCFullYear()}`;
+}
+export function formatUtcTime(value: DateInput): string {
+  const date = parseUtcDate(value);
+  if (!date) return fallbackLabel(value);
+  return `${pad2(date.getUTCHours())}:${pad2(date.getUTCMinutes())} UTC`;
+}
+export function formatUtcDateTime(value: DateInput): string {
+  const date = parseUtcDate(value);
+  if (!date) return fallbackLabel(value);
+  return `${WEEKDAYS_SHORT[date.getUTCDay()]} ${date.getUTCDate()} ${MONTHS_SHORT[date.getUTCMonth()]} ${date.getUTCFullYear()}, ${pad2(date.getUTCHours())}:${pad2(date.getUTCMinutes())} UTC`;
+}
+export function formatUtcDateTimeShort(value: DateInput): string {
+  const date = parseUtcDate(value);
+  if (!date) return fallbackLabel(value);
+  return `${WEEKDAYS_SHORT[date.getUTCDay()]} ${date.getUTCDate()} ${MONTHS_SHORT[date.getUTCMonth()]}, ${pad2(date.getUTCHours())}:${pad2(date.getUTCMinutes())} UTC`;
+}
+export function formatUtcKickoff(value: DateInput): string {
+  const date = parseUtcDate(value);
+  if (!date) return fallbackLabel(value);
+  return `${MONTHS_SHORT[date.getUTCMonth()]} ${date.getUTCDate()}, ${pad2(date.getUTCHours())}:${pad2(date.getUTCMinutes())} UTC`;
+}
+export function utcDateKey(value: DateInput): string {
+  const date = parseUtcDate(value);
+  return date ? date.toISOString().slice(0, 10) : fallbackLabel(value);
+}
+export function utcTimeValue(value: DateInput): number {
+  return parseUtcDate(value)?.getTime() ?? 0;
+}
+/** UTC day key for a mounted-clock timestamp. Never calls the ambient clock. */
+export function utcPastDateKey(now: number, days: number): string {
+  return new Date(now - days * DAY_MS).toISOString().slice(0, 10);
+}
+
+export function formatUtcDateGroup(
+  value: DateInput,
+  todayUtc: string | null,
+  tomorrowUtc: string | null,
+): string {
+  const date = parseUtcDate(value);
+  if (!date) return fallbackLabel(value);
+  const base = `${WEEKDAYS_LONG[date.getUTCDay()]} ${date.getUTCDate()} ${MONTHS_LONG[date.getUTCMonth()]} ${date.getUTCFullYear()}`;
+  const key = date.toISOString().slice(0, 10);
+  if (todayUtc && key === todayUtc) return `Today · ${base}`;
+  if (tomorrowUtc && key === tomorrowUtc) return `Tomorrow · ${base}`;
+  return base;
+}
+export function utcFixtureStatus(
+  dateStr: string,
+  now: number | null,
+): "LIVE" | "UPCOMING" | "FINISHED" {
+  if (now === null) return "UPCOMING";
+  const start = parseUtcDate(dateStr)?.getTime();
+  if (start === undefined) return "UPCOMING";
+  if (start <= now && now - start < 120 * 60 * 1000) return "LIVE";
+  if (start < now) return "FINISHED";
+  return "UPCOMING";
+}
+
+export interface UtcClock {
+  now: number | null;
+  mounted: boolean;
+  todayUtc: string | null;
+  tomorrowUtc: string | null;
+}
+
+/** Client-only UTC clock. Returns nulls on SSR and the first client render. */
+export function useUtcClock(): UtcClock {
+  const [clock, setClock] = useState<UtcClock>({
+    now: null,
+    mounted: false,
+    todayUtc: null,
+    tomorrowUtc: null,
+  });
+
+  useEffect(() => {
+    const tick = () => {
+      const current = Date.now();
+      setClock({
+        now: current,
+        mounted: true,
+        todayUtc: new Date(current).toISOString().slice(0, 10),
+        tomorrowUtc: new Date(current + DAY_MS).toISOString().slice(0, 10),
+      });
+    };
+    tick();
+    const interval = window.setInterval(tick, 60_000);
+    return () => window.clearInterval(interval);
+  }, []);
+
+  return clock;
 }
 
 export function TeamBadge({
@@ -308,16 +440,6 @@ export function Section({
   );
 }
 
-function kickoffLabel(dateIso: string): string {
-  const d = new Date(dateIso);
-  return d.toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
 /**
  * Stable fallback tint for cards rendered without a list index: hashes the
  * fixture id so a card always wears the same colour, even across re-renders.
@@ -364,7 +486,7 @@ export function FixtureCard({
   const stateText = isLive
     ? fx.clock ?? "LIVE"
     : fx.state === "pre"
-    ? kickoffLabel(fx.date)
+    ? formatUtcKickoff(fx.date)
     : "FT";
   const showScore =
     (isLive || isFinished) &&

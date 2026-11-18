@@ -9,6 +9,7 @@ import {
   GLASS_PANEL,
   GLASS_TEXT_SHADOW,
 } from "../_components/design";
+import { formatUtcTime } from "../_components/ui";
 import ScoreDetailOverlay, {
   qualityDot,
   qualityStyle,
@@ -114,12 +115,6 @@ function FootballIcon({ size = 32 }: { size?: number }) {
 
 // ─── Formatters ───────────────────────────────────────────────────────────────
 
-function formatTime(iso: string): string {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return iso;
-  return date.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
-}
-
 function formatSimulations(count?: number): string {
   if (!count) return "Monte Carlo";
   return count >= 1000 ? `${Math.round(count / 1000)}k sims` : `${count} sims`;
@@ -195,7 +190,7 @@ function MatchCard({ match, accentIndex, onOpen }: MatchCardProps) {
     >
       <div className="flex items-center justify-between gap-2">
         <time dateTime={match.date} className="font-mono text-xs font-bold text-slate-300">
-          {formatTime(match.date)}
+          {formatUtcTime(match.date)}
         </time>
         <ModelBadge match={match} />
       </div>
@@ -355,30 +350,36 @@ export default function CorrectScorePage() {
   const [error, setError] = useState<string | null>(null);
   /** Fixture whose detail overlay is open; `null` keeps the overlay unmounted. */
   const [selectedMatch, setSelectedMatch] = useState<CorrectScoreMatch | null>(null);
-  // Predictor Mode: read once from localStorage at mount (same lazy-initialiser
-  // pattern the rest of the app uses for persisted preferences), then persist
-  // every change back so the choice survives a refresh.
-  const [predictorMode, setPredictorMode] = useState<boolean>(() => {
-    if (typeof window === "undefined") return false;
-    try {
-      return window.localStorage.getItem(PREDICTOR_MODE_STORAGE_KEY) === "1";
-    } catch {
-      return false;
-    }
-  });
+  // Predictor Mode starts with the deterministic default on SSR/first paint.
+  // localStorage is read after mount, then changes are persisted so the choice
+  // survives a refresh without changing the hydrating markup.
+  const [predictorMode, setPredictorMode] = useState<boolean>(false);
+  const [predictorModeHydrated, setPredictorModeHydrated] = useState(false);
   /** View mode: compact cards (default) or the match-predictions table. */
   const [viewMode, setViewMode] = useState<"cards" | "table">("cards");
   const initialLoad = useRef(false);
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
+    try {
+      if (window.localStorage.getItem(PREDICTOR_MODE_STORAGE_KEY) === "1") {
+        // eslint-disable-next-line react-hooks/set-state-in-effect
+        setPredictorMode(true);
+      }
+    } catch {
+      // Storage failures are non-fatal; the toggle still works for the session.
+    }
+    setPredictorModeHydrated(true);
+  }, []);
+
+  useEffect(() => {
+    if (!predictorModeHydrated) return;
     try {
       if (predictorMode) window.localStorage.setItem(PREDICTOR_MODE_STORAGE_KEY, "1");
       else window.localStorage.removeItem(PREDICTOR_MODE_STORAGE_KEY);
     } catch {
       // Storage failures are non-fatal; the toggle still works for the session.
     }
-  }, [predictorMode]);
+  }, [predictorMode, predictorModeHydrated]);
 
   const load = useCallback(async (week: number | null = null, refresh = false) => {
     if (refresh) setRefreshing(true);

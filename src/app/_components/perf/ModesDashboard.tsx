@@ -11,6 +11,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { Card, ErrorState, Section, cn } from "@/app/_components/perf/ui";
+import { formatUtcTime } from "@/app/_components/ui";
 import {
   AutomatedInsightsPanel,
   BetsTable,
@@ -273,7 +274,7 @@ export function ModesDashboard() {
         <div className="flex flex-wrap items-center gap-2 text-xs">
           <span className="font-mono text-[10px] text-slate-500">
             {data.totals.performanceRows} match rows · {data.totals.valueBetRows} value bets ·{" "}
-            {data.totals.slipRows} slips · updated {new Date(data.generatedAt).toLocaleTimeString()}
+            {data.totals.slipRows} slips · updated {formatUtcTime(data.generatedAt)}
           </span>
           <Link className="ml-auto cursor-pointer font-semibold text-amber-300 hover:underline" href="/performance/leagues">
             League breakdown →

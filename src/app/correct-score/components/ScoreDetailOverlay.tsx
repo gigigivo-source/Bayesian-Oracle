@@ -11,7 +11,7 @@
 // opening it never triggers a second API call or a navigation.
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { TeamBadge } from "../../_components/ui";
+import { TeamBadge, formatUtcDate, formatUtcTime } from "../../_components/ui";
 import { GLASS_PANEL, NAV_PILL_PREMIUM } from "../../_components/design";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -189,26 +189,8 @@ function MonteCarloIcon({ size = 14 }: { size?: number }) {
 
 // ─── Formatters ───────────────────────────────────────────────────────────────
 
-function formatDate(iso: string): string {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return iso;
-  return new Intl.DateTimeFormat("en-GB", {
-    weekday: "short",
-    day: "numeric",
-    month: "short",
-    year: "numeric",
-  }).format(date);
-}
-
-function formatTime(iso: string): string {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return "";
-  return new Intl.DateTimeFormat("en-GB", {
-    hour: "2-digit",
-    minute: "2-digit",
-    timeZoneName: "short",
-  }).format(date);
-}
+const formatDate = formatUtcDate;
+const formatTime = formatUtcTime;
 
 function formatSimulations(count?: number): string {
   if (!count) return "Monte Carlo";
