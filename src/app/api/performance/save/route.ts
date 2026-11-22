@@ -1,6 +1,6 @@
 import { db } from "@/db";
 import { performanceLog } from "@/db/schema";
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import { ALL_RANKING_MODES, type RankingMode } from "@/lib/engine/selector";
 import { asNumber, asRecord, roundTo } from "@/lib/data/sources/shared";
 
@@ -203,6 +203,10 @@ export async function POST(req: Request) {
     const pending = top10picks.filter((p) => p.outcome === "PENDING").length;
     const verified = hits + misses;
 
+    // The select above is a TOCTOU check. The partial unique index
+    // `performance_log_event_mode_idx` (event_id, ranking_mode) WHERE
+    // feature IS NULL is the real guard: a concurrent writer that wins the race
+    // turns this insert into a no-op instead of a duplicate accuracy row.
     const [row] = await db
       .insert(performanceLog)
       .values({
@@ -224,7 +228,28 @@ export async function POST(req: Request) {
         top10Detail: top10picks,
         rankingMode,
       })
+      .onConflictDoNothing()
       .returning();
+
+    if (!row) {
+      // Another writer logged this (eventId, rankingMode) first — report the
+      // row we now agree on rather than a spurious 500.
+      const [existingRow] = await db
+        .select({ id: performanceLog.id })
+        .from(performanceLog)
+        .where(and(
+          eq(performanceLog.eventId, fixture.id),
+          eq(performanceLog.rankingMode, rankingMode),
+          isNull(performanceLog.feature),
+        ))
+        .limit(1);
+      return Response.json({
+        success: true,
+        id: existingRow?.id ?? null,
+        rankingMode,
+        alreadyExists: true,
+      });
+    }
 
     return Response.json({ success: true, id: row.id, rankingMode });
   } catch (err) {

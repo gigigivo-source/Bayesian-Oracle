@@ -1,6 +1,7 @@
 import { db } from "@/db";
 import { performanceLog, savedSlips, dailyPicks } from "@/db/schema";
-import { eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
+import { requireCronAuth } from "@/lib/apiAuth";
 import { fetchScoreboard, fetchSummary, type FixtureLite } from "@/lib/espn";
 import { runEngineFromReal, evaluateFinishedMatch } from "@/lib/engine";
 import { ALL_RANKING_MODES } from "@/lib/engine/selector";
@@ -111,7 +112,8 @@ async function fetchMatchById(slug: string, eventId: string): Promise<MatchResul
  *  3) Settle pending dailyPicks against their own finished matches.
  *
  * Trigger via GET/POST from an external cron (e.g. every 30–60 min).
- * Protect with CRON_SECRET env var; if unset the endpoint is open (dev mode).
+ * Protect with the CRON_SECRET env var (bearer header). A production deploy
+ * with no CRON_SECRET refuses every request; dev/test stays open.
  */
 async function runVerification() {
   let matchesLogged = 0;
@@ -130,11 +132,17 @@ async function runVerification() {
 
   for (const fx of finished) {
     try {
-      // Idempotency is per (eventId, rankingMode) — one verification row per mode.
+      // Idempotency is per (eventId, rankingMode) — one verification row per
+      // ranking-mode match. Feature rows ('corners', 'first5') reuse eventId
+      // with their own rankingMode letter, so the read must be scoped to
+      // feature-less rows exactly like the unique index in src/db/schema.ts.
       const existing = await db
         .select({ rankingMode: performanceLog.rankingMode })
         .from(performanceLog)
-        .where(eq(performanceLog.eventId, fx.id));
+        .where(and(
+          eq(performanceLog.eventId, fx.id),
+          isNull(performanceLog.feature),
+        ));
       const haveModes = new Set(
         existing.map((r) => (r.rankingMode ?? "B").toUpperCase() as string),
       );
@@ -153,7 +161,13 @@ async function runVerification() {
         const pending = prediction.top10.filter((m) => m.outcome === "PENDING" || !m.outcome).length;
         const evalC   = prediction.evaluatedCount ?? 0;
 
-        await db.insert(performanceLog).values({
+        // The select above is a TOCTOU check: /api/cron, /api/cron/settle and
+        // /api/performance/save all write this table. The partial unique index
+        // `performance_log_event_mode_idx` (event_id, ranking_mode) WHERE
+        // feature IS NULL is the real guard — a concurrent writer that wins the
+        // race makes this insert a no-op instead of a duplicate row that would
+        // double-count the match in every accuracy dashboard.
+        const inserted = await db.insert(performanceLog).values({
           eventId:    fx.id,
           matchLabel: `${fx.home.name} vs ${fx.away.name}`,
           homeTeam:   fx.home.name,
@@ -184,8 +198,9 @@ async function runVerification() {
             };
           }),
           rankingMode: mode,
-        });
-        matchesLogged++;
+        }).onConflictDoNothing().returning({ id: performanceLog.id });
+        // A no-op insert means another writer already logged this mode.
+        if (inserted.length > 0) matchesLogged++;
       }
     } catch {
       // skip individual failed match — keep the job running
@@ -359,20 +374,14 @@ function settlePick(
   return "PENDING";
 }
 
-// ─── Auth guard ───────────────────────────────────────────────────────────────
-function authorized(req: Request): boolean {
-  const secret = process.env.CRON_SECRET;
-  if (!secret) return true; // no secret configured → open (dev/local)
-  const url      = new URL(req.url);
-  const provided =
-    req.headers.get("authorization")?.replace("Bearer ", "") ??
-    url.searchParams.get("key");
-  return provided === secret;
-}
-
 // ─── Route handlers ───────────────────────────────────────────────────────────
+// Auth lives in @/lib/apiAuth: header-only bearer token, constant-time compare,
+// and FAIL CLOSED in production when CRON_SECRET is unset (it used to be
+// `if (!secret) return true`, which left every write endpoint open on a deploy
+// that forgot the variable).
 export async function GET(req: Request) {
-  if (!authorized(req)) return Response.json({ error: "Unauthorized" }, { status: 401 });
+  const denied = requireCronAuth(req);
+  if (denied) return denied;
   try {
     const result = await runVerification();
     return Response.json({ ok: true, ...result, ranAt: new Date().toISOString() });

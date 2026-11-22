@@ -6,8 +6,9 @@
 // enrichment + confidence gate) and writes the settled verifications to the
 // performance tables with leagueSlug + competitionName populated.
 //
-// Trigger manually via POST. Protected by BACKFILL_SECRET (or Authorization
-// Bearer header / ?key= query). Idempotent: re-running skips matches already
+// Trigger manually via POST. Protected by BACKFILL_SECRET or CRON_SECRET, sent
+// as `Authorization: Bearer <secret>` (header only — no query secret).
+// Idempotent: re-running skips matches already
 // in performance_log, so partial runs can simply be repeated.
 //
 //   curl -X POST "https://…/api/backfill/performance" \
@@ -24,6 +25,7 @@
 // Response: { totalProcessed, totalSucceeded, totalFailed, ... }
 
 import { db } from "@/db";
+import { requireBackfillAuth } from "@/lib/apiAuth";
 import { performanceLog } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { LEAGUES } from "@/lib/leagues";
@@ -305,22 +307,14 @@ async function runBackfill(body: {
   return summary;
 }
 
-// ─── Auth ─────────────────────────────────────────────────────────────────────
-
-function authorized(req: Request): boolean {
-  const secret = process.env.BACKFILL_SECRET;
-  if (!secret) return true; // no secret configured → open (dev/local only)
-  const url = new URL(req.url);
-  const provided =
-    req.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ??
-    url.searchParams.get("key");
-  return provided === secret;
-}
-
 // ─── Handler ──────────────────────────────────────────────────────────────────
+// Auth lives in @/lib/apiAuth: bearer header only (no ?key= query secret),
+// constant-time compare, and FAIL CLOSED in production when neither
+// BACKFILL_SECRET nor CRON_SECRET is set.
 
 export async function POST(req: Request) {
-  if (!authorized(req)) return Response.json({ error: "Unauthorized" }, { status: 401 });
+  const denied = requireBackfillAuth(req);
+  if (denied) return denied;
   try {
     const body = await req.json().catch(() => ({})) as {
       from?: string; to?: string; days?: number; leagues?: string[]; timeBudgetMs?: number;
@@ -337,7 +331,8 @@ export async function POST(req: Request) {
 
 export async function GET(req: Request) {
   // GET exposes a dry-run of the window only (no processing).
-  if (!authorized(req)) return Response.json({ error: "Unauthorized" }, { status: 401 });
+  const denied = requireBackfillAuth(req);
+  if (denied) return denied;
   const window = resolveWindow({});
   return Response.json({
     ok: true,
