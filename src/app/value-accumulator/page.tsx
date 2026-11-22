@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { runLiveScan } from "./actions";
+import { runLiveScan, runTicketBacktest as runTicketBacktestAction } from "./actions";
 import { formatUtcDate, formatUtcDateTimeShort } from "../_components/ui";
 
 interface VaTicketLeg {
@@ -311,15 +311,12 @@ export default function ValueAccumulatorPage() {
     setTicketBacktestError(null);
     setTicketBacktestResult(null);
     try {
-      const res = await fetch("/api/va/scan?mode=stack&finished=true", {
-        method: "POST",
-        cache: "no-store",
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = (await res.json()) as VaScanResponse;
+      // Server action, not an HTTP hop: the endpoint now requires the bearer
+      // secret for ?finished=true too, and that secret must never reach the
+      // browser bundle (it used to be NEXT_PUBLIC_CRON_SECRET).
+      const data = (await runTicketBacktestAction()) as VaScanResponse;
       if (!data.ok) throw new Error(data.reason || data.error || "Ticket backtest failed");
       setTicketBacktestResult(data);
-      if (data.learning) setLearning(data.learning);
       setTicketBacktestStatus("done");
       setTicketBacktestOpen(true);
     } catch (e) {

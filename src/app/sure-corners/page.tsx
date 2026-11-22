@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { runSureCornersVerifyAction } from "./actions";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   TeamBadge,
@@ -172,19 +173,13 @@ export default function SureCornersPage() {
     setVerifying(true);
     setVerifyStatus(null);
     try {
-      const response = await fetch("/api/sure-corners/verify", {
-        method: "POST",
-        cache: "no-store",
-        headers: {
-          Authorization: `Bearer ${process.env.NEXT_PUBLIC_CRON_SECRET ?? ""}`,
-        },
-      });
-      const payload = (await response.json()) as VerifySummary & {
-        error?: string;
-      };
-      if (!response.ok)
-        throw new Error(payload.error ?? `HTTP ${response.status}`);
-      setVerifyStatus({ kind: "success", summary: payload });
+      // Server action, not an HTTP hop: the CRON_SECRET that guards the verify
+      // route must never be inlined into the client bundle (it used to be sent
+      // from here as NEXT_PUBLIC_CRON_SECRET).
+      const result = await runSureCornersVerifyAction();
+      if (!result.ok || !result.summary)
+        throw new Error(result.error ?? "Verification failed");
+      setVerifyStatus({ kind: "success", summary: result.summary });
       void load(false);
     } catch (reason) {
       setVerifyStatus({

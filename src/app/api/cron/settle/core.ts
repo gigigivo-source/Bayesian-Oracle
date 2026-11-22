@@ -29,6 +29,7 @@
 import { db } from "@/db";
 import { dailyPicks, performanceLog, savedSlips, valueBetLog, vaTickets } from "@/db/schema";
 import { and, count, eq, isNull, isNotNull, gt } from "drizzle-orm";
+import { requireCronAuth } from "@/lib/apiAuth";
 import { settleVaTickets } from "@/lib/va/settlement";
 import { runSettlementEngine, settlementStatusLabel } from "@/lib/settlement/engine";
 import {
@@ -1364,16 +1365,12 @@ async function runAllLeagueSettlement(force = false): Promise<SettleSweepSummary
   };
 }
 
-function authorized(req: Request): boolean {
-  const secret = process.env.CRON_SECRET;
-  if (!secret) return true;
-  const provided = req.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ??
-    new URL(req.url).searchParams.get("key");
-  return provided === secret;
-}
-
+// Auth lives in @/lib/apiAuth: bearer header only (no ?key= query secret, which
+// leaks into access logs), constant-time compare, and FAIL CLOSED in production
+// when CRON_SECRET is unset.
 export async function GET(req: Request) {
-  if (!authorized(req)) return Response.json({ error: "Unauthorized" }, { status: 401 });
+  const denied = requireCronAuth(req);
+  if (denied) return denied;
   try {
     const force = new URL(req.url).searchParams.get("force") === "true";
     return Response.json(await runAllLeagueSettlement(force));

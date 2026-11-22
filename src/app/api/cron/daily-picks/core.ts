@@ -31,6 +31,7 @@ import { fetchScoreboard, type FixtureLite } from "@/lib/espn";
 import { evaluateFinishedMatch } from "@/lib/engine";
 import { runOracleAllModesWithStandings, type OracleResult } from "@/lib/engine/oracle";
 import { ALL_RANKING_MODES, type RankingMode } from "@/lib/engine/selector";
+import { requireCronAuth } from "@/lib/apiAuth";
 import { findValueBets, type BookmakerOdds } from "@/lib/engine/value";
 import { evaluateLeg, type MatchResult } from "@/lib/settlement/evaluate";
 import { LEAGUES, LEAGUE_MAP } from "@/lib/leagues";
@@ -650,7 +651,10 @@ export async function savePerformanceLog(
   const pending = detail.filter((p) => p.outcome === "PENDING" || !p.outcome).length;
   const decided = hits + misses;
 
-  await db.insert(performanceLog).values({
+  // The partial unique index `performance_log_event_mode_idx`
+  // (event_id, ranking_mode) WHERE feature IS NULL is the real idempotency
+  // guard — the select above is only a fast path.
+  const inserted = await db.insert(performanceLog).values({
     eventId:         fx.id,
     matchLabel:      `${fx.home.name} vs ${fx.away.name}`,
     homeTeam:        fx.home.name,
@@ -669,8 +673,8 @@ export async function savePerformanceLog(
     top10Detail:     detail,
     lowConfidence:   pred.lowConfidence ?? false,
     rankingMode,
-  });
-  return true;
+  }).onConflictDoNothing().returning({ id: performanceLog.id });
+  return inserted.length > 0;
 }
 
 /**
@@ -1083,20 +1087,13 @@ export async function runDailyPicksSweep(): Promise<DailyPicksSweepSummary> {
 
 // ─── Auth guard ───────────────────────────────────────────────────────────────
 
-function authorized(req: Request): boolean {
-  const secret = process.env.CRON_SECRET;
-  if (!secret) return true; // no secret configured → open (dev/local)
-  const url = new URL(req.url);
-  const provided =
-    req.headers.get("authorization")?.replace("Bearer ", "") ??
-    url.searchParams.get("key");
-  return provided === secret;
-}
-
 // ─── Route handlers ───────────────────────────────────────────────────────────
+// Auth lives in @/lib/apiAuth: bearer header only, constant-time compare, and
+// FAIL CLOSED in production when CRON_SECRET is unset.
 
 export async function GET(req: Request) {
-  if (!authorized(req)) return Response.json({ error: "Unauthorized" }, { status: 401 });
+  const denied = requireCronAuth(req);
+  if (denied) return denied;
   try {
     return Response.json({ ...(await runDailyPicksSweep()) });
   } catch (err) {

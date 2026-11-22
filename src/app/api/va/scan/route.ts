@@ -1,16 +1,21 @@
 import { performScan } from "@/lib/va/performScan";
 import type { VaScanMode } from "@/lib/va/scanner";
+import { requireCronAuth } from "@/lib/apiAuth";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
-function getCronSecret(): string {
-  return (process.env.CRON_SECRET ?? "").trim();
-}
-
 /**
- * Runs the VA scan; ?finished=true skips authentication for local backtests.
- * All other requests retain the existing CRON_SECRET authentication check.
+ * Runs the VA scan.
+ *
+ * Auth: bearer header only, via `requireCronAuth` (@/lib/apiAuth) — constant
+ * time compare, no `?secret=`/`x-cron-secret`/`cron_secret` variants (query
+ * secrets leak into access logs), and FAIL CLOSED in production when
+ * CRON_SECRET is unset.
+ *
+ * `?finished=true` runs the read-only backtest scan. It used to skip auth
+ * entirely; it still queries live fixture and odds providers, so it is now
+ * gated exactly like the live scan.
  *
  * `?freshOdds=true` bypasses the `league_odds_cache` read for every league the
  * scan actually fetches, so every leg is priced from a response fetched right
@@ -22,25 +27,12 @@ function getCronSecret(): string {
  * (`runLiveScan`) can share it without an HTTP hop or the bearer secret.
  */
 export async function POST(req: Request) {
+  const denied = requireCronAuth(req);
+  if (denied) return denied;
+
   const url = new URL(req.url);
   const finished = url.searchParams.get("finished") === "true";
   const forceRefresh = url.searchParams.get("freshOdds") === "true";
-
-  if (!finished) {
-    // Protected by CRON_SECRET header
-    const auth = req.headers.get("authorization") || req.headers.get("x-cron-secret") || "";
-    const secret = getCronSecret();
-    const provided = auth.startsWith("Bearer ") ? auth.slice(7).trim() : auth.trim();
-    // Also allow ?secret= or header CRON_SECRET
-    const querySecret = url.searchParams.get("secret")?.trim() ?? "";
-
-    if (secret) {
-      const ok = provided === secret || querySecret === secret || req.headers.get("cron_secret") === secret;
-      if (!ok) {
-        return Response.json({ ok: false, reason: "unauthorized" }, { status: 401 });
-      }
-    }
-  }
 
   const modeParam = url.searchParams.get("mode")?.trim().toLowerCase();
   const mode: VaScanMode = modeParam === "stack" ? "stack" : "value";

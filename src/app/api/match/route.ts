@@ -174,6 +174,10 @@ async function persistAndEvaluate(
     const pend  = prediction.top10.filter((m) => m.outcome === "PENDING" || !m.outcome).length;
 
     try {
+      // The partial unique index `performance_log_event_mode_idx`
+      // (event_id, ranking_mode) WHERE feature IS NULL is the real idempotency
+      // guard — /api/cron and /api/cron/settle write the same rows. A no-op
+      // insert means the match is already logged for this mode.
       await db.insert(performanceLog).values({
         eventId:         fixture.id,
         matchLabel:      `${fixture.home.name} vs ${fixture.away.name}`,
@@ -209,7 +213,7 @@ async function persistAndEvaluate(
           };
         }),
         rankingMode,
-      });
+      }).onConflictDoNothing();
     } catch (e) {
       console.error("performance log failed", e);
     }

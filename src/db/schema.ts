@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import {
   jsonb,
   pgTable,
@@ -8,6 +9,7 @@ import {
   real,
   boolean,
   uniqueIndex,
+  index,
   date,
   numeric,
 } from "drizzle-orm/pg-core";
@@ -137,7 +139,31 @@ export const performanceLog = pgTable("performance_log", {
   confidence:      text("confidence"),                // "HIGH" for sure-bet picks
   settledAt:       timestamp("settled_at"),           // set when the pick is verified
   createdAt:       timestamp("created_at").defaultNow().notNull(),
-});
+}, (table) => [
+  // The real idempotency guard for ranking-mode rows.
+  //
+  // Every ranking-mode writer (/api/cron, /api/cron/settle,
+  // /api/performance/save, /api/match) used to do a check-then-insert with no
+  // constraint behind it, so two overlapping runs of the two crons that share
+  // the `0 */2 * * *` schedule could both see "no row yet" and both insert —
+  // double-counting the match in every accuracy dashboard.
+  //
+  // PARTIAL on purpose: `feature IS NULL` scopes the index to ranking-mode
+  // rows only. Feature rows ('corners' with rankingMode 'S', 'first5' with
+  // 'F') intentionally share an eventId with nothing in common here, and
+  // /api/sure-corners can legitimately write several corners picks for one
+  // fixture — they must not collide with (and be silently dropped by) this
+  // constraint.
+  uniqueIndex("performance_log_event_mode_idx")
+    .on(table.eventId, table.rankingMode)
+    .where(sql`feature IS NULL`),
+  // Every dashboard and every settlement sweep filters on these, and the table
+  // had no non-unique indexes at all: /api/cron/settle scans
+  // (feature, outcome) for the pending refresh while /api/cron/settle's
+  // feature pass scans (rankingMode, outcome).
+  index("performance_log_feature_outcome_idx").on(table.feature, table.outcome),
+  index("performance_log_mode_idx").on(table.rankingMode),
+]);
 
 export type PerformanceRow = typeof performanceLog.$inferSelect;
 export type NewPerformance  = typeof performanceLog.$inferInsert;
