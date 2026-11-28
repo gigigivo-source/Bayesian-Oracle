@@ -203,6 +203,22 @@ export interface TeamForm {
    * xG-driven rules refuse to act on a thin sample sized by `minXgSamples`.
    */
   xgSamples: number;
+  /**
+   * Venue-specific rolling xG: this side's xG created and conceded in its home
+   * matches. `null` when the window has no home match carrying real xG.
+   *
+   * A fixture does not ask "how good is this side" — it asks how a team attacks
+   * *here* against how its opponent defends *there*. Blending home and away form
+   * into one rate blurs exactly that gap.
+   */
+  xgForHome: number | null;
+  xgAgainstHome: number | null;
+  /** Venue-specific rolling xG for this side's away matches. */
+  xgForAway: number | null;
+  xgAgainstAway: number | null;
+  /** Matches in the window at each venue that carried real xG. */
+  homeXgSamples: number;
+  awayXgSamples: number;
   /** ISO date of the most recent match in the window, else null. */
   lastDate: string | null;
 }
@@ -268,6 +284,25 @@ export interface V4RefactorConfig {
    * gap between two bad sides from firing.
    */
   snipeNeedsXgEvidence: boolean;
+  /**
+   * Standard Home over-confidence gate.
+   *
+   * Standard Home locks a home win whenever two Standard-tier sides meet, and
+   * that branch is the weakest converter in the tree: 19 fixtures on 2026-27 for
+   * a single exact score, and the outcome is wrong more than half the time.
+   *
+   * When the Engine rates the host *strongly* (home λ minus away λ above this
+   * threshold) the flat 1-0 is doing two things at once — claiming a home win
+   * and claiming a low score. Across the four prior seasons that bucket splits
+   * exactly 6 home wins / 6 draws / 6 away wins, so the home claim is a coin
+   * flip while the 1-1 line converts better than 1-0 in every one of the four
+   * seasons (100 points vs 70 over the 18 fixtures).
+   *
+   * `null` disables the gate and keeps the unconditional home win.
+   */
+  standardHomeOverconfidenceGap: number | null;
+  /** Draw line taken when the gate fires. 1-1 measured best on the bucket. */
+  standardHomeOverconfidenceLine: string;
 }
 
 /** Pre-refactor behaviour: no dynamic tiers, no slump, no override, no blend. */
@@ -281,6 +316,8 @@ export const LEGACY_V4_CONFIG: V4RefactorConfig = {
   slumpXgDiff: null,
   snipeXgOverride: null,
   snipeNeedsXgEvidence: true,
+  standardHomeOverconfidenceGap: null,
+  standardHomeOverconfidenceLine: "1-1",
 };
 
 /**
@@ -315,6 +352,8 @@ export const V4_LIVE_CONFIG: V4RefactorConfig = {
   slumpXgDiff: null,
   snipeXgOverride: 0.5,
   snipeNeedsXgEvidence: true,
+  standardHomeOverconfidenceGap: 0.7,
+  standardHomeOverconfidenceLine: "1-1",
 };
 
 export type XgPair = readonly [homeXg: number, awayXg: number];
@@ -760,8 +799,19 @@ export function generateV2Predictions(
         fallback = "0-1";
       }
     } else {
-      outcome = "H";
-      fallback = "1-0";
+      // Standard Home. Normally an unconditional home win on the flat 1-0. The
+      // over-confidence gate below replaces that with a draw when the Engine
+      // rates the host strongly enough that the home claim stops carrying
+      // information — see `standardHomeOverconfidenceGap` for the measurement.
+      const overGap = refactor.standardHomeOverconfidenceGap;
+      const homeEdge = xg === null ? null : xg[0] - xg[1];
+      if (overGap !== null && homeEdge !== null && homeEdge > overGap) {
+        outcome = "D";
+        fallback = refactor.standardHomeOverconfidenceLine;
+      } else {
+        outcome = "H";
+        fallback = "1-0";
+      }
       category = "LOCK: Standard Home";
     }
     }
