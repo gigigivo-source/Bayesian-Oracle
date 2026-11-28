@@ -10,8 +10,18 @@ import {
   type HistoricalMatch,
 } from "@/lib/data/historical";
 import { parseCsv } from "@/lib/data/sources/githubDatasets";
-import { generateV2Predictions, translateTeamName, type MatchXgResolver } from "@/lib/v4-predictor";
-import { createMatchXgResolver } from "@/lib/v4-predictor-server";
+import {
+  generateV2Predictions,
+  translateTeamName,
+  V4_LIVE_CONFIG,
+  type MatchXgResolver,
+} from "@/lib/v4-predictor";
+import {
+  buildFormTable,
+  createMatchXgResolver,
+  formResolverFrom,
+  type FormResolver,
+} from "@/lib/v4-predictor-server";
 import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
@@ -42,6 +52,10 @@ interface CompletedMatchResult {
   homeGoals: number;
   awayGoals: number;
   isoDate: string | null;
+  /** Real home xG (`HxG`), when the CSV provides it. */
+  homeXg: number | null;
+  /** Real away xG (`AxG`). */
+  awayXg: number | null;
 }
 
 let cachedResults: { at: number; map: Map<string, CompletedMatchResult> } | null = null;
@@ -78,7 +92,18 @@ async function loadCompletedEplResults(): Promise<Map<string, CompletedMatchResu
     const awayIdx = header.indexOf("AwayTeam");
     const fthgIdx = header.indexOf("FTHG");
     const ftagIdx = header.indexOf("FTAG");
+    // Real per-match expected goals. Optional: older seasons and some files omit
+    // them, in which case the refactor degrades to goals-only form.
+    const hxgIdx = header.indexOf("HxG");
+    const axgIdx = header.indexOf("AxG");
     if (homeIdx < 0 || awayIdx < 0 || fthgIdx < 0 || ftagIdx < 0) return null;
+    const readXg = (idx: number, row: string[]): number | null => {
+      if (idx < 0) return null;
+      const raw = (row[idx] ?? "").trim();
+      if (raw === "") return null;
+      const value = Number(raw);
+      return Number.isFinite(value) && value >= 0 ? value : null;
+    };
 
     const map = new Map<string, CompletedMatchResult>();
     for (const row of rows.slice(1)) {
@@ -103,7 +128,13 @@ async function loadCompletedEplResults(): Promise<Map<string, CompletedMatchResu
       const rawTime = timeIdx >= 0 ? (row[timeIdx] ?? "").trim() : "";
       const hhmm = /^\d{2}:\d{2}$/.test(rawTime) ? rawTime : "15:00";
       const isoDate = dayIso ? `${dayIso.slice(0, 10)}T${hhmm}:00Z` : null;
-      map.set(`${home}|${away}`, { homeGoals, awayGoals, isoDate });
+      map.set(`${home}|${away}`, {
+        homeGoals,
+        awayGoals,
+        isoDate,
+        homeXg: readXg(hxgIdx, row),
+        awayXg: readXg(axgIdx, row),
+      });
     }
     cachedResults = { at: Date.now(), map };
     return map;
@@ -143,6 +174,8 @@ async function backfillOpenfootballResults(
 }
 
 const SEASONS_BACK = 4;
+/** Rolling-form window: the last 5 matches, matching the "last 5 matchweeks". */
+const FORM_WINDOW_MATCHES = 5;
 const EPL_SEASON_FIXTURES = 20 * 19; // Each club hosts the other 19 once.
 const XG_HISTORY_TTL_MS = 60 * 60_000;
 const priorSeasonCache = new Map<string, { at: number; matches: HistoricalMatch[] }>();
@@ -180,6 +213,8 @@ function csvHistoryBefore(
     homeGoals: number;
     awayGoals: number;
     leagueSlug: string;
+    homeXg: number | null;
+    awayXg: number | null;
   }> = [];
   for (const [key, result] of results) {
     if (!result.isoDate) continue;
@@ -193,6 +228,8 @@ function csvHistoryBefore(
       homeGoals: result.homeGoals,
       awayGoals: result.awayGoals,
       leagueSlug: "eng.1",
+      homeXg: result.homeXg,
+      awayXg: result.awayXg,
     });
   }
   return history;
@@ -204,6 +241,26 @@ function csvHistoryBefore(
  * xG-aware Locks back to their flat V2 lines — never to fabricated odds.
  */
 async function buildMatchXgResolver(cutoffIso: string): Promise<MatchXgResolver | null> {
+  const built = await buildSlateContext(cutoffIso);
+  return built?.xg ?? null;
+}
+
+interface SlateContext {
+  xg: MatchXgResolver | null;
+  form: FormResolver;
+}
+
+/**
+ * Everything the refactor needs from history, built once per request from the
+ * same strictly pre-kickoff slice:
+ *
+ *  · the xG resolver (goals-based attack/defence λ, optional decay)
+ *  · the rolling form table (points, winless streak, and **real** HxG/AxG)
+ *
+ * The form table is what Slump Detection and the Snipe xG override read, so the
+ * real xG columns now reach the prediction path for the first time.
+ */
+async function buildSlateContext(cutoffIso: string): Promise<SlateContext | null> {
   const kickoff = new Date(cutoffIso);
   if (!Number.isFinite(kickoff.getTime())) return null;
 
@@ -211,16 +268,29 @@ async function buildMatchXgResolver(cutoffIso: string): Promise<MatchXgResolver 
   // previous seasons newest first, in the same order as backtest-local.ts.
   const [season, ...priorSeasons] = seasonCodes(kickoff, SEASONS_BACK + 1).reverse();
   const priorHistory = await Promise.all(priorSeasons.map(loadPriorSeason));
-  // If a prior season is missing, use flat V2 for this request rather than
-  // fitting xG to an incomplete window (or to the current-season CSV alone).
-  if (priorHistory.some((matches) => matches.length === 0)) return null;
-
   const results = season === RESULTS_CSV_SEASON ? await loadCompletedEplResults() : null;
+
   const history = [
     ...matchesBefore(priorHistory.flat(), cutoffIso),
     ...csvHistoryBefore(results, cutoffIso),
   ];
-  return createMatchXgResolver({ history, leagueSlug: "eng.1", onlyRelevant: false });
+
+  // Rolling form is built from whatever history exists — it degrades to an empty
+  // table rather than disabling the whole refactor when a prior season is thin,
+  // because form is per-side and needs far less data than the λ model.
+  const form = formResolverFrom(buildFormTable({ history, window: FORM_WINDOW_MATCHES }));
+
+  // If a prior season is missing, fall back to the flat V2 xG path (as before)
+  // rather than fitting λ to an incomplete window.
+  if (priorHistory.some((matches) => matches.length === 0)) return { xg: null, form };
+
+  const xg = createMatchXgResolver({
+    history,
+    leagueSlug: "eng.1",
+    onlyRelevant: false,
+    now: cutoffIso,
+  });
+  return { xg, form };
 }
 
 export async function GET(request: Request) {
@@ -261,8 +331,13 @@ export async function GET(request: Request) {
       home: translateTeamName(fx.home.name),
       away: translateTeamName(fx.away.name),
     }));
-    const xg = sorted.length ? await buildMatchXgResolver(sorted[0].date) : null;
-    const v2Predictions = generateV2Predictions(v2Fixtures, xg);
+    const context = sorted.length ? await buildSlateContext(sorted[0].date) : null;
+    const v2Predictions = generateV2Predictions(
+      v2Fixtures,
+      context?.xg ?? null,
+      V4_LIVE_CONFIG,
+      context?.form ?? null,
+    );
 
     const result = sorted.map((fx, index) => {
       const { home: homeName, away: awayName } = v2Fixtures[index];

@@ -13,7 +13,7 @@
  *      GitHub when `site.api.espn.com` is blocked).
  *   2. Sort fixtures chronologically, rebuild the Engine's attack/defence model
  *      from matches that finished before the matchweek's first kickoff, and
- *      pass both into `generateV2Predictions(fixtures, xg)`. The xG resolver is
+ *      pass both into `generateV2Predictions(fixtures, xg, V4_LIVE_CONFIG, form)`. The xG resolver is
  *      only consulted by the three xG-aware Locks (Chaos, Top 4 Derby, Standard
  *      blowout) — the Snipes and every other Lock stay pure rules.
  *   3. Score the V2 predictions against the real final scores with
@@ -30,8 +30,21 @@ import {
   type HistoricalMatch,
 } from "../src/lib/data/historical";
 import { parseCsv } from "../src/lib/data/sources/githubDatasets";
-import { calculateScore, generateV2Predictions, translateTeamName, type Actual, type MatchXgResolver, type Prediction } from "../src/lib/v4-predictor";
-import { createMatchXgResolver } from "../src/lib/v4-predictor-server";;
+import {
+  calculateScore,
+  generateV2Predictions,
+  translateTeamName,
+  V4_LIVE_CONFIG,
+  type Actual,
+  type MatchXgResolver,
+  type Prediction,
+} from "../src/lib/v4-predictor";
+import {
+  buildFormTable,
+  createMatchXgResolver,
+  formResolverFrom,
+  type FormResolver,
+} from "../src/lib/v4-predictor-server";
 
 try {
   dns.setDefaultResultOrder?.("ipv4first");
@@ -49,6 +62,8 @@ try {
   // Ignore on runtimes without custom CA hooks.
 }
 
+/** Rolling-form window used by Slump Detection and the Snipe xG override. */
+const FORM_WINDOW_MATCHES = 5;
 const PTS_EXACT = 20;
 const PTS_OUTCOME = 10;
 const PTS_MISS = 0;
@@ -70,6 +85,9 @@ interface CompletedMatchResult {
   homeGoals: number;
   awayGoals: number;
   isoDate: string | null;
+  /** Real per-match xG from the CSV, when present. */
+  homeXg?: number | null;
+  awayXg?: number | null;
 }
 
 interface FixtureOutcome {
@@ -149,10 +167,19 @@ async function loadCompletedEplResults(): Promise<Map<string, CompletedMatchResu
     const awayIdx = header.indexOf("AwayTeam");
     const fthgIdx = header.indexOf("FTHG");
     const ftagIdx = header.indexOf("FTAG");
+    const hxgIdx = header.indexOf("HxG");
+    const axgIdx = header.indexOf("AxG");
     if (homeIdx < 0 || awayIdx < 0 || fthgIdx < 0 || ftagIdx < 0) {
       cachedResults = null;
       return null;
     }
+    const readXg = (idx: number, row: string[]): number | null => {
+      if (idx < 0) return null;
+      const raw = (row[idx] ?? "").trim();
+      if (raw === "") return null;
+      const value = Number(raw);
+      return Number.isFinite(value) && value >= 0 ? value : null;
+    };
 
     const map = new Map<string, CompletedMatchResult>();
     for (const row of rows.slice(1)) {
@@ -177,7 +204,13 @@ async function loadCompletedEplResults(): Promise<Map<string, CompletedMatchResu
       const rawTime = timeIdx >= 0 ? (row[timeIdx] ?? "").trim() : "";
       const hhmm = /^\d{2}:\d{2}$/.test(rawTime) ? rawTime : "15:00";
       const isoDate = dayIso ? `${dayIso.slice(0, 10)}T${hhmm}:00Z` : null;
-      map.set(`${home}|${away}`, { homeGoals, awayGoals, isoDate });
+      map.set(`${home}|${away}`, {
+        homeGoals,
+        awayGoals,
+        isoDate,
+        homeXg: readXg(hxgIdx, row),
+        awayXg: readXg(axgIdx, row),
+      });
     }
     cachedResults = map;
     return map;
@@ -214,7 +247,10 @@ async function loadXgHistory(season: number, csvHistory: HistoricalMatch[]): Pro
   return [...(cachedXgHistory ?? []), ...csvHistory];
 }
 
-function seasonalCsvHistory(results: Map<string, { homeGoals: number; awayGoals: number; isoDate: string | null }> | null, cutoffIso: string): HistoricalMatch[] {
+function seasonalCsvHistory(
+  results: Map<string, { homeGoals: number; awayGoals: number; isoDate: string | null; homeXg?: number | null; awayXg?: number | null }> | null,
+  cutoffIso: string,
+) {
   if (!results) return [];
   const cutoff = Date.parse(cutoffIso);
   const out: HistoricalMatch[] = [];
@@ -283,15 +319,24 @@ function emptyWeek(week: number, note: string): WeekResult {
   };
 }
 
-async function buildXgResolver(cutoffIso: string, cfg: Config): Promise<MatchXgResolver | null> {
-  if (cfg.league !== "eng.1") return null;
+/**
+ * Everything the predictor needs for one matchweek, from a strictly pre-kickoff
+ * slice: the xG resolver and the rolling form table (which reads real HxG/AxG).
+ */
+async function buildSlateContext(
+  cutoffIso: string,
+  cfg: Config,
+): Promise<{ xg: MatchXgResolver | null; form: FormResolver | null }> {
+  if (cfg.league !== "eng.1") return { xg: null, form: null };
   const results = cfg.season === 2026 ? await loadCompletedEplResults() : null;
   const csvHistory = seasonalCsvHistory(results, cutoffIso);
   const history = await loadXgHistory(cfg.season, csvHistory);
   // `onlyRelevant: false` keeps xG flowing for every fixture: the Top 4 Derby
   // rule needs it even when the match would otherwise be a Lock, and the
   // guardrail check must see the same numbers regardless of rule order.
-  return createMatchXgResolver({ history, leagueSlug: cfg.league, onlyRelevant: false });
+  const xg = createMatchXgResolver({ history, leagueSlug: cfg.league, onlyRelevant: false, now: cutoffIso });
+  const form = formResolverFrom(buildFormTable({ history, window: FORM_WINDOW_MATCHES }));
+  return { xg, form };
 }
 
 async function backtestWeek(week: number, cfg: Config): Promise<WeekResult> {
@@ -330,8 +375,8 @@ async function backtestWeek(week: number, cfg: Config): Promise<WeekResult> {
 
   // Rebuild the Engine's attack/defence model from matches that finished before
   // this matchweek's first kickoff, then let the xG-aware Locks read it.
-  const xg = await buildXgResolver(sorted[0]?.date ?? "", cfg);
-  const predictions = generateV2Predictions(v2Inputs, xg);
+  const context = await buildSlateContext(sorted[0]?.date ?? "", cfg);
+  const predictions = generateV2Predictions(v2Inputs, context.xg, V4_LIVE_CONFIG, context.form);
   const snipes = predictions.filter((p) => p.Category.startsWith("SNIPE:")).length;
 
   const finishedIndices: number[] = [];

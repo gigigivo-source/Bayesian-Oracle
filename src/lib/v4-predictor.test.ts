@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { BOTTOM_5, CHAOS_DRAW_MAX_XG_GAP, CHAOS_TEAMS, CHAOS_VISITOR_XG_EDGE, MID_DEADLOCK_MAX_XG_GAP, MID_FAVOURITE_BIG_WIN_XG, MID_TABLE, STANDARD_AWAY_DRAW_MAX_XG_GAP, STANDARD_BLOWOUT_GAP, STANDARD_DRAW_XG, TOP4_DERBY_AWAY_TOLERANCE, TOP4_DERBY_MAX_AWAY_EDGE, TOP4_DERBY_MIN_XG_EDGE, TOP_4, blowoutGoals, buildPredictions, calculateScore, generateV2Predictions, getScorelineOutcome, isScoreline, translateTeamName, type XgPair } from "@/lib/v4-predictor";
+import { BOTTOM_5, CHAOS_DRAW_MAX_XG_GAP, CHAOS_TEAMS, CHAOS_VISITOR_XG_EDGE, MID_DEADLOCK_MAX_XG_GAP, MID_FAVOURITE_BIG_WIN_XG, MID_TABLE, STANDARD_AWAY_DRAW_MAX_XG_GAP, STANDARD_BLOWOUT_GAP, STANDARD_DRAW_XG, TOP4_DERBY_AWAY_TOLERANCE, TOP4_DERBY_MAX_AWAY_EDGE, TOP4_DERBY_MIN_XG_EDGE, TOP_4, blowoutGoals, buildPredictions, calculateScore, generateV2Predictions, getScorelineOutcome, isScoreline, translateTeamName, LEGACY_V4_CONFIG, V4_LIVE_CONFIG, type TeamForm, type XgPair } from "@/lib/v4-predictor";
 import { createMatchXgResolver } from "@/lib/v4-predictor-server";;
 
 describe("V2 team classifications", () => {
@@ -483,6 +483,11 @@ describe("GET /api/v4-predictor/auto — V2 Strict 3-Snipe route", () => {
       // Deterministic xG so the route's Chaos-vs-Chaos pick is testable offline:
       // 1.8 vs 1.4 is a 0.40 gap, over CHAOS_DRAW_MAX_XG_GAP, so Chelsea win.
       createMatchXgResolver: () => () => [1.8, 1.4] as XgPair,
+      // The route also builds a rolling form table. An empty table means every
+      // side has no form, so Slump Detection and the Snipe xG override stay
+      // dormant and this test keeps testing the rule tree alone.
+      buildFormTable: () => new Map(),
+      formResolverFrom: () => () => null,
     }));
 
     try {
@@ -775,5 +780,106 @@ describe("Hull plays as a Standard side", () => {
       Prediction: "2-0",
       Target_Pts: 10,
     });
+  });
+});
+
+describe("V4 refactor — decay, slump, dynamic tiers, and the Snipe xG override", () => {
+  const fixtures = [
+    { home: "Arsenal", away: "Fulham" },
+    { home: "Brighton", away: "Leeds" },
+  ];
+  const form = (over: Partial<TeamForm>) => () => ({
+    n: 5,
+    points: 15,
+    winless: 0,
+    ppg: 2.4,
+    recent: ["W", "W", "W", "W", "W"],
+    xgFor: 2,
+    xgAgainst: 1,
+    xgSamples: 5,
+    lastDate: "2026-08-01T00:00:00Z",
+    ...over,
+  });
+
+  it("LEGACY_V4_CONFIG reproduces the untouched V2 output", () => {
+    const legacy = generateV2Predictions(fixtures, null);
+    expect(generateV2Predictions(fixtures, null, LEGACY_V4_CONFIG, null)).toEqual(legacy);
+  });
+
+  it("a winless streak demotes a Top 4 side to Mid-Table for that matchweek", () => {
+    const cfg = { ...LEGACY_V4_CONFIG, slumpWinless: 3, slumpDrop: 1 };
+    const healthy = generateV2Predictions(fixtures, null, LEGACY_V4_CONFIG, null);
+    // Arsenal is Top 4 at home vs a Mid-Table side: normally a Smart Top 4 Home.
+    expect(healthy[0].Category).toBe("LOCK: Smart Top 4 Home");
+    const slumping = generateV2Predictions(fixtures, null, cfg, form({ winless: 4, ppg: 0.6 }));
+    expect(slumping[0].Category).not.toBe("LOCK: Smart Top 4 Home");
+  });
+
+  it("the slump rule stays off when the side has too few matches to judge", () => {
+    const cfg = { ...LEGACY_V4_CONFIG, slumpWinless: 3, slumpDrop: 1, minFormMatches: 3 };
+    const thin = generateV2Predictions(fixtures, null, cfg, form({ n: 2, winless: 2 }));
+    expect(thin[0].Category).toBe("LOCK: Smart Top 4 Home");
+  });
+
+  it("a strong contradictory real-xG gap cancels a Mid-Table Deadlock Snipe", () => {
+    const cfg = { ...LEGACY_V4_CONFIG, snipeXgOverride: 0.5 };
+    const f = [
+      { home: "Leeds", away: "Brentford" },
+      { home: "Arsenal", away: "Fulham" },
+    ];
+    // Leeds at home, Brentford away, both Mid-Table: the Deadlock pattern wants a draw.
+    expect(generateV2Predictions(f, null, LEGACY_V4_CONFIG, null)[0].Category).toBe(
+      "SNIPE: Mid-Table Deadlock",
+    );
+
+    // Build a resolver that keeps both sides inside the engine's own
+    // MID_DEADLOCK_MAX_XG_GAP window (so the Snipe still *looks* valid) while
+    // the rolling real-xG differential contradicts backing a home draw.
+    const withDiff = (homeDiff: number, awayDiff: number) => (_i: number, team: string) => {
+      const d = team === "Leeds" ? homeDiff : awayDiff;
+      return {
+        n: 5, points: 6, winless: 0, ppg: 1.4, recent: ["D", "W", "D", "L", "D"],
+        xgFor: 1.5 + d / 2, xgAgainst: 1.5 - d / 2, xgSamples: 5, lastDate: null,
+      };
+    };
+
+    // Leeds -1.00 vs Brentford +1.00: a 2.00 rolling differential, far past 0.5.
+    const contradicted = generateV2Predictions(f, null, cfg, withDiff(-1.0, 1.0));
+    expect(contradicted[0].Category).not.toContain("Snipe");
+    expect(contradicted[0].Category).toBe("LOCK: Standard Home");
+
+    // The same shape but only 0.4 apart on each side (0.8 total) still fires;
+    // 0.2 apart each (0.4 total) is below the 0.5 threshold and must not.
+    expect(generateV2Predictions(f, null, cfg, withDiff(-0.4, 0.4))[0].Category).not.toContain("Snipe");
+    expect(generateV2Predictions(f, null, cfg, withDiff(-0.2, 0.2))[0].Category).toBe(
+      "SNIPE: Mid-Table Deadlock",
+    );
+  });
+
+  it("refuses to let a single xG match veto a pick", () => {
+    const cfg = { ...LEGACY_V4_CONFIG, snipeXgOverride: 0.5, minXgSamples: 3 };
+    const f = [
+      { home: "Leeds", away: "Brentford" },
+      { home: "Arsenal", away: "Fulham" },
+    ];
+    // Stub the *engine* xG to an exact deadlock, so the engine's own
+    // MID_DEADLOCK_MAX_XG_GAP gate cannot be what refuses the Snipe — that
+    // isolates the rolling-xG override as the only thing under test.
+    const engine = () => [1.30, 1.30] as XgPair;
+    const mk = (xgSamples: number) => (_i: number, team: string) =>
+      team === "Leeds"
+        ? { n: 5, points: 6, winless: 0, ppg: 1.4, recent: ["D","W","D","L","D"], xgFor: 1.0, xgAgainst: 2.0, xgSamples, lastDate: null }
+        : { n: 5, points: 6, winless: 0, ppg: 1.4, recent: ["D","W","D","L","D"], xgFor: 2.0, xgAgainst: 1.0, xgSamples, lastDate: null };
+
+    // A 2.00 rolling differential would cancel the Snipe if we trusted it.
+    expect(generateV2Predictions(f, engine, cfg, mk(5))[0].Category).toBe("LOCK: Standard Home");
+    // One match of real xG is not evidence enough to veto a rule-tree pick.
+    expect(generateV2Predictions(f, engine, cfg, mk(1))[0].Category).toBe("SNIPE: Mid-Table Deadlock");
+  });
+
+  it("ships a live config that actually enables the fixes", () => {
+    expect(V4_LIVE_CONFIG.slumpWinless).toBeGreaterThan(0);
+    expect(V4_LIVE_CONFIG.snipeXgOverride).not.toBeNull();
+    expect(V4_LIVE_CONFIG).not.toEqual(LEGACY_V4_CONFIG);
   });
 });
