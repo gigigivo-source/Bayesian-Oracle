@@ -95,7 +95,14 @@ export interface FormBuilderOptions {
  */
 export function buildFormTable(options: FormBuilderOptions): Map<string, TeamForm> {
   const window = Math.max(1, Math.floor(options.window));
-  type Entry = { date: string; gf: number; ga: number; xgf: number | null; xga: number | null };
+  type Entry = {
+    date: string;
+    gf: number;
+    ga: number;
+    xgf: number | null;
+    xga: number | null;
+    venue: "home" | "away";
+  };
   const per = new Map<string, Entry[]>();
 
   for (const row of options.history) {
@@ -106,8 +113,8 @@ export function buildFormTable(options: FormBuilderOptions): Map<string, TeamFor
     const ax = typeof row.awayXg === "number" && Number.isFinite(row.awayXg) ? row.awayXg : null;
     if (!per.has(home)) per.set(home, []);
     if (!per.has(away)) per.set(away, []);
-    per.get(home)!.push({ date, gf: row.homeGoals, ga: row.awayGoals, xgf: hx, xga: ax });
-    per.get(away)!.push({ date, gf: row.awayGoals, ga: row.homeGoals, xgf: ax, xga: hx });
+    per.get(home)!.push({ date, gf: row.homeGoals, ga: row.awayGoals, xgf: hx, xga: ax, venue: "home" });
+    per.get(away)!.push({ date, gf: row.awayGoals, ga: row.homeGoals, xgf: ax, xga: hx, venue: "away" });
   }
 
   const table = new Map<string, TeamForm>();
@@ -122,6 +129,12 @@ export function buildFormTable(options: FormBuilderOptions): Map<string, TeamFor
     }
     const points = last.reduce((sum, e) => sum + (e.gf > e.ga ? 3 : e.gf === e.ga ? 1 : 0), 0);
     const withXg = last.filter((e) => e.xgf !== null && e.xga !== null);
+    // Venue splits within the same window: a home fixture speaks only to home
+    // form, an away fixture only to away form.
+    const homeWithXg = withXg.filter((e) => e.venue === "home");
+    const awayWithXg = withXg.filter((e) => e.venue === "away");
+    const mean = (rows: Entry[], k: "xgf" | "xga"): number | null =>
+      rows.length ? rows.reduce((s, e) => s + (e[k] as number), 0) / rows.length : null;
     table.set(team, {
       n: last.length,
       points,
@@ -131,6 +144,12 @@ export function buildFormTable(options: FormBuilderOptions): Map<string, TeamFor
       xgFor: withXg.length ? withXg.reduce((s, e) => s + (e.xgf as number), 0) / withXg.length : null,
       xgAgainst: withXg.length ? withXg.reduce((s, e) => s + (e.xga as number), 0) / withXg.length : null,
       xgSamples: withXg.length,
+      xgForHome: mean(homeWithXg, "xgf"),
+      xgAgainstHome: mean(homeWithXg, "xga"),
+      xgForAway: mean(awayWithXg, "xgf"),
+      xgAgainstAway: mean(awayWithXg, "xga"),
+      homeXgSamples: homeWithXg.length,
+      awayXgSamples: awayWithXg.length,
       lastDate: last.length ? last[last.length - 1].date : null,
     });
   }

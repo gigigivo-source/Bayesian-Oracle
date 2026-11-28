@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { BOTTOM_5, CHAOS_DRAW_MAX_XG_GAP, CHAOS_TEAMS, CHAOS_VISITOR_XG_EDGE, MID_DEADLOCK_MAX_XG_GAP, MID_FAVOURITE_BIG_WIN_XG, MID_TABLE, STANDARD_AWAY_DRAW_MAX_XG_GAP, STANDARD_BLOWOUT_GAP, STANDARD_DRAW_XG, TOP4_DERBY_AWAY_TOLERANCE, TOP4_DERBY_MAX_AWAY_EDGE, TOP4_DERBY_MIN_XG_EDGE, TOP_4, blowoutGoals, buildPredictions, calculateScore, generateV2Predictions, getScorelineOutcome, isScoreline, translateTeamName, LEGACY_V4_CONFIG, V4_LIVE_CONFIG, type TeamForm, type XgPair } from "@/lib/v4-predictor";
-import { createMatchXgResolver } from "@/lib/v4-predictor-server";;
+import { buildFormTable, createMatchXgResolver } from "@/lib/v4-predictor-server";
 
 describe("V2 team classifications", () => {
   it("exports the exact hardcoded V2 team arrays", () => {
@@ -784,22 +784,30 @@ describe("Hull plays as a Standard side", () => {
 });
 
 describe("V4 refactor — decay, slump, dynamic tiers, and the Snipe xG override", () => {
+  /** Complete TeamForm with sensible defaults; override only what a test needs. */
+  const formOf = (over: Partial<TeamForm> = {}): TeamForm => ({
+    n: 5,
+    points: 15,
+    ppg: 2.4,
+    recent: ["W", "W", "W", "W", "W"],
+    winless: 0,
+    xgFor: 2,
+    xgAgainst: 1,
+    xgSamples: 5,
+    xgForHome: 2,
+    xgAgainstHome: 1,
+    xgForAway: 2,
+    xgAgainstAway: 1,
+    homeXgSamples: 3,
+    awayXgSamples: 2,
+    lastDate: "2026-08-01T00:00:00Z",
+    ...over,
+  });
   const fixtures = [
     { home: "Arsenal", away: "Fulham" },
     { home: "Brighton", away: "Leeds" },
   ];
-  const form = (over: Partial<TeamForm>) => () => ({
-    n: 5,
-    points: 15,
-    winless: 0,
-    ppg: 2.4,
-    recent: ["W", "W", "W", "W", "W"],
-    xgFor: 2,
-    xgAgainst: 1,
-    xgSamples: 5,
-    lastDate: "2026-08-01T00:00:00Z",
-    ...over,
-  });
+  const form = (over: Partial<TeamForm>) => () => formOf(over);
 
   it("LEGACY_V4_CONFIG reproduces the untouched V2 output", () => {
     const legacy = generateV2Predictions(fixtures, null);
@@ -837,10 +845,12 @@ describe("V4 refactor — decay, slump, dynamic tiers, and the Snipe xG override
     // the rolling real-xG differential contradicts backing a home draw.
     const withDiff = (homeDiff: number, awayDiff: number) => (_i: number, team: string) => {
       const d = team === "Leeds" ? homeDiff : awayDiff;
-      return {
-        n: 5, points: 6, winless: 0, ppg: 1.4, recent: ["D", "W", "D", "L", "D"],
-        xgFor: 1.5 + d / 2, xgAgainst: 1.5 - d / 2, xgSamples: 5, lastDate: null,
-      };
+      return formOf({
+        n: 5, points: 6, ppg: 1.4, recent: ["D", "W", "D", "L", "D"],
+        xgFor: 1.5 + d / 2, xgAgainst: 1.5 - d / 2,
+        xgForHome: 1.5 + d / 2, xgAgainstHome: 1.5 - d / 2,
+        xgForAway: 1.5 + d / 2, xgAgainstAway: 1.5 - d / 2,
+      });
     };
 
     // Leeds -1.00 vs Brentford +1.00: a 2.00 rolling differential, far past 0.5.
@@ -868,8 +878,8 @@ describe("V4 refactor — decay, slump, dynamic tiers, and the Snipe xG override
     const engine = () => [1.30, 1.30] as XgPair;
     const mk = (xgSamples: number) => (_i: number, team: string) =>
       team === "Leeds"
-        ? { n: 5, points: 6, winless: 0, ppg: 1.4, recent: ["D","W","D","L","D"], xgFor: 1.0, xgAgainst: 2.0, xgSamples, lastDate: null }
-        : { n: 5, points: 6, winless: 0, ppg: 1.4, recent: ["D","W","D","L","D"], xgFor: 2.0, xgAgainst: 1.0, xgSamples, lastDate: null };
+        ? formOf({ n: 5, points: 6, ppg: 1.4, recent: ["D","W","D","L","D"], xgFor: 1.0, xgAgainst: 2.0, xgSamples })
+        : formOf({ n: 5, points: 6, ppg: 1.4, recent: ["D","W","D","L","D"], xgFor: 2.0, xgAgainst: 1.0, xgSamples });
 
     // A 2.00 rolling differential would cancel the Snipe if we trusted it.
     expect(generateV2Predictions(f, engine, cfg, mk(5))[0].Category).toBe("LOCK: Standard Home");
@@ -877,9 +887,83 @@ describe("V4 refactor — decay, slump, dynamic tiers, and the Snipe xG override
     expect(generateV2Predictions(f, engine, cfg, mk(1))[0].Category).toBe("SNIPE: Mid-Table Deadlock");
   });
 
+  it("demotes a strongly-favoured Standard host from a home win to a draw", () => {
+    // Two Standard-tier sides, so the tree takes the Standard branch.
+    const f = [{ home: "Bournemouth", away: "Hull" }];
+    const engine = () => [2.2, 1.0] as XgPair; // a 1.20 home edge
+    const off = generateV2Predictions(f, engine, { ...LEGACY_V4_CONFIG }, null);
+    const on = generateV2Predictions(
+      f,
+      engine,
+      { ...LEGACY_V4_CONFIG, standardHomeOverconfidenceGap: 0.7, standardHomeOverconfidenceLine: "1-1" },
+      null,
+    );
+    const outcome = (p: string) => {
+      const [h, a] = p.split("-").map(Number);
+      return h > a ? "H" : h < a ? "A" : "D";
+    };
+    // Without the gate the tree locks a home win; with it, a draw.
+    expect(outcome(off[0].Prediction)).toBe("H");
+    expect(outcome(on[0].Prediction)).toBe("D");
+    // The branch keeps its name — only the locked outcome changes.
+    expect(on[0].Category).toBe(off[0].Category);
+  });
+
+  it("leaves a Standard host alone when the Engine does not over-rate it", () => {
+    const f = [{ home: "Bournemouth", away: "Hull" }];
+    const engine = () => [1.4, 1.2] as XgPair; // a 0.20 edge, under the gate
+    const on = generateV2Predictions(
+      f,
+      engine,
+      { ...LEGACY_V4_CONFIG, standardHomeOverconfidenceGap: 0.7 },
+      null,
+    );
+    const [h, a] = on[0].Prediction.split("-").map(Number);
+    expect(h).toBeGreaterThan(a);
+  });
+
+  it("keeps the Standard Home gate off in LEGACY and on in LIVE", () => {
+    expect(LEGACY_V4_CONFIG.standardHomeOverconfidenceGap).toBeNull();
+    expect(V4_LIVE_CONFIG.standardHomeOverconfidenceGap).toBeGreaterThan(0);
+  });
+
   it("ships a live config that actually enables the fixes", () => {
     expect(V4_LIVE_CONFIG.slumpWinless).toBeGreaterThan(0);
     expect(V4_LIVE_CONFIG.snipeXgOverride).not.toBeNull();
     expect(V4_LIVE_CONFIG).not.toEqual(LEGACY_V4_CONFIG);
+  });
+});
+
+describe("buildFormTable — venue splits", () => {
+  it("separates home xG from away xG instead of blending them", () => {
+    const history = [
+      // Home team scores 2.0 xG at home, then 0.2 xG away.
+      { id: "a", homeTeam: "Arsenal", awayTeam: "Hull", leagueSlug: "eng.1",
+        matchDate: "2026-08-01T00:00:00Z", homeGoals: 2, awayGoals: 0,
+        competitionName: null, source: "github-datasets", homeXg: 2.0, awayXg: 0.4 },
+      { id: "b", homeTeam: "Hull", awayTeam: "Arsenal", leagueSlug: "eng.1",
+        matchDate: "2026-08-08T00:00:00Z", homeGoals: 1, awayGoals: 1,
+        competitionName: null, source: "github-datasets", homeXg: 1.1, awayXg: 0.2 },
+    ] as never;
+    const table = buildFormTable({ history, window: 5 });
+    const arsenal = table.get("Arsenal")!;
+    // Blended average would be (2.0 + 0.2) / 2 = 1.1 and hide both halves.
+    expect(arsenal.xgForHome).toBeCloseTo(2.0, 5);
+    expect(arsenal.xgForAway).toBeCloseTo(0.2, 5);
+    expect(arsenal.homeXgSamples).toBe(1);
+    expect(arsenal.awayXgSamples).toBe(1);
+    expect(arsenal.xgSamples).toBe(2);
+  });
+
+  it("returns null venue splits when the window has no match at that venue", () => {
+    const history = [
+      { id: "a", homeTeam: "Arsenal", awayTeam: "Hull", leagueSlug: "eng.1",
+        matchDate: "2026-08-01T00:00:00Z", homeGoals: 2, awayGoals: 0,
+        competitionName: null, source: "github-datasets", homeXg: 2.0, awayXg: 0.4 },
+    ] as never;
+    const table = buildFormTable({ history, window: 5 });
+    const hull = table.get("Hull")!;
+    expect(hull.xgForHome).toBeNull();
+    expect(hull.xgForAway).toBeCloseTo(0.4, 5);
   });
 });
