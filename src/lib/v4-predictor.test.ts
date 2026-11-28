@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { BOTTOM_5, CHAOS_DRAW_MAX_XG_GAP, CHAOS_TEAMS, CHAOS_VISITOR_XG_EDGE, MID_DEADLOCK_MAX_XG_GAP, MID_FAVOURITE_BIG_WIN_XG, MID_TABLE, STANDARD_AWAY_DRAW_MAX_XG_GAP, STANDARD_BLOWOUT_GAP, STANDARD_DRAW_XG, TOP4_DERBY_AWAY_TOLERANCE, TOP4_DERBY_MAX_AWAY_EDGE, TOP4_DERBY_MIN_XG_EDGE, TOP_4, blowoutGoals, buildPredictions, calculateScore, generateV2Predictions, getScorelineOutcome, isScoreline, translateTeamName, LEGACY_V4_CONFIG, V4_LIVE_CONFIG, type TeamForm, type XgPair } from "@/lib/v4-predictor";
+import { BOTTOM_5, CHAOS_DRAW_MAX_XG_GAP, CHAOS_TEAMS, CHAOS_VISITOR_XG_EDGE, MID_DEADLOCK_MAX_XG_GAP, MID_FAVOURITE_BIG_WIN_XG, MID_TABLE, STANDARD_AWAY_DRAW_MAX_XG_GAP, STANDARD_BLOWOUT_GAP, STANDARD_DRAW_XG, TOP4_DERBY_AWAY_TOLERANCE, TOP4_DERBY_MAX_AWAY_EDGE, TOP4_DERBY_MIN_XG_EDGE, TOP_4, blowoutGoals, buildPredictions, calculateScore, generateV2Predictions, getScorelineOutcome, isScoreline, translateTeamName, LEGACY_V4_CONFIG, V4_LIVE_CONFIG, americanToDecimal, applyMarketBlend, MARKET_BLEND_CONFIG, impliedProbabilities, type TeamForm, type XgPair } from "@/lib/v4-predictor";
 import { buildFormTable, createMatchXgResolver } from "@/lib/v4-predictor-server";
 
 describe("V2 team classifications", () => {
@@ -965,5 +965,63 @@ describe("buildFormTable — venue splits", () => {
     const hull = table.get("Hull")!;
     expect(hull.xgForHome).toBeNull();
     expect(hull.xgForAway).toBeCloseTo(0.4, 5);
+  });
+});
+
+
+describe("Market odds layer", () => {
+  const odds = (home: number, draw: number, away: number) => ({ home, draw, away });
+
+  it("removes the bookmaker overround so probabilities sum to 1", () => {
+    // 1.20 / 7.00 / 13.00 carries about 5.5% vig on the two short prices.
+    const p = impliedProbabilities(odds(1.2, 7, 13))!;
+    expect(p[0] + p[1] + p[2]).toBeCloseTo(1, 10);
+    expect(p[0]).toBeGreaterThan(p[1]);
+    expect(p[1]).toBeGreaterThan(p[2]);
+  });
+
+  it("converts American moneylines in both directions", () => {
+    expect(americanToDecimal(150)).toBeCloseTo(2.5, 10);   // +150 underdog
+    expect(americanToDecimal(-200)).toBeCloseTo(1.5, 10);  // -200 favourite
+    expect(americanToDecimal(100)).toBeCloseTo(2.0, 10);   // even money
+    expect(americanToDecimal(null)).toBeNull();
+    expect(americanToDecimal(0)).toBeNull();
+    expect(americanToDecimal(-100)).toBeCloseTo(2.0, 10);
+  });
+
+  it("leaves the engine pick alone when the market agrees on the winner", () => {
+    const preds = [{ Match: "A vs B", Category: "LOCK: Standard Home", Prediction: "2-0", Target_Pts: 10 }];
+    // Home is a heavy favourite, so the market agrees with a home-win lock.
+    expect(applyMarketBlend(preds, [odds(1.3, 5, 9)])[0].Prediction).toBe("2-0");
+  });
+
+  it("takes the market's side when it disagrees about the winner", () => {
+    const preds = [{ Match: "A vs B", Category: "LOCK: Standard Home", Prediction: "1-0", Target_Pts: 10 }];
+    // Away is the heavy favourite: the engine says home, the market says away.
+    expect(applyMarketBlend(preds, [odds(6, 4, 1.4)])[0].Prediction).toBe("1-2");
+  });
+
+  it("keeps the engine's category so the pick's reasoning stays traceable", () => {
+    const preds = [{ Match: "A vs B", Category: "LOCK: Chaos Rule", Prediction: "2-1", Target_Pts: 10 }];
+    expect(applyMarketBlend(preds, [odds(7, 4, 1.35)])[0].Category).toBe("LOCK: Chaos Rule");
+  });
+
+  it("is inert without a usable price", () => {
+    const preds = [{ Match: "A vs B", Category: "LOCK: Standard Home", Prediction: "1-0", Target_Pts: 10 }];
+    expect(applyMarketBlend(preds, [null])[0].Prediction).toBe("1-0");
+    expect(applyMarketBlend(preds, [odds(0, 4, 1.4)])[0].Prediction).toBe("1-0");
+    expect(applyMarketBlend(preds, [odds(1.0, 1.0, 1.0)])[0].Prediction).toBe("1-0");
+  });
+
+  it("respects minConfidence", () => {
+    const preds = [{ Match: "A vs B", Category: "LOCK: Standard Home", Prediction: "1-0", Target_Pts: 10 }];
+    const close = odds(3.2, 3.3, 2.2); // market only mildly favours away
+    expect(applyMarketBlend(preds, [close], { ...MARKET_BLEND_CONFIG, minConfidence: 0 })[0].Prediction).toBe("1-2");
+    expect(applyMarketBlend(preds, [close], { ...MARKET_BLEND_CONFIG, minConfidence: 0.6 })[0].Prediction).toBe("1-0");
+  });
+
+  it("is disabled wholesale when enabled is false", () => {
+    const preds = [{ Match: "A vs B", Category: "LOCK: Standard Home", Prediction: "1-0", Target_Pts: 10 }];
+    expect(applyMarketBlend(preds, [odds(6, 4, 1.4)], { ...MARKET_BLEND_CONFIG, enabled: false })[0].Prediction).toBe("1-0");
   });
 });
