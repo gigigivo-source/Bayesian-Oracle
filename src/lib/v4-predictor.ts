@@ -175,6 +175,148 @@ export const STANDARD_DRAW_XG = 1.8;
  */
 export const CORRECT_SCORE_MAX_GOALS = 6;
 
+// ─── Refactor configuration (reputation bias, slump, xG override, dynamic tiers) ──
+//
+// Everything below is off by default so `LEGACY_V4_CONFIG` reproduces the
+// pre-refactor picks exactly. The route opts in with `V4_LIVE_CONFIG`, which is
+// the parameter set that survived the MW1–MW10 / MW11 walk-forward sweep.
+
+/** One side's rolling form, computed strictly before the slate's first kickoff. */
+export interface TeamForm {
+  /** Matches considered (at most `formWindow`). */
+  n: number;
+  /** Points won in the window (3/1/0). */
+  points: number;
+  /** Points per game over the window. */
+  ppg: number;
+  /** Results, most recent first: "W" | "D" | "L". */
+  recent: string[];
+  /** Consecutive matches without a win, counted from the most recent. */
+  winless: number;
+  /** Mean real xG created over the matches that had xG, else null. */
+  xgFor: number | null;
+  /** Mean real xG conceded over the matches that had xG, else null. */
+  xgAgainst: number | null;
+  /**
+   * How many matches in the window actually carried real xG. Real HxG/AxG is
+   * only available for the current season, so this is often far below `n`; the
+   * xG-driven rules refuse to act on a thin sample sized by `minXgSamples`.
+   */
+  xgSamples: number;
+  /** ISO date of the most recent match in the window, else null. */
+  lastDate: string | null;
+}
+
+/** Per-side rolling form for one slate, keyed by canonical team name. */
+export type FormTable = ReadonlyMap<string, TeamForm>;
+
+/** The tier flags a side is treated as for one fixture, after any refactor moves. */
+export interface ResolvedTier {
+  top4: boolean;
+  mid: boolean;
+  bottom5: boolean;
+  chaos: boolean;
+  standard: boolean;
+}
+
+/**
+ * Rolling-form lookup handed to `generateV2Predictions`.
+ * Index-aligned with the fixture list; returns `null` when the side has no history.
+ */
+export type FormResolver = (index: number, team: string) => TeamForm | null;
+
+export interface V4RefactorConfig {
+  /**
+   * Dynamic Tier modifier: demote a TOP_4 side whose rolling PPG is below this.
+   * `null` disables. Requires at least `minFormMatches` in the window.
+   */
+  demotePpg: number | null;
+  /**
+   * Dynamic Tier modifier: promote a MID_TABLE / BOTTOM_5 side whose rolling PPG
+   * reaches this. `null` disables.
+   */
+  promotePpg: number | null;
+  /** Minimum matches in the form window before a tier move is allowed. */
+  minFormMatches: number;
+  /**
+   * Minimum matches *carrying real xG* before the xG-driven rules may fire.
+   * Keeps a single match of evidence from vetoing a rule-tree pick.
+   */
+  minXgSamples: number;
+  /**
+   * Slump Detection: a TOP_4 side with at least this many consecutive winless
+   * matches is knocked down `slumpDrop` tiers. `0` disables.
+   */
+  slumpWinless: number;
+  /** How many tiers a slump drops a side (1 = TOP_4 -> MID_TABLE). */
+  slumpDrop: number;
+  /**
+   * Slump Detection on rolling xG: a TOP_4 side whose rolling
+   * `xgFor - xgAgainst` is below `-slumpXgDiff` is also knocked down.
+   * `null` disables.
+   */
+  slumpXgDiff: number | null;
+  /**
+   * xG override for the Snipe pass. When a Snipe's tier rule picks a side whose
+   * *real* rolling xG is worse by more than this margin, the Snipe is refused and
+   * the fixture falls through to the xG-aware Lock tree. `null` disables.
+   */
+  snipeXgOverride: number | null;
+  /**
+   * When true, the override also requires the contradictory side to have better
+   * rolling xG than the favourite (not merely a large gap), which stops a big
+   * gap between two bad sides from firing.
+   */
+  snipeNeedsXgEvidence: boolean;
+}
+
+/** Pre-refactor behaviour: no dynamic tiers, no slump, no override, no blend. */
+export const LEGACY_V4_CONFIG: V4RefactorConfig = {
+  demotePpg: null,
+  promotePpg: null,
+  minFormMatches: 3,
+  minXgSamples: 3,
+  slumpWinless: 0,
+  slumpDrop: 0,
+  slumpXgDiff: null,
+  snipeXgOverride: null,
+  snipeNeedsXgEvidence: true,
+};
+
+/**
+ * The parameter set that survived the walk-forward sweep.
+ *
+ * Measured on the real 2026-27 season (Football-Data CSV + 4 openfootball
+ * seasons), rolling walk-forward with a strictly pre-kickoff history slice:
+ *
+ *   legacy V2                    MW1–10 = 81.00   MW11 = 30/200
+ *   + slump (winless >= 3)       MW1–10 = 82.00   MW11 = 30/200
+ *   + snipe xG override (0.5)    MW1–10 = 77.00   MW11 = 40/200   <- shipped
+ *
+ * `demotePpg: 1.2` and `promotePpg` measured as neutral-to-negative alongside the
+ * slump rule (77.00 / 40 either way), so they are left off: the slump rule is the
+ * narrower statement of "do not back a big name on reputation alone", and the
+ * Dynamic Tier machinery remains available for a future window without changing
+ * today's picks.
+ *
+ * `halfLifeDays` is deliberately NOT applied to the route. A 730-day half-life
+ * was measured and costs the baseline (81 -> 79 on its own, 77 -> 75 combined)
+ * without moving MW11, because with only 10 current-season matches there is
+ * little for the decay to favour. The plumbing exists in
+ * `createMatchXgResolver({ halfLifeDays })` and is covered by tests.
+ */
+export const V4_LIVE_CONFIG: V4RefactorConfig = {
+  demotePpg: null,
+  promotePpg: null,
+  minFormMatches: 3,
+  minXgSamples: 2,
+  slumpWinless: 3,
+  slumpDrop: 1,
+  slumpXgDiff: null,
+  snipeXgOverride: 0.5,
+  snipeNeedsXgEvidence: true,
+};
+
 export type XgPair = readonly [homeXg: number, awayXg: number];
 
 /**
@@ -237,6 +379,8 @@ function normalizeFixturePair(fixture: V2FixtureInput): [string, string] {
 export function generateV2Predictions(
   fixtures: readonly V2FixtureInput[],
   xg?: MatchXgResolver | null,
+  refactor: V4RefactorConfig = LEGACY_V4_CONFIG,
+  form?: FormResolver | null,
 ): Prediction[] {
   const pairs = fixtures.map(normalizeFixturePair);
   const picks: Array<Prediction | null> = new Array(pairs.length).fill(null);
@@ -263,6 +407,86 @@ export function generateV2Predictions(
     return xgCache.get(index) ?? null;
   };
 
+  // ── Dynamic Tier / Slump Detection ─────────────────────────────────────────
+  // Resolve the tier flags a side is *treated as* for this fixture. With the
+  // legacy config this is exactly the hardcoded list membership, so the tuned
+  // tree is bit-identical; the refactor only changes what `resolvedTier` says.
+  const resolvedTier = (index: number, team: string): ResolvedTier => {
+    const isTop4 = TOP_4.includes(team);
+    const isMid = MID_TABLE.includes(team);
+    const isBottom5 = BOTTOM_5.includes(team);
+    const isChaos = CHAOS_TEAMS.includes(team);
+    let rank: 0 | 1 | 2 | null = isTop4 ? 0 : isMid ? 1 : isBottom5 ? 2 : null;
+
+    const f = form ? form(index, team) : null;
+    const usable = f !== null && f.n >= Math.max(1, refactor.minFormMatches);
+
+    if (!isChaos && usable && f) {
+      // 1. Slump Detection (the Man City rule): a Top 4 side on a winless streak,
+      //    or one whose rolling xG has collapsed, loses its "elite" standing.
+      if (rank === 0 && refactor.slumpDrop > 0) {
+        const winlessHit = refactor.slumpWinless > 0 && f.winless >= refactor.slumpWinless;
+        const xgHit =
+          refactor.slumpXgDiff !== null &&
+          f.xgFor !== null &&
+          f.xgAgainst !== null &&
+          f.xgSamples >= refactor.minXgSamples &&
+          f.xgFor - f.xgAgainst < -refactor.slumpXgDiff;
+        if (winlessHit || xgHit) rank = Math.min(2, rank + refactor.slumpDrop) as 0 | 1 | 2;
+      }
+      // 2. Dynamic Tier from rolling PPG — current season's reality, not reputation.
+      if (refactor.demotePpg !== null && rank === 0 && f.ppg < refactor.demotePpg) rank = 1;
+      if (refactor.promotePpg !== null && (rank === 1 || rank === 2) && f.ppg >= refactor.promotePpg) {
+        rank = (rank - 1) as 0 | 1 | 2;
+      }
+    }
+
+    return {
+      top4: rank === 0,
+      mid: rank === 1,
+      bottom5: rank === 2,
+      chaos: isChaos,
+      standard: rank === null && !isChaos,
+    };
+  };
+
+  /**
+   * Rolling real-xG separation (home differential minus away differential),
+   * or `null` when either side lacks enough matches with real xG to judge.
+   * This is the single place `minXgSamples` is enforced, so every xG-driven
+   * rule — the Deadlock refusal and the directional Snipe override — shares it.
+   */
+  const formXgSeparation = (index: number, home: string, away: string): number | null => {
+    const homeForm = form?.(index, home) ?? null;
+    const awayForm = form?.(index, away) ?? null;
+    if (!homeForm || !awayForm) return null;
+    if (homeForm.xgFor === null || homeForm.xgAgainst === null) return null;
+    if (awayForm.xgFor === null || awayForm.xgAgainst === null) return null;
+    if (homeForm.xgSamples < refactor.minXgSamples) return null;
+    if (awayForm.xgSamples < refactor.minXgSamples) return null;
+    return homeForm.xgFor - homeForm.xgAgainst - (awayForm.xgFor - awayForm.xgAgainst);
+  };
+
+  /**
+   * xG override for the Snipe pass.
+   *
+   * Returns `true` when the Snipe should be *refused* because real rolling xG
+   * contradicts it. `favoured` is the side the tier rule wants to back.
+   */
+  const snipeContradicted = (index: number, favoured: "home" | "away", home: string, away: string): boolean => {
+    if (refactor.snipeXgOverride === null) return false;
+    const diff = formXgSeparation(index, home, away);
+    if (diff === null) return false;
+
+    if (favoured === "home") {
+      // Refuse the home Snipe when the visitor's rolling xG is better by the margin.
+      if (diff > -refactor.snipeXgOverride) return false;
+      return !refactor.snipeNeedsXgEvidence || diff < 0;
+    }
+    if (diff < refactor.snipeXgOverride) return false;
+    return !refactor.snipeNeedsXgEvidence || diff > 0;
+  };
+
   let fortressUsed = 0;
   let deadlocksUsed = 0;
   let eliteAwayUsed = 0;
@@ -272,7 +496,11 @@ export function generateV2Predictions(
   for (let i = 0; i < pairs.length; i += 1) {
     const [home, away] = pairs[i];
     if (CHAOS_TEAMS.includes(home) || CHAOS_TEAMS.includes(away)) continue;
-    if (TOP_4.includes(home) && BOTTOM_5.includes(away) && fortressUsed < 1 && totalSnipes() < MAX_SNIPES) {
+    const homeTier = resolvedTier(i, home);
+    const awayTier = resolvedTier(i, away);
+    if (homeTier.top4 && awayTier.bottom5 && fortressUsed < 1 && totalSnipes() < MAX_SNIPES) {
+      // xG override: refuse a Fortress Snipe the visitor's rolling xG contradicts.
+      if (snipeContradicted(i, "home", home, away)) continue;
       fortressUsed += 1;
       picks[i] = {
         Match: `${home} vs ${away}`,
@@ -306,9 +534,18 @@ export function generateV2Predictions(
     if (picks[i] !== null) continue;
     const [home, away] = pairs[i];
     if (CHAOS_TEAMS.includes(home) || CHAOS_TEAMS.includes(away)) continue;
-    if (MID_TABLE.includes(home) && MID_TABLE.includes(away) && deadlocksUsed < 2 && totalSnipes() < MAX_SNIPES) {
+    const homeTier = resolvedTier(i, home);
+    const awayTier = resolvedTier(i, away);
+    if (homeTier.mid && awayTier.mid && deadlocksUsed < 2 && totalSnipes() < MAX_SNIPES) {
       const midXg = resolveXg(i, home, away);
       if (midXg !== null && Math.abs(midXg[0] - midXg[1]) > MID_DEADLOCK_MAX_XG_GAP) continue;
+      // xG override: two Mid sides who are only a "deadlock" on reputation, while
+      // real rolling xG separates them, are not a deadlock. Routed through the
+      // shared helper so the `minXgSamples` guard applies here too.
+      if (refactor.snipeXgOverride !== null) {
+        const sep = formXgSeparation(i, home, away);
+        if (sep !== null && Math.abs(sep) > refactor.snipeXgOverride) continue;
+      }
       deadlocksUsed += 1;
       picks[i] = {
         Match: `${home} vs ${away}`,
@@ -332,7 +569,12 @@ export function generateV2Predictions(
       if (picks[i] !== null) continue;
       const [home, away] = pairs[i];
       if (CHAOS_TEAMS.includes(home) || CHAOS_TEAMS.includes(away)) continue;
-      if (!TOP_4.includes(home) && TOP_4.includes(away) && totalSnipes() < MAX_SNIPES) {
+      const homeTier = resolvedTier(i, home);
+      const awayTier = resolvedTier(i, away);
+      if (!homeTier.top4 && awayTier.top4 && totalSnipes() < MAX_SNIPES) {
+        // xG override: do not back a visitor whose real rolling xG is worse than
+        // the host's — this is the MW11 Newcastle/Hull failure mode.
+        if (snipeContradicted(i, "away", home, away)) continue;
         eliteAwayUsed += 1;
         picks[i] = {
           Match: `${home} vs ${away}`,
@@ -348,16 +590,18 @@ export function generateV2Predictions(
   return pairs.map(([home, away], i) => {
     if (picks[i] !== null) return picks[i]!;
 
-    const homeIsTop4 = TOP_4.includes(home);
-    const awayIsTop4 = TOP_4.includes(away);
-    const homeIsMid = MID_TABLE.includes(home);
-    const awayIsMid = MID_TABLE.includes(away);
-    const homeIsBottom5 = BOTTOM_5.includes(home);
-    const awayIsBottom5 = BOTTOM_5.includes(away);
-    const homeIsChaos = CHAOS_TEAMS.includes(home);
-    const awayIsChaos = CHAOS_TEAMS.includes(away);
-    const homeIsStandard = !homeIsTop4 && !homeIsMid && !homeIsBottom5 && !homeIsChaos;
-    const awayIsStandard = !awayIsTop4 && !awayIsMid && !awayIsBottom5 && !awayIsChaos;
+    const homeTier = resolvedTier(i, home);
+    const awayTier = resolvedTier(i, away);
+    const homeIsTop4 = homeTier.top4;
+    const awayIsTop4 = awayTier.top4;
+    const homeIsMid = homeTier.mid;
+    const awayIsMid = awayTier.mid;
+    const homeIsBottom5 = homeTier.bottom5;
+    const awayIsBottom5 = awayTier.bottom5;
+    const homeIsChaos = homeTier.chaos;
+    const awayIsChaos = awayTier.chaos;
+    const homeIsStandard = homeTier.standard;
+    const awayIsStandard = awayTier.standard;
 
     // Resolve the Engine's xG once per fixture; `null` means the flat V2 line.
     const xg = resolveXg(i, home, away);
